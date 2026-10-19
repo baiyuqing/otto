@@ -77,8 +77,16 @@ impl crate::workflow::Controller {
                 }),
             )
             .map_err(|e| e.to_string())?;
-        for run in self.list()? {
-            for request in self.requests(&run.id)? {
+        for run in self
+            .list()
+            .map_err(|error| format!("workflow runs unavailable: {}", error.message()))?
+        {
+            for request in self.requests(&run.id).map_err(|error| {
+                format!(
+                    "workflow approval requests unavailable: {}",
+                    error.message()
+                )
+            })? {
                 if request.status == "pending" {
                     publish(service, &self.workspace, &request).map_err(|e| e.to_string())?;
                 }
@@ -91,11 +99,11 @@ impl crate::workflow::Controller {
     pub fn approval_request(
         &self,
         id: &str,
-    ) -> std::result::Result<crate::workflow::ApprovalRequest, String> {
+    ) -> std::result::Result<crate::workflow::ApprovalRequest, crate::workflow::Error> {
         let request = self
             .store
             .request(id)?
-            .ok_or("workflow request not found")?;
+            .ok_or_else(|| crate::workflow::Error::not_found("approval request not found"))?;
         self.get(&request.run_id)?;
         Ok(request)
     }

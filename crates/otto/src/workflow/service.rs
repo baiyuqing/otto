@@ -2,6 +2,7 @@
 #[cfg(test)]
 use super::Store;
 use super::contracts::*;
+use super::error::Error;
 use super::repository::WorkflowStore;
 use crate::deadline::{Control, Deadline};
 use crate::log::Logger;
@@ -127,7 +128,7 @@ impl Catalog {
     }
 }
 
-pub(crate) fn validate_write_coordination(definition: &Definition) -> Result<(), String> {
+pub(crate) fn validate_write_coordination(definition: &Definition) -> Result<(), Error> {
     let agents: HashMap<&str, &AgentSnapshot> = definition
         .agents
         .iter()
@@ -154,10 +155,10 @@ pub(crate) fn validate_write_coordination(definition: &Definition) -> Result<(),
                 continue;
             };
             if writer_scopes_conflict(&left_writer, &right_writer) {
-                return Err(format!(
+                return Err(Error::invalid(format!(
                     "steps {:?} and {:?} may run concurrently and both can write; add a dependency or use disjoint owned_paths write policies",
                     left.id, right.id
-                ));
+                )));
             }
         }
     }
@@ -356,13 +357,13 @@ impl Controller {
             .unwrap_or_else(|poison| poison.into_inner()) = Some(guard);
     }
 
-    pub async fn start(self: &Arc<Self>, workflow: &str, input: &str) -> Result<Run, String> {
+    pub async fn start(self: &Arc<Self>, workflow: &str, input: &str) -> Result<Run, Error> {
         let definition = self
             .catalog
             .lookup(workflow)
-            .ok_or_else(|| format!("workflow {workflow:?} not found"))?;
+            .ok_or_else(|| Error::not_found(format!("workflow {workflow:?} not found")))?;
         validate_write_coordination(definition)?;
-        let id = random_id().map_err(|_| "generate workflow id failed".to_string())?;
+        let id = random_id().map_err(|_| Error::internal("generate workflow id failed"))?;
         let run = self.store.create_run(
             &id,
             definition,
@@ -376,36 +377,54 @@ impl Controller {
         Ok(run)
     }
 
-    pub fn get(&self, run_id: &str) -> Result<Run, String> {
+    pub fn get(&self, run_id: &str) -> Result<Run, Error> {
         let run = self
             .store
             .get_run(run_id)?
-            .ok_or_else(|| "workflow run not found".to_string())?;
+            .ok_or_else(|| Error::not_found("workflow run not found"))?;
         if run.workspace != self.workspace {
-            return Err("workflow run not found".to_string());
+            return Err(Error::not_found("workflow run not found"));
         }
         Ok(run)
     }
 
-    pub fn list(&self) -> Result<Vec<Run>, String> {
-        self.store.list_runs(&self.workspace)
+    pub fn list(&self) -> Result<Vec<Run>, Error> {
+        self.store.list_runs(&self.workspace, &ListQuery::all())
     }
 
-    pub fn requests(&self, run_id: &str) -> Result<Vec<ApprovalRequest>, String> {
+    /// One bounded page of runs, newest first, with the cursor for the next
+    /// page when more remain.
+    pub fn page(&self, limit: usize, before: Option<String>) -> Result<RunPage, Error> {
+        let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+        let mut runs = self
+            .store
+            .list_runs(&self.workspace, &ListQuery::page(limit + 1, before))?;
+        let next_before = if runs.len() > limit {
+            runs.truncate(limit);
+            runs.last()
+                .map(|run| run.created_at.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(RunPage { runs, next_before })
+    }
+
+    pub fn requests(&self, run_id: &str) -> Result<Vec<ApprovalRequest>, Error> {
         self.get(run_id)?;
         self.store.requests(run_id)
     }
 
-    pub fn events(&self, run_id: &str, after: i64) -> Result<Vec<EventRecord>, String> {
+    pub fn events(&self, run_id: &str, after: i64) -> Result<Vec<EventRecord>, Error> {
         self.get(run_id)?;
         self.store.events(run_id, after)
     }
 
-    pub async fn wait(&self, run_id: &str) -> Result<Run, String> {
+    pub async fn wait(&self, run_id: &str) -> Result<Run, Error> {
         let done = self
             .active
             .lock()
-            .map_err(|_| "workflow runtime unavailable".to_string())?
+            .map_err(|_| runtime_unavailable())?
             .get(run_id)
             .map(|active| Arc::clone(&active.done));
         if let Some(done) = done {
@@ -418,18 +437,22 @@ impl Controller {
         self: &Arc<Self>,
         run_id: &str,
         retry_step: Option<&str>,
-    ) -> Result<Run, String> {
+    ) -> Result<Run, Error> {
         let run = self.get(run_id)?;
         if run.profile != self.runtime.profile
             || run.provider != self.runtime.provider
             || run.model != self.runtime.model
         {
-            return Err("workflow runtime no longer matches the stored run".to_string());
+            return Err(Error::conflict(
+                "workflow runtime no longer matches the stored run",
+            ));
         }
         if let Some(step_id) = retry_step {
             self.store.retry(run_id, step_id)?;
         } else if run.status == RunStatus::Paused {
-            return Err("an interrupted step must be selected for retry".to_string());
+            return Err(Error::conflict(
+                "a paused or failed step must be selected for retry",
+            ));
         }
         let current = self.get(run_id)?;
         if current.status == RunStatus::Running {
@@ -438,15 +461,17 @@ impl Controller {
         Ok(current)
     }
 
-    pub async fn fork(self: &Arc<Self>, run_id: &str, after_step: &str) -> Result<Run, String> {
+    pub async fn fork(self: &Arc<Self>, run_id: &str, after_step: &str) -> Result<Run, Error> {
         let source = self.get(run_id)?;
         if source.profile != self.runtime.profile
             || source.provider != self.runtime.provider
             || source.model != self.runtime.model
         {
-            return Err("workflow runtime no longer matches the stored run".to_string());
+            return Err(Error::conflict(
+                "workflow runtime no longer matches the stored run",
+            ));
         }
-        let id = random_id().map_err(|_| "generate workflow id failed".to_string())?;
+        let id = random_id().map_err(|_| Error::internal("generate workflow id failed"))?;
         let fork = self.store.fork_run(&id, run_id, after_step)?;
         if fork.status == RunStatus::Running {
             self.launch(id)?;
@@ -454,17 +479,17 @@ impl Controller {
         Ok(fork)
     }
 
-    pub fn respond(self: &Arc<Self>, request_id: &str, approved: bool) -> Result<Run, String> {
+    pub fn respond(self: &Arc<Self>, request_id: &str, approved: bool) -> Result<Run, Error> {
         let service = self
             .approval_service
             .lock()
-            .map_err(|_| "workflow runtime unavailable")?
+            .map_err(|_| runtime_unavailable())?
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
         if let Some(service) = service {
             let domain = self.approval_request(request_id)?;
             let request = crate::approval::workflow::publish(&service, &self.workspace, &domain)
-                .map_err(|e| e.to_string())?;
+                .map_err(approval_failure)?;
             service
                 .decide(
                     &request.id,
@@ -474,10 +499,10 @@ impl Controller {
                     "",
                     &crate::approval::Actor::local("workflow-command"),
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(approval_failure)?;
             service
                 .apply_available(&self.workspace)
-                .map_err(|e| e.to_string())?;
+                .map_err(approval_failure)?;
             return self.get(&domain.run_id);
         }
         self.respond_authorized(request_id, approved)
@@ -487,12 +512,22 @@ impl Controller {
         self: &Arc<Self>,
         request_id: &str,
         approved: bool,
-    ) -> Result<Run, String> {
+    ) -> Result<Run, Error> {
         let request = self
             .store
             .request(request_id)?
-            .ok_or_else(|| "approval request not found".to_string())?;
+            .ok_or_else(|| Error::not_found("approval request not found"))?;
         self.get(&request.run_id)?;
+        if !approved {
+            // Rejecting a gate cancels the run, so its in-flight attempts are
+            // stopped before the store records the cancellation; otherwise a
+            // sibling agent keeps working after the human said no.
+            if let Ok(active) = self.active.lock()
+                && let Some(active) = active.get(&request.run_id)
+            {
+                active.cancel.cancel();
+            }
+        }
         let run_id = self.store.respond(request_id, approved)?;
         let run = self.get(&run_id)?;
         if approved && run.status == RunStatus::Running {
@@ -503,11 +538,11 @@ impl Controller {
         Ok(run)
     }
 
-    pub async fn cancel(&self, run_id: &str) -> Result<Run, String> {
+    pub async fn cancel(&self, run_id: &str) -> Result<Run, Error> {
         let active = self
             .active
             .lock()
-            .map_err(|_| "workflow runtime unavailable".to_string())?
+            .map_err(|_| runtime_unavailable())?
             .get(run_id)
             .map(|active| (active.cancel.clone(), Arc::clone(&active.done)));
         if let Some((cancel, done)) = active {
@@ -581,19 +616,16 @@ impl Controller {
         }
         for (run_id, _, done) in active {
             done.notified().await;
-            let _ = self.store.pause_run(&run_id);
+            let _ = self.store.pause_run(&run_id, "workflow runtime closed");
         }
         self.executor.close().await;
     }
 
-    fn launch(self: &Arc<Self>, run_id: String) -> Result<(), String> {
+    fn launch(self: &Arc<Self>, run_id: String) -> Result<(), Error> {
         let cancel = CancellationToken::new();
         let done = Arc::new(Notify::new());
         {
-            let mut active = self
-                .active
-                .lock()
-                .map_err(|_| "workflow runtime unavailable".to_string())?;
+            let mut active = self.active.lock().map_err(|_| runtime_unavailable())?;
             if let Some(active) = active.get_mut(&run_id) {
                 active.relaunch_requested = true;
                 return Ok(());
@@ -609,8 +641,15 @@ impl Controller {
         }
         let controller = Arc::clone(self);
         tokio::spawn(async move {
-            if controller.drive(&run_id, &cancel).await.is_err() {
-                let _ = controller.store.pause_run(&run_id);
+            if let Err(error) = controller.drive(&run_id, &cancel).await {
+                // A paused run must explain itself: the cause goes to the log and
+                // onto the interrupted attempts it stopped.
+                let reason = error.to_string();
+                controller.logger.error(
+                    "workflow_run_paused",
+                    &[("run_id", run_id.clone()), ("reason", reason.clone())],
+                );
+                let _ = controller.store.pause_run(&run_id, &reason);
             }
             let active = controller
                 .active
@@ -634,7 +673,7 @@ impl Controller {
         Ok(())
     }
 
-    async fn drive(&self, run_id: &str, cancel: &CancellationToken) -> Result<(), String> {
+    async fn drive(&self, run_id: &str, cancel: &CancellationToken) -> Result<(), Error> {
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
@@ -657,18 +696,18 @@ impl Controller {
             for step in ready {
                 match step.kind {
                     StepKind::Approval => {
-                        let request_id =
-                            random_id().map_err(|_| "generate workflow id failed".to_string())?;
+                        let request_id = random_id()
+                            .map_err(|_| Error::internal("generate workflow id failed"))?;
                         let request = self.store.request_approval(&request_id, run_id, &step.id)?;
                         if let Some(service) = self
                             .approval_service
                             .lock()
-                            .map_err(|_| "workflow runtime unavailable")?
+                            .map_err(|_| runtime_unavailable())?
                             .as_ref()
                             .and_then(std::sync::Weak::upgrade)
                         {
                             crate::approval::workflow::publish(&service, &self.workspace, &request)
-                                .map_err(|e| e.to_string())?;
+                                .map_err(approval_failure)?;
                         }
                     }
                     StepKind::Agent | StepKind::Handoff => agents.push(step),
@@ -683,7 +722,7 @@ impl Controller {
                 let permit = Arc::clone(&self.semaphore)
                     .acquire_owned()
                     .await
-                    .map_err(|_| "workflow runtime unavailable".to_string())?;
+                    .map_err(|_| runtime_unavailable())?;
                 if cancel.is_cancelled() {
                     drop(permit);
                     return Ok(());
@@ -695,10 +734,10 @@ impl Controller {
                 for directory in [&self.transcript_root, &run_root, &step_root, &attempt_root] {
                     secure_directory(directory)?;
                 }
-                let session_id =
-                    random_id().map_err(|_| "generate workflow session id failed".to_string())?;
+                let session_id = random_id()
+                    .map_err(|_| Error::internal("generate workflow session id failed"))?;
                 let workspace_key = crate::session::workspace_key(Path::new(&run.workspace))
-                    .map_err(|_| "resolve workflow transcript path failed".to_string())?;
+                    .map_err(|_| Error::unavailable("resolve workflow transcript path failed"))?;
                 let transcript_path = attempt_root
                     .join(workspace_key)
                     .join(format!("{session_id}.jsonl"))
@@ -715,7 +754,7 @@ impl Controller {
                         .iter()
                         .find(|definition| definition.name == step.agent)
                         .cloned()
-                        .ok_or_else(|| "workflow agent snapshot is missing".to_string())?,
+                        .ok_or_else(|| Error::internal("workflow agent snapshot is missing"))?,
                     prompt: attempt_prompt(&run, &step)?,
                     attempt: attempt_number,
                     session_id,
@@ -767,7 +806,7 @@ impl Controller {
             let mut timed_out = false;
             while let Some(joined) = attempts.join_next().await {
                 let (attempt, result, canceled, attempt_timed_out, started) =
-                    joined.map_err(|_| "workflow attempt task failed".to_string())?;
+                    joined.map_err(|_| Error::internal("workflow attempt task failed"))?;
                 if attempt_timed_out {
                     self.store.interrupt_attempt(
                         &attempt.run_id,
@@ -811,12 +850,17 @@ impl Controller {
                     }
                 }
             }
-            if timed_out {
-                self.store.finalize_interrupted_batch(run_id)?;
+            // A batch canceled by `cancel` or `close` belongs to that caller: the
+            // driver leaves the run status to it. A batch whose own failure
+            // canceled its attempts must still settle below.
+            if cancel.is_cancelled() && !failed && !timed_out {
                 return Ok(());
             }
-            if failed {
-                self.store.finalize_failed(run_id)?;
+            // Each settled attempt settles the run in its own transaction; settle
+            // once more so a batch that ended in failure or timeout can never leave
+            // the run `running` with no owner.
+            self.store.settle(run_id)?;
+            if timed_out || failed {
                 self.log_run_if_final(&self.get(run_id)?);
                 return Ok(());
             }
@@ -832,7 +876,10 @@ fn is_final(status: RunStatus) -> bool {
     )
 }
 
-fn attempt_prompt(run: &Run, step: &StepRecord) -> Result<String, String> {
+/// Assembles one attempt prompt. Dependency results share whatever budget the
+/// step prompt and workflow input leave, so a large upstream result truncates
+/// with a marker instead of failing after the attempt is already claimed.
+fn attempt_prompt(run: &Run, step: &StepRecord) -> Result<String, Error> {
     let mut prompt = step.prompt.clone();
     if !run.input.is_empty() {
         prompt.push_str("\n\n## Workflow input\n");
@@ -842,23 +889,76 @@ fn attempt_prompt(run: &Run, step: &StepRecord) -> Result<String, String> {
         prompt.push_str("\n\n## Handoff\nYou are receiving control from: ");
         prompt.push_str(&step.needs.join(", "));
     }
-    for dependency in &step.needs {
+    if prompt.len() > MAX_TEXT_BYTES {
+        return Err(Error::invalid(
+            "workflow step prompt and input exceed 65536 UTF-8 bytes",
+        ));
+    }
+    for (index, dependency) in step.needs.iter().enumerate() {
         let result = run
             .steps
             .iter()
             .find(|candidate| &candidate.id == dependency)
             .filter(|candidate| candidate.status == StepStatus::Succeeded)
             .map(|candidate| candidate.result.as_str())
-            .ok_or_else(|| format!("workflow dependency {dependency:?} has no result"))?;
+            .ok_or_else(|| {
+                Error::conflict(format!("workflow dependency {dependency:?} has no result"))
+            })?;
         prompt.push_str("\n\n## Result from ");
         prompt.push_str(dependency);
         prompt.push('\n');
-        prompt.push_str(result);
-    }
-    if prompt.len() > MAX_TEXT_BYTES {
-        return Err("workflow attempt prompt exceeds 65536 UTF-8 bytes".to_string());
+        // Split what is left evenly over the dependencies still to come.
+        let budget = MAX_TEXT_BYTES.saturating_sub(prompt.len()) / (step.needs.len() - index);
+        prompt.push_str(&excerpt(result, budget));
     }
     Ok(prompt)
+}
+
+/// Returns at most `budget` bytes of `result`, marking a cut when it happens.
+fn excerpt(result: &str, budget: usize) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    const MARKER: &str = "\n[truncated]";
+    if result.len() <= budget {
+        return Cow::Borrowed(result);
+    }
+    let keep = if budget > MARKER.len() {
+        budget - MARKER.len()
+    } else {
+        budget
+    };
+    let mut end = keep.min(result.len());
+    while end > 0 && !result.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut text = String::with_capacity(end + MARKER.len());
+    text.push_str(&result[..end]);
+    if budget > MARKER.len() {
+        text.push_str(MARKER);
+    }
+    Cow::Owned(text)
+}
+
+fn runtime_unavailable() -> Error {
+    Error::unavailable("workflow runtime unavailable")
+}
+
+fn approval_failure(error: crate::approval::Error) -> Error {
+    match error {
+        crate::approval::Error::Unavailable => {
+            Error::unavailable("workflow approval service unavailable")
+        }
+        crate::approval::Error::CommitUnknown => {
+            Error::unavailable("workflow approval commit is unknown; reconcile before retrying")
+        }
+        crate::approval::Error::NotFound => Error::not_found("approval request not found"),
+        crate::approval::Error::Unauthorized => {
+            Error::conflict("workflow approval is not permitted in this workspace")
+        }
+        crate::approval::Error::Conflict => {
+            Error::conflict("workflow approval changed or was already decided")
+        }
+        crate::approval::Error::Invalid(message) => Error::invalid(message),
+    }
 }
 
 fn random_id() -> std::io::Result<String> {
@@ -868,11 +968,11 @@ fn random_id() -> std::io::Result<String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn secure_directory(path: &Path) -> Result<(), String> {
+fn secure_directory(path: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(path)
-        .map_err(|_| "create workflow transcript directory failed".to_string())?;
+        .map_err(|_| Error::unavailable("create workflow transcript directory failed"))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|_| "secure workflow transcript directory failed".to_string())
+        .map_err(|_| Error::unavailable("secure workflow transcript directory failed"))
 }
 
 #[derive(Deserialize)]
@@ -901,68 +1001,72 @@ pub(crate) fn parse_definition(
     name: &str,
     data: &[u8],
     has_agent: &dyn Fn(&str) -> bool,
-) -> Result<Definition, String> {
+) -> Result<Definition, Error> {
     if !valid_name(name) {
-        return Err(format!("workflow name {name:?} is invalid"));
+        return Err(Error::invalid(format!("workflow name {name:?} is invalid")));
     }
     if data.len() > MAX_DEFINITION_BYTES {
-        return Err(format!("workflow {name} exceeds 1 MiB"));
+        return Err(Error::invalid(format!("workflow {name} exceeds 1 MiB")));
     }
-    let text = std::str::from_utf8(data).map_err(|_| format!("workflow {name} is not UTF-8"))?;
-    let file: DefinitionFile =
-        toml::from_str(text).map_err(|error| format!("workflow {name}: {error}"))?;
+    let text = std::str::from_utf8(data)
+        .map_err(|_| Error::invalid(format!("workflow {name} is not UTF-8")))?;
+    let file: DefinitionFile = toml::from_str(text)
+        .map_err(|error| Error::invalid(format!("workflow {name}: {error}")))?;
     if file.version != 1 {
-        return Err(format!("workflow {name} version must be 1"));
+        return Err(Error::invalid(format!("workflow {name} version must be 1")));
     }
     if file.description.chars().count() > MAX_DESCRIPTION_CHARS {
-        return Err(format!(
+        return Err(Error::invalid(format!(
             "workflow {name} description exceeds {MAX_DESCRIPTION_CHARS} characters"
-        ));
+        )));
     }
     if !(1..=MAX_STEPS).contains(&file.steps.len()) {
-        return Err(format!(
+        return Err(Error::invalid(format!(
             "workflow {name} must contain 1 to {MAX_STEPS} steps"
-        ));
+        )));
     }
 
     let mut seen = HashSet::new();
     let mut steps = Vec::with_capacity(file.steps.len());
     for raw in file.steps {
         if !valid_name(&raw.id) {
-            return Err(format!("workflow {name} step id {:?} is invalid", raw.id));
+            return Err(Error::invalid(format!(
+                "workflow {name} step id {:?} is invalid",
+                raw.id
+            )));
         }
         if !seen.insert(raw.id.clone()) {
-            return Err(format!(
+            return Err(Error::invalid(format!(
                 "workflow {name} contains duplicate step {:?}",
                 raw.id
-            ));
+            )));
         }
         if raw.prompt.trim().is_empty() || raw.prompt.len() > MAX_TEXT_BYTES {
-            return Err(format!(
+            return Err(Error::invalid(format!(
                 "workflow {name} step {:?} prompt must be 1 to 65536 UTF-8 bytes",
                 raw.id
-            ));
+            )));
         }
         match raw.kind {
             StepKind::Agent | StepKind::Handoff => {
                 if raw.agent.is_empty() || !has_agent(&raw.agent) {
-                    return Err(format!(
+                    return Err(Error::invalid(format!(
                         "workflow {name} step {:?} references unknown agent {:?}",
                         raw.id, raw.agent
-                    ));
+                    )));
                 }
                 if raw.kind == StepKind::Handoff && raw.needs.is_empty() {
-                    return Err(format!(
+                    return Err(Error::invalid(format!(
                         "workflow {name} handoff step {:?} requires a dependency",
                         raw.id
-                    ));
+                    )));
                 }
             }
             StepKind::Approval if !raw.agent.is_empty() => {
-                return Err(format!(
+                return Err(Error::invalid(format!(
                     "workflow {name} approval step {:?} cannot set agent",
                     raw.id
-                ));
+                )));
             }
             StepKind::Approval => {}
         }
@@ -972,10 +1076,10 @@ pub(crate) fn parse_definition(
             .iter()
             .any(|dependency| dependency == &raw.id || !dependencies.insert(dependency.clone()))
         {
-            return Err(format!(
+            return Err(Error::invalid(format!(
                 "workflow {name} step {:?} has an invalid dependency",
                 raw.id
-            ));
+            )));
         }
         steps.push(Step {
             id: raw.id,
@@ -1007,7 +1111,7 @@ fn valid_name(name: &str) -> bool {
         })
 }
 
-fn validate_graph(name: &str, steps: &[Step]) -> Result<(), String> {
+fn validate_graph(name: &str, steps: &[Step]) -> Result<(), Error> {
     let indexes: HashMap<&str, usize> = steps
         .iter()
         .enumerate()
@@ -1018,10 +1122,10 @@ fn validate_graph(name: &str, steps: &[Step]) -> Result<(), String> {
     for (index, step) in steps.iter().enumerate() {
         for dependency in &step.needs {
             let Some(&source) = indexes.get(dependency.as_str()) else {
-                return Err(format!(
+                return Err(Error::invalid(format!(
                     "workflow {name} step {:?} depends on unknown step {:?}",
                     step.id, dependency
-                ));
+                )));
             };
             incoming[index] += 1;
             outgoing[source].push(index);
@@ -1043,7 +1147,9 @@ fn validate_graph(name: &str, steps: &[Step]) -> Result<(), String> {
         }
     }
     if visited != steps.len() {
-        return Err(format!("workflow {name} contains a dependency cycle"));
+        return Err(Error::invalid(format!(
+            "workflow {name} contains a dependency cycle"
+        )));
     }
     Ok(())
 }
@@ -1159,7 +1265,7 @@ prompt = "right"
 
         let error = validate_write_coordination(&definition).expect_err("parallel writers fail");
 
-        assert!(error.contains("may run concurrently"), "{error}");
+        assert!(error.message().contains("may run concurrently"), "{error}");
     }
 
     #[test]
@@ -1272,7 +1378,7 @@ prompt = "b"
 
         let error = validate_write_coordination(&definition).expect_err("overlap fails");
 
-        assert!(error.contains("may run concurrently"), "{error}");
+        assert!(error.message().contains("may run concurrently"), "{error}");
     }
 
     #[test]
@@ -1318,7 +1424,7 @@ prompt = "Take over"
         .expect_err("root handoff");
 
         assert_eq!(
-            error,
+            error.message(),
             "workflow handoff handoff step \"review\" requires a dependency"
         );
     }
@@ -1344,7 +1450,10 @@ needs = ["one"]
         )
         .expect_err("cycle");
 
-        assert_eq!(error, "workflow cycle contains a dependency cycle");
+        assert_eq!(
+            error.message(),
+            "workflow cycle contains a dependency cycle"
+        );
     }
 
     #[test]
@@ -1519,7 +1628,8 @@ needs = ["first"]
         assert_eq!(
             store
                 .fork_run("fork-1", "run-1", "second")
-                .expect_err("pending step"),
+                .expect_err("pending step")
+                .message(),
             "workflow fork boundary is not a committed success"
         );
     }
@@ -1623,7 +1733,10 @@ prompt = "Ship?"
             RunStatus::Succeeded
         );
         assert_eq!(
-            store.respond("request-1", false).expect_err("conflict"),
+            store
+                .respond("request-1", false)
+                .expect_err("conflict")
+                .message(),
             "approval request already answered differently"
         );
     }
@@ -2225,5 +2338,300 @@ prompt = "work"
 
         controller.close().await;
         assert_eq!(controller.active_runs(), 0);
+    }
+
+    const TWO_STEP: &[u8] = br#"
+version = 1
+[[steps]]
+id = "a"
+agent = "worker"
+prompt = "a"
+[[steps]]
+id = "b"
+agent = "worker"
+prompt = "b"
+"#;
+
+    #[test]
+    fn crash_after_failure_settles_the_run_and_failed_steps_are_retryable() {
+        let store = Store::open_in_memory();
+        let definition = definition(TWO_STEP);
+        store
+            .create_run("run-1", &definition, "/w", "p", "provider", "m", "")
+            .expect("create");
+        store
+            .claim_ready("run-1", "a", "/tmp/a1.jsonl")
+            .expect("claim a");
+        store
+            .claim_ready("run-1", "b", "/tmp/b1.jsonl")
+            .expect("claim b");
+        store
+            .finish_attempt("run-1", "a", 1, Err("boom"))
+            .expect("fail a");
+
+        // Process death here: `b` is still running, so recovery interrupts it and
+        // pauses the run instead of leaving it `running` with no owner.
+        assert_eq!(store.recover("/w").expect("recover"), 1);
+        assert_eq!(
+            store.get_run("run-1").expect("get").expect("run").status,
+            RunStatus::Paused
+        );
+
+        // Retrying the surviving sibling must not hide the failed step: once it
+        // succeeds the run reaches its durable failure rather than hanging.
+        store.retry("run-1", "b").expect("retry b");
+        let attempt = store
+            .claim_ready("run-1", "b", "/tmp/b2.jsonl")
+            .expect("claim b");
+        store
+            .finish_attempt("run-1", "b", attempt, Ok("b done"))
+            .expect("finish b");
+        let run = store.get_run("run-1").expect("get").expect("run");
+        assert_eq!(run.status, RunStatus::Failed, "{:?}", run.steps);
+        assert_eq!(run.steps[0].status, StepStatus::Failed);
+
+        // A failed step is retryable, and retrying it revives the run.
+        store.retry("run-1", "a").expect("retry a");
+        let attempt = store
+            .claim_ready("run-1", "a", "/tmp/a2.jsonl")
+            .expect("claim a");
+        store
+            .finish_attempt("run-1", "a", attempt, Ok("a done"))
+            .expect("finish a");
+        assert_eq!(
+            store.get_run("run-1").expect("get").expect("run").status,
+            RunStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn retry_revives_steps_canceled_by_the_failure() {
+        let store = Store::open_in_memory();
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "a"
+agent = "worker"
+prompt = "a"
+[[steps]]
+id = "b"
+agent = "worker"
+prompt = "b"
+[[steps]]
+id = "c"
+agent = "worker"
+prompt = "c"
+needs = ["b"]
+"#,
+        );
+        store
+            .create_run("run-1", &definition, "/w", "p", "provider", "m", "")
+            .expect("create");
+        store
+            .claim_ready("run-1", "a", "/tmp/a1.jsonl")
+            .expect("claim a");
+        store
+            .claim_ready("run-1", "b", "/tmp/b1.jsonl")
+            .expect("claim b");
+        store
+            .finish_attempt("run-1", "a", 1, Err("boom"))
+            .expect("fail a");
+        store.cancel_attempt("run-1", "b", 1).expect("cancel b");
+        store.settle("run-1").expect("settle");
+
+        let run = store.get_run("run-1").expect("get").expect("run");
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.steps[2].status, StepStatus::Canceled);
+
+        // Retrying the failed step re-admits the work the failure canceled.
+        store.retry("run-1", "a").expect("retry a");
+        let run = store.get_run("run-1").expect("get").expect("run");
+        assert_eq!(run.steps[1].status, StepStatus::Ready, "{:?}", run.steps);
+        assert_eq!(run.steps[2].status, StepStatus::Pending, "{:?}", run.steps);
+
+        let attempt = store
+            .claim_ready("run-1", "a", "/tmp/a2.jsonl")
+            .expect("claim a");
+        store
+            .finish_attempt("run-1", "a", attempt, Ok("a done"))
+            .expect("finish a");
+        let attempt = store
+            .claim_ready("run-1", "b", "/tmp/b2.jsonl")
+            .expect("claim b");
+        store
+            .finish_attempt("run-1", "b", attempt, Ok("b done"))
+            .expect("finish b");
+        let attempt = store
+            .claim_ready("run-1", "c", "/tmp/c1.jsonl")
+            .expect("claim c");
+        store
+            .finish_attempt("run-1", "c", attempt, Ok("c done"))
+            .expect("finish c");
+        assert_eq!(
+            store.get_run("run-1").expect("get").expect("run").status,
+            RunStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn oversized_dependency_results_are_truncated_not_rejected() {
+        let store = Store::open_in_memory();
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "first"
+agent = "worker"
+prompt = "first"
+[[steps]]
+id = "second"
+agent = "worker"
+prompt = "second"
+needs = ["first"]
+"#,
+        );
+        store
+            .create_run("run-1", &definition, "/w", "p", "provider", "m", "")
+            .expect("create");
+        let attempt = store
+            .claim_ready("run-1", "first", "/tmp/first.jsonl")
+            .expect("claim");
+        let huge = "x".repeat(MAX_TEXT_BYTES + 4096);
+        store
+            .finish_attempt("run-1", "first", attempt, Ok(&huge))
+            .expect("finish");
+
+        let run = store.get_run("run-1").expect("get").expect("run");
+        assert!(
+            run.steps[0].result.len() <= MAX_TEXT_BYTES + 64,
+            "stored result was not bounded: {}",
+            run.steps[0].result.len()
+        );
+        let prompt = attempt_prompt(&run, &run.steps[1]).expect("prompt");
+        assert!(
+            prompt.len() <= MAX_TEXT_BYTES,
+            "prompt size {}",
+            prompt.len()
+        );
+        assert!(prompt.contains("[truncated"), "prompt was not marked");
+    }
+
+    #[test]
+    fn list_runs_pages_newest_first_with_a_cursor() {
+        let store = Store::open_in_memory();
+        let definition = definition(TWO_STEP);
+        for id in ["run-1", "run-2", "run-3"] {
+            store
+                .create_run(id, &definition, "/w", "p", "provider", "m", "")
+                .expect("create");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let page = store
+            .list_runs("/w", &ListQuery::page(2, None))
+            .expect("page");
+        let ids: Vec<&str> = page.iter().map(|run| run.id.as_str()).collect();
+        assert_eq!(ids, ["run-3", "run-2"]);
+
+        let next = store
+            .list_runs("/w", &ListQuery::page(2, Some(page[1].created_at.clone())))
+            .expect("next page");
+        let ids: Vec<&str> = next.iter().map(|run| run.id.as_str()).collect();
+        assert_eq!(ids, ["run-1"]);
+        assert!(next[0].steps.len() == 2, "a page keeps each run's steps");
+        assert!(
+            store
+                .list_runs("/other", &ListQuery::all())
+                .expect("other workspace")
+                .is_empty()
+        );
+    }
+
+    struct GateExecutor {
+        started: Arc<AtomicBool>,
+        canceled: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Executor for GateExecutor {
+        async fn execute(&self, attempt: Attempt, control: &Control) -> Result<String, String> {
+            if attempt.step_id == "work" {
+                self.started.store(true, Ordering::SeqCst);
+                control.cancellation_token().cancelled().await;
+                self.canceled.store(true, Ordering::SeqCst);
+                return Err("context canceled".to_string());
+            }
+            Ok(format!("{} complete", attempt.step_id))
+        }
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_gate_cancels_a_running_sibling() {
+        let started = Arc::new(AtomicBool::new(false));
+        let canceled = Arc::new(AtomicBool::new(false));
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "work"
+agent = "worker"
+prompt = "work"
+[[steps]]
+id = "approve"
+kind = "approval"
+prompt = "Ship?"
+[[steps]]
+id = "deliver"
+agent = "worker"
+prompt = "deliver"
+needs = ["work", "approve"]
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new(
+            Arc::new(Store::open_in_memory()),
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(GateExecutor {
+                started: Arc::clone(&started),
+                canceled: Arc::clone(&canceled),
+            }),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            2,
+        );
+
+        let run = controller.start("flow", "").await.expect("start");
+        for _ in 0..200 {
+            if started.load(Ordering::SeqCst)
+                && controller.requests(&run.id).expect("requests").len() == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            started.load(Ordering::SeqCst),
+            "the sibling attempt never started"
+        );
+        let request = controller
+            .requests(&run.id)
+            .expect("requests")
+            .pop()
+            .expect("request");
+
+        let rejected = controller.respond(&request.id, false).expect("reject");
+        assert_eq!(rejected.status, RunStatus::Canceled);
+        for _ in 0..200 {
+            if canceled.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            canceled.load(Ordering::SeqCst),
+            "a rejected run kept executing its sibling"
+        );
     }
 }

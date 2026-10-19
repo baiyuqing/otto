@@ -19,6 +19,59 @@
 //! against the constants below, the way `cli::run` already compares
 //! [`SESSION_OPERATION_UNAVAILABLE`].
 
+/// Add read-only identity to pending transcript calls from durable facts.
+fn project_invocation_identity(
+    messages: &mut [Message],
+    ledger: &otto_core::session::OperationLedger,
+) {
+    // Only unmatched calls need the ledger: completed calls carry
+    // their precise identity in result metadata, even when provider
+    // call IDs were reused. This is a read-only projection.
+    let mut pending: std::collections::HashMap<String, Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
+    for message in messages.iter_mut() {
+        for block in &mut message.blocks {
+            if let Some(record) = block
+                .operation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.operation_id.as_ref())
+                .and_then(|id| ledger.operation(id))
+            {
+                block.invocation_id = record.operation_id.to_string();
+                block.invocation_attempt = Some(record.attempts);
+            }
+        }
+    }
+    for (mi, message) in messages.iter().enumerate() {
+        for (bi, block) in message.blocks.iter().enumerate() {
+            let call_id = block.tool_call_id.clone();
+            match block.block_type {
+                otto_core::model::BlockType::ToolCall => {
+                    pending.entry(call_id).or_default().push((mi, bi));
+                }
+                otto_core::model::BlockType::ToolResult => {
+                    if let Some(calls) = pending.get_mut(&call_id) {
+                        if !calls.is_empty() {
+                            calls.remove(0);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (call_id, calls) in pending {
+        if let Some(record) = ledger.operation_for_tool_call(&call_id) {
+            // The ledger owns the latest provider ID binding only.
+            if let Some((mi, bi)) = calls.last() {
+                let block = &mut messages[*mi].blocks[*bi];
+                block.invocation_id = record.operation_id.to_string();
+                block.invocation_attempt = Some(record.attempts);
+            }
+        }
+    }
+}
+
 pub mod approval;
 pub mod approval_control;
 pub mod auto_reflection;
@@ -812,7 +865,11 @@ impl Controller {
         }
         let state = self.lock();
         match state.current.as_ref() {
-            Some(current) => current.session.messages(),
+            Some(current) => {
+                let mut messages = current.session.messages();
+                project_invocation_identity(&mut messages, &current.session.operation_ledger());
+                messages
+            }
             None => Vec::new(),
         }
     }
@@ -4480,5 +4537,48 @@ mod tests {
                 "1 standing preference is not recalled because the standing set is over its 2000-token budget. Forget one with /memory forget <id>; list them with /memory list --scope user."
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod invocation_projection_tests {
+    use super::project_invocation_identity;
+    use otto_core::model::{Block, BlockType, Message, OperationId};
+    use otto_core::session::{OperationFact, OperationLedger};
+
+    #[test]
+    fn pending_identity_uses_persisted_facts_without_rewriting_prior_call() {
+        let call = Block {
+            block_type: BlockType::ToolCall,
+            tool_call_id: "reused".into(),
+            tool_name: "read".into(),
+            ..Default::default()
+        };
+        let result = Block {
+            block_type: BlockType::ToolResult,
+            tool_call_id: "reused".into(),
+            ..Default::default()
+        };
+        let mut messages = vec![Message {
+            blocks: vec![call.clone(), result, call],
+            ..Default::default()
+        }];
+        let mut ledger = OperationLedger::default();
+        ledger
+            .apply(OperationFact::attempt(
+                OperationId::new("op_current").unwrap(),
+                1,
+                "reused",
+                "read",
+            ))
+            .unwrap();
+        project_invocation_identity(&mut messages, &ledger);
+        assert!(messages[0].blocks[0].invocation_id.is_empty());
+        assert!(messages[0].blocks[1].invocation_id.is_empty());
+        assert_eq!(messages[0].blocks[2].invocation_id, "op_current");
+        assert_eq!(messages[0].blocks[2].invocation_attempt, Some(1));
+        let serialized = serde_json::to_string(&messages).unwrap();
+        let decoded: Vec<Message> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(decoded[0].blocks[2].invocation_id, "op_current");
     }
 }

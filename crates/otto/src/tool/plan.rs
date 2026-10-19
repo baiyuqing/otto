@@ -42,8 +42,17 @@ impl UpdatePlan {
     }
 }
 
+// Whole-plan replacement has the same effect on repetition, but is not ReadOnly
+// and therefore does not qualify for automatic recovery replay.
+pub(crate) const UPDATE_PLAN_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("update_plan", otto_core::model::RetrySafety::Idempotent);
+
 #[async_trait::async_trait]
 impl Tool for UpdatePlan {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        UPDATE_PLAN_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         definition(
             UPDATE_PLAN_TOOL,

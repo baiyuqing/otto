@@ -74,6 +74,12 @@ pub trait Tool: Send + Sync {
     /// the caller.
     fn definition(&self) -> ToolDefinition;
 
+    /// Tool-owned retry safety, never supplied by model arguments or config.
+    /// Unknown/custom tools conservatively forbid automatic re-execution.
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        otto_core::model::RetrySafety::NonIdempotent
+    }
+
     fn approval_spec(&self, _arguments: &RawValue) -> Result<Option<ApprovalSpec>, ToolResult> {
         Ok(None)
     }

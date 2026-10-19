@@ -17,6 +17,19 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Tool implementations now own their retry-safety declarations. Recovery only
+  automatically replays genuinely read-only calls; effectful interrupted calls
+  settle with unknown effects for the model to inspect before choosing a new
+  invocation. Yield, verification submission and approval queue mutation no
+  longer inherit read-only recovery classification; custom/MCP tools remain
+  conservative even when named like a built-in.
+
+- TUI tool calls now default to compact action/target/status/result summaries,
+  hiding raw arguments, output and diffs until `Ctrl+O`. Operation-based
+  invocation IDs deduplicate live/replayed calls while preserving provider IDs,
+  full details and approval behavior. Running attach snapshots project existing
+  operation facts without rewriting append-only history.
+
 - ChatGPT model discovery now sends a tested Codex catalog compatibility version
   instead of Otto's release version. Successful nonempty catalogs are cached in
   a private JSON file for three days, scoped to the endpoint, account and

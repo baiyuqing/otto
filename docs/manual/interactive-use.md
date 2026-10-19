@@ -125,16 +125,19 @@ capability.
   Esc cancels it the same way as a user turn. Composer text is left in place.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
-- Tool calls are folded to the tool name and a cut-down first line of the
-  arguments, with at most the first three result lines under `⎿` and a
-  `+N lines (ctrl+o)` count for the rest. A call still running shows no result
-  line, and one that finished with none says `(no output)`. `Ctrl+O` shows the
-  call id, the arguments, and the output in full, and toggles back.
-- Successful built-in `edit` and `write` calls show their bounded text diff
-  inline, with green additions, red removals, and cyan hunk headers. The same
-  diff appears when a session is resumed or its TUI is attached to `otto serve`.
-  Other tools and failed file edits keep the usual folded preview. `Ctrl+O`
-  also shows the call arguments and full recorded result.
+- Tool calls default to the action/tool name, a known target (when available),
+  explicit `running` / `completed` / `error` status, and a bounded key result.
+  A stable 12-hex invocation fingerprint keeps calls distinguishable without
+  crowding the summary (deduplication uses the full identity, not this label).
+  Raw arguments, shell commands, output and file diffs are hidden by default;
+  failures retain the first actionable error line and uncertain effects stay
+  visibly `effect unknown`. Unknown tools fall back to their tool name.
+  `Ctrl+O` shows full recorded arguments/output and colored file diffs, plus
+  the full invocation ID and original provider call ID; it toggles back.
+  Operation IDs keep live/replayed calls deduplicated across attach/reconnect;
+  retries update the same logical invocation. Legacy records without operation
+  identity use deterministic message/block IDs and cannot promise live replay
+  deduplication. No configuration or migration is required, including on resume.
 - The composer keeps a prompt history: `↑`/`↓` walk back and forth through the
   lines already submitted, and `↓` past the newest one restores what was being
   typed. It starts from the prompts the session already had, so a resumed

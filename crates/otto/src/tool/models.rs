@@ -116,8 +116,15 @@ fn render(catalog: &crate::provider::catalog::ModelCatalog, max: usize) -> Strin
     }
 }
 
+pub(crate) const LIST_MODELS_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("list_models", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for ListModelsTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        LIST_MODELS_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         list_models_definition()
     }

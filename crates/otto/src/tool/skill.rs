@@ -138,8 +138,15 @@ pub fn skill_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const SKILL_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("skill", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for SkillTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        SKILL_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         skill_definition()
     }

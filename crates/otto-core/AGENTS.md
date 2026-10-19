@@ -28,6 +28,5 @@ with its implementation.
 - A contract change updates its `crates/otto` implementations in the same
   change; `make rust-wasm-check` keeps the crate buildable for wasm32.
 
-See [package boundaries](../../docs/development/architecture.md#package-boundaries) for
-module ownership and [the architecture design](../../docs/specs/2026-09-05-architecture-contracts.md)
-for compatibility rationale.
+See [package boundaries](../../docs/development/architecture.md#package-boundaries)
+for module ownership and current compatibility contracts.

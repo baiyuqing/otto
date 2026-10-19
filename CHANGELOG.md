@@ -17,6 +17,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Remote `memory_search` can inspect an item with only its ID. Otto checks the
+  current session's authorized scopes and returns the current raw item; updates
+  and forget still require a tenant-bound reference and opaque revision.
+
 - Tool implementations now own their retry-safety declarations. Recovery only
   automatically replays genuinely read-only calls; effectful interrupted calls
   settle with unknown effects for the model to inspect before choosing a new

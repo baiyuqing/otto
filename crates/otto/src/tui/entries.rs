@@ -10,6 +10,8 @@
 //! reintroduce it if profiling shows markdown rendering is a hot path at large
 //! scrollback sizes.
 
+use std::time::{Duration, Instant};
+
 use otto_core::model::{
     Block, BlockType, EffectCertainty, Message, OperationDisposition, OperationStopReason, Role,
     Usage,
@@ -50,6 +52,9 @@ pub struct Entry {
     pub tool_call_id: String,
     /// Highest live execution attempt observed for this logical invocation.
     pub tool_attempt: u32,
+    /// Local monotonic observations only; never reconstructed from history.
+    pub tool_started: Option<Instant>,
+    pub tool_elapsed: Option<Duration>,
     pub tool_name: String,
     pub tool_args: String,
     pub tool_output: String,
@@ -62,6 +67,13 @@ pub struct Entry {
 }
 
 impl Entry {
+    pub fn execution_elapsed(&self, now: Instant) -> Option<Duration> {
+        self.tool_elapsed.or_else(|| {
+            self.tool_started
+                .map(|start| now.saturating_duration_since(start))
+        })
+    }
+
     fn new(id: String, kind: EntryKind) -> Self {
         Self {
             id,
@@ -74,7 +86,18 @@ impl Entry {
 /// Fold one tool frame by Otto operation identity, not provider ID or arguments.
 /// Legacy frames can only match pending provider calls; completed calls remain
 /// distinct because legacy streams do not carry a replay-safe invocation key.
+#[cfg(test)]
 pub fn reduce_tool_event(entries: &mut Vec<Entry>, event: &otto_core::wire::events::WireEvent) {
+    reduce_tool_event_at(entries, event, Some(Instant::now()));
+}
+
+/// Attach streams replay from frame zero without execution timestamps, so their
+/// delivery intervals cannot establish tool execution duration.
+pub fn reduce_tool_event_at(
+    entries: &mut Vec<Entry>,
+    event: &otto_core::wire::events::WireEvent,
+    now: Option<Instant>,
+) {
     let operation = (!event.operation_id.is_empty()).then_some(event.operation_id.as_str());
     let index = entries.iter().rposition(|e| {
         e.kind == Some(EntryKind::Tool)
@@ -108,6 +131,12 @@ pub fn reduce_tool_event(entries: &mut Vec<Entry>, event: &otto_core::wire::even
         }
         if attempt > entry.tool_attempt {
             entry.tool_done = false;
+            entry.tool_started = now;
+            entry.tool_elapsed = None;
+            entry.tool_error = false;
+            entry.disposition = None;
+            entry.effect_certainty = None;
+            entry.stop_reason = None;
         }
         entry.tool_attempt = attempt;
         entry.tool_args = event
@@ -120,6 +149,14 @@ pub fn reduce_tool_event(entries: &mut Vec<Entry>, event: &otto_core::wire::even
     } else if let Some(result) = &event.result {
         if entry.tool_done && entry.tool_attempt == 0 {
             return;
+        }
+        if !entry.tool_done || attempt > entry.tool_attempt {
+            entry.tool_elapsed = entry
+                .tool_started
+                .zip(now)
+                .filter(|_| attempt == entry.tool_attempt)
+                .map(|(start, end)| end.saturating_duration_since(start));
+            entry.tool_started = None;
         }
         entry.tool_attempt = attempt;
         entry.tool_output = result.content.clone();
@@ -739,6 +776,97 @@ mod tests {
         assert_eq!(usage.output_tokens, 6);
         assert_eq!(usage.cached_input_tokens, 2);
     }
+    #[test]
+    fn execution_clock_updates_freezes_and_preserves_identity_on_replay() {
+        use otto_core::wire::events::{WireEvent, WireToolResult};
+        let start = Instant::now();
+        for disposition in [
+            OperationDisposition::Succeeded,
+            OperationDisposition::Error,
+            OperationDisposition::Cancelled,
+            OperationDisposition::DeadlineExceeded,
+            OperationDisposition::Interrupted,
+        ] {
+            let mut entries = Vec::new();
+            let mut event = WireEvent {
+                event_type: "tool_call_started".into(),
+                operation_id: "op_clock".into(),
+                tool_call_id: "provider_clock".into(),
+                tool_name: "bash".into(),
+                attempt: Some(1),
+                ..Default::default()
+            };
+            reduce_tool_event_at(&mut entries, &event, Some(start));
+            assert_eq!(
+                entries[0].execution_elapsed(start + Duration::from_secs(2)),
+                Some(Duration::from_secs(2))
+            );
+            reduce_tool_event_at(&mut entries, &event, Some(start + Duration::from_secs(1)));
+            assert_eq!(
+                entries[0].tool_started,
+                Some(start),
+                "duplicate start must not reset clock"
+            );
+            event.event_type = "tool_call_finished".into();
+            event.result = Some(WireToolResult {
+                disposition: Some(disposition),
+                is_error: disposition != OperationDisposition::Succeeded,
+                ..Default::default()
+            });
+            reduce_tool_event_at(&mut entries, &event, Some(start + Duration::from_secs(3)));
+            reduce_tool_event_at(&mut entries, &event, Some(start + Duration::from_secs(9)));
+            assert_eq!(
+                entries[0].execution_elapsed(start + Duration::from_secs(20)),
+                Some(Duration::from_secs(3))
+            );
+            event.event_type = "tool_call_started".into();
+            reduce_tool_event_at(&mut entries, &event, Some(start + Duration::from_secs(10)));
+            assert!(entries[0].tool_done);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].operation_id.as_deref(), Some("op_clock"));
+            assert_eq!(entries[0].tool_call_id, "provider_clock");
+            event.attempt = Some(2);
+            reduce_tool_event_at(&mut entries, &event, Some(start + Duration::from_secs(11)));
+            assert_eq!(
+                entries[0].execution_elapsed(start + Duration::from_secs(12)),
+                Some(Duration::from_secs(1))
+            );
+            assert_eq!(entries.len(), 1, "retry retains logical invocation");
+        }
+    }
+
+    #[test]
+    fn replay_and_unmatched_finish_do_not_invent_execution_time() {
+        use otto_core::wire::events::{WireEvent, WireToolResult};
+        let mut entries = Vec::new();
+        let mut event = WireEvent {
+            event_type: "tool_call_started".into(),
+            operation_id: "op_replay".into(),
+            attempt: Some(1),
+            ..Default::default()
+        };
+        reduce_tool_event_at(&mut entries, &event, None);
+        assert_eq!(entries[0].execution_elapsed(Instant::now()), None);
+        event.event_type = "tool_call_finished".into();
+        event.result = Some(WireToolResult::default());
+        reduce_tool_event_at(&mut entries, &event, None);
+        assert_eq!(entries[0].execution_elapsed(Instant::now()), None);
+        entries.clear();
+        reduce_tool_event_at(&mut entries, &event, Some(Instant::now()));
+        assert_eq!(entries[0].execution_elapsed(Instant::now()), None);
+        entries.clear();
+        event.event_type = "tool_call_started".into();
+        reduce_tool_event_at(&mut entries, &event, Some(Instant::now()));
+        event.event_type = "tool_call_finished".into();
+        event.attempt = Some(2);
+        reduce_tool_event_at(&mut entries, &event, Some(Instant::now()));
+        assert_eq!(
+            entries[0].execution_elapsed(Instant::now()),
+            None,
+            "a finish for an unobserved attempt cannot use the previous attempt's clock"
+        );
+    }
+
     #[test]
     fn invocation_replay_dedupes_without_merging_identical_real_calls() {
         use otto_core::wire::events::{WireEvent, WireToolResult};

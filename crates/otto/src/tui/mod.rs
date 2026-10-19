@@ -36,7 +36,6 @@ use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, KeyEvent, KeyEventKind,
     MouseButton, MouseEventKind,
 };
-use otto_core::agent::inbox::NotificationKind;
 use otto_core::agent::{AgentError, Event};
 use otto_core::model::{Block, MAX_IMAGE_BYTES};
 use otto_core::wire::events::{WireEvent, to_wire, to_wire_compaction};
@@ -736,17 +735,9 @@ async fn run_turn<B: Backend>(
 }
 
 /// The wire form of one local event, so a local turn and an attached turn
-/// reach [`App::apply_event`] as the same frames. `to_wire` drops a
-/// notification's kind, so the queued-prompt notification is mapped here.
+/// reach [`App::apply_event`] as the same frames, including delivered guidance.
 fn wire_frame(event: &Event) -> WireEvent {
-    match event {
-        Event::Notification {
-            kind: Some(NotificationKind::UserMessage),
-            text,
-            ..
-        } => WireEvent::user_message(text, false),
-        _ => to_wire(event),
-    }
+    to_wire(event)
 }
 
 fn image_block_from_path(path: &str) -> Result<Block, String> {

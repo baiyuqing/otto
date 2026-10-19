@@ -2,6 +2,14 @@
 
 Previous: [Interactive use](interactive-use.md) · [Documentation index](../README.md) · Next: [Servers and connectors](servers-and-connectors.md)
 
+Approval titles, reasons, proposal details, reviewer context/reasons and decision
+feedback are not secret-scanned, including credential-shaped text, redaction
+markers and configured exact secret values. This content may be displayed and
+persisted: **do not include actual secrets**. Approval policy, permissions and
+human checkpoints still apply; model redaction and memory/reflection secret
+protections are unchanged. This behavior needs no configuration; existing
+installations require the normal rebuild/upgrade and restart to use it.
+
 ## Unified approvals
 
 Otto proceeds within the task you requested. It asks when a material choice is

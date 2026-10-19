@@ -1028,8 +1028,8 @@ process and durability claims remain behind `cfg` and their existing gates.
 
 > Amended 2026-10-07. The deterministic seams for the provider boundary are
 > the scripted loopback HTTP server in `otto::faults::http` and the matrix in
-> `crates/otto/tests/fault_provider.rs`, specified in
-> [fault injection testing](2026-10-07-fault-injection-testing.md). The matrix
+> `crates/otto/tests/fault_provider.rs`, documented in
+> [fault injection testing](../development/testing.md#fault-injection). The matrix
 > asserts the retry and settlement contract above, including the 2026-10-07
 > transport-retry exception, against injected refusals, resets, cut and
 > malformed streams, error statuses and stalls.

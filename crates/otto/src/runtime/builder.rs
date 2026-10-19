@@ -2316,9 +2316,6 @@ impl Builder {
         warnings: &mut (dyn std::io::Write + Send),
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
-        self.approvals
-            .protect_secrets(&redaction_values)
-            .map_err(|e| e.to_string())?;
         let max_output = output_cap(runtime.max_output_bytes);
         let output_logs = Arc::new(crate::tool::bash_output::Logs::default());
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());

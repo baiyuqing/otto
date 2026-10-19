@@ -139,6 +139,15 @@ impl MemoryContext {
 }
 impl MemoryRef {
     pub fn validate(&self, context: &MemoryContext, service: &str) -> Result<()> {
+        self.validate_with_revision(context, service, true)
+    }
+
+    fn validate_with_revision(
+        &self,
+        context: &MemoryContext,
+        service: &str,
+        require_revision: bool,
+    ) -> Result<()> {
         id(&self.service)?;
         id(&self.id)?;
         optional_id(&self.revision)?;
@@ -146,7 +155,9 @@ impl MemoryRef {
         if self.organization_id != context.organization_id {
             return Err(Error::new(ErrorKind::Unauthorized));
         }
-        if service == "remote" && (self.organization_id.is_none() || self.revision.is_none()) {
+        if service == "remote"
+            && (self.organization_id.is_none() || (require_revision && self.revision.is_none()))
+        {
             return Err(invalid());
         }
         context.validate_scope(&self.scope)
@@ -354,7 +365,9 @@ impl InspectRequest {
     pub fn validate(&self, service: &str) -> Result<()> {
         self.context.validate()?;
         match &self.query {
-            InspectQuery::Get(reference) => reference.validate(&self.context, service),
+            InspectQuery::Get(reference) => {
+                reference.validate_with_revision(&self.context, service, false)
+            }
             InspectQuery::List {
                 scope,
                 limit,

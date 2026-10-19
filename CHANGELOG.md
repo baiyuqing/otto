@@ -265,6 +265,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- The terminal UI keeps queued next input pinned above the composer when an
+  unrelated message arrives from the active turn. That message now appears in
+  the transcript under its own text instead of consuming the queued input.
+
 - A cross-workspace delivery whose target run was still `running` when
   `otto serve` stopped, for example after a crash, is now reported as
   `unknown` after restart, as documented, instead of `running` indefinitely.

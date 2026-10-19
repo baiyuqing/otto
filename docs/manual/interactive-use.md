@@ -44,46 +44,19 @@ capability.
 
 ### TUI behavior
 
-- Feature screens share navigation, focus, loading, error and submission
-  behavior. Every feature screen opens as a centered panel over the conversation;
-  help, pickers, forms, collections, command results, context, agents and memory
-  review never replace the whole terminal. `Tab`/`Shift+Tab` move focus between
-  lists, details, fields and actions; arrows navigate the focused control, and
-  `Enter` activates it. Queries run independently of terminal input and live turn
-  output. Returning from a detail screen restores the previous selection and
-  draft.
-- `Esc` returns or dismisses a feature screen without making a decision.
-  Approval actions are arranged horizontally, with **Approve** (or **Accept**
-  for a review) selected on the left by default and **Deny**/**Reject** on the
-  right. `←`/`→` changes the selected action and Enter submits it. The read-only
-  Document area never takes focus, including when clicked, so inspecting the
-  request cannot unset the selected action; `↑`/`↓` and `PgUp`/`PgDn` still
-  scroll long details. Approval panels have no feedback field. Approve and Deny
-  both close the panel as soon as the decision succeeds; no extra `Esc` is
-  needed. Multiple pending
-  approvals are shown one at a time in creation order. If you dismiss an
-  undecided approval with `Esc`, it remains pending; `/approve` with no arguments
-  opens pending approvals again. A submitted action prevents duplicate clicks;
-  failures keep the panel open, and safe read failures offer a Retry action.
+- Feature panels open over the conversation. `Tab`/`Shift+Tab` change focus,
+  arrows navigate, Enter activates, and Esc returns/dismisses without deciding.
+  Returning from details restores selection/draft; queries do not block input.
+- Approval panels select **Approve/Accept** on the left by default; use
+  `←`/`→` and Enter to approve or deny. The read-only document does not take
+  focus, but arrows/Page keys scroll it. There is no feedback field. Successful
+  decisions close the panel and advance to the next request in creation order;
+  errors keep it open. Esc leaves a request pending; `/approve` reopens it.
 - Runs inline and preserves the terminal scrollback; completed transcript rows remain
   available through normal terminal scrolling.
-- Every transcript entry is one block under a marker in the left gutter, so a
-  turn reads as prompt, tool calls, reply. The marker opens the block and an
-  aligned indent continues it, including on the rows a wrap produced:
-
-  | Marker | Entry |
-  | --- | --- |
-  | `❯` (bold green on a shaded band) | a prompt you submitted |
-  | `⏺` | an assistant reply |
-  | `⏺` (cyan) | a tool call; red when it failed |
-  | `⎿` | that call's result, indented under it |
-  | `✻` (dim) | a compaction checkpoint, a notification, or other system text |
-
-- A prompt is drawn as a shaded band across the transcript width, every row of
-  it, so the start of a turn is easy to find when scrolling back. The marker is
-  `❯` rather than `>` so it is not mistaken for the `>` a quoted markdown line
-  carries in a reply.
-- Entries are separated by a blank line.
+- Transcript markers distinguish submitted prompts (`❯`), replies/tool calls
+  (`⏺`), indented results (`⎿`) and system notices/checkpoints (`✻`). Failed
+  tools are red; prompts are shaded. Normal terminal scrollback remains usable.
 - While a turn is running, an animated status line is shown under the
   transcript, and the composer title reads `Working — Enter queues for this
   turn · Esc cancels turn`. Once input is queued, a yellow `◆ QUEUED …` banner
@@ -150,39 +123,16 @@ capability.
 - `/image <path>` attaches one PNG, JPEG, or WebP image to the next ordinary
   prompt. The path may contain spaces. A later `/image` replaces the pending
   image.
-- Mouse-wheel transcript scrolling is enabled. Dragging with the left button
-  selects visible transcript text and copies it to the clipboard on release;
-  no modifier key is needed. Any key or wheel notch clears the highlight. The
-  copied text has the gutter removed — markers and the indent they add — and
-  trailing blanks dropped, including the padding a prompt's band adds, so a
-  command or a code block pastes as it was written; indentation the text
-  itself carried is kept.
-- Below the composer, a panel lists this session's sub-agent tasks that are
-  queued or running, one row each: a status marker, the task id, its name,
-  how long it has been queued or running, and its description. It shows at
-  most 4 rows; with more than 4 such tasks the panel shows the first 3 and a
-  `+N more` row for the rest. It covers only this session's in-memory tasks,
-  not other sessions' or finished tasks — use `/agents` for the full record
-  of every session's tasks, running or finished. The panel takes no rows
-  when the session has no queued or running task.
-- The footer is always the terminal's last row, below the composer and the
-  sub-agent panel. Its fields, most important first: the model, the approval
-  mode (`AUTO` or `MANUAL`), the session's token totals with the cached share
-  of the prompt (`tokens 12.4k/802 (cached 9.8k, 79.0%)`, or `tokens 0/0`
-  before the first report; the cached suffix is omitted when any accumulated
-  report lacks that breakdown), the context percentage, the sandbox state
-  (`sb · write · net`, `sb · write · no-net`, or the full `seatbelt ·
-  workspace-write · network allowed`, `sandbox off · WARNING: bash is
-  unsandboxed`, and `bash disabled · sandbox unavailable`), the reasoning
-  effort, the workspace, and the session ID. Ratatui clips the row at the
-  terminal's right edge, so a narrow terminal loses the tail and keeps the
-  head: the token totals and the cached share stay readable down to about 60
-  columns, while the sandbox state, the reasoning effort, the workspace and
-  the session ID can be cut off. The cached share is `cached input tokens /
-  input tokens`. `GET /v1/usage` reports provider operations and actual HTTP
-  attempts separately. Its `cache_hit_rate` and cached-token total are `null`
-  when any included, reported usage lacks a cached-token breakdown; a missing
-  breakdown is unknown, not a reported zero.
+- Mouse wheel scrolls; left-drag copies visible transcript text on release,
+  without gutters/padding but preserving code indentation. Any key/wheel clears
+  the highlight. Clipboard support requires a host helper.
+- The task panel shows up to four rows for this session's queued/running
+  children; `/agents` includes other sessions and completed tasks.
+- The footer shows model, approval mode, token totals/cache share, context,
+  sandbox, effort, workspace and session ID; narrow terminals clip the tail.
+  Cached share is cached/input tokens and is omitted if any report lacks its
+  breakdown. In `GET /v1/usage`, absent cache breakdown means unknown (`null`),
+  not zero. Provider operations and actual HTTP attempts are counted separately.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys

@@ -231,6 +231,7 @@ impl RecallRequest {
             }
         }
         text(&self.query, MAX_QUERY_BYTES, true)?;
+        require(self.query.is_empty() || !self.query.trim().is_empty())?;
         require(self.limit > 0 && self.limit <= MAX_ITEMS)?;
         require(self.token_budget > 0 && self.token_budget <= MAX_TOKEN_BUDGET)
     }

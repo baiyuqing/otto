@@ -622,7 +622,9 @@ Key points:
   is only available where the provider supplies it; missing prices or capability
   details are not inferred as facts. If discovery fails, returns no models, or
   suitability is unknown, the parent uses the session model instead of guessing
-  IDs or blindly retrying. See [discovery and recovery](safety-and-tools.md#list_models).
+  IDs or blindly retrying. ChatGPT catalogs are cached locally for three days;
+  account, endpoint and catalog compatibility version changes refresh them. See
+  [discovery and recovery](safety-and-tools.md#list_models).
 - `[profiles.<name>].subagent_models` is an optional deprecated compatibility
   override in user configuration, not a project's `.otto/config.toml`. It lists
   up to 16 exact model IDs in your preferred lower-cost-to-higher-capability

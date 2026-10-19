@@ -17,6 +17,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Stop secret-scanning approval content, including credential-shaped text and
+  configured exact secret matches. Approval text may be displayed and persisted;
+  do not include actual secrets. Policy, permissions, human checkpoints, model
+  redaction and non-approval secret protections are unchanged. No configuration
+  change is needed; rebuild/upgrade and restart normally.
+
 - Remote `memory_search` accepts `query: ""` to browse a bounded set of effective
   memories, not a complete inventory. Whitespace-only nonempty queries remain
   invalid; scope authority, mandatory pinned winners, permissions, filters and

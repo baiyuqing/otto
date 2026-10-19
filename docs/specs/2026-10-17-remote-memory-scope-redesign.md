@@ -4,7 +4,7 @@ Status: approved 2026-10-17; implementation in progress.
 User approved the design, including organization-isolated personal memory,
 and requested sub-agent implementation.
 
-This replaces the initial [Protocol 1 design](2026-10-17-remote-memory-protocol.md)
+This replaces the initial Protocol 1 design (available in Git history)
 in place under that approval. It is not Protocol 2. Paths remain `/v1/`, the protocol
 header remains `1.0`, and compatibility with the previous v1 bodies is not
 required. Session history and the public embedding API remain compatible.
@@ -472,8 +472,8 @@ The repository does not implement or migrate the remote service's storage.
 
 Implementation updates the canonical remote protocol manual, configuration docs,
 capability descriptions, fixtures, code and changelog together. The initial v1
-spec is superseded by this approved design; preserve both documents as design
-history. Current behavior belongs in the
+spec is superseded by this approved design and retained in Git history.
+Current behavior belongs in the
 [protocol manual](../manual/remote-memory-protocol.md), not a second wire contract.
 
 Required offline acceptance coverage:

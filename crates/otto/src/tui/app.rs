@@ -687,6 +687,7 @@ impl App {
                     surface.state.reconcile(&view);
                 }
                 Err(message) => {
+                    surface.model.failed(&message);
                     surface.state.pending =
                         mutation && message.to_ascii_lowercase().contains("outcome unknown");
                     surface.state.error = Some(message.clone());
@@ -1142,6 +1143,7 @@ impl App {
                     surface.state.pending = true;
                 }
                 if !self.connected && matches!(tr, Transition::Request(Request::Command(_))) {
+                    self.surfaces.top_mut()?.model.failed("TUI disconnected");
                     self.surfaces.top_mut()?.state.pending = false;
                     self.surfaces.top_mut()?.state.error = Some("TUI disconnected".into());
                 } else {

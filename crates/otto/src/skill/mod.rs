@@ -47,7 +47,7 @@ pub const MAX_SKILL_CONTRACT_CHARS: usize = 1024;
 /// case that makes sub-agent execution fail, so it is reported and treated as
 /// declaring neither. See the
 /// [sub-agent execution design](../../../docs/specs/2026-09-22-skill-subagent-execution.md).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Contract {
     pub input: String,
     pub output: String,
@@ -58,7 +58,7 @@ pub struct Contract {
 /// `name` is the catalog ID (qualified for plugins). Local frontmatter names
 /// must equal the directory base name.
 /// `directory` is absolute; `path` is `directory/SKILL.md`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Skill {
     pub name: String,
     pub description: String,

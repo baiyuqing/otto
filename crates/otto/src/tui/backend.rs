@@ -1039,6 +1039,40 @@ async fn remote_management(
 ) -> Result<Reply, String> {
     use crate::app::management::{Reply as ManagementReply, Request};
     let reply = match request {
+        Request::SkillManager => ManagementReply::SkillManager(
+            remote
+                .client
+                .skill_manager(session)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        Request::SkillInfo(name) => ManagementReply::SkillInfo(
+            remote
+                .client
+                .skill_info(session, &name)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        Request::SkillDetail(name) => {
+            let info = remote
+                .client
+                .skill_info(session, &name)
+                .await
+                .map_err(|e| e.to_string())?;
+            ManagementReply::SkillDetail {
+                skill: info.skill,
+                body: info.body,
+                contract_check: info.contract_check,
+                generated: None,
+            }
+        }
+        Request::SkillSet { name, enabled } => ManagementReply::SkillSet(
+            remote
+                .client
+                .set_skill_enabled(session, &name, enabled)
+                .await
+                .map_err(mutation_error)?,
+        ),
         Request::ReflectList => ManagementReply::ReflectList(
             remote
                 .client

@@ -428,8 +428,12 @@ Shared commands:
   described in
   [Git metadata is read-only](safety-and-tools.md#git-metadata-is-read-only-in-the-seatbelt-sandbox)
   for git commands.
-- `/skills` lists every available skill name in the current session; use `/skill <name>` for its description, location, contract-check status, and instructions.
-- `/skill <name>` displays one skill's description, location, and instructions.
+- `/skill` opens the skill manager in the TUI; text frontends list the current
+  session's available skills. `/skill <name>` displays one skill's description,
+  location, contract-check status, and instructions, without executing it.
+  `/skill set <name> enabled|disabled` saves its configured state. See
+  [skills](memory-and-extensions.md#skills) for management and restart behavior.
+  `/skills` is not a command.
 - `/mcp` shows every configured MCP server and its connection state.
   `/mcp login <server>` signs in to one HTTP server that uses OAuth. See
   [MCP servers](memory-and-extensions.md#mcp-servers).

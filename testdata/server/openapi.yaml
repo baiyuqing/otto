@@ -594,6 +594,50 @@ components:
           items:
             $ref: "#/components/schemas/Skill"
       required: [skills]
+    ManagedSkillMetadata:
+      type: object
+      properties:
+        name: {type: string}
+        description: {type: string}
+        directory: {type: string}
+        path: {type: string}
+        contract:
+          anyOf:
+            - type: "null"
+            - type: object
+              properties:
+                input: {type: string}
+                output: {type: string}
+              required: [input, output]
+      required: [name, description, directory, path, contract]
+    SkillManager:
+      type: object
+      properties:
+        global_enabled:
+          type: boolean
+          description: Latest persisted skills.enabled (default true). When false, enable it in Otto config and restart; row preferences alone cannot activate skills.
+        skills:
+          type: array
+          items: {$ref: "#/components/schemas/ManagedSkill"}
+      required: [global_enabled, skills]
+    ManagedSkill:
+      type: object
+      properties:
+        skill: {$ref: "#/components/schemas/ManagedSkillMetadata"}
+        enabled:
+          type: boolean
+          description: Persisted per-skill preference only; execution also requires global_enabled. Not a hot-reloaded state
+        loaded:
+          type: boolean
+          description: Whether this skill belongs to the session's fixed active catalog
+      required: [skill, enabled, loaded]
+    ManagedSkillInfo:
+      type: object
+      properties:
+        skill: {$ref: "#/components/schemas/ManagedSkillMetadata"}
+        body: {type: string, description: Read-only skill instructions, never executed by this endpoint}
+        contract_check: {type: [string, "null"]}
+      required: [skill, body, contract_check]
     SkillMutation:
       type: object
       properties:
@@ -2344,6 +2388,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/skill-manager:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List all discovered skills including disabled ones, with persisted and session status
+      responses:
+        "200":
+          description: Discovery snapshot; enablement changes require Otto restart
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillManager"
+        "404":
+          description: Session not found
+        "500":
+          description: Configuration read failed (skill_config_read_failed)
+  /v1/sessions/{id}/skill-manager/{name}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Exact discovered skill name, including qualified plugin names
+    get:
+      summary: Read a discovered skill's full instructions and supported contract check without execution
+      responses:
+        "200":
+          description: Read-only details, including disabled skills
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ManagedSkillInfo"}
+        "404":
+          description: Session not found
+        "400":
+          description: Skill name or confined file read failed (skill_read_failed)
   /v1/sessions/{id}/skills:
     parameters:
       - $ref: "#/components/parameters/sessionID"

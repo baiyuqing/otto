@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- ChatGPT model discovery now sends a tested Codex catalog compatibility version
+  instead of Otto's release version. Successful nonempty catalogs are cached in
+  a private JSON file for three days, scoped to the endpoint, account and
+  compatibility version; rejected model requests invalidate the cache.
+
 - Sub-agent selection discovers the active provider's model catalog on demand
   for both ChatGPT and OpenAI-compatible connections, reusing it until the
   connection changes. The parent chooses an economical adequate model and gives
@@ -266,6 +271,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 
 ### Fixes
+
+- The terminal UI keeps queued next input pinned above the composer when an
+  unrelated message arrives from the active turn. That message now appears in
+  the transcript under its own text instead of consuming the queued input.
 
 - A cross-workspace delivery whose target run was still `running` when
   `otto serve` stopped, for example after a crash, is now reported as

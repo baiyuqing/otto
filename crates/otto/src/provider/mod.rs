@@ -5,5 +5,6 @@
 //! the retry policy, and credential redaction.
 
 pub mod catalog;
+mod catalog_cache;
 pub mod chatgpt;
 pub mod openaicompat;

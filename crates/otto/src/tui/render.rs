@@ -1137,6 +1137,11 @@ mod tests {
         app.scroll = Some(0);
         app.start_turn();
         app.queued_input = Some("/memory search vim".to_string());
+        app.apply_event(&otto_core::wire::events::WireEvent {
+            event_type: otto_core::wire::events::USER_MESSAGE.into(),
+            text: "guidance for current turn".into(),
+            ..Default::default()
+        });
 
         let width = 72;
         let height = 12;

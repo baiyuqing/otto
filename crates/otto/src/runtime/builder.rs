@@ -2289,6 +2289,9 @@ impl Builder {
                         &self.auth_credentials,
                         self.auth_credentials_loaded,
                     )?
+                    .with_catalog_cache(
+                        std::path::Path::new(&self.home).join(".otto/cache/chatgpt-models.json"),
+                    )
                     .with_hosted_web_search(self.hosted_search(Some(runtime))),
                 ),
                 timeout: runtime.resilience.deadlines.provider_timeout,

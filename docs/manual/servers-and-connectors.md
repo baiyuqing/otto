@@ -417,14 +417,14 @@ are served at the root. Request and error bodies are JSON.
 | `POST /v1/schedule/claim` | Body `{}`. Claims up to 10 due [`schedule`](safety-and-tools.md#schedule) items with origin `web` for 120 s and returns `{"items":[{"id":"s7","due_at":<unix ms>,"text":"..."}]}`; a claimed item is not returned again until the claim expires. `503 schedule_unavailable` when `~/.otto/schedule.db` could not be opened. |
 | `POST /v1/schedule/{id}/delivered` | Body `{"due_at":<unix ms>}` from the claim. Records the delivery and returns `{}`, also when it was already recorded. `404` for an id that is not `s<n>`, `400` for a bad body, `503` as above. |
 | `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
-| `GET/POST /v1/workflows?workspace=<path>` | List that workspace's workflow runs (default the startup workspace), or start one there with `{"name":"...","input":"..."}`. |
+| `GET/POST /v1/workflows?workspace=<path>` | List that workspace's workflow runs newest first (default the startup workspace), or start one there with `{"name":"...","input":"..."}`. The list takes `limit` (default 50, at most 200) and `before` (the `next_before` cursor of the previous page, empty when there are no older runs) and returns `{"runs":[...],"next_before":...}`. |
 | `GET /v1/workflows/{id}` | Return a run, its steps, and its approval requests. Searches every loaded workspace for the run id. |
 | `GET /v1/workflows/{id}/events?after=N` | Replay durable workflow SSE events after sequence `N`; unlike turn events, replay survives process restart. |
-| `POST /v1/workflows/{id}/resume` | Resume a run; `{"retry":"step-id"}` explicitly retries one interrupted step. |
+| `POST /v1/workflows/{id}/resume` | Resume a run; `{"retry":"step-id"}` explicitly retries one `interrupted` or `failed` step and re-admits the steps that failure canceled. |
 | `POST /v1/workflows/{id}/fork` | Create a new run from a committed step boundary with `{"after_step":"step-id"}`. |
 | `POST /v1/workflows/{id}/cancel` | Cancel a run after its active attempts stop. |
 | `POST /v1/workflows/requests/{id}/approve` | Approve a durable workflow gate. Searches every loaded workspace for the request id. |
-| `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate and cancel the run. Searches every loaded workspace for the request id. |
+| `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate: the run is canceled and its in-flight attempts stop. Searches every loaded workspace for the request id. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to every loaded workspace; `409` while any session in any loaded workspace has a turn in flight, or `409 sandbox_reload_failed` when any workspace's reload fails; `501` when the process has no reloadable sandbox. With one loaded workspace, returns the sandbox object now in effect, as before; with more than one, the startup workspace's sandbox fields stay at the top level and an added `workspaces` array carries each workspace's own `{"workspace", "sandbox", "error"}` (`sandbox` and `error` are mutually exclusive). |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
 | `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |
@@ -432,6 +432,11 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/openapi.yaml` | The OpenAPI 3.1 document for this API. |
 | `GET /healthz` | `{"status":"ok","sessions_open":N}`. |
 | `GET /metrics` | Prometheus text-format metrics. |
+
+Workflow routes report failure by kind: `400` for an invalid request or page
+limit, `404` when the workspace has no such run, request, or definition, `409`
+when the run cannot change state as asked, and `503` when the workflow store is
+unavailable. `501` still means the workspace has no workflow runtime.
 
 A turn keeps running after its client disconnects; `POST .../cancel` is the
 only way to stop it.

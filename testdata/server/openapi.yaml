@@ -1030,11 +1030,12 @@ components:
         status:
           type: string
           enum: [running, waiting, paused, succeeded, failed, canceled]
+        created_at: {type: string}
         steps:
           type: array
           items:
             $ref: "#/components/schemas/WorkflowStep"
-      required: [id, workflow, workspace, profile, provider, model, input, forked_from_run_id, forked_from_event_seq, forked_from_step_id, status, steps]
+      required: [id, workflow, workspace, profile, provider, model, input, forked_from_run_id, forked_from_event_seq, forked_from_step_id, status, created_at, steps]
     WorkflowRequest:
       type: object
       properties:
@@ -1061,7 +1062,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WorkflowRun"
-      required: [runs]
+        next_before:
+          type: string
+          description: Cursor for the next page; empty on the last page.
+      required: [runs, next_before]
     WorkflowEvent:
       type: object
       properties:
@@ -1195,6 +1199,22 @@ components:
       schema:
         type: integer
         minimum: 0
+    workflowLimit:
+      name: limit
+      in: query
+      required: false
+      description: Page size for the run list; defaults to 50 and is capped at 200.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+    workflowBefore:
+      name: before
+      in: query
+      required: false
+      description: Return runs created before this cursor (a run's `created_at`).
+      schema:
+        type: string
 paths:
   /v1/approvals:
     get:
@@ -2951,7 +2971,16 @@ paths:
                 $ref: "#/components/schemas/Error"
   /v1/workflows:
     get:
-      summary: List durable workflow runs for the workspace
+      summary: List durable workflow runs for the workspace, newest first
+      parameters:
+        - name: workspace
+          in: query
+          required: false
+          description: Workspace to list; defaults to the startup workspace.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/workflowLimit"
+        - $ref: "#/components/parameters/workflowBefore"
       responses:
         "200":
           description: OK
@@ -2959,6 +2988,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowList"
+        "400":
+          description: Invalid page limit
+        "503":
+          description: Workflow store unavailable
         "501":
           description: Workflow runtime unavailable
     post:
@@ -2980,8 +3013,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowView"
+        "400":
+          description: Invalid definition or input
+        "404":
+          description: No workflow has that name
         "409":
-          description: Invalid definition or runtime conflict
+          description: Runtime conflict
+        "503":
+          description: Workflow store unavailable
         "501":
           description: Workflow runtime unavailable
   /v1/workflows/{id}:
@@ -3031,8 +3070,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowView"
+        "400":
+          description: Invalid request
         "409":
           description: Run cannot be resumed
+        "503":
+          description: Workflow store unavailable
   /v1/workflows/{id}/fork:
     parameters:
       - $ref: "#/components/parameters/workflowID"
@@ -3054,8 +3097,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowView"
+        "400":
+          description: Invalid request
         "409":
           description: Step is not a committed success boundary
+        "503":
+          description: Workflow store unavailable
   /v1/workflows/{id}/cancel:
     parameters:
       - $ref: "#/components/parameters/workflowID"
@@ -3068,8 +3115,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowView"
+        "400":
+          description: Invalid request
         "409":
           description: Run already finished
+        "503":
+          description: Workflow store unavailable
   /v1/workflows/requests/{id}/approve:
     parameters:
       - $ref: "#/components/parameters/workflowRequestID"
@@ -3082,22 +3133,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowView"
+        "400":
+          description: Invalid request
         "409":
           description: Request conflict
+        "503":
+          description: Workflow store unavailable
   /v1/workflows/requests/{id}/reject:
     parameters:
       - $ref: "#/components/parameters/workflowRequestID"
     post:
-      summary: Reject one durable workflow gate
+      summary: Reject one durable workflow gate and cancel the run
       responses:
         "200":
-          description: Gate rejected and run canceled
+          description: Gate rejected; the run is canceled and its in-flight attempts stop
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowView"
+        "400":
+          description: Invalid request
         "409":
           description: Request conflict
+        "503":
+          description: Workflow store unavailable
   /v1/workspaces:
     get:
       summary: List loaded workspaces, startup first then by path

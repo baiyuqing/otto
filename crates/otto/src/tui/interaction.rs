@@ -11,6 +11,7 @@ pub(crate) struct View {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
     pub collection: bool,
+    pub search: Option<String>,
     pub default_row: Option<String>,
     pub document: String,
     pub fields: Vec<Field>,
@@ -294,6 +295,24 @@ impl State {
                 }
             }
             Intent::Activate => return self.activate(view),
+            Intent::Shortcut(key) if view.search.is_some() && key != ' ' => {
+                let mut query = view.search.clone().unwrap_or_default();
+                query.push(key);
+                return Some(Activation::Action {
+                    id: "otto:search".into(),
+                    row: self.selected_row.clone(),
+                    fields: BTreeMap::from([("query".into(), query)]),
+                });
+            }
+            Intent::Backspace if view.search.is_some() => {
+                let mut query = view.search.clone().unwrap_or_default();
+                query.pop();
+                return Some(Activation::Action {
+                    id: "otto:search".into(),
+                    row: self.selected_row.clone(),
+                    fields: BTreeMap::from([("query".into(), query)]),
+                });
+            }
             Intent::Shortcut(key) if !matches!(self.focus, Focus::Field(_)) => {
                 if let Some(action) = view.actions.iter().find(|action| {
                     action.enabled
@@ -302,8 +321,11 @@ impl State {
                             .is_some_and(|shortcut| shortcut.eq_ignore_ascii_case(&key))
                 }) {
                     self.selected_action = Some(action.id.clone());
+                    let previous_focus = self.focus.clone();
                     self.focus = Focus::Actions;
-                    return self.activate(view);
+                    let activation = self.activate(view);
+                    self.focus = previous_focus;
+                    return activation;
                 }
             }
             Intent::Text(text) => {

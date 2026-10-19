@@ -2,8 +2,9 @@
 
 Status: Rust contracts, host admission, built-in projection and runtime injection
 implemented on 2026-10-07. External transports and a semantic-search upgrade are
-not included. The [research records](2026-10-07-open-memory-research/README.md)
-preserve the source evidence and its limits.
+not included in that implementation. The original comparative research records
+are available in Git history; examples below describe consumer boundaries, not
+supported third-party provider integrations.
 
 ## Objective and decisions
 

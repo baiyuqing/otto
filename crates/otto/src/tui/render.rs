@@ -228,20 +228,15 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 pub(super) const SPINNER_FRAME: Duration = Duration::from_millis(100);
 
 /// The line shown under the transcript while a turn is in flight: the phase
-/// (waiting for the model, reasoning, running a tool, a provider retry) and
-/// how long the phase and the turn have lasted, so a slow step is
-/// distinguishable from a hung terminal.
+/// (waiting for the model, reasoning, running a tool, a provider retry).
+/// The spinner stays animated, but only tool records display execution time.
 fn thinking_line(status: &TurnStatus) -> Line<'static> {
     let frame = status.turn_elapsed.as_millis() / SPINNER_FRAME.as_millis();
     Line::styled(
         format!(
             "{} {}",
             SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()],
-            otto_core::wire::transcript::status_line(
-                &status.phase,
-                status.phase_elapsed.as_secs(),
-                status.turn_elapsed.as_secs()
-            )
+            status.phase
         ),
         Style::default().fg(Color::Magenta),
     )
@@ -1005,21 +1000,19 @@ mod tests {
             .collect()
     }
 
-    /// The frame index and the turn count both come from one `Duration`, so
-    /// they cannot disagree about how long the turn has been running.
+    /// The spinner advances, but model phases never expose elapsed duration.
     #[test]
-    fn the_status_line_names_the_phase_and_advances_with_elapsed_time() {
-        let at = |phase_ms, turn_ms| {
+    fn the_status_line_animates_without_thinking_or_turn_duration() {
+        let at = |_phase_ms, turn_ms| {
             line_text(&thinking_line(&TurnStatus {
                 phase: "reasoning".into(),
-                phase_elapsed: Duration::from_millis(phase_ms),
                 turn_elapsed: Duration::from_millis(turn_ms),
             }))
         };
 
-        assert_eq!(at(0, 0), "⠋ reasoning · 0s · turn 0s");
-        assert_eq!(at(0, 100), "⠙ reasoning · 0s · turn 0s");
-        assert_eq!(at(1_000, 5_000), "⠋ reasoning · 1s · turn 5s");
+        assert_eq!(at(0, 0), "⠋ reasoning");
+        assert_eq!(at(0, 100), "⠙ reasoning");
+        assert_eq!(at(1_000, 5_000), "⠋ reasoning");
     }
 
     /// A turn streams nothing until the model's first token, so without this
@@ -1048,11 +1041,11 @@ mod tests {
 
         assert!(!idle.contains("waiting"), "idle transcript:\n{idle}");
         assert!(
-            busy.contains("waiting for model · 0s · turn 0s"),
+            busy.contains("waiting for model"),
             "running transcript:\n{busy}"
         );
         assert!(
-            running.contains(r#"running bash {"command":"ls"}"#),
+            running.contains("running bash") && !running.contains(r#"{"command":"ls"}"#),
             "tool transcript:\n{running}"
         );
         assert!(!rendered(&app, 50, 10).contains("turn"));

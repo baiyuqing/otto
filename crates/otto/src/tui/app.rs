@@ -36,7 +36,6 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStatus {
     pub phase: String,
-    pub phase_elapsed: Duration,
     pub turn_elapsed: Duration,
 }
 const CTRL_C_ARM_WINDOW: Duration = Duration::from_secs(1);
@@ -279,13 +278,24 @@ impl App {
                     )
                 })
                 .unwrap_or_else(|| self.phase.0.clone()),
-            phase_elapsed: self.phase.1.elapsed(),
             turn_elapsed: self.busy_since?.elapsed(),
         })
     }
     pub fn refresh(&mut self, backend: &Backend<'_>) {
         let old = (self.info.workspace.clone(), self.info.session_id.clone());
-        let (entries, usage) = entries::entries_from_history(&backend.history());
+        let (mut entries, usage) = entries::entries_from_history(&backend.history());
+        let info = backend.info();
+        if old == (info.workspace.clone(), info.session_id.clone()) {
+            for entry in &mut entries {
+                if entry.tool_done && entry.operation_id.is_some() {
+                    if let Some(previous) = self.entries.iter().find(|previous| {
+                        previous.tool_done && previous.operation_id == entry.operation_id
+                    }) {
+                        entry.tool_elapsed = previous.tool_elapsed;
+                    }
+                }
+            }
+        }
         self.entries = entries;
         self.usage = usage;
         self.info = backend.info();
@@ -1277,7 +1287,12 @@ impl App {
         if let Some(reporter) = &self.program_status {
             reporter.observe_wire_stdout(event);
         }
-        if let Some(phase) = transcript::phase(event)
+        let phase = if event.event_type == "tool_call_started" {
+            Some(format!("running {}", event.tool_name))
+        } else {
+            transcript::phase(event)
+        };
+        if let Some(phase) = phase
             && phase != self.phase.0
         {
             self.phase = (phase, Instant::now());
@@ -1328,7 +1343,11 @@ impl App {
                         .saturating_add(usage.cached_input_tokens.max(0));
                 }
             }
-            "tool_call_started" => super::entries::reduce_tool_event(&mut self.entries, event),
+            "tool_call_started" => super::entries::reduce_tool_event_at(
+                &mut self.entries,
+                event,
+                (!self.attached).then(Instant::now),
+            ),
             "tool_call_finished" => {
                 let result = event.result.clone().unwrap_or_default();
                 let approval = if !self.attached {
@@ -1341,7 +1360,11 @@ impl App {
                 } else {
                     None
                 };
-                super::entries::reduce_tool_event(&mut self.entries, event);
+                super::entries::reduce_tool_event_at(
+                    &mut self.entries,
+                    event,
+                    (!self.attached).then(Instant::now),
+                );
                 if let Some(request) = approval {
                     self.show_approval(features::Approval::legacy(
                         request.id,
@@ -1619,6 +1642,47 @@ mod tests {
         let app = App::new(&Backend::Attach(&remote));
         (app, remote)
     }
+    #[test]
+    fn tool_duration_survives_same_session_refresh_but_not_session_replacement() {
+        use otto_core::model::{Block, BlockType, Message, Role, ToolResultMetadata};
+        let history = vec![Message {
+            role: Role::Tool,
+            blocks: vec![Block {
+                block_type: BlockType::ToolResult,
+                tool_call_id: "provider_refresh".into(),
+                operation_metadata: Some(ToolResultMetadata {
+                    operation_id: Some(otto_core::model::OperationId::new("op_refresh").unwrap()),
+                    disposition: otto_core::model::OperationDisposition::Succeeded,
+                    effect_certainty: otto_core::model::EffectCertainty::Completed,
+                    stop_reason: None,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let remote = Remote::offline(history);
+        let mut app = App::new(&Backend::Attach(&remote));
+        assert!(app.entries[0].tool_done);
+        app.entries[0].tool_elapsed = Some(Duration::from_secs(3));
+        app.refresh(&Backend::Attach(&remote));
+        assert_eq!(app.entries[0].tool_elapsed, Some(Duration::from_secs(3)));
+        app.info.session_id = "other-session".into();
+        app.refresh(&Backend::Attach(&remote));
+        assert_eq!(app.entries[0].tool_elapsed, None);
+    }
+
+    #[test]
+    fn attached_tool_frames_cannot_measure_execution_from_replay_delivery() {
+        let (mut app, _) = app();
+        app.attached = true;
+        app.apply_event(&WireEvent {
+            event_type: "tool_call_started".into(),
+            operation_id: "op_attach".into(),
+            ..Default::default()
+        });
+        assert_eq!(app.entries.last().unwrap().tool_started, None);
+    }
+
     #[test]
     fn provider_recovery_separates_partial_output_in_local_and_attached_tui() {
         for attached in [false, true] {

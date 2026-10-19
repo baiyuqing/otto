@@ -18,7 +18,7 @@ the owning code instead of restating it.
 | Native runtime, tools and frontends | [otto rules](crates/otto/AGENTS.md), `crates/otto/src/cli/` |
 | Documentation | [documentation rules](docs/AGENTS.md), `docs/user-manual.md` |
 | Browser frontend | [otto-plus](https://github.com/baiyuqing/otto-plus); separate client of Otto HTTP APIs |
-| Chat connector | `chat-connector/`; independent Go ACP client; [design](docs/specs/2026-10-02-otto-connect.md) |
+| Chat connector | `chat-connector/`; independent Go ACP client; [guide](docs/manual/servers-and-connectors.md#chat-connector) |
 
 Otto supports only `openai-compatible` and `chatgpt`. Do not implement or
 advertise other providers or planned roadmap features.

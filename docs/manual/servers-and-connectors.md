@@ -1088,8 +1088,7 @@ they are unavailable in direct TCP mode.
 
 ### The ACP TCP stack script
 
-Starting that pair by hand, in the right order, with the same token in two
-processes, is what `scripts/otto-tcp.sh` does:
+`scripts/otto-tcp.sh` supervises serve's ACP listener and the connector:
 
 ```bash
 export OTTO_ACP_TOKEN=<token>     # read by both programs; never stored
@@ -1118,43 +1117,27 @@ and shell limits are shared with the terminal frontends:
 | `OTTO_TCP_HOME` | state and log directory; empty uses `~/.local/state/otto-tcp` |
 | `OTTO_UI`, `OTTO_EXTRA_ARGS` | not used: `otto serve` accepts neither `--ui` nor `--prompt` |
 
-Before starting anything it checks the deployment and reports what would
-otherwise fail obscurely: that `OTTO_ACP_TOKEN` is set and well formed, that
-`connect.toml` really uses `[agent] address` (and not `command`, which would
-start an `otto acp` of its own, the mode this script exists to avoid), that the
-address is the one serve binds, that `token_env` names `OTTO_ACP_TOKEN` (or a
-variable holding the same value), and that the workspace is absolute. A
-workspace that differs from `OTTO_CWD` is a warning, not a failure, because a
-serve may serve several workspaces. `OTTO_TCP_SKIP_CHECKS=1` turns the
-`connect.toml` checks off for a configuration the operator vouches for.
+Startup validates the token, absolute workspace and matching connector
+`[agent].address`/token binding. Use `address`, not `command` (which launches
+another ACP process). A different connector workspace warns because serve can
+admit several. Keep checks enabled; `OTTO_TCP_SKIP_CHECKS=1` delegates this
+validation to the operator.
 
-`start` runs the supervisor in the background; `run` runs it in the foreground
-for launchd, `tmux` or a terminal. It starts connect only after serve has
-announced its ACP listener, and it restarts a process that exits: immediately
-when it had run for 60 s, otherwise after 1 s doubling to 60 s. Five
-consecutive fast failures stop the whole stack instead of looping, which is
-what a rejected `connect.toml`, a token the platform refuses, or a missing
-provider credential looks like. `SIGTERM` and `SIGINT` stop connect first, so
-its running prompts are cancelled, and then serve; `SIGUSR1` restarts serve and
-`SIGUSR2` restarts connect. Restarting serve does not restart connect: the next
-chat message reconnects and loads the chat's session, while the turns that were
-running in the old serve process are cancelled.
+`start` backgrounds the supervisor; `run` stays foreground for a supervisor or
+terminal. Connect starts only after serve announces readiness. Exited processes
+restart with 1–60 s exponential delay, reset after 60 s uptime; five fast
+failures stop the stack. Inspect logs/config/credentials before restarting.
+SIGTERM/SIGINT stop connect first, cancelling prompts, then serve. SIGUSR1
+restarts serve; SIGUSR2 restarts connect. After a serve restart, connect reloads
+the chat session on the next message; old running turns were cancelled.
 
-State, pid files and the three logs (`supervisor.log`, `serve.log`,
-`connect.log`) live in `OTTO_TCP_HOME`, mode `0700` with mode `0600` files,
-because the serve log carries the serve HTTP token URL and the connect log
-carries chat and sender ids. `start` keeps one previous generation of each log;
-`logs` follows one of them. The supervisor writes no secret: the ACP token and
-the connector's platform tokens come from the environment of whoever runs it,
-or from that user's own ignored `otto.env`. That is also why no launchd plist
-ships here — a plist can carry those secrets only as a file, which the safety
-rules forbid. `otto-tcp.sh run` is the program to point a supervisor at if you
-accept that trade-off, or have your own wrapper read the token from the macOS
-Keychain.
-
-These knobs exist for tests and unusual deployments: `OTTO_TCP_POLL`,
-`OTTO_TCP_READY_TIMEOUT`, `OTTO_TCP_STOP_TIMEOUT`, `OTTO_TCP_MIN_DELAY`,
-`OTTO_TCP_MAX_DELAY`, `OTTO_TCP_STABLE_AFTER` and `OTTO_TCP_MAX_FAILS`.
+`OTTO_TCP_HOME` holds PID/state and `supervisor.log`, `serve.log`, `connect.log`
+(directory `0700`, files `0600`). `start` retains one previous log generation;
+`logs` follows. Protect them: serve logs can contain its HTTP token URL and
+connector logs contain chat/sender IDs. Tokens come from the launching
+environment or ignored `otto.env`, never a committed supervisor file. For
+launchd or another supervisor use `otto-tcp.sh run` with private environment/
+credential injection. Restart the relevant processes after upgrades or changes.
 
 ### Admission
 
@@ -1327,44 +1310,24 @@ can manage Otto's existing provider profiles through the running `otto serve`:
 /config cancel
 ```
 
-`/config` and `/config profiles` list profile names, providers, models and the
-default marker. `/config show` also shows the endpoint and API-key environment
-**variable name**, never its value. `/models` asks an OpenAI-compatible
-endpoint for its model IDs; ChatGPT profiles report that model enumeration is
-not supported rather than guessing an ID.
+`/config` lists names/providers/models/default; `show` adds endpoint and API-key
+**variable name**, never its value. `/models` queries OpenAI-compatible model
+IDs; this connector command does not enumerate ChatGPT models.
 
-These commands require the attached deployment. A connector that starts
-`otto acp` directly has no management client and answers
-"This command requires otto acp --attach connected to a running otto serve.
-Use /model <profile> to switch this conversation's profile."; `/model` is the
-session-level switch, which needs no configuration write and works in both
-deployments.
+Management requires `otto acp --attach` and a running server. Direct ACP rejects
+these commands without sending them to the model; `/model <profile>` still
+switches the current conversation in either deployment without saving config.
 
-Every mutation first returns a redacted preview and a one-time confirmation
-token. Send `/config confirm <token>` from the same chat and sender within ten
-minutes to write exactly that change, or `/config cancel` to discard it. The
-connector never accepts API-key values, bot secrets, raw TOML, arbitrary file
-writes, or providers other than `openai-compatible` and `chatgpt`.
+Mutations return a redacted preview and one-time token. The same chat/sender
+must `/config confirm <token>` within ten minutes, or `/config cancel`. No raw
+TOML, arbitrary writes, credential values or unsupported providers are accepted.
+Base URL and API-key binding are **host-only**: chat cannot change where server
+environment credentials are sent. Thus OpenAI-compatible profile creation and
+`--base-url`/`--api-key-env` changes must be performed on the host.
 
-A profile's base URL and API-key environment variable name can only be changed
-on the host, through the web UI, the TUI or the config file. Together they
-decide which environment variable of `otto serve` is sent as a bearer token and
-to which URL, so a chat sender who could set them could send any of the
-server's environment variables to a server of their choice. `/config add` with
-`--base-url` or `--api-key-env`, `/config add --provider openai-compatible`
-(which needs a base URL), and `/config set <profile> base-url|api-key-env`
-reply that these fields are host-only and send nothing to `otto serve`.
-
-A saved profile change requires restarting `otto serve` before it becomes
-available to new sessions; it never silently changes an existing session. These
-commands need attach mode. With direct `otto acp`, the connector replies with
-the attach requirement and does not send the command to the model.
-
-Management failures include a `request_id` when a write preview fails. Search
-connector and Otto server logs for that ID. Normal logs contain lifecycle IDs,
-profile names and outcomes, but never chat text, model text, tool contents,
-configuration bytes, API keys, bot tokens, OAuth credentials, or environment
-variable values.
+Restart `otto serve` after saving; existing sessions never silently switch.
+On failed previews search connector/server logs for `request_id`. Logs contain
+IDs/profile names/outcomes, not text, config bytes or credential values.
 
 ### Memory review
 
@@ -1398,21 +1361,15 @@ user decides a candidate and how, so the model can point the user to
 `/memory`; it still cannot decide one. Editing a candidate during review is
 not available from the chat; use `/memory review` in the REPL or TUI.
 
-The local REPL immediately prints **"Memory review available. Run `/memory
-review`."** after any pending proposal is saved. The local TUI prints the same
-notice and refreshes the unified approval queue; the proposal appears in the
-same centered approval panel as other human decisions instead of opening a
-separate memory screen. `/memory review` still opens a centered collection for
-explicit memory-only browsing: use Up/Down to choose, `a` to accept, `r` to
-reject, or Esc to close without changing anything. An empty collection says
-**"No pending memory candidates."** The availability signal itself contains no
-candidate content and is process-local, so attached TUI, web, and chat
-connectors retain their existing refresh/command behavior.
+Local REPL/TUI announces pending reviews; the TUI also refreshes its unified
+approval queue. `/memory review` opens memory-only browsing: arrows select,
+`a` accepts, `r` rejects, Esc closes unchanged. This content-free notice is
+process-local; attached/web/chat clients use their own refresh behavior.
 
 ### Permission requests
 
 When Otto asks to run an unsandboxed `bash` command (see
-[Elevated `bash` uses `session/request_permission`](servers-and-connectors.md#elevated-bash-uses-sessionrequestpermission)),
+[Elevated Bash permission requests](#elevated-bash-uses-sessionrequest_permission)),
 the chat gets the command with **Approve** and **Deny** buttons (Telegram inline
 keyboard or Feishu interactive card). The first button click or `/allow` or
 `/deny` from an admitted sender in that chat answers it once. Buttons are bound

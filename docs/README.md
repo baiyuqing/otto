@@ -1,32 +1,27 @@
 # Otto documentation
 
-This is the canonical index for Otto documentation.
+## Use Otto
 
-## User guide
+Start with the [root README](../README.md) for installation and first use, then
+choose a topic in the [user manual](user-manual.md):
 
-- [User manual](user-manual.md) — stable index and legacy deep-link map
-- [Getting started](manual/getting-started.md)
-- [Interactive use](manual/interactive-use.md)
-- [Safety and tools](manual/safety-and-tools.md)
+- [Getting started and configuration](manual/getting-started.md)
+- [Interactive use and sessions](manual/interactive-use.md)
+- [Safety, approvals and tools](manual/safety-and-tools.md)
 - [Servers and connectors](manual/servers-and-connectors.md)
 - [Automation](manual/automation.md)
 - [Memory and extensions](manual/memory-and-extensions.md)
-- [Remote memory protocol](manual/remote-memory-protocol.md)
 - [Troubleshooting](manual/troubleshooting.md)
 
-## Contributing and development
+## Develop and integrate
 
-- [Development guide](development.md) — stable index and legacy deep-link map
 - [Code organization](code-organization.md)
-- [Architecture contracts](development/architecture.md)
-- [Development workflow](development/workflow.md)
-- [Testing](development/testing.md)
-- [Implementation contracts](development/contracts.md)
-
-## Architecture and historical designs
-
+- [Development guide](development.md)
+- [Remote memory protocol](manual/remote-memory-protocol.md)
 - [Architecture diagram](architecture/otto-architecture.svg)
-- [Historical design specifications](specs/)
-- [Changelog](../CHANGELOG.md) and [complete historical index](changelog-history.md)
+- [Changelog](../CHANGELOG.md)
 
-Design documents preserve historical rationale and are not statements that every described capability is currently shipped. Current behavior belongs in the user guide; current contributor contracts belong in the development guide.
+Current behavior belongs in the user manual; current contributor contracts belong
+in the development guide. Retained [design notes](specs/) explain selected
+architectural decisions, not an independent feature inventory. Superseded designs
+and detailed change history are available in Git, not maintained as parallel docs.

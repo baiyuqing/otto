@@ -497,6 +497,42 @@ async fn raw_get_checks_tenant_scope_and_status_and_never_returns_effective_view
         );
     }
 }
+
+#[tokio::test]
+async fn exact_search_with_only_id_uses_host_scopes() {
+    let (url, seen) = serve_request(|path, body| {
+        assert_eq!(path, "/v1/get");
+        let request: Value = serde_json::from_slice(body).unwrap();
+        if request["scope"]["namespace"] == "workspace" {
+            reply(200, json!({"view":"raw","organization_id":"acme","item":{"id":"m-17","scope":scope("workspace"),"revision":"r4","key":"editor","text":"workspace value","pinned":false}}))
+        } else {
+            reply(404, json!({}))
+        }
+    }).await;
+    let search = crate::tool::memory_service::tools(
+        Arc::new(client(service(&url))),
+        context(Origin::Model),
+        8192,
+    )
+    .into_iter()
+    .find(|tool| tool.definition().name == "memory_search")
+    .unwrap();
+    let args = serde_json::value::RawValue::from_string(json!({"id":"m-17"}).to_string()).unwrap();
+    let result = search.execute(&args, &CancellationToken::new()).await;
+    assert!(
+        !result.is_error,
+        "{}; requests={}",
+        result.content,
+        seen.lock().unwrap().len()
+    );
+    assert!(result.content.contains("workspace value"));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen.iter().all(|(_, _, body)| {
+        let request: Value = serde_json::from_slice(body).unwrap();
+        request["context"]["organization_id"] == "acme" && request["id"] == "m-17"
+    }));
+}
 #[tokio::test]
 async fn references_and_model_organization_mutations_fail_before_dispatch() {
     let (url, seen) = serve(|_| reply(200, json!({}))).await;

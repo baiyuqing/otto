@@ -80,8 +80,15 @@ pub fn memory_search_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const MEMORY_SEARCH_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("memory_search", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for MemorySearchTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        MEMORY_SEARCH_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         memory_search_definition()
     }
@@ -243,8 +250,15 @@ pub fn remember_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const REMEMBER_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("remember", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for RememberTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        REMEMBER_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         remember_definition()
     }
@@ -375,8 +389,15 @@ pub fn forget_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const FORGET_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("forget", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for ForgetTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        FORGET_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         forget_definition()
     }

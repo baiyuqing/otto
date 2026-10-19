@@ -357,6 +357,12 @@ pub struct Block {
     pub tool_call_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_name: String,
+    /// Read-only transcript projection from persisted operation facts.
+    /// Not provider identity; absent in legacy stored blocks.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub invocation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_attempt: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Box<RawValue>>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -384,6 +390,10 @@ impl<'de> Deserialize<'de> for Block {
             tool_call_id: String,
             #[serde(default)]
             tool_name: String,
+            #[serde(default)]
+            invocation_id: String,
+            #[serde(default)]
+            invocation_attempt: Option<u32>,
             #[serde(default)]
             arguments: Option<Box<RawValue>>,
             #[serde(default)]
@@ -431,6 +441,8 @@ impl<'de> Deserialize<'de> for Block {
             mime_type: wire.mime_type,
             tool_call_id: wire.tool_call_id,
             tool_name: wire.tool_name,
+            invocation_id: wire.invocation_id,
+            invocation_attempt: wire.invocation_attempt,
             arguments: wire.arguments,
             is_error: wire.is_error,
             operation_metadata,
@@ -448,6 +460,8 @@ impl PartialEq for Block {
             && self.mime_type == other.mime_type
             && self.tool_call_id == other.tool_call_id
             && self.tool_name == other.tool_name
+            && self.invocation_id == other.invocation_id
+            && self.invocation_attempt == other.invocation_attempt
             && self.arguments.as_ref().map(|raw| raw.get())
                 == other.arguments.as_ref().map(|raw| raw.get())
             && self.is_error == other.is_error
@@ -1386,5 +1400,23 @@ mod tests {
             serde_json::to_string(&zero_time()).expect("encode"),
             "\"0001-01-01T00:00:00Z\""
         );
+    }
+    #[test]
+    fn invocation_projection_is_additive_and_roundtrips_without_outcome_metadata() {
+        let legacy = r#"{"type":"tool_call","tool_call_id":"provider-1","tool_name":"read"}"#;
+        let mut block: Block = serde_json::from_str(legacy).unwrap();
+        assert!(block.invocation_id.is_empty());
+        assert_eq!(block.invocation_attempt, None);
+        let value = serde_json::to_value(&block).unwrap();
+        assert!(value.get("invocation_id").is_none());
+        assert!(value.get("invocation_attempt").is_none());
+        block.invocation_id = "op_identity".into();
+        block.invocation_attempt = Some(2);
+        let decoded: Block = serde_json::from_str(&serde_json::to_string(&block).unwrap()).unwrap();
+        assert_eq!(decoded, block);
+        assert_eq!(decoded.tool_call_id, "provider-1");
+        assert!(decoded.operation_metadata.is_none());
+        let old: Block = serde_json::from_str(legacy).unwrap();
+        assert_ne!(decoded, old);
     }
 }

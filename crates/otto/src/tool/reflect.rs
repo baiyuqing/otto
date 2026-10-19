@@ -76,8 +76,15 @@ struct Args {
     focus: String,
 }
 
+pub(crate) const REFLECT_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("reflect", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for ReflectTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        REFLECT_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         definition(
             NAME,

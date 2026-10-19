@@ -23,7 +23,6 @@ const TOOL_PREVIEW_LIMIT: usize = 64;
 /// How many result lines a folded tool call shows before the rest collapse
 /// into a count. Three is enough for the shape of a test summary or a short
 /// error, and still cannot push a reply off the screen.
-const TOOL_RESULT_LINES: usize = 3;
 
 /// The band behind a prompt, which is what a reader scrolling back looks for
 /// to find where a turn started.
@@ -101,8 +100,8 @@ fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>>
 }
 
 /// Renders one tool call: a bulleted header, then its result indented under
-/// it. Folded (the default) the result is at most [`TOOL_RESULT_LINES`] cut
-/// lines plus a count of the rest, so a long `bash` output cannot push the
+/// it. Folded (the default) shows a bounded action/target/status summary;
+/// raw output is hidden, so a long `bash` output cannot push the
 /// reply that follows it off the screen; `Ctrl+O` ([`super::app::App`]'s
 /// details flag) shows the call id, the arguments, and the output in full.
 fn tool_outcome_label(entry: &Entry) -> Option<&'static str> {
@@ -145,6 +144,14 @@ fn diff_line_style(line: &str, fallback: Style) -> Style {
     }
 }
 
+/// Stable display abbreviation only; reducers always compare the full identity.
+fn compact_invocation_id(id: &str) -> String {
+    let hash = id.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("{:012x}", hash & 0xffffffffffff)
+}
+
 fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> {
     let args = otto_core::wire::transcript::format_args_compact(
         otto_core::wire::events::tool_args_raw(&entry.tool_args).as_deref(),
@@ -175,9 +182,16 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
         Style::default().add_modifier(Modifier::BOLD),
     )];
     if details {
-        header.push(Span::styled(format!(" ({})", entry.tool_call_id), dim));
-    } else if !entry.tool_args.is_empty() {
-        header.push(Span::styled(format!(" {}", preview(&args)), dim));
+        header.push(Span::styled(
+            format!(" ({}, provider: {})", entry.id, entry.tool_call_id),
+            dim,
+        ));
+    }
+    if !details {
+        header.push(Span::styled(
+            format!(" [{}]", compact_invocation_id(&entry.id)),
+            dim,
+        ));
     }
     let mut lines = gutter::block(&[Line::from(header)], BULLET_MARK, marker_style, width);
 
@@ -219,59 +233,62 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
         return lines;
     }
 
-    // A call still running has no result yet, and no row at all.
-    if !entry.tool_done {
-        return lines;
-    }
-    let outcome_label = tool_outcome_label(entry);
-    if let Some(label) = outcome_label {
-        push_result(&mut lines, label.to_string(), true, result_style);
-    }
-    if entry.tool_output.trim().is_empty() {
-        push_result(
-            &mut lines,
-            "(no output)".to_string(),
-            outcome_label.is_none(),
-            result_style,
-        );
-        return lines;
-    }
-    if is_file_diff(entry) {
-        for (index, line) in entry.tool_output.lines().enumerate() {
-            push_result(
-                &mut lines,
-                escape_plain_text(line),
-                outcome_label.is_none() && index == 0,
-                diff_line_style(line, result_style),
-            );
-        }
-        return lines;
-    }
-    let output: Vec<&str> = entry.tool_output.lines().collect();
-    for (index, line) in output.iter().take(TOOL_RESULT_LINES).enumerate() {
-        push_result(
-            &mut lines,
-            preview(line),
-            outcome_label.is_none() && index == 0,
-            result_style,
-        );
-    }
-    match output.len().saturating_sub(TOOL_RESULT_LINES) {
-        0 => {}
-        1 => push_result(
-            &mut lines,
-            "+1 line (ctrl+o)".to_string(),
-            false,
-            result_style,
-        ),
-        more => push_result(
-            &mut lines,
-            format!("+{more} lines (ctrl+o)"),
-            false,
-            result_style,
-        ),
-    }
+    let summary = compact_tool_summary(entry);
+    // The header already names the tool; summary carries target/status/result.
+    push_result(&mut lines, summary, true, result_style);
     lines
+}
+
+/// Deterministic presentation only: never invokes a model or alters tool data.
+fn compact_tool_summary(entry: &Entry) -> String {
+    let args = serde_json::from_str::<serde_json::Value>(&entry.tool_args).unwrap_or_default();
+    // Only known target fields are eligible: no arbitrary args or shell text.
+    let field = match entry.tool_name.as_str() {
+        "read" | "write" | "edit" | "ls" | "find" | "grep" => Some("path"),
+        "web_fetch" => Some("url"),
+        "web_search" => Some("query"),
+        _ => None,
+    };
+    let target = field
+        .and_then(|key| args.get(key))
+        .and_then(|v| v.as_str())
+        .map(preview)
+        .unwrap_or_default();
+    let status = if !entry.tool_done {
+        "running"
+    } else if entry.effect_certainty == Some(EffectCertainty::Unknown) {
+        "effect unknown"
+    } else if entry.tool_error {
+        "error"
+    } else {
+        "completed"
+    };
+    let result = if !entry.tool_done {
+        String::new()
+    } else if entry.tool_error {
+        let error = preview(
+            entry
+                .tool_output
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("tool failed; open details"),
+        );
+        match tool_outcome_label(entry) {
+            Some(label) => format!("{} · {error}", preview(label)),
+            None => error,
+        }
+    } else if let Some(label) = tool_outcome_label(entry) {
+        preview(label)
+    } else if entry.tool_output.trim().is_empty() {
+        "no output".into()
+    } else {
+        format!("{} lines", entry.tool_output.lines().count())
+    };
+    [target, status.into(), result]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// The first line of `text`, control-escaped and cut to
@@ -331,7 +348,7 @@ mod tests {
         let entry = tool_entry("bash", args, "");
         for details in [false, true] {
             let text = rows(&entry_lines(&entry, details, 200)).join("\n");
-            assert!(text.contains("中文/🚀&<>"), "{text}");
+            assert_eq!(text.contains("中文/🚀&<>"), details, "{text}");
             if details {
                 assert!(text.contains(r#"\\u0026"#), "{text}");
             }
@@ -508,14 +525,14 @@ mod tests {
             60,
         );
         let rows = rows(&rendered);
-        assert_eq!(rows[0], "⏺ bash {\"command\":\"ls\"}");
-        assert_eq!(rows[1], "  ⎿ one");
+        assert_eq!(rows[0], format!("⏺ bash [{}]", compact_invocation_id("t1")));
+        assert_eq!(rows[1], "  ⎿ completed · 1 lines");
     }
 
     #[test]
-    fn successful_file_edits_show_colored_hunks_without_expanding_all_tools() {
+    fn expanded_file_edits_show_colored_hunks() {
         let output = "edited src/main.rs\n@@ -1,2 +1,2 @@\n old\n-before\n+after\n note";
-        let rendered = entry_lines(&tool_entry("edit", "", output), false, 80);
+        let rendered = entry_lines(&tool_entry("edit", "", output), true, 80);
         let text = rows(&rendered);
         assert!(text.iter().any(|line| line.contains("-before")), "{text:?}");
         assert!(text.iter().any(|line| line.contains("+after")), "{text:?}");
@@ -536,7 +553,7 @@ mod tests {
 
         let write = entry_lines(
             &tool_entry("write", "", "wrote x (2 bytes)\n@@ -0,0 +1,1 @@\n+x"),
-            false,
+            true,
             80,
         );
         assert!(rows(&write).iter().any(|line| line.contains("+x")));
@@ -568,7 +585,7 @@ mod tests {
             },
         ];
         let (entries, _) = super::super::entries::entries_from_history(&history);
-        let rendered = lines(&entries, false, 80);
+        let rendered = lines(&entries, true, 80);
         assert!(rows(&rendered).iter().any(|line| line.contains("+x")));
     }
 
@@ -576,16 +593,11 @@ mod tests {
     fn failed_edits_keep_the_usual_fold_and_diff_text_escapes_controls() {
         let mut failed = tool_entry("edit", "", "edit failed\nline 2\nline 3\nline 4");
         failed.tool_error = true;
-        let failed_rows = rows(&entry_lines(&failed, false, 80));
-        assert!(
-            failed_rows
-                .iter()
-                .any(|line| line.contains("+1 line (ctrl+o)"))
-        );
-
+        let text = rows(&entry_lines(&failed, false, 80)).join("\n");
+        assert!(text.contains("error · edit failed"), "{text}");
+        assert!(!text.contains("line 2"));
         let output = "edited x\n@@ -1,1 +1,1 @@\n-old\n+new\u{1b}[31m";
-        let rendered = entry_lines(&tool_entry("edit", "", output), false, 80);
-        let joined = rows(&rendered).join("\n");
+        let joined = rows(&entry_lines(&tool_entry("edit", "", output), true, 80)).join("\n");
         assert!(joined.contains(r"\x1b"), "{joined}");
         assert!(!joined.contains('\u{1b}'), "{joined}");
     }
@@ -604,17 +616,12 @@ mod tests {
 
     #[test]
     fn a_folded_tool_call_shows_at_most_three_result_lines() {
-        let output = "l1\nl2\nl3\nl4\nl5\nl6";
-        let rendered = entry_lines(&tool_entry("bash", "", output), false, 60);
-        let rows = rows(&rendered);
+        let rendered = entry_lines(&tool_entry("bash", "", "l1\nl2\nl3\nl4\nl5\nl6"), false, 60);
         assert_eq!(
-            rows,
+            rows(&rendered),
             [
-                "⏺ bash",
-                "  ⎿ l1",
-                "    l2",
-                "    l3",
-                "    +3 lines (ctrl+o)",
+                &format!("⏺ bash [{}]", compact_invocation_id("t1")),
+                "  ⎿ completed · 6 lines"
             ]
         );
     }
@@ -622,24 +629,32 @@ mod tests {
     #[test]
     fn a_folded_tool_call_cuts_a_long_result_line() {
         let long = "x".repeat(200);
-        let rendered = entry_lines(&tool_entry("bash", "", &long), false, 200);
+        let mut call = tool_entry("bash", "", &long);
+        call.tool_error = true;
+        let rendered = entry_lines(&call, false, 200);
         let rows = rows(&rendered);
-        assert!(rows[1].chars().count() < 80, "{:?}", rows[1]);
+        assert!(rows[1].chars().count() < 100, "{:?}", rows[1]);
         assert!(rows[1].ends_with('…'), "{:?}", rows[1]);
     }
 
     #[test]
     fn a_tool_call_with_no_output_says_so() {
         let rendered = entry_lines(&tool_entry("write", "", "  \n "), false, 60);
-        assert_eq!(rows(&rendered)[1], "  ⎿ (no output)");
+        assert_eq!(rows(&rendered)[1], "  ⎿ completed · no output");
     }
 
     #[test]
-    fn a_running_tool_call_has_no_result_row() {
+    fn a_running_tool_call_has_explicit_status() {
         let mut call = tool_entry("bash", "", "");
         call.tool_done = false;
         let rendered = entry_lines(&call, false, 60);
-        assert_eq!(rendered.len(), 1);
+        assert_eq!(
+            rows(&rendered),
+            [
+                format!("⏺ bash [{}]", compact_invocation_id("t1")),
+                "  ⎿ running".into()
+            ]
+        );
     }
 
     #[test]
@@ -659,7 +674,7 @@ mod tests {
         let rendered = entry_lines(&call, false, 100);
         assert_eq!(
             rows(&rendered)[1],
-            "  ⎿ Outcome unknown — check effects before retrying"
+            "  ⎿ effect unknown · Outcome unknown — check effects before retrying · connection lost"
         );
         assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Yellow));
         assert!(
@@ -678,12 +693,12 @@ mod tests {
         call.effect_certainty = Some(EffectCertainty::Completed);
         assert_eq!(
             rows(&entry_lines(&call, false, 100))[1],
-            "  ⎿ Failed with a known result"
+            "  ⎿ error · Failed with a known result · exit 1"
         );
     }
 
     #[test]
-    fn legacy_tool_result_keeps_the_old_output_first_rendering() {
+    fn legacy_error_preserves_actionable_text_without_fabricating_metadata() {
         let mut call = tool_entry(
             "bash",
             "",
@@ -691,9 +706,10 @@ mod tests {
         );
         call.tool_error = true;
         let rendered = entry_lines(&call, false, 100);
-        assert_eq!(
-            rows(&rendered)[1],
-            "  ⎿ Outcome unknown — check effects before retrying"
+        let text = rows(&rendered).join("\n");
+        assert!(
+            text.contains("error") && text.contains("check effects before retrying"),
+            "{text}"
         );
         assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Red));
     }
@@ -702,7 +718,7 @@ mod tests {
     fn expanded_details_show_the_call_id_and_every_output_line() {
         let rendered = entry_lines(&tool_entry("bash", "{}", "l1\nl2\nl3\nl4"), true, 60);
         let rows = rows(&rendered);
-        assert_eq!(rows[0], "⏺ bash (call-1)");
+        assert_eq!(rows[0], "⏺ bash (t1, provider: call-1)");
         assert!(rows.iter().any(|row| row.ends_with("l4")), "{rows:?}");
         assert!(
             !rows.iter().any(|row| row.contains("ctrl+o")),
@@ -736,5 +752,43 @@ mod tests {
                 width,
             );
         }
+    }
+    #[test]
+    fn compact_hides_raw_payload_and_unknown_tools_fall_back_to_name() {
+        let entry = tool_entry(
+            "custom_tool",
+            r#"{"secret":"hidden-argument"}"#,
+            "hidden-output\n@@ diff",
+        );
+        let compact = rows(&entry_lines(&entry, false, 80)).join("\n");
+        assert!(compact.contains("custom_tool") && compact.contains("completed"));
+        for raw in ["hidden-argument", "hidden-output", "@@", "call-1"] {
+            assert!(!compact.contains(raw), "{compact}");
+        }
+        let detail = rows(&entry_lines(&entry, true, 80)).join("\n");
+        assert!(detail.contains("hidden-argument") && detail.contains("hidden-output"));
+    }
+
+    #[test]
+    fn compact_known_target_and_running_status() {
+        let mut entry = tool_entry("read", r#"{"path":"src/main.rs","other":"hidden"}"#, "");
+        entry.tool_done = false;
+        let compact = rows(&entry_lines(&entry, false, 80)).join("\n");
+        assert!(compact.contains("src/main.rs · running"), "{compact}");
+        assert!(!compact.contains("hidden"));
+    }
+    #[test]
+    fn compact_identity_is_short_stable_and_details_retain_full_identity() {
+        let mut call = tool_entry("read", "", "done");
+        call.id = "operation:op_a_long_native_identity_123456789".into();
+        let label = compact_invocation_id(&call.id);
+        assert_eq!(label.len(), 12);
+        assert_eq!(label, compact_invocation_id(&call.id));
+        assert_ne!(label, compact_invocation_id("operation:op_other"));
+        let compact = rows(&entry_lines(&call, false, 100)).join("\n");
+        assert!(compact.contains(&format!("[{label}]")));
+        assert!(!compact.contains(&call.id));
+        let details = rows(&entry_lines(&call, true, 160)).join("\n");
+        assert!(details.contains(&call.id) && details.contains(&call.tool_call_id));
     }
 }

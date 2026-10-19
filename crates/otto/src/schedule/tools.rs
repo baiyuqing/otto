@@ -182,8 +182,15 @@ fn one_line(body: &str, max: usize) -> String {
 
 struct ScheduleTool(Context, Option<Arc<dyn crate::session::SessionHandle>>);
 
+pub(crate) const SCHEDULE_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("schedule", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for ScheduleTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        SCHEDULE_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         schedule_definition()
     }
@@ -358,8 +365,15 @@ fn build_item(
 
 struct ListTool(Context);
 
+pub(crate) const SCHEDULE_LIST_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("schedule_list", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for ListTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        SCHEDULE_LIST_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         list_definition()
     }
@@ -419,8 +433,17 @@ fn list_line(item: &Item) -> String {
 
 struct CancelTool(Context);
 
+pub(crate) const SCHEDULE_CANCEL_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "schedule_cancel",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait::async_trait]
 impl Tool for CancelTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        SCHEDULE_CANCEL_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         cancel_definition()
     }

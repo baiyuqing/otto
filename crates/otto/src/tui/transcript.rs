@@ -207,6 +207,17 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
     };
 
     if details {
+        if entry.disposition == Some(OperationDisposition::Cancelled) {
+            push_result(&mut lines, "cancelled".into(), false, result_style);
+        }
+        if let Some(elapsed) = entry.execution_elapsed(std::time::Instant::now()) {
+            push_result(
+                &mut lines,
+                format!("execution {:.1}s", elapsed.as_secs_f64()),
+                false,
+                result_style,
+            );
+        }
         if !entry.tool_args.is_empty() {
             for line in escape_plain_text(&args).split('\n') {
                 push_result(&mut lines, line.to_string(), false, result_style);
@@ -256,6 +267,8 @@ fn compact_tool_summary(entry: &Entry) -> String {
         .unwrap_or_default();
     let status = if !entry.tool_done {
         "running"
+    } else if entry.disposition == Some(OperationDisposition::Cancelled) {
+        "cancelled"
     } else if entry.effect_certainty == Some(EffectCertainty::Unknown) {
         "effect unknown"
     } else if entry.tool_error {
@@ -284,7 +297,11 @@ fn compact_tool_summary(entry: &Entry) -> String {
     } else {
         format!("{} lines", entry.tool_output.lines().count())
     };
-    [target, status.into(), result]
+    let elapsed = entry
+        .execution_elapsed(std::time::Instant::now())
+        .map(|duration| format!("{:.1}s", duration.as_secs_f64()))
+        .unwrap_or_default();
+    [target, status.into(), elapsed, result]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -515,6 +532,33 @@ mod tests {
     fn a_prompt_wraps_by_display_column_not_character_count() {
         let rendered = entry_lines(&entry(EntryKind::User, "集群数量极多"), false, 8);
         assert_eq!(rows(&rendered), ["❯ 集群数", "  量极多"]);
+    }
+
+    #[test]
+    fn cancelled_execution_keeps_timing_identity_and_raw_details_at_narrow_width() {
+        let mut call = tool_entry(
+            "bash",
+            r#"{"command":"private command"}"#,
+            "cancelled output",
+        );
+        call.id = "operation:op_cancelled".into();
+        call.operation_id = Some("op_cancelled".into());
+        call.disposition = Some(OperationDisposition::Cancelled);
+        call.effect_certainty = Some(EffectCertainty::Unknown);
+        call.tool_error = true;
+        call.tool_elapsed = Some(std::time::Duration::from_millis(1250));
+        let compact = rows(&entry_lines(&call, false, 26)).join("\n");
+        assert!(compact.contains("cancelled"));
+        assert!(compact.contains("1.2s"));
+        assert!(!compact.contains("private command"));
+        let expanded = rows(&entry_lines(&call, true, 26)).join("\n");
+        // Wrapping may insert gutter indentation; compare the full rendered text
+        // without whitespace to prove IDs and raw data are not truncated.
+        let flat: String = expanded.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(flat.contains("operation:op_cancelled"));
+        assert!(flat.contains(&call.tool_call_id));
+        assert!(flat.contains("privatecommand"));
+        assert!(expanded.contains("execution 1.2s"));
     }
 
     #[test]

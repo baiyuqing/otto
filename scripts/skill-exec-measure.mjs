@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /**
- * Measures what `docs/specs/2026-09-22-skill-subagent-execution.md` says must
- * be measured before sub-agent execution of skills is trusted: peak context
+ * Measures skill delegation behavior: peak context
  * per window, total tokens, and how often the model honours the
  * `exec="agent"` marking.
  *

@@ -105,6 +105,30 @@ pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> 
             "remembered {} (scope={}/{} kind={})",
             record.id, record.scope.namespace, record.scope.id, record.kind
         ),
+        Reply::SkillManager(inventory) => {
+            let rows = inventory.skills.iter().map(|row| {
+                format!(
+                    "{} [preference: {}] {}",
+                    row.skill.name,
+                    if row.enabled { "enabled" } else { "disabled" },
+                    row.skill.description
+                )
+            }).collect::<Vec<_>>().join("\n");
+            if inventory.global_enabled {
+                rows
+            } else {
+                format!("Skills globally disabled. Set [skills].enabled = true in Otto config and restart Otto; restarting alone will not enable skills.\n{rows}")
+            }
+        }
+        Reply::SkillInfo(info) => format!(
+            "Skill: {}\nDescription: {}\nLocation: {}\nSource: {}\n{}\n\n{}",
+            info.skill.name,
+            info.skill.description,
+            info.skill.directory.display(),
+            info.skill.path.display(),
+            info.contract_check.as_deref().unwrap_or(""),
+            info.body
+        ),
         Reply::Skills(catalog) => {
             if catalog.is_empty() {
                 "No skills found.".into()

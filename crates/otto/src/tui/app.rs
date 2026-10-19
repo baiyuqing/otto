@@ -2014,6 +2014,40 @@ mod tests {
     }
 
     #[test]
+    fn delivered_queued_input_is_visible_after_steering_read_clears_banner() {
+        let text = "我发的 queued input 又看不到了";
+        for attached in [false, true] {
+            let (mut app, _) = app();
+            app.attached = attached;
+            app.start_turn();
+            app.apply_steering(vec![steer(1, text, Status::Queued)]);
+            app.apply_steering(vec![steer(1, text, Status::Delivered)]);
+            assert!(app.queued_steer.is_none());
+            let event = otto_core::wire::events::to_wire(&otto_core::agent::Event::Notification {
+                kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
+                task_id: String::new(),
+                text: text.into(),
+                usage: Default::default(),
+                present: false,
+            });
+            app.apply_event(&event);
+            assert_eq!(
+                app.entries
+                    .iter()
+                    .filter(|entry| entry.kind == Some(EntryKind::User) && entry.raw == text)
+                    .count(),
+                1,
+                "delivered queued input must remain a user transcript entry (attached={attached})"
+            );
+            assert!(
+                !app.entries
+                    .iter()
+                    .any(|entry| entry.kind == Some(EntryKind::System) && entry.raw.contains(text))
+            );
+        }
+    }
+
+    #[test]
     fn user_message_echo_does_not_duplicate_prompt_history() {
         let (mut app, remote) = app();
         app.insert_text("hello");

@@ -220,7 +220,10 @@ good.
 Each `POST .../turns` response carries the header `Otto-Turn-Id` with the
 turn's id. In the event stream of a turn started by a client, the first frame
 is `user_message` with the prompt `text`, and `image: true` when an image was
-attached (the image data is not repeated). Wake turns have no `user_message`.
+attached (the image data is not repeated). Delivered in-turn queued guidance also
+emits `user_message` with its text, so clients retain a visible user transcript
+entry after the queued banner clears. Wake turns have no initial `user_message`,
+but may emit one if user guidance is delivered while they run.
 The last frame of every turn is `turn_end` with `status` (`ok`, `error`, or
 `canceled`) and, for `error`, the error text. Both frames are kept in the
 turn's event buffer, so a reader that resumes with `?after=N` receives them

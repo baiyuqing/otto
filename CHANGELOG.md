@@ -9,6 +9,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- Compact TUI tool records show live/final locally observed execution time and
+  distinguish cancellation, while preserving expandable raw details and full
+  operation/provider IDs. Thinking and total-turn durations are no longer shown.
+  Unknown history/attach timing is omitted rather than estimated. Enabled by
+  default after rebuild/restart; no configuration or migration is required.
+
 - Workflow runs reach a durable outcome instead of staying `running`: a failed
   step settles its run as `failed`, recovery settles every unfinished run, and
   `otto workflow resume --retry` accepts `failed` steps and re-admits the steps

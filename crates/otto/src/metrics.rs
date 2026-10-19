@@ -1186,6 +1186,7 @@ mod tests {
             forked_from_event_seq: None,
             forked_from_step_id: None,
             status: crate::workflow::RunStatus::Waiting,
+            created_at: "2026-01-01T00:00:00Z".into(),
             steps: vec![crate::workflow::StepRecord {
                 id: "approve".into(),
                 kind: crate::workflow::StepKind::Approval,

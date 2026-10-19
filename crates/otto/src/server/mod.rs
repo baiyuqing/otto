@@ -6754,6 +6754,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_routes_map_error_kinds_and_bound_the_run_page() {
+        let harness = Harness::with(HarnessOptions {
+            workflows: Some(workflow_test_controller("/workspace")),
+            ..HarnessOptions::default()
+        });
+
+        // An unknown run is a missing resource, not a conflict.
+        let missing = harness.send("GET", "/v1/workflows/missing", None).await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+        assert_eq!(missing.json()["error"]["code"], "workflow_not_found");
+
+        // An unknown definition name is also a missing resource.
+        let unknown = harness
+            .send_with(
+                "POST",
+                "/v1/workflows",
+                Some(r#"{"name":"missing"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+        assert_eq!(unknown.json()["error"]["code"], "workflow_not_found");
+
+        // A page size of zero is a caller mistake.
+        let invalid = harness.send("GET", "/v1/workflows?limit=0", None).await;
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST, "{}", invalid.body);
+        assert_eq!(invalid.json()["error"]["code"], "invalid_workflow_limit");
+
+        // A bounded page reports its cursor even when the page is not full.
+        let page = harness.send("GET", "/v1/workflows?limit=1", None).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        assert!(page.json().get("next_before").is_some(), "{}", page.body);
+        assert!(page.json()["runs"].as_array().is_some(), "{}", page.body);
+    }
+
+    #[tokio::test]
     async fn workflow_routes_scope_runs_and_lists_by_workspace_query() {
         let harness = Harness::with(HarnessOptions {
             workflows: Some(workflow_test_controller("/a")),

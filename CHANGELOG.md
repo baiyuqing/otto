@@ -9,6 +9,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- Workflow runs reach a durable outcome instead of staying `running`: a failed
+  step settles its run as `failed`, recovery settles every unfinished run, and
+  `otto workflow resume --retry` accepts `failed` steps and re-admits the steps
+  that failure canceled. Rejecting a gate stops the run's in-flight attempts.
+  `GET /v1/workflows` is paginated (`limit`, `before`, `next_before`) and reports
+  `400`, `404`, `409`, or `503` by cause instead of `409` for every failure.
+
 - Delivered queued input remains a visible user message in server/attached TUI
   streams after the queued banner clears. Rebuild and restart `otto serve`, then
   reconnect clients; no configuration or history migration is needed.

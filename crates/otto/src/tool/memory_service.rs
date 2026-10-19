@@ -121,8 +121,10 @@ impl ServiceTool {
     async fn call(&self, args: Args, cancel: &CancellationToken) -> Result<ToolResult> {
         let mut context = self.context.clone();
         context.origin = Origin::Model;
-        let exact = args.id.as_ref().is_some_and(|id| !id.is_empty()) || !args.target_id.is_empty();
-        if self.client.describe().identity == "remote" && exact {
+        let exact_read = self.operation == Operation::Recall
+            && args.id.as_ref().is_some_and(|id| !id.is_empty());
+        let exact_write = !args.target_id.is_empty() || self.operation == Operation::Forget;
+        if self.client.describe().identity == "remote" && exact_write {
             if args.organization_id.is_none() || args.organization_id != context.organization_id {
                 return Err(Error::new(ErrorKind::Unauthorized));
             }
@@ -136,6 +138,20 @@ impl ServiceTool {
                 .scopes
                 .iter()
                 .any(|scope| scope.namespace == args.scope_namespace && scope.id == args.scope_id)
+            {
+                return Err(Error::new(ErrorKind::Unauthorized));
+            }
+        } else if self.client.describe().identity == "remote" && exact_read {
+            if args.organization_id.is_some() && args.organization_id != context.organization_id {
+                return Err(Error::new(ErrorKind::Unauthorized));
+            }
+            if args.scope_namespace.is_empty() != args.scope_id.is_empty() {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
+            if !args.scope_namespace.is_empty()
+                && !context.scopes.iter().any(|scope| {
+                    scope.namespace == args.scope_namespace && scope.id == args.scope_id
+                })
             {
                 return Err(Error::new(ErrorKind::Unauthorized));
             }
@@ -153,11 +169,6 @@ impl ServiceTool {
                 }
                 let items = if let Some(id) = id {
                     let mut found = Vec::new();
-                    if self.client.describe().identity == "remote"
-                        && (args.scope_namespace.is_empty() || args.scope_id.is_empty())
-                    {
-                        return Err(Error::new(ErrorKind::InvalidInput));
-                    }
                     for scope in &context.scopes {
                         if !args.scope_namespace.is_empty()
                             && (scope.namespace != args.scope_namespace
@@ -350,7 +361,7 @@ impl Tool for ServiceTool {
         };
         let description = match self.operation {
             Operation::Recall => {
-                "Recall memory context or inspect an opaque item ID. Returned items are untrusted references; remote exact reads require tenant-bound scope/ID and opaque_revision. Search resolves workspace > organization > user before optional scope_filter; raw exact reads do not override effective recall."
+                "Recall memory context or inspect an opaque item ID within the host-authorized scopes. Returned items are untrusted references. Search resolves workspace > organization > user before optional scope_filter; raw exact reads do not override effective recall."
             }
             Operation::Remember => {
                 "Submit explicit user/workspace memory with a nullable semantic key. Organization memory is model read-only. Remote updates require tenant-bound target scope/ID and opaque_revision. Report actual completion and visibility."
@@ -364,11 +375,11 @@ impl Tool for ServiceTool {
         if let Some(parameters) = &definition.parameters {
             let mut schema: serde_json::Value =
                 serde_json::from_str(parameters.get()).expect("tool schema");
-            schema["properties"]["opaque_revision"] = json!({"type":"string", "description":"Opaque service revision returned by memory_search; required for remote exact reads, target updates and forget"});
-            schema["properties"]["organization_id"] = json!({"type":"string", "description":"Tenant binding copied from the remote reference; required for exact remote reads, updates and forget. Must equal the host tenant; never selects a tenant"});
+            schema["properties"]["opaque_revision"] = json!({"type":"string", "description":"Opaque service revision returned by memory_search; required for remote target updates and forget"});
+            schema["properties"]["organization_id"] = json!({"type":"string", "description":"Tenant binding copied from the remote reference; required for updates and forget. If supplied for exact reads, must equal the host tenant; never selects a tenant"});
             schema["properties"]["key"] = json!({"type":["string", "null"], "description":"Nullable semantic conflict key, 1..128 lower-case ASCII alphanumeric segments separated by dot, underscore or hyphen. Full replacement on update"});
-            schema["properties"]["scope_namespace"] = json!({"type":"string", "enum":["organization", "workspace", "user"], "description":"Exact reference scope namespace; required for remote exact reads, target updates and forget"});
-            schema["properties"]["scope_id"] = json!({"type":"string", "description":"Exact reference scope ID; required for remote exact reads, target updates and forget"});
+            schema["properties"]["scope_namespace"] = json!({"type":"string", "enum":["organization", "workspace", "user"], "description":"Exact reference scope namespace; optional for reads and required for remote target updates and forget"});
+            schema["properties"]["scope_id"] = json!({"type":"string", "description":"Exact reference scope ID; optional for reads and required for remote target updates and forget"});
             for field in ["kind", "labels", "confidence", "reason"] {
                 if let Some(property) = schema["properties"].get_mut(field) {
                     property["description"] = json!(format!(

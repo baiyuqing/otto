@@ -196,6 +196,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   Disabled skills remain manageable; saved configuration and current-session
   loading are shown separately, with saving errors and restart guidance. Existing
   text commands remain available. See [skills](docs/manual/memory-and-extensions.md#skills).
+  ([#512](https://github.com/baiyuqing/otto/pull/512))
 
 - The `agent` tool accepts `fork_before`, the text of an earlier user prompt.
   The sub-agent then starts with the parent conversation as it was before

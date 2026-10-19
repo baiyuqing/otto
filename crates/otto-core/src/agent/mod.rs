@@ -2345,6 +2345,110 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn recovered_nonidempotent_outcome_reaches_model_and_new_call_is_distinct() {
+        use crate::model::{EffectCertainty, OperationDisposition, ToolResultMetadata};
+        for new_call in [false, true] {
+            let executor = ReplayExecutor {
+                replayable: &[],
+                calls: AtomicUsize::new(0),
+            };
+            let prior_operation = OperationId::new("op-prior").unwrap();
+            let arguments = raw("{}");
+            // Execute once, then simulate process loss before its result persisted.
+            executor
+                .execute(
+                    crate::tool::ToolCall {
+                        tool_call_id: "call-1",
+                        operation_id: &prior_operation,
+                        name: "echo",
+                        arguments: &arguments,
+                        attempt: 1,
+                    },
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+            let session = session_with_pending_echo(true).await;
+            let mut result = Block {
+                block_type: BlockType::ToolResult,
+                tool_call_id: "call-1".into(),
+                tool_name: "echo".into(),
+                text: "operation interrupted; effects unknown".into(),
+                is_error: true,
+                ..Block::default()
+            };
+            result.operation_metadata = Some(ToolResultMetadata {
+                operation_id: Some(OperationId::new("op-prior").unwrap()),
+                disposition: OperationDisposition::Interrupted,
+                effect_certainty: EffectCertainty::Unknown,
+                stop_reason: Some(crate::model::OperationStopReason::ProcessLost),
+            });
+            session
+                .append(Message {
+                    role: Role::Tool,
+                    blocks: vec![result],
+                    ..Message::default()
+                })
+                .await
+                .unwrap();
+            let mut script = Vec::new();
+            if new_call {
+                // Identical arguments remain a new model decision, not a retry.
+                // The transcript contract requires a fresh provider call ID.
+                let mut call = assistant_tool_call();
+                call.message.blocks[0].tool_call_id = "call-new".into();
+                script.push((Vec::new(), call));
+            }
+            script.push((Vec::new(), assistant_text()));
+            let agent = Agent::new(
+                ScriptedProvider::new(script),
+                executor,
+                session,
+                test_options(),
+            );
+            let mut events = Vec::new();
+            agent
+                .run(
+                    "continue",
+                    &mut |event| events.push(event),
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            // One effect happened before process loss; recovery adds no execution.
+            // Only the explicitly model-emitted new invocation adds one execution.
+            assert_eq!(
+                agent.tools.calls.load(Ordering::SeqCst),
+                1 + usize::from(new_call)
+            );
+            let requests = agent.provider().requests.lock().unwrap();
+            let old = requests[0]
+                .messages
+                .iter()
+                .flat_map(|m| &m.blocks)
+                .find(|b| b.block_type == BlockType::ToolResult)
+                .expect("interrupted outcome sent to model");
+            assert!(old.is_error);
+            assert!(old.text.contains("effects unknown"));
+            let metadata = old.operation_metadata.as_ref().unwrap();
+            assert_eq!(metadata.disposition, OperationDisposition::Interrupted);
+            assert_eq!(metadata.effect_certainty, EffectCertainty::Unknown);
+            if new_call {
+                let started: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::ToolCallStarted { operation_id, .. } => Some(operation_id),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(started.len(), 1);
+                assert_ne!(started[0].as_str(), "op-prior");
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn run_does_not_replay_a_call_whose_tool_is_not_replayable() {
         let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
         let executor = ReplayExecutor {

@@ -48,6 +48,8 @@ pub struct Entry {
     pub checkpoint_id: String,
     pub tokens_before: i64,
     pub tool_call_id: String,
+    /// Highest live execution attempt observed for this logical invocation.
+    pub tool_attempt: u32,
     pub tool_name: String,
     pub tool_args: String,
     pub tool_output: String,
@@ -66,6 +68,66 @@ impl Entry {
             kind: Some(kind),
             ..Self::default()
         }
+    }
+}
+
+/// Fold one tool frame by Otto operation identity, not provider ID or arguments.
+/// Legacy frames can only match pending provider calls; completed calls remain
+/// distinct because legacy streams do not carry a replay-safe invocation key.
+pub fn reduce_tool_event(entries: &mut Vec<Entry>, event: &otto_core::wire::events::WireEvent) {
+    let operation = (!event.operation_id.is_empty()).then_some(event.operation_id.as_str());
+    let index = entries.iter().rposition(|e| {
+        e.kind == Some(EntryKind::Tool)
+            && match operation {
+                Some(op) => e.operation_id.as_deref() == Some(op),
+                None => !e.tool_done && e.tool_call_id == event.tool_call_id,
+            }
+    });
+    let index = index.unwrap_or_else(|| {
+        entries.push(Entry {
+            id: operation
+                .map(|op| format!("operation:{op}"))
+                .unwrap_or_else(|| format!("streaming-tool-{}", entries.len())),
+            kind: Some(EntryKind::Tool),
+            tool_call_id: event.tool_call_id.clone(),
+            tool_name: event.tool_name.clone(),
+            operation_id: operation.map(str::to_owned),
+            ..Entry::default()
+        });
+        entries.len() - 1
+    });
+    let entry = &mut entries[index];
+    let attempt = event.attempt.unwrap_or(1);
+    if attempt < entry.tool_attempt {
+        return;
+    }
+    if event.event_type == "tool_call_started" {
+        // Replayed starts cannot turn a completed attempt back into running.
+        if entry.tool_done && (attempt == entry.tool_attempt || entry.tool_attempt == 0) {
+            return;
+        }
+        if attempt > entry.tool_attempt {
+            entry.tool_done = false;
+        }
+        entry.tool_attempt = attempt;
+        entry.tool_args = event
+            .tool_args
+            .as_deref()
+            .map(|v| v.get().to_owned())
+            .unwrap_or_default();
+        entry.tool_name = event.tool_name.clone();
+        entry.tool_call_id = event.tool_call_id.clone();
+    } else if let Some(result) = &event.result {
+        if entry.tool_done && entry.tool_attempt == 0 {
+            return;
+        }
+        entry.tool_attempt = attempt;
+        entry.tool_output = result.content.clone();
+        entry.tool_error = result.is_error;
+        entry.tool_done = true;
+        entry.disposition = result.disposition;
+        entry.effect_certainty = result.effect_certainty;
+        entry.stop_reason = result.stop_reason;
     }
 }
 
@@ -147,6 +209,9 @@ pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
                         tool_call_id: block.tool_call_id.clone(),
                         tool_name: block.tool_name.clone(),
                         tool_args: raw_arguments(block),
+                        operation_id: (!block.invocation_id.is_empty())
+                            .then(|| block.invocation_id.clone()),
+                        tool_attempt: block.invocation_attempt.unwrap_or(0),
                         ..Entry::new(format!("{base_id}-tool-{block_index}"), EntryKind::Tool)
                     };
                     entries.push(entry);
@@ -182,7 +247,23 @@ pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
         flush_text(&mut entries, &mut text, &mut text_ordinal, false);
     }
 
-    (entries, usage)
+    // Result metadata is the persisted operation identity. Coalesce retries and
+    // replayed results, never calls merely sharing provider IDs or arguments.
+    let mut unique: Vec<Entry> = Vec::with_capacity(entries.len());
+    for mut entry in entries {
+        if let Some(op) = entry.operation_id.as_deref().filter(|op| !op.is_empty()) {
+            entry.id = format!("operation:{op}");
+            if let Some(prior) = unique
+                .iter_mut()
+                .find(|e| e.kind == Some(EntryKind::Tool) && e.operation_id.as_deref() == Some(op))
+            {
+                *prior = entry;
+                continue;
+            }
+        }
+        unique.push(entry);
+    }
+    (unique, usage)
 }
 
 fn raw_arguments(block: &Block) -> String {
@@ -324,6 +405,7 @@ fn preserve_unknown_tool_block(role: &Role, block: &Block) -> bool {
 }
 
 fn copy_tool_result_metadata(entry: &mut Entry, block: &Block) {
+    entry.tool_attempt = block.invocation_attempt.unwrap_or(0);
     let Some(metadata) = block.operation_metadata.as_ref() else {
         return;
     };
@@ -656,5 +738,83 @@ mod tests {
         assert_eq!(usage.input_tokens, 13);
         assert_eq!(usage.output_tokens, 6);
         assert_eq!(usage.cached_input_tokens, 2);
+    }
+    #[test]
+    fn invocation_replay_dedupes_without_merging_identical_real_calls() {
+        use otto_core::wire::events::{WireEvent, WireToolResult};
+        let mut entries = Vec::new();
+        let mut event = WireEvent {
+            event_type: "tool_call_started".into(),
+            operation_id: "op_a".into(),
+            tool_call_id: "reused-provider-id".into(),
+            tool_name: "bash".into(),
+            attempt: Some(1),
+            tool_args: otto_core::wire::events::tool_args_raw(r#"{"command":"echo same"}"#),
+            ..WireEvent::default()
+        };
+        reduce_tool_event(&mut entries, &event);
+        reduce_tool_event(&mut entries, &event);
+        assert_eq!(entries.len(), 1);
+        event.event_type = "tool_call_finished".into();
+        event.result = Some(WireToolResult {
+            content: "done".into(),
+            ..WireToolResult::default()
+        });
+        reduce_tool_event(&mut entries, &event);
+        reduce_tool_event(&mut entries, &event);
+        event.event_type = "tool_call_started".into();
+        reduce_tool_event(&mut entries, &event);
+        assert!(
+            entries[0].tool_done,
+            "replayed start must not regress completion"
+        );
+        event.operation_id = "op_b".into();
+        reduce_tool_event(&mut entries, &event);
+        assert_eq!(
+            entries.len(),
+            2,
+            "identical args and reused provider ID are not identity"
+        );
+        assert_ne!(entries[0].id, entries[1].id);
+        event.operation_id = "op_a".into();
+        event.attempt = Some(2);
+        reduce_tool_event(&mut entries, &event);
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].tool_done);
+        event.event_type = "tool_call_finished".into();
+        event.attempt = Some(1);
+        reduce_tool_event(&mut entries, &event);
+        assert!(
+            !entries[0].tool_done,
+            "stale finish cannot close newer attempt"
+        );
+    }
+
+    #[test]
+    fn running_history_identity_matches_live_replay() {
+        let history = vec![Message {
+            role: Role::Assistant,
+            blocks: vec![Block {
+                block_type: BlockType::ToolCall,
+                tool_call_id: "c1".into(),
+                tool_name: "read".into(),
+                invocation_id: "op_running".into(),
+                invocation_attempt: Some(1),
+                ..Block::default()
+            }],
+            ..Message::default()
+        }];
+        let (mut entries, _) = entries_from_history(&history);
+        assert_eq!(entries[0].id, "operation:op_running");
+        let event = otto_core::wire::events::WireEvent {
+            event_type: "tool_call_started".into(),
+            operation_id: "op_running".into(),
+            tool_call_id: "c1".into(),
+            tool_name: "read".into(),
+            attempt: Some(1),
+            ..Default::default()
+        };
+        reduce_tool_event(&mut entries, &event);
+        assert_eq!(entries.len(), 1);
     }
 }

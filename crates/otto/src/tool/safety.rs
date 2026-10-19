@@ -6,51 +6,53 @@
 //! session takeover, a call left without a result is run again by the agent
 //! when its tool is `ReadOnly` now and was when the attempt started (see
 //! `docs/specs/2026-10-02-replay-readonly-on-takeover.md` and
-//! `docs/specs/2026-10-06-crash-recovery-and-turn-resume.md`). Every other
-//! built-in is listed as `NonIdempotent` on purpose, so adding a tool without
-//! classifying it fails `every_builtin_tool_is_classified`.
+//! `docs/specs/2026-10-06-crash-recovery-and-turn-resume.md`). Idempotent writes are not automatically replayed either. Tool implementations
+//! own the metadata aggregated here for recovery before runtime construction.
 
 use otto_core::model::RetrySafety;
 
-/// The declared base safety of each built-in tool, by provider-visible name.
-/// A tool absent from this table, including every MCP tool, is treated as
-/// `NonIdempotent`.
+/// Recovery directory assembled from tool-owned metadata; no safety policy lives here.
 const BASE_SAFETY: &[(&str, RetrySafety)] = &[
-    ("otto_help", RetrySafety::ReadOnly),
-    ("approval_pending", RetrySafety::ReadOnly),
-    ("request_approval", RetrySafety::NonIdempotent),
-    ("approval_revoke", RetrySafety::NonIdempotent),
-    ("approval_queue", RetrySafety::NonIdempotent),
-    ("read", RetrySafety::ReadOnly),
-    ("ls", RetrySafety::ReadOnly),
-    ("grep", RetrySafety::ReadOnly),
-    ("find", RetrySafety::ReadOnly),
-    ("memory_search", RetrySafety::ReadOnly),
-    ("write", RetrySafety::NonIdempotent),
-    ("edit", RetrySafety::NonIdempotent),
-    ("bash", RetrySafety::NonIdempotent),
-    ("web_fetch", RetrySafety::NonIdempotent),
-    ("web_search", RetrySafety::NonIdempotent),
-    ("skill", RetrySafety::NonIdempotent),
-    ("remember", RetrySafety::NonIdempotent),
-    ("forget", RetrySafety::NonIdempotent),
-    ("reflect", RetrySafety::NonIdempotent),
-    ("remind", RetrySafety::NonIdempotent),
-    ("remind_status", RetrySafety::ReadOnly),
-    ("remind_cancel", RetrySafety::NonIdempotent),
-    ("schedule", RetrySafety::NonIdempotent),
-    ("schedule_list", RetrySafety::ReadOnly),
-    ("schedule_cancel", RetrySafety::NonIdempotent),
-    ("list_models", RetrySafety::ReadOnly),
-    ("submit_verification", RetrySafety::ReadOnly),
-    // Each call replaces the whole plan, so a repeat has the same effect.
-    ("update_plan", RetrySafety::Idempotent),
-    ("agent", RetrySafety::NonIdempotent),
-    ("agent_status", RetrySafety::ReadOnly),
-    ("agent_yield", RetrySafety::ReadOnly),
-    ("agent_send", RetrySafety::NonIdempotent),
-    ("agent_cancel", RetrySafety::NonIdempotent),
-    ("agent_report", RetrySafety::NonIdempotent),
+    crate::tool::read::READ_RETRY,
+    crate::tool::write::WRITE_RETRY,
+    crate::tool::edit::EDIT_RETRY,
+    crate::tool::ls::LS_RETRY,
+    crate::tool::find::FIND_RETRY,
+    crate::tool::grep::GREP_RETRY,
+    crate::tool::bash::BASH_RETRY,
+    crate::tool::skill::SKILL_RETRY,
+    crate::tool::memory::MEMORY_SEARCH_RETRY,
+    crate::tool::memory::REMEMBER_RETRY,
+    crate::tool::memory::FORGET_RETRY,
+    crate::tool::otto::OTTO_HELP_RETRY,
+    crate::tool::otto::APPROVAL_QUEUE_RETRY,
+    crate::tool::approval::REQUEST_APPROVAL_RETRY,
+    crate::tool::models::LIST_MODELS_RETRY,
+    crate::tool::verification::SUBMIT_VERIFICATION_RETRY,
+    crate::tool::plan::UPDATE_PLAN_RETRY,
+    crate::tool::reflect::REFLECT_RETRY,
+    crate::tool::remind::REMIND_RETRY,
+    crate::tool::remind::REMIND_STATUS_RETRY,
+    crate::tool::remind::REMIND_CANCEL_RETRY,
+    crate::tool::web::WEB_FETCH_RETRY,
+    crate::tool::web::WEB_SEARCH_RETRY,
+    crate::tool::task_control::TASK_QUEUE_RETRY,
+    crate::tool::task_control::TASK_REPLY_RETRY,
+    crate::tool::task_control::TASK_STEER_RETRY,
+    crate::schedule::tools::SCHEDULE_RETRY,
+    crate::schedule::tools::SCHEDULE_LIST_RETRY,
+    crate::schedule::tools::SCHEDULE_CANCEL_RETRY,
+    crate::subagent::tools::AGENT_YIELD_RETRY,
+    crate::subagent::tools::AGENT_RETRY,
+    crate::subagent::tools::AGENT_STATUS_RETRY,
+    crate::subagent::tools::AGENT_SEND_RETRY,
+    crate::subagent::tools::AGENT_CANCEL_RETRY,
+    crate::subagent::runner::AGENT_REPORT_RETRY,
+    crate::delivery::START_DELIVERY_TASK_RETRY,
+    crate::tool::mcp::MCP_SEARCH_TOOLS_RETRY,
+    crate::tool::mcp::MCP_CALL_TOOL_RETRY,
+    crate::tool::approval::APPROVAL_PENDING_RETRY,
+    crate::tool::approval::APPROVAL_REVOKE_RETRY,
 ];
 
 /// The declared base safety of the built-in tool `name`, or `None` when the
@@ -76,6 +78,57 @@ mod tests {
     const RECORDED_DEFINITIONS: &str = include_str!("../../tests/testdata/tool_definitions.jsonl");
 
     #[test]
+    fn every_native_tool_implementation_explicitly_declares_safety() {
+        fn check(dir: &std::path::Path, count: &mut usize) {
+            for entry in std::fs::read_dir(dir).expect("source directory") {
+                let path = entry.expect("source entry").path();
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "testsupport.rs")
+                {
+                    continue;
+                }
+                if path.is_dir() {
+                    check(&path, count);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source = std::fs::read_to_string(&path).expect("Rust source");
+                    // Test doubles intentionally exercise the conservative default.
+                    let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+                    for marker in ["impl Tool for ", "impl crate::tool::Tool for "] {
+                        for implementation in production.split(marker).skip(1) {
+                            let body = implementation.split("fn definition(").next().unwrap();
+                            assert!(
+                                body.contains("fn retry_safety("),
+                                "{}: {} has no explicit retry safety",
+                                path.display(),
+                                implementation.lines().next().unwrap()
+                            );
+                            *count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut count = 0;
+        check(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut count,
+        );
+        assert!(
+            count >= 40,
+            "tool implementation scan must not be empty: {count}"
+        );
+    }
+
+    #[test]
+    fn recovery_metadata_has_unique_names() {
+        let mut names = std::collections::HashSet::new();
+        for (name, _) in BASE_SAFETY {
+            assert!(names.insert(name), "duplicate owner metadata for {name}");
+        }
+    }
+
+    #[test]
     fn every_builtin_tool_is_classified() {
         for line in RECORDED_DEFINITIONS
             .lines()
@@ -85,7 +138,7 @@ mod tests {
             let name = value["name"].as_str().expect("golden name");
             assert!(
                 declared_safety(name).is_some(),
-                "built-in tool {name:?} has no declared retry safety; add it to BASE_SAFETY in \
+                "built-in tool {name:?} has no declared retry safety; declare owner metadata in its implementation and aggregate it in \
                  crates/otto/src/tool/safety.rs (NonIdempotent unless it is read-only)"
             );
         }
@@ -102,7 +155,6 @@ mod tests {
             "agent_status",
             "remind_status",
             "list_models",
-            "submit_verification",
         ] {
             assert!(is_replayable(name), "{name}");
         }
@@ -112,6 +164,11 @@ mod tests {
             "bash",
             "skill",
             "remember",
+            "submit_verification",
+            "agent_yield",
+            "approval_revoke",
+            "approval_queue",
+            "update_plan",
             "mcp__x__y",
             "",
         ] {

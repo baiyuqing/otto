@@ -57,8 +57,15 @@ pub fn ls_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const LS_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("ls", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for LsTool<'_> {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        LS_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         ls_definition()
     }

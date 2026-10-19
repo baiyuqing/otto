@@ -390,7 +390,7 @@ impl ToolExecutor for Registry {
 
     fn retry_safety(&self, name: &str) -> otto_core::model::RetrySafety {
         self.lookup(name)
-            .and_then(|_| super::safety::declared_safety(name))
+            .map(|tool| tool.retry_safety())
             .unwrap_or(otto_core::model::RetrySafety::NonIdempotent)
     }
 
@@ -453,6 +453,22 @@ mod tests {
             }
             self.result.clone().unwrap_or_else(|| text_result("ok"))
         }
+    }
+
+    #[test]
+    fn custom_read_name_cannot_inherit_builtin_retry_safety() {
+        let registry = Registry::new(vec![Box::new(FakeTool {
+            name: "read",
+            result: None,
+            cancel_during_call: false,
+        })])
+        .expect("registry");
+        assert_eq!(
+            ToolExecutor::retry_safety(&registry, "read"),
+            otto_core::model::RetrySafety::NonIdempotent
+        );
+        assert!(!ToolExecutor::replayable(&registry, "read"));
+        assert!(!ToolExecutor::replayable(&registry, "unknown"));
     }
 
     struct AsyncApprovalTool {

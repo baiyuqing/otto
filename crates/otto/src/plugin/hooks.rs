@@ -500,6 +500,9 @@ struct CommandTool {
 }
 #[async_trait::async_trait]
 impl crate::tool::Tool for CommandTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        otto_core::model::RetrySafety::NonIdempotent
+    }
     fn definition(&self) -> otto_core::model::ToolDefinition {
         crate::tool::definition(
             &format!(

@@ -305,6 +305,9 @@ fn render_block(block: &ContentBlock) -> String {
 
 #[async_trait::async_trait]
 impl Tool for McpTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        otto_core::model::RetrySafety::NonIdempotent
+    }
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name.clone(),
@@ -413,8 +416,16 @@ struct SearchArgs {
     query: String,
 }
 
+pub(crate) const MCP_SEARCH_TOOLS_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "mcp_search_tools",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait::async_trait]
 impl Tool for McpSearchTools {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        MCP_SEARCH_TOOLS_RETRY.1
+    }
     fn definition(&self) -> ToolDefinition {
         definition(
             "mcp_search_tools",
@@ -482,8 +493,16 @@ struct CallArgs {
     arguments: Option<Value>,
 }
 
+pub(crate) const MCP_CALL_TOOL_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "mcp_call_tool",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait::async_trait]
 impl Tool for McpCallTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        MCP_CALL_TOOL_RETRY.1
+    }
     fn definition(&self) -> ToolDefinition {
         definition(
             "mcp_call_tool",

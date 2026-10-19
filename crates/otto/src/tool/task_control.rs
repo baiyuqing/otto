@@ -49,8 +49,14 @@ impl TaskQueue {
     }
 }
 
+pub(crate) const TASK_QUEUE_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("task_queue", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for TaskQueue {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        TASK_QUEUE_RETRY.1
+    }
     fn definition(&self) -> ToolDefinition {
         if self.route.is_some() {
             return definition(
@@ -128,8 +134,14 @@ impl TaskReply {
     }
 }
 
+pub(crate) const TASK_REPLY_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("task_reply", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for TaskReply {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        TASK_REPLY_RETRY.1
+    }
     fn definition(&self) -> ToolDefinition {
         definition(
             "task_reply",
@@ -175,8 +187,14 @@ impl TaskSteer {
     }
 }
 
+pub(crate) const TASK_STEER_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("task_steer", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for TaskSteer {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        TASK_STEER_RETRY.1
+    }
     fn definition(&self) -> ToolDefinition {
         definition(
             "task_steer",

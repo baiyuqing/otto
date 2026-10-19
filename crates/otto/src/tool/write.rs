@@ -165,8 +165,15 @@ pub fn write_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const WRITE_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("write", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for WriteTool<'_> {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        WRITE_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         write_definition()
     }

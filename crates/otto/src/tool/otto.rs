@@ -35,8 +35,15 @@ struct HelpArgs {
     topic: String,
 }
 
+pub(crate) const OTTO_HELP_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("otto_help", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for Help {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        OTTO_HELP_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         definition(
             "otto_help",
@@ -256,6 +263,14 @@ pub fn approval_definition(revoke: bool) -> ToolDefinition {
 
 #[async_trait::async_trait]
 impl Tool for Approvals {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        if self.revoke {
+            super::approval::APPROVAL_REVOKE_RETRY.1
+        } else {
+            super::approval::APPROVAL_PENDING_RETRY.1
+        }
+    }
+
     fn definition(&self) -> ToolDefinition {
         approval_definition(self.revoke)
     }
@@ -325,8 +340,17 @@ pub fn controls(session: &str, approvals: &Arc<BashApprovals>) -> Vec<Box<dyn To
 
 /// Explicitly marks a non-approval task for the frontend's existing queue.
 pub struct Queue(pub Arc<std::sync::atomic::AtomicBool>);
+pub(crate) const APPROVAL_QUEUE_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "approval_queue",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait::async_trait]
 impl Tool for Queue {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        APPROVAL_QUEUE_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         definition(
             "approval_queue",

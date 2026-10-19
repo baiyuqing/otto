@@ -3333,6 +3333,35 @@ fn takeover_repairs_every_call_when_one_is_not_replayable() {
 }
 
 #[test]
+fn interrupted_nonidempotent_call_is_settled_once_and_never_replayed() {
+    use otto_core::model::{EffectCertainty, OperationDisposition};
+    let (_temp, store, path) = take_over_with(
+        &[("call-write", "write")],
+        &[("call-write", "write", 1)],
+        crate::tool::safety::is_replayable,
+    );
+    let recovery = store.take_recovery().expect("recovery recorded");
+    assert!(recovery.replayable.is_empty());
+    assert_eq!(recovery.repaired.len(), 1);
+    assert_eq!(tool_result_count(&path), 1);
+    let messages = store.messages();
+    let result = messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .find(|b| b.tool_call_id == "call-write" && b.is_error)
+        .expect("model-visible result");
+    let metadata = result
+        .operation_metadata
+        .as_ref()
+        .expect("operation result metadata");
+    assert_eq!(metadata.disposition, OperationDisposition::Interrupted);
+    assert_eq!(metadata.effect_certainty, EffectCertainty::Unknown);
+    assert!(store.take_recovery().is_none(), "recovery is consumed once");
+    assert_eq!(tool_result_count(&path), 1);
+    store.close().expect("close");
+}
+
+#[test]
 fn takeover_repairs_a_call_that_was_already_replayed_once() {
     let (_temp, store, path) = take_over_with(
         &[("call-1", "read")],

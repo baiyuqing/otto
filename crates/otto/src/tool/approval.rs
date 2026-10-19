@@ -29,7 +29,7 @@ struct Args {
 pub fn request_definition() -> ToolDefinition {
     definition(
         "request_approval",
-        "Request an actual user choice or approval checkpoint, or inspect a prepared subject_ref. Supply exactly one of proposal or subject_ref; an empty value counts as omitted. Returns the recorded decision and feedback. AUTO reviews ordinary operations against original user evidence; explicit user choices and checkpoints require a person. MANUAL asks the user, NEVER rejects additional authority, and YOLO bypasses review. Later calls in this batch will not execute. A confirmation grants no additional tool or sandbox permissions. Never fabricate a decision or repeat confirmation for unchanged authorized scope.",
+        "Request an actual user choice or approval checkpoint, or inspect a prepared subject_ref. Supply exactly one of proposal or subject_ref; an empty value counts as omitted. Returns the recorded decision and feedback. AUTO reviews ordinary operations against original user evidence; explicit user choices and checkpoints require a person. MANUAL asks the user, NEVER rejects additional authority, and YOLO bypasses review. Later calls in this batch will not execute. A confirmation grants no additional tool or sandbox permissions. Content is not secret-scanned and may be displayed or persisted; never include actual secrets. Never fabricate a decision or repeat confirmation for unchanged authorized scope.",
         json!({"type":"object","additionalProperties":false,"properties":{
             "title":{"type":"string"},"reason":{"type":"string"},
             "proposal":{"type":"string"},"subject_ref":{"type":"string"}

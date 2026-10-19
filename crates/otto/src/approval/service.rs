@@ -3,7 +3,6 @@
 //! uncertain external action is never automatically replayed.
 use super::contracts::*;
 use super::repository::{ApprovalStore, Claim, ClaimChange};
-use crate::memory::guard::{ContentGuard, DefaultGuard, ExactGuard};
 use chrono::Utc;
 use otto_core::approval::{
     ApplicationState, ApprovalMode, ApprovalSettings, Change, Choice, Decision, Kind, Request,
@@ -23,7 +22,6 @@ pub struct Service {
     pub(super) owner: String,
     pub(super) store: Arc<dyn ApprovalStore>,
     changes: watch::Sender<u64>,
-    secrets: RwLock<BTreeMap<String, ExactGuard>>,
     domains: RwLock<BTreeMap<(String, String), Arc<dyn Domain>>>,
     pub(super) review_state: RwLock<super::coordinator::ReviewState>,
 }
@@ -44,7 +42,6 @@ impl Service {
             owner: random.iter().map(|b| format!("{b:02x}")).collect(),
             store,
             changes: watch::channel(0).0,
-            secrets: RwLock::new(BTreeMap::new()),
             domains: RwLock::new(BTreeMap::new()),
             review_state: RwLock::new(Default::default()),
         })
@@ -301,36 +298,11 @@ impl Service {
         })
     }
 
-    pub fn protect_secrets(&self, secrets: &[String]) -> Result<()> {
-        let key = digest(&serde_json::to_string(secrets).map_err(|_| Error::Unavailable)?);
-        let guard = ExactGuard::new(secrets).map_err(|_| Error::Unavailable)?;
-        self.secrets
-            .write()
-            .map_err(|_| Error::Unavailable)?
-            .insert(key, guard);
-        Ok(())
-    }
-    pub(super) fn check_content(&self, text: &str) -> Result<()> {
-        let input = crate::memory::GuardInput {
-            fields: vec![crate::memory::GuardField {
-                name: "approval".into(),
-                value: text.into(),
-                opaque: false,
-            }],
-        };
-        DefaultGuard
-            .check(&input)
-            .map_err(|_| Error::Invalid("sensitive approval content"))?;
-        for guard in self
-            .secrets
-            .read()
-            .map_err(|_| Error::Unavailable)?
-            .values()
-        {
-            guard
-                .check(&input)
-                .map_err(|_| Error::Invalid("sensitive approval content"))?;
-        }
+    /// Compatibility no-op: approval content is no longer secret-scanned.
+    ///
+    /// Content may be displayed and persisted; callers must not include real secrets.
+    #[deprecated(note = "approval content is no longer secret-scanned; do not include secrets")]
+    pub fn protect_secrets(&self, _secrets: &[String]) -> Result<()> {
         Ok(())
     }
 
@@ -443,9 +415,6 @@ impl Service {
         };
         request.review = Some(self.creation_review(&request)?);
         request.validate().map_err(Error::Invalid)?;
-        self.check_content(&request.subject.details)?;
-        self.check_content(&request.title)?;
-        self.check_content(&request.reason)?;
         let key = if request.subject.source == "memory" {
             digest(&serde_json::to_string(&request.subject).map_err(|_| Error::Unavailable)?)
         } else {
@@ -591,7 +560,6 @@ impl Service {
         if feedback.len() > 8192 || actor.identity.is_empty() || actor.transport.is_empty() {
             return Err(Error::Invalid("invalid decision provenance or feedback"));
         }
-        self.check_content(feedback)?;
         self.mutate(id, scope, |request| {
             Self::record_decision(request, revision, allow, feedback, actor, false)
         })

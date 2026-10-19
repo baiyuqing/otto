@@ -26,6 +26,15 @@ changes.
 
 ### Unified approval contract
 
+Approval content is not sensitive-content checked: neither shape-based guards nor
+configured exact-secret matching apply to titles, reasons, details, feedback,
+review context, rehydrated subjects or reviewer reasons. Content may be displayed
+and persisted; callers must not include actual secrets. Structural/size validation,
+policy, permissions and human checkpoints remain enforced. Model redaction and
+non-approval protections (including memory/reflection guards) remain unchanged.
+`Service::protect_secrets` is a deprecated compatibility no-op and retains no
+secret values. No configuration toggle is provided; normal rebuild/restart applies.
+
 `otto-core::approval` owns neutral requests, choices, scopes and separate
 human/application states. `otto::approval` stores them in `approvals.db`; the
 same decision authority is injected into the parent and child native registries,

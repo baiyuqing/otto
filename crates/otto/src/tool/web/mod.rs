@@ -230,8 +230,15 @@ impl WebFetch {
     }
 }
 
+pub(crate) const WEB_FETCH_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("web_fetch", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for WebFetch {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        WEB_FETCH_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         fetch_definition()
     }
@@ -404,8 +411,15 @@ impl WebSearch {
     }
 }
 
+pub(crate) const WEB_SEARCH_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("web_search", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for WebSearch {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        WEB_SEARCH_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         search_definition()
     }

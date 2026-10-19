@@ -1328,19 +1328,7 @@ impl App {
                         .saturating_add(usage.cached_input_tokens.max(0));
                 }
             }
-            "tool_call_started" => self.entries.push(Entry {
-                id: format!("streaming-tool-{}", self.entries.len()),
-                kind: Some(EntryKind::Tool),
-                tool_call_id: event.tool_call_id.clone(),
-                tool_name: event.tool_name.clone(),
-                tool_args: event
-                    .tool_args
-                    .as_deref()
-                    .map(|v| v.get().to_owned())
-                    .unwrap_or_default(),
-                operation_id: Some(event.operation_id.clone()),
-                ..Entry::default()
-            }),
+            "tool_call_started" => super::entries::reduce_tool_event(&mut self.entries, event),
             "tool_call_finished" => {
                 let result = event.result.clone().unwrap_or_default();
                 let approval = if !self.attached {
@@ -1353,17 +1341,7 @@ impl App {
                 } else {
                     None
                 };
-                if let Some(e) = self.entries.iter_mut().rev().find(|e| {
-                    e.kind == Some(EntryKind::Tool) && e.tool_call_id == event.tool_call_id
-                }) {
-                    e.tool_output = result.content;
-                    e.tool_error = result.is_error;
-                    e.tool_done = true;
-                    e.operation_id = Some(event.operation_id.clone());
-                    e.disposition = result.disposition;
-                    e.effect_certainty = result.effect_certainty;
-                    e.stop_reason = result.stop_reason;
-                }
+                super::entries::reduce_tool_event(&mut self.entries, event);
                 if let Some(request) = approval {
                     self.show_approval(features::Approval::legacy(
                         request.id,

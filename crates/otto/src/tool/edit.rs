@@ -245,8 +245,15 @@ pub fn edit_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const EDIT_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("edit", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for EditTool<'_> {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        EDIT_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         edit_definition()
     }

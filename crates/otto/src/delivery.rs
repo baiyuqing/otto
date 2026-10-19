@@ -1222,8 +1222,17 @@ impl StartDeliveryTask {
     }
 }
 
+pub(crate) const START_DELIVERY_TASK_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "start_delivery_task",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait]
 impl Tool for StartDeliveryTask {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        START_DELIVERY_TASK_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         start_definition()
     }

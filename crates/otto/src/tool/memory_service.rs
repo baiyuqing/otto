@@ -333,6 +333,15 @@ fn receipt_result(receipt: Receipt) -> ToolResult {
 
 #[async_trait::async_trait]
 impl Tool for ServiceTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        match self.operation {
+            Operation::Recall => super::memory::MEMORY_SEARCH_RETRY.1,
+            Operation::Remember => super::memory::REMEMBER_RETRY.1,
+            Operation::Forget => super::memory::FORGET_RETRY.1,
+            _ => otto_core::model::RetrySafety::NonIdempotent,
+        }
+    }
+
     fn definition(&self) -> ToolDefinition {
         let mut definition = match self.operation {
             Operation::Recall => super::memory::memory_search_definition(),

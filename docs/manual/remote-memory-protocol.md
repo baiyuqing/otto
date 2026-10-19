@@ -168,9 +168,13 @@ item; only resolved recall results are automatically injected into task context.
 }
 ```
 
-`query` is nonblank, at most 8192 UTF-8 bytes; `limit` is 1..64 and `max_bytes`
-is 1..8192. `scope_filter` defaults to null or is a nonempty unique array of
-`organization`, `workspace`, `user`. A workspace filter without a selected
+`query` is at most 8192 UTF-8 bytes. Exactly `""` requests bounded browsing of
+effective memories rather than semantic matching; nonempty whitespace-only
+queries are invalid. Browsing retains workspace > organization > user resolution,
+mandatory pinned winners and host-authorized scopes. The same count and
+rendered-byte budgets apply; this is not a complete inventory or enumeration API.
+`limit` is 1..64 and `max_bytes` is 1..8192. `scope_filter` defaults to null or is a
+nonempty unique array of `organization`, `workspace`, `user`. A workspace filter without a selected
 workspace is invalid. Explicit `memory_search` may filter; automatic recall does not.
 
 Response `200`:

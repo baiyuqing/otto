@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::TryStreamExt;
 use otto_core::provider::ProviderError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -13,14 +13,14 @@ pub const MAX_BODY: usize = 8 << 20;
 const MAX_ID: usize = 512;
 const MAX_METADATA: usize = 2048;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CatalogModel {
     pub id: String,
-    #[serde(skip_serializing_if = "Map::is_empty")]
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub metadata: Map<String, Value>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ModelCatalog {
     pub models: Vec<CatalogModel>,
     /// Entries or metadata omitted by validation/size bounds.

@@ -614,8 +614,15 @@ pub struct RemindTool {
     reminders: Arc<Reminders>,
 }
 
+pub(crate) const REMIND_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("remind", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for RemindTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        REMIND_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         remind_definition()
     }
@@ -660,8 +667,15 @@ pub struct RemindStatusTool {
     reminders: Arc<Reminders>,
 }
 
+pub(crate) const REMIND_STATUS_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("remind_status", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for RemindStatusTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        REMIND_STATUS_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         remind_status_definition()
     }
@@ -688,8 +702,17 @@ pub struct RemindCancelTool {
     reminders: Arc<Reminders>,
 }
 
+pub(crate) const REMIND_CANCEL_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "remind_cancel",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait::async_trait]
 impl Tool for RemindCancelTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        REMIND_CANCEL_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         remind_cancel_definition()
     }

@@ -743,6 +743,7 @@ fn pi_message_to_context_message(
                 arguments: None,
                 is_error: wire.is_error.unwrap_or(false),
                 operation_metadata,
+                ..Block::default()
             }];
         }
         "custom" => {
@@ -838,6 +839,7 @@ fn pi_context_text_and_tool_blocks(message: &PiMessage, role: Role) -> Result<Ve
                     arguments: block.arguments.clone(),
                     is_error: false,
                     operation_metadata: None,
+                    ..Block::default()
                 });
             }
             "image" => {

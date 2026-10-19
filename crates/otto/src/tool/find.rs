@@ -84,8 +84,15 @@ pub fn find_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const FIND_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("find", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for FindTool<'_> {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        FIND_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         find_definition()
     }

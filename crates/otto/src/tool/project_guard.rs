@@ -109,6 +109,9 @@ fn revoked() -> ToolResult {
 
 #[async_trait::async_trait]
 impl Tool for Guarded {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        self.inner.retry_safety()
+    }
     fn definition(&self) -> ToolDefinition {
         self.inner.definition()
     }
@@ -189,6 +192,24 @@ impl Tool for Guarded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guarding_preserves_owner_retry_safety() {
+        let tool = Guarded {
+            guard: Guard {
+                home: PathBuf::new(),
+                workspace: PathBuf::new(),
+                user: PathBuf::new(),
+                check_trust: false,
+                expected_digest: None,
+                require_sandbox: false,
+            },
+            inner: Box::new(super::super::otto::Help {
+                definitions: Vec::new(),
+            }),
+        };
+        assert_eq!(tool.retry_safety(), otto_core::model::RetrySafety::ReadOnly);
+    }
+
     struct Echo;
     #[async_trait::async_trait]
     impl Tool for Echo {

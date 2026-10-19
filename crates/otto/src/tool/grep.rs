@@ -105,8 +105,15 @@ pub fn grep_definition() -> ToolDefinition {
     )
 }
 
+pub(crate) const GREP_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("grep", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for GrepTool<'_> {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        GREP_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         grep_definition()
     }

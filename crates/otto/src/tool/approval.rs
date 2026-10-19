@@ -36,8 +36,17 @@ pub fn request_definition() -> ToolDefinition {
         },"required":["title","reason"]}),
     )
 }
+pub(crate) const REQUEST_APPROVAL_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "request_approval",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait]
 impl Tool for RequestApproval {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        REQUEST_APPROVAL_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         request_definition()
     }
@@ -117,8 +126,23 @@ pub struct Control {
     pub expected_id: Option<String>,
     pub legacy: Option<Arc<super::bash::BashApprovals>>,
 }
+pub(crate) const APPROVAL_PENDING_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("approval_pending", otto_core::model::RetrySafety::ReadOnly);
+pub(crate) const APPROVAL_REVOKE_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "approval_revoke",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait]
 impl Tool for Control {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        if self.revoke {
+            APPROVAL_REVOKE_RETRY.1
+        } else {
+            APPROVAL_PENDING_RETRY.1
+        }
+    }
+
     fn definition(&self) -> ToolDefinition {
         definition(
             if self.revoke {

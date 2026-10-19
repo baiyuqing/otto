@@ -142,8 +142,16 @@ struct AgentYieldTool {
     runner: Arc<Runner>,
 }
 
+// Yield changes turn scheduling and waits on notifications, not a pure status read.
+pub(crate) const AGENT_YIELD_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("agent_yield", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for AgentYieldTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        AGENT_YIELD_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         agent_yield_definition()
     }
@@ -266,8 +274,15 @@ struct AgentTool {
     runner: Arc<Runner>,
 }
 
+pub(crate) const AGENT_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("agent", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for AgentTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        AGENT_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         agent_definition()
     }
@@ -430,8 +445,15 @@ struct AgentStatusTool {
     runner: Arc<Runner>,
 }
 
+pub(crate) const AGENT_STATUS_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("agent_status", otto_core::model::RetrySafety::ReadOnly);
+
 #[async_trait::async_trait]
 impl Tool for AgentStatusTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        AGENT_STATUS_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         agent_status_definition()
     }
@@ -506,8 +528,15 @@ struct AgentSendTool {
     runner: Arc<Runner>,
 }
 
+pub(crate) const AGENT_SEND_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("agent_send", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for AgentSendTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        AGENT_SEND_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         agent_send_definition()
     }
@@ -548,8 +577,15 @@ struct AgentCancelTool {
     runner: Arc<Runner>,
 }
 
+pub(crate) const AGENT_CANCEL_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("agent_cancel", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for AgentCancelTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        AGENT_CANCEL_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         agent_cancel_definition()
     }

@@ -264,10 +264,11 @@ overrides host security, system rules or actual user authorization.
 - Exact-item `memory_search` (with `id`) is explicitly labeled **raw**. It may
   inspect a shadowed item, but is not effective lookup or automatically injected
   context. Remote references carry organization, scope, ID and opaque revision.
-  Exact remote search additionally requires `organization_id`, `scope_namespace`,
-  `scope_id` and `opaque_revision` from the reference. The organization must
-  match the host-selected tenant and cannot change request context. Missing/
-  mismatched tenants are rejected before dispatch, including old tenantless
+  Exact remote search accepts an ID alone and checks the host-authorized scopes.
+  Optional `organization_id`, `scope_namespace` and `scope_id` narrow or bind
+  that read; a supplied organization must match the host-selected tenant and
+  cannot change request context. Missing or mismatched tenant bindings on
+  updates and forget are rejected before dispatch, including old tenantless
   remote references. Wire get sends the exact scope/ID; it returns the current
   stored revision, not a historical revision lookup.
 - `remember` takes `text`, nullable `key` and destination `scope` (`user` or

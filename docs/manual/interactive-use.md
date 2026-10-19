@@ -76,16 +76,16 @@ capability.
   provider failure, or the turn deadline — the guidance is not delivered and
   Otto says so, quoting the message; when the composer was empty, the text is
   put back there to send again. The status line reads
-  `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
-  seconds since the turn started. The phase is `waiting for model`,
-  `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments
-  truncated to 60 characters). During a provider transport retry — a ChatGPT
+  an animated spinner and the current phase, without thinking/reasoning or
+  total-turn duration. The phase is `waiting for model`,
+  `reasoning`, `responding`, `compacting`, or `running TOOL` (raw arguments
+  stay in the expanded record). During a provider transport retry — a ChatGPT
   retry, or an OpenAI-compatible one whose reason is `connection failed` or
   `connection interrupted` — it shows
   `retry A/M after REASON, waiting Ns`, with a live countdown, followed by
   `requesting` once the delay ends. `A/M` counts retries (1/3 through 3/3);
-  the phase and turn elapsed times keep updating. Esc or Ctrl+C cancels the
-  retry, including its wait. The Web UI uses the same status text.
+  the retry countdown keeps updating. Esc or Ctrl+C cancels the retry,
+  including its wait. This countdown is a retry delay, not reasoning duration.
 - When a thinking effort is set and the provider returns reasoning summaries,
   the summary text streams as a dimmed `reasoning` entry before the reply and
   is saved in the session, so a resumed session shows it again.
@@ -99,7 +99,13 @@ capability.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
 - Tool calls default to the action/tool name, a known target (when available),
-  explicit `running` / `completed` / `error` status, and a bounded key result.
+  explicit `running` / `completed` / `error` / `cancelled` status, and a bounded
+  key result. Locally observed executions show live elapsed seconds, frozen at
+  the tool's terminal result, including errors and cancellation. Retried attempts
+  restart the execution clock within the same logical invocation. Timing is
+  process-local, not inferred from history timestamps: resumed records and
+  attached/replayed streams without trustworthy execution timing omit duration.
+  Completed durations survive a history refresh within the same process/session.
   A stable 12-hex invocation fingerprint keeps calls distinguishable without
   crowding the summary (deduplication uses the full identity, not this label).
   Raw arguments, shell commands, output and file diffs are hidden by default;

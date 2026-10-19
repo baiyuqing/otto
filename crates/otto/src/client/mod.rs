@@ -876,6 +876,59 @@ impl Client {
         }
     }
 
+    pub(crate) async fn skill_manager(
+        &self,
+        session: &str,
+    ) -> Result<crate::app::management::SkillManager, Error> {
+        let mut url = reqwest::Url::parse(BASE).expect("static base");
+        url.path_segments_mut().expect("base URL").extend([
+            "v1",
+            "sessions",
+            session,
+            "skill-manager",
+        ]);
+        decode(self.send(self.http.get(url.as_str())).await?).await
+    }
+
+    pub(crate) async fn skill_info(
+        &self,
+        session: &str,
+        name: &str,
+    ) -> Result<crate::app::management::SkillInfo, Error> {
+        let mut url = reqwest::Url::parse(BASE).expect("static base");
+        url.path_segments_mut().expect("base URL").extend([
+            "v1",
+            "sessions",
+            session,
+            "skill-manager",
+            name,
+        ]);
+        decode(self.send(self.http.get(url.as_str())).await?).await
+    }
+
+    pub(crate) async fn set_skill_enabled(
+        &self,
+        session: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<String, Error> {
+        let mut url = reqwest::Url::parse(BASE).expect("static base");
+        url.path_segments_mut().expect("base URL").extend([
+            "v1",
+            "sessions",
+            session,
+            "skills",
+            name,
+            if enabled { "enable" } else { "disable" },
+        ]);
+        let response = self.send(self.post(url.as_str(), &json!({}))).await?;
+        let _: serde_json::Value = decode(response).await?;
+        Ok(format!(
+            "skill {name} preference is {}; restart Otto to apply the active catalog (activation also requires [skills].enabled = true)",
+            if enabled { "enabled" } else { "disabled" }
+        ))
+    }
+
     /// `POST /v1/sessions/{id}/reflection/skills/{name}/revert`.
     pub async fn revert_generated_skill(
         &self,
@@ -1909,6 +1962,53 @@ mod tests {
             )
         );
         assert_eq!(client.compact("cut", "").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn skill_manager_client_uses_session_routes_and_encodes_qualified_names() {
+        let (client, seen, _dir) = stub(|_, path| {
+            if path.ends_with("/skill-manager") {
+                json_body(StatusCode::OK, r#"{"global_enabled":false,"skills":[]}"#)
+            } else if path.contains("/skill-manager/") {
+                json_body(
+                    StatusCode::OK,
+                    r#"{"skill":{"name":"plugin:lint","description":"lint","contract":null,"directory":"/skills/lint","path":"/skills/lint/SKILL.md"},"body":"instructions","contract_check":null}"#,
+                )
+            } else {
+                json_body(
+                    StatusCode::OK,
+                    r#"{"name":"plugin:lint","enabled":true,"restart_required":true}"#,
+                )
+            }
+        });
+        let inventory = client.skill_manager("s1").await.unwrap();
+        assert!(!inventory.global_enabled);
+        assert!(inventory.skills.is_empty());
+        assert_eq!(
+            client.skill_info("s1", "plugin:lint").await.unwrap().body,
+            "instructions"
+        );
+        assert!(
+            client
+                .set_skill_enabled("s1", "plugin:lint", true)
+                .await
+                .unwrap()
+                .contains("restart Otto")
+        );
+        assert_eq!(request(&seen, 0).0, "GET /v1/sessions/s1/skill-manager");
+        assert_eq!(
+            request(&seen, 1).0,
+            "GET /v1/sessions/s1/skill-manager/plugin:lint"
+        );
+        assert_eq!(
+            request(&seen, 2).0,
+            "POST /v1/sessions/s1/skills/plugin:lint/enable"
+        );
+        client.skill_info("s1", "bad/name").await.unwrap();
+        assert_eq!(
+            request(&seen, 3).0,
+            "GET /v1/sessions/s1/skill-manager/bad%2Fname"
+        );
     }
 
     #[tokio::test]

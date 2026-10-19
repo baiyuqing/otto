@@ -641,6 +641,7 @@ fn roots(paths: &[String]) -> Vec<std::path::PathBuf> {
 
 /// The skills and agents resolved for one build, plus their prompt sections.
 pub struct CatalogWiring {
+    pub discovered_skills: skill::Catalog,
     pub skills: skill::Catalog,
     pub skill_section: String,
     pub agents: AgentsRuntime,
@@ -924,17 +925,26 @@ impl Builder {
         plugins: &crate::plugin::Snapshot,
     ) -> Result<CatalogWiring, BuildError> {
         let skills = resolve_skills(&self.config, &self.environment, &self.workspace_path);
+        // Inventory uses the same trust-filtered roots even when execution is off.
+        // Only the active catalog below may feed tools, prompts, or sub-agents.
+        let mut discovery_config = self.config.clone();
+        discovery_config.skills.enabled = Some(true);
+        let discovery = resolve_skills(&discovery_config, &self.environment, &self.workspace_path);
         let skill_roots = crate::config::layered::catalog_roots(
             &self.config,
             Path::new(&self.home),
             Path::new(&self.workspace_path),
-            &skills.roots,
+            &discovery.roots,
             "skills",
         )?;
         let (mut discovered_catalog, mut warnings) = skill::Catalog::discover(&roots(&skill_roots));
         warnings.extend(plugins.diagnostics.clone());
         warnings.extend(plugins.extend_skills(&mut discovered_catalog));
-        let catalog = discovered_catalog.without_names(&skills.disabled);
+        let catalog = if skills.enabled {
+            discovered_catalog.without_names(&skills.disabled)
+        } else {
+            skill::Catalog::default()
+        };
 
         let agents = resolve_agents(&self.config, &self.environment, &self.workspace_path)
             .map_err(|error| error.to_string())?;
@@ -979,6 +989,7 @@ impl Builder {
         }
 
         Ok(CatalogWiring {
+            discovered_skills: discovered_catalog,
             skills: catalog,
             skill_section,
             agents,
@@ -2713,6 +2724,7 @@ mod tests {
             cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
         };
         let catalogs = CatalogWiring {
+            discovered_skills: skill::Catalog::default(),
             skills: skill::Catalog::default(),
             skill_section: String::new(),
             agents: AgentsRuntime {
@@ -3220,6 +3232,8 @@ mod catalog_tests {
 
         let (wiring, tools, _) = catalogs(&fixture.builder);
         assert_eq!(wiring.skill_section, "");
+        assert!(wiring.discovered_skills.lookup("pdf").is_some());
+        assert!(wiring.skills.is_empty());
         assert!(!tools.contains(&"skill".to_string()), "{tools:?}");
         let names = definition_names(&fixture.builder.boundary_catalog_definitions(65536, true));
         assert!(!names.contains(&"skill".to_string()), "{names:?}");

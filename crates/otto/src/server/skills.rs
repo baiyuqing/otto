@@ -42,6 +42,37 @@ struct SkillMutation {
     restart_required: bool,
 }
 
+pub async fn manager(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.managed_skills() {
+        Ok(rows) => json_response(StatusCode::OK, &rows),
+        Err(error) => super::error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "skill_config_read_failed",
+            &error,
+        ),
+    }
+}
+
+pub async fn info(
+    State(server): State<Arc<Server>>,
+    Path((id, name)): Path<(String, String)>,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session
+        .ctrl
+        .management(crate::app::management::Request::SkillInfo(name))
+    {
+        Ok(crate::app::management::Reply::SkillInfo(info)) => json_response(StatusCode::OK, &info),
+        Err(error) => super::error_response(StatusCode::BAD_REQUEST, "skill_read_failed", &error),
+        _ => unreachable!(),
+    }
+}
+
 pub async fn list(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");

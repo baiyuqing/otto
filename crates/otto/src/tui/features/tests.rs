@@ -16,6 +16,46 @@ use crate::tui::interaction::{Activation, Focus, Intent, State};
 use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn skill_manager_command_is_available_locally_and_attached_and_keeps_text_forms() {
+    use crate::app::management::Request as M;
+    let catalog = Catalog::default();
+    for attached in [false, true] {
+        let Transition::Push(mut presenter) =
+            catalog.open("/skill", &Info::default(), attached).unwrap()
+        else {
+            panic!("manager surface expected")
+        };
+        assert_eq!(presenter.key(), "skills");
+        assert!(matches!(
+            presenter.start(),
+            Some(BackendRequest::Management(M::SkillManager))
+        ));
+        let Transition::Push(mut detail) = catalog
+            .open("/skill lint", &Info::default(), attached)
+            .unwrap()
+        else {
+            panic!("text detail expected")
+        };
+        assert!(
+            matches!(detail.start(), Some(BackendRequest::Management(M::SkillDetail(name))) if name == "lint")
+        );
+        let Transition::Push(mut set) = catalog
+            .open("/skill set lint enabled", &Info::default(), attached)
+            .unwrap()
+        else {
+            panic!("text mutation expected")
+        };
+        assert!(matches!(
+            set.start(),
+            Some(BackendRequest::Command(Command::Management(M::SkillSet {
+                enabled: true,
+                ..
+            })))
+        ));
+    }
+}
+
 fn approval_request() -> otto_core::approval::Request {
     otto_core::approval::Request {
         options: vec![],

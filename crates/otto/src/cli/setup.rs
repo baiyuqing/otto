@@ -152,21 +152,12 @@ pub fn run(
         (String::new(), String::new())
     };
 
-    let Some(child_model_choice) = ask_subagent_models(stdin, stdout) else {
-        let _ = writeln!(stdout, "Cancelled; configuration unchanged.");
-        return 0;
-    };
-    let (subagent_models, save_confirmed) = match child_model_choice {
-        ChildModelChoice::Preview(models) => (models, false),
-        ChildModelChoice::Save => (Vec::new(), true),
-    };
     let content = match crate::config::initial_profile_content(
         &profile,
         &provider,
         &model,
         &base_url,
         &api_key_env,
-        &subagent_models,
     ) {
         Ok(content) => content,
         Err(message) => return fail(stderr, &message),
@@ -176,12 +167,10 @@ pub fn run(
         "\nProposed configuration for {}:\n\n{content}",
         path.display()
     );
-    if !save_confirmed {
-        let _ = write!(stdout, "\n[save / cancel] (cancel): ");
-        if read_line(stdin).as_deref() != Some("save") {
-            let _ = writeln!(stdout, "Cancelled; configuration unchanged.");
-            return 0;
-        }
+    let _ = write!(stdout, "\n[save / cancel] (cancel): ");
+    if read_line(stdin).as_deref() != Some("save") {
+        let _ = writeln!(stdout, "Cancelled; configuration unchanged.");
+        return 0;
     }
 
     match crate::config::create_initial_profile(
@@ -191,7 +180,6 @@ pub fn run(
         &model,
         &base_url,
         &api_key_env,
-        &subagent_models,
     ) {
         Ok(()) => {
             let _ = writeln!(stdout, "Created {}.", path.display());
@@ -206,51 +194,6 @@ pub fn run(
             0
         }
         Err(message) => fail(stderr, &message),
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum ChildModelChoice {
-    Preview(Vec<String>),
-    Save,
-}
-
-fn ask_subagent_models(
-    stdin: &mut (dyn BufRead + Send),
-    stdout: &mut (dyn Write + Send),
-) -> Option<ChildModelChoice> {
-    let _ = writeln!(
-        stdout,
-        "Optional child model IDs for this provider connection, in preferred order. Check your provider's model list and pricing; Otto does not infer availability or cost. Blank inherits the parent model; this is not an automatic retry list. Enter a list or leave blank to preview before confirming. Enter save to save now with the parent model, or cancel to exit without writing. EOF always cancels."
-    );
-    loop {
-        let _ = write!(
-            stdout,
-            "Child model IDs (comma-separated, optional) or save / cancel: "
-        );
-        let answer = read_line(stdin)?;
-        match answer.as_str() {
-            "save" => return Some(ChildModelChoice::Save),
-            "cancel" => return None,
-            "" => return Some(ChildModelChoice::Preview(Vec::new())),
-            _ => {}
-        }
-        let models: Vec<String> = answer.split(',').map(|id| id.trim().to_string()).collect();
-        let mut seen = std::collections::HashSet::new();
-        if models.len() <= 16
-            && models.iter().all(|id| {
-                !id.is_empty()
-                    && id.len() <= 256
-                    && !id.chars().any(char::is_control)
-                    && seen.insert(id)
-            })
-        {
-            return Some(ChildModelChoice::Preview(models));
-        }
-        let _ = writeln!(
-            stdout,
-            "Enter at most 16 distinct, nonempty model IDs (at most 256 bytes each, no control characters), leave blank to preview, or enter save / cancel."
-        );
     }
 }
 
@@ -329,7 +272,7 @@ mod tests {
     #[test]
     fn creates_a_chatgpt_profile_without_a_secret() {
         let home = tempfile::tempdir().unwrap();
-        let mut input = Cursor::new(b"\n\nmy-model\n\nsave\n".to_vec());
+        let mut input = Cursor::new(b"\n\nmy-model\nsave\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = run(
@@ -353,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_scripted_save_inherits_parent_without_another_confirmation() {
+    fn scripted_save_confirms_after_preview_without_child_model_prompt() {
         for text in [
             "\n\nparent\nsave\n",
             "openai-compatible\nwork\nparent\nhttps://api.example/v1\nWORK_KEY\nsave\n",
@@ -381,7 +324,12 @@ mod tests {
             let output = String::from_utf8(stdout).unwrap();
             assert!(output.contains("Proposed configuration"));
             assert!(output.contains("Created"));
-            assert!(!output.contains("[save / cancel] (cancel):"));
+            let preview = output.find("Proposed configuration").unwrap();
+            let confirmation = output.find("[save / cancel] (cancel):").unwrap();
+            let created = output.find("Created").unwrap();
+            assert!(preview < confirmation && confirmation < created);
+            assert_eq!(output.matches("[save / cancel] (cancel):").count(), 1);
+            assert!(!output.contains("Child model IDs"));
         }
     }
 
@@ -389,7 +337,7 @@ mod tests {
     fn creates_an_openai_compatible_profile() {
         let home = tempfile::tempdir().unwrap();
         let mut input = Cursor::new(
-            b"openai-compatible\nwork\ncheap-model\nhttps://api.example/v1\nWORK_KEY\nfirst-child, second-child\nsave\n"
+            b"openai-compatible\nwork\ncheap-model\nhttps://api.example/v1\nWORK_KEY\nsave\n"
                 .to_vec(),
         );
         let mut stdout = Vec::new();
@@ -406,11 +354,7 @@ mod tests {
         );
         let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
         assert!(config.contains("api_key_env = \"WORK_KEY\""), "{config}");
-        let parsed = otto_core::config::parse(&config).unwrap();
-        assert_eq!(
-            parsed.profiles["work"].subagent_models,
-            ["first-child", "second-child"]
-        );
+        assert!(!config.contains("subagent_models"), "{config}");
         assert!(
             config.contains("base_url = \"https://api.example/v1\""),
             "{config}"
@@ -418,53 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn child_model_input_reprompts_without_echoing_invalid_values() {
-        let invalid = [
-            "duplicate,duplicate".to_string(),
-            "first,,last".into(),
-            "bad\u{001b}id".into(),
-            "x".repeat(257),
-            (0..17)
-                .map(|n| format!("id-{n}"))
-                .collect::<Vec<_>>()
-                .join(","),
-        ];
-        for answer in invalid {
-            let mut input = Cursor::new(format!("{answer}\n first , second \n").into_bytes());
-            let mut output = Vec::new();
-            assert_eq!(
-                ask_subagent_models(&mut input, &mut output).unwrap(),
-                ChildModelChoice::Preview(vec!["first".into(), "second".into()])
-            );
-            let output = String::from_utf8(output).unwrap();
-            assert!(output.contains("at most 16 distinct"));
-            assert!(!output.contains(&answer));
-        }
-    }
-
-    #[test]
-    fn chatgpt_child_models_are_persisted_in_order() {
-        let home = tempfile::tempdir().unwrap();
-        let mut input = Cursor::new(b"\n\nparent\nchild-b,child-a\nsave\n".to_vec());
-        assert_eq!(
-            run(
-                &[],
-                &mut input,
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &lookup(home.path())
-            ),
-            0
-        );
-        let text = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
-        assert_eq!(
-            otto_core::config::parse(&text).unwrap().profiles["chatgpt"].subagent_models,
-            ["child-b", "child-a"]
-        );
-    }
-
-    #[test]
-    fn eof_or_cancel_at_child_model_setup_does_not_write() {
+    fn only_explicit_save_after_preview_writes_configuration() {
         for text in [
             "\n\nparent\n",
             "\n\nparent\ncancel\n",
@@ -501,6 +399,8 @@ mod tests {
                 output.contains("Cancelled; configuration unchanged."),
                 "{text:?}"
             );
+            assert!(output.contains("Proposed configuration"), "{text:?}");
+            assert!(output.contains("[save / cancel] (cancel):"), "{text:?}");
             assert!(!output.contains("Created"), "{text:?}");
         }
     }

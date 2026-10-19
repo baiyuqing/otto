@@ -1965,7 +1965,7 @@ impl Builder {
                 false => bash::bash_definition(private_home),
             });
         }
-        if runtime.is_some_and(|runtime| runtime.provider != otto_core::config::PROVIDER_CHATGPT) {
+        if runtime.is_some() {
             definitions.push(models::list_models_definition());
         }
         let dynamic =
@@ -2488,11 +2488,20 @@ impl Builder {
         }
         mark_build_trace(&mut trace, "runner/mcp");
 
-        if let ProviderClient::Compat { client, .. } = &client {
-            tools.push(Box::new(models::ListModelsTool::new(
-                Arc::clone(client),
-                max_output,
-            )));
+        match &client {
+            ProviderClient::Compat { client, .. } => {
+                tools.push(Box::new(models::ListModelsTool::new(
+                    Arc::clone(client),
+                    max_output,
+                )));
+            }
+            ProviderClient::ChatGpt { client, .. } => {
+                tools.push(Box::new(models::ListModelsTool::chatgpt(
+                    Arc::clone(client),
+                    max_output,
+                )));
+            }
+            _ => {}
         }
         mark_build_trace(&mut trace, "runner/provider");
 
@@ -4187,7 +4196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_chatgpt_runtime_registers_remind() {
+    async fn a_chatgpt_runtime_registers_catalog_discovery_without_manual_models() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut builder = builder(dir.path());
         let shared = builder.shared_mut();
@@ -4212,7 +4221,16 @@ mod tests {
         let names = tool_names(&runner);
         assert!(names.contains(&"remind".to_string()), "{names:?}");
         assert!(names.contains(&"agent".to_string()), "{names:?}");
-        assert!(!names.contains(&"list_models".to_string()), "{names:?}");
+        assert!(names.contains(&"list_models".to_string()), "{names:?}");
+        assert!(runtime.subagent_models.is_empty());
+        assert!(runner.system_prompt().contains("list_models"));
+        let child_names: Vec<_> = builder
+            .child_tools(&runtime, 65536, &[], &Catalog::default())
+            .expect("child tools")
+            .into_iter()
+            .map(|tool| tool.definition().name)
+            .collect();
+        assert!(!child_names.contains(&"list_models".to_string()));
     }
 
     #[tokio::test]

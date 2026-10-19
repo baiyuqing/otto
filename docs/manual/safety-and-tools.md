@@ -67,6 +67,20 @@ panels. A queued or running review is recorded as a noninteractive status.
 Approval and application remain separate: an approved operation can still fail,
 and an operation with an unknown external effect is never replayed automatically.
 
+Each tool implementation declares its own retry safety; model arguments and
+configuration cannot relax it. Only genuinely read-only tools qualify for
+bounded automatic recovery replay. Replacing the full plan is idempotent but
+is not automatically replayed. Writes, shell commands, web requests, approval
+queue changes, `agent_yield` and `submit_verification` are conservative
+non-idempotent operations; custom, plugin and MCP tools default to the same
+safe classification. When an effectful call is interrupted or its effect is
+uncertain, Otto settles an interrupted/unknown-effect result into the model's
+history instead of automatically retrying the invocation. Inspect the target
+state before trying again. The model may choose a **new invocation** with a
+fresh call ID, including the same arguments; that is a new decision, not a
+retry of the interrupted operation. Existing approval and sandbox requirements
+still apply, and permission to execute does not authorize automatic replay.
+
 **YOLO** is the deliberate answer to "stop asking me": the session decides
 every request that carries its id, including plan reviews, sandbox
 escalations and durable grants, and including requests made

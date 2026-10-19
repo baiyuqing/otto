@@ -82,8 +82,19 @@ impl SubmitVerification {
     }
 }
 
+// Submission participates in a verification workflow; do not automatically
+// resubmit a verdict after an uncertain interruption, even if validation reads history.
+pub(crate) const SUBMIT_VERIFICATION_RETRY: (&str, otto_core::model::RetrySafety) = (
+    "submit_verification",
+    otto_core::model::RetrySafety::NonIdempotent,
+);
+
 #[async_trait::async_trait]
 impl Tool for SubmitVerification {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        SUBMIT_VERIFICATION_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         verification_definition()
     }

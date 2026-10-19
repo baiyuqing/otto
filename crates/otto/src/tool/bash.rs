@@ -1023,8 +1023,15 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
     )
 }
 
+pub(crate) const BASH_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("bash", otto_core::model::RetrySafety::NonIdempotent);
+
 #[async_trait::async_trait]
 impl Tool for BashTool {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        BASH_RETRY.1
+    }
+
     fn definition(&self) -> ToolDefinition {
         if self.approvals.is_some() {
             bash_definition_with_approvals(self.private_home)

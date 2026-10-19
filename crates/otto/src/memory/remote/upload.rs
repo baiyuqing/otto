@@ -325,6 +325,7 @@ mod tests {
             arguments: None,
             is_error: false,
             operation_metadata: None,
+            ..Block::default()
         }
     }
 

@@ -1261,7 +1261,11 @@ mod tests {
 
         assert!(screen.contains("❯ hello otto"), "{screen}");
         assert!(screen.contains("\u{23fa} bash"), "{screen}");
-        assert!(screen.contains("\u{23bf} a.txt"), "{screen}");
+        assert!(screen.contains("\u{23bf} completed · 1 lines"), "{screen}");
+        assert!(
+            !screen.contains("a.txt"),
+            "raw output must stay folded: {screen}"
+        );
         assert!(screen.contains("\u{23fa} the reply"), "{screen}");
     }
 

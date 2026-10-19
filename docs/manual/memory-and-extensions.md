@@ -256,9 +256,12 @@ inclusion, not higher authority: a lower pinned value makes its effective winner
 mandatory. If mandatory winners cannot fit, all recall is discarded. Memory never
 overrides host security, system rules or actual user authorization.
 
-- `memory_search` accepts `query` **or** exact `id`, not both, and supports
-  nullable `scope_filter`, a nonempty unique array of `organization`, `workspace`,
-  `user`. It filters winning namespaces **after**
+- `memory_search` accepts `query` **or** exact `id`, not both.
+  `query: ""` browses a bounded set of effective memories, not a complete inventory.
+  Nonempty whitespace-only queries are invalid. Browsing preserves authority,
+  mandatory pinned winners, host permissions and count/rendered-byte budgets.
+  The tool also accepts nullable `scope_filter`, a nonempty unique array of
+  `organization`, `workspace`, `user`. It filters winning namespaces **after**
   resolution: a user-only view cannot expose a shadowed user value. Workspace
   filters require a selected project. Automatic recall always uses no filter.
 - Exact-item `memory_search` (with `id`) is explicitly labeled **raw**. It may

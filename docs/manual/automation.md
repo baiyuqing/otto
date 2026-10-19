@@ -4,10 +4,9 @@ Previous: [Servers and connectors](servers-and-connectors.md) · [Documentation 
 
 ## Durable workflows
 
-Durable workflows are explicit DAGs for work whose order, concurrency, human
-gates, and restart behavior must not depend on the parent model improvising a
-plan. They are separate from the interactive session and continue to be
-inspectable after `/new`, `/resume`, or process restart.
+Durable workflows define order, concurrency and human gates as DAGs, separate
+from interactive sessions. Runs remain inspectable after session changes or
+process restart.
 
 Definitions are discovered from `~/.otto/workflows/<name>.toml` and
 `<workspace>/.otto/workflows/<name>.toml`; the workspace file wins. Agent and
@@ -147,19 +146,12 @@ format holds `sha256:<64 hex>` and keeps it. Existing transcripts and memory
 records are not rewritten. Later conflicting memory overrides fail startup
 rather than silently switch to another scope.
 
-Deleting the marker makes the next start derive the memory scope again. A
-directory whose deleted marker held `sha256:<64 hex>`, or that was last used
-by an Otto release without markers, then gets the new format, and its earlier
-workspace memory records are not found. To keep them, print the old ID in the
-workspace directory:
-
-```bash
-printf 'sha256:%s\n' "$(printf %s "$(pwd -P)" | shasum -a 256 | cut -d' ' -f1)"
-```
-
-Map the canonical path to that ID under `[memory.workspace_ids]`. If Otto
-already wrote a new marker, stop Otto and delete `.otto/workspace.json` before
-the next start so the override is adopted.
+Do not delete the marker casually: the next startup derives identity again and
+can lose lookup of earlier workspace memory. Preserve an existing scope using
+`[memory.workspace_ids]` before reinitialization; conflicting overrides fail
+rather than silently rebinding. Stop all affected processes before repairing
+identity or replacing a marker. This does not move the actual memory/session
+files.
 
 ```bash
 otto workspace status --cwd /path/to/workspace

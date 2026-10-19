@@ -682,7 +682,7 @@ impl MemoryService for RemoteService {
             return Err(err(ErrorKind::Unsupported));
         };
         let context = Self::context(&request.context)?;
-        check_target(&request.context, reference)?;
+        request.validate(IDENTITY)?;
         let body = serde_json::to_vec(&wire::GetBody {
             context,
             scope: (&reference.scope).into(),

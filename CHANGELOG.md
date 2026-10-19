@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Remote `memory_search` accepts `query: ""` to browse a bounded set of effective
+  memories, not a complete inventory. Whitespace-only nonempty queries remain
+  invalid; scope authority, mandatory pinned winners, permissions, filters and
+  count/rendered-byte limits are unchanged.
+
 - Remote `memory_search` can inspect an item with only its ID. Otto checks the
   current session's authorized scopes and returns the current raw item; updates
   and forget still require a tenant-bound reference and opaque revision.

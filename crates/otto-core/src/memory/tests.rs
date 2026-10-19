@@ -151,6 +151,22 @@ fn returned_references_cannot_expand_authority_or_cross_service() {
 }
 
 #[test]
+fn recall_accepts_exact_empty_query_but_rejects_nonempty_whitespace() {
+    let mut request = request();
+    for query in ["", "editor", " editor "] {
+        request.query = query.into();
+        assert!(request.validate().is_ok(), "{query:?}");
+    }
+    for query in [" ", "\t", "\r\n", "\u{2003}"] {
+        request.query = query.into();
+        assert_eq!(
+            request.validate().unwrap_err().kind,
+            ErrorKind::InvalidInput
+        );
+    }
+}
+
+#[test]
 fn requests_and_results_reject_oversized_values() {
     let mut request = request();
     request.query = "x".repeat(MAX_QUERY_BYTES + 1);

@@ -59,6 +59,12 @@ under fixed headings. There is no template language. Definitions have at most
 32 steps, must be acyclic, and are validated completely before the run is
 stored.
 
+Prompts and stored results are bounded to 64 KiB. A step prompt plus the run
+input must fit that budget before the attempt starts, and predecessor results
+share whatever budget is left, so a large upstream result is cut with a
+`[truncated]` marker instead of failing the attempt. A stored step result is
+capped the same way, which keeps later prompts and list responses bounded.
+
 When a run starts, Otto snapshots the workflow plus each referenced agent's
 instructions, model choice, tool allowlist, and write policy. Editing the
 source files affects new runs only. The current sandbox remains authoritative
@@ -110,13 +116,21 @@ Recovery is deliberately conservative:
 - Unstarted ready steps may run after an explicit `resume`.
 - Pending approval requests keep the same request ID.
 - A step that was running becomes `interrupted` and the run becomes `paused`.
+- A step that failed leaves the run `failed` as soon as its batch settles,
+  including when the process dies between the failure and the driver's next
+  step. A run never stays `running` without an owner.
+- Rejecting an approval gate cancels the run and stops its in-flight attempts
+  before the run is recorded as `canceled`.
 - A configured `workflow_step_timeout` has the same durable result: the active
   attempt and step become `interrupted`, the run becomes `paused`, and no
   dependent step is admitted. Cleanup of the active effectful boundary is
   awaited rather than detached.
-- Interrupted steps are never retried automatically. Use
+- Interrupted and failed steps are never retried automatically. Use
   `otto workflow resume <run-id> --retry <step-id>` only after considering
-  whether its last tool call may already have caused an external effect.
+  whether the step's last tool call may already have caused an external effect.
+  Retrying one step re-admits the steps that failure canceled; a run that is
+  `paused` or `failed` needs that explicit `--retry`, and resuming without it
+  is rejected.
 
 Time travel is an explicit fork, not rewind. `otto workflow fork <run-id>
 --after-step <step-id>` creates a new run from that step's committed success

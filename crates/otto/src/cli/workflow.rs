@@ -129,7 +129,28 @@ pub async fn run_command(
     controller: &Arc<Controller>,
     stdout: &mut (dyn Write + Send),
 ) -> Result<(), String> {
-    let mut run = match command {
+    let run = execute(command, controller)
+        .await
+        .map_err(|error| error.to_string())?;
+    // The driver may have completed between the command's last observation and
+    // serialization; read once more for a coherent view.
+    let run = controller.get(&run.id).map_err(|error| error.to_string())?;
+    let view = View {
+        requests: controller
+            .requests(&run.id)
+            .map_err(|error| error.to_string())?,
+        run,
+    };
+    serde_json::to_writer_pretty(&mut *stdout, &view)
+        .map_err(|_| "write workflow output failed")?;
+    writeln!(stdout).map_err(|_| "write workflow output failed".to_string())
+}
+
+async fn execute(
+    command: Command,
+    controller: &Arc<Controller>,
+) -> Result<Run, crate::workflow::Error> {
+    Ok(match command {
         Command::Run { name, input } => {
             let run = controller.start(&name, &input).await?;
             controller.wait(&run.id).await?
@@ -161,17 +182,7 @@ pub async fn run_command(
         }
         Command::Reject { request_id } => controller.respond(&request_id, false)?,
         Command::Cancel { run_id } => controller.cancel(&run_id).await?,
-    };
-    // The driver may have completed between the command's last observation and
-    // serialization; read once more for a coherent view.
-    run = controller.get(&run.id)?;
-    let view = View {
-        requests: controller.requests(&run.id)?,
-        run,
-    };
-    serde_json::to_writer_pretty(&mut *stdout, &view)
-        .map_err(|_| "write workflow output failed")?;
-    writeln!(stdout).map_err(|_| "write workflow output failed".to_string())
+    })
 }
 
 struct AgentExecutor {
@@ -289,7 +300,9 @@ pub async fn build_controller(
     let store = builder
         .storage
         .workflow(&Path::new(&builder.home).join(".otto/workflows.db"))?;
-    store.recover(&builder.workspace_path)?;
+    store
+        .recover(&builder.workspace_path)
+        .map_err(|error| error.to_string())?;
     let agents = otto_core::config::resolve_agents(
         &builder.config,
         &builder.environment,

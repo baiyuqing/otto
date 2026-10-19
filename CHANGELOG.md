@@ -15,6 +15,7 @@ commit ledger; Git and release tags retain the full history. See the
   that failure canceled. Rejecting a gate stops the run's in-flight attempts.
   `GET /v1/workflows` is paginated (`limit`, `before`, `next_before`) and reports
   `400`, `404`, `409`, or `503` by cause instead of `409` for every failure.
+  ([#521](https://github.com/baiyuqing/otto/pull/521))
 
 - Delivered queued input remains a visible user message in server/attached TUI
   streams after the queued banner clears. Rebuild and restart `otto serve`, then

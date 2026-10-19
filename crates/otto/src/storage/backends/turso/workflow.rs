@@ -3,9 +3,10 @@ use crate::storage::drivers::turso::TursoDriver;
 use crate::storage::{Connection, OptionalExtension, Transaction, params};
 use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 use crate::workflow::contracts::*;
+use crate::workflow::error::Error;
 use crate::workflow::repository::WorkflowStore;
 use chrono::{SecondsFormat, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -88,6 +89,138 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 CREATE INDEX IF NOT EXISTS workflow_events_run ON workflow_events(run_id, seq);
 "#;
 
+/// Run header columns, in the order every read selects them.
+const RUN_COLUMNS: usize = 13;
+struct RawRun {
+    id: String,
+    workflow: String,
+    workspace: String,
+    profile: String,
+    provider: String,
+    model: String,
+    input: String,
+    forked_from_run_id: Option<String>,
+    forked_from_event_seq: Option<i64>,
+    forked_from_step_id: Option<String>,
+    status: String,
+    definition_json: String,
+    created_at: String,
+}
+
+impl RawRun {
+    fn decode(self, steps: Vec<StepRecord>) -> Result<Run, Error> {
+        Ok(Run {
+            id: self.id,
+            workflow: self.workflow,
+            workspace: self.workspace,
+            profile: self.profile,
+            provider: self.provider,
+            model: self.model,
+            input: self.input,
+            forked_from_run_id: self.forked_from_run_id,
+            forked_from_event_seq: self.forked_from_event_seq,
+            forked_from_step_id: self.forked_from_step_id,
+            status: RunStatus::parse(&self.status)?,
+            steps,
+            definition: serde_json::from_str(&self.definition_json).map_err(|_| corrupt())?,
+            created_at: self.created_at,
+        })
+    }
+}
+
+struct RawStep {
+    id: String,
+    kind: String,
+    agent: String,
+    prompt: String,
+    needs: String,
+    status: String,
+    attempt: i64,
+    result: String,
+    error: String,
+    transcript_path: String,
+    source_run_id: Option<String>,
+    source_step_id: Option<String>,
+    source_attempt: Option<i64>,
+}
+
+impl RawStep {
+    fn decode(self) -> Result<StepRecord, Error> {
+        Ok(StepRecord {
+            id: self.id,
+            kind: StepKind::parse(&self.kind)?,
+            agent: self.agent,
+            prompt: self.prompt,
+            needs: serde_json::from_str(&self.needs).map_err(|_| corrupt())?,
+            status: StepStatus::parse(&self.status)?,
+            attempt: u32::try_from(self.attempt).map_err(|_| corrupt())?,
+            result: self.result,
+            error: self.error,
+            transcript_path: self.transcript_path,
+            source_run_id: self.source_run_id,
+            source_step_id: self.source_step_id,
+            source_attempt: self
+                .source_attempt
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| corrupt())?,
+        })
+    }
+}
+
+fn raw_run(row: &crate::storage::Row, offset: usize) -> crate::storage::Result<RawRun> {
+    Ok(RawRun {
+        id: row.get(offset)?,
+        workflow: row.get(offset + 1)?,
+        workspace: row.get(offset + 2)?,
+        profile: row.get(offset + 3)?,
+        provider: row.get(offset + 4)?,
+        model: row.get(offset + 5)?,
+        input: row.get(offset + 6)?,
+        forked_from_run_id: row.get(offset + 7)?,
+        forked_from_event_seq: row.get(offset + 8)?,
+        forked_from_step_id: row.get(offset + 9)?,
+        status: row.get(offset + 10)?,
+        definition_json: row.get(offset + 11)?,
+        created_at: row.get(offset + 12)?,
+    })
+}
+
+fn raw_step(row: &crate::storage::Row, offset: usize) -> crate::storage::Result<RawStep> {
+    Ok(RawStep {
+        id: row.get(offset)?,
+        kind: row.get(offset + 1)?,
+        agent: row.get(offset + 2)?,
+        prompt: row.get(offset + 3)?,
+        needs: row.get(offset + 4)?,
+        status: row.get(offset + 5)?,
+        attempt: row.get(offset + 6)?,
+        result: row.get(offset + 7)?,
+        error: row.get(offset + 8)?,
+        transcript_path: row.get(offset + 9)?,
+        source_run_id: row.get(offset + 10)?,
+        source_step_id: row.get(offset + 11)?,
+        source_attempt: row.get(offset + 12)?,
+    })
+}
+
+/// Caps a stored result so one pathological step cannot make every later read
+/// and prompt unbounded.
+fn bounded(result: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if result.len() <= MAX_TEXT_BYTES {
+        return Cow::Borrowed(result);
+    }
+    let mut end = MAX_TEXT_BYTES;
+    while end > 0 && !result.is_char_boundary(end) {
+        end -= 1;
+    }
+    Cow::Owned(format!(
+        "{}\n\n[truncated at {MAX_TEXT_BYTES} bytes]",
+        &result[..end]
+    ))
+}
+
 struct CopiedStep {
     seq: i64,
     attempt: i64,
@@ -155,14 +288,14 @@ impl WorkflowStore for TursoWorkflowStore {
         provider: &str,
         model: &str,
         input: &str,
-    ) -> Result<Run, String> {
+    ) -> Result<Run, Error> {
         if input.len() > MAX_TEXT_BYTES {
-            return Err("workflow input exceeds 65536 UTF-8 bytes".to_string());
+            return Err(Error::invalid("workflow input exceeds 65536 UTF-8 bytes"));
         }
-        let definition_json = serde_json::to_string(definition).map_err(|_| unavailable())?;
+        let definition_json = serde_json::to_string(definition).map_err(|_| op_error())?;
         let now = timestamp();
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         transaction
             .execute(
                 "INSERT INTO workflow_runs (
@@ -182,7 +315,7 @@ impl WorkflowStore for TursoWorkflowStore {
                     now,
                 ],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         event(&transaction, id, "run_started", "", "running")?;
         for (position, step) in definition.steps.iter().enumerate() {
             let status = if step.needs.is_empty() {
@@ -202,61 +335,34 @@ impl WorkflowStore for TursoWorkflowStore {
                         step.kind.as_str(),
                         step.agent,
                         step.prompt,
-                        serde_json::to_string(&step.needs).map_err(|_| unavailable())?,
+                        serde_json::to_string(&step.needs).map_err(|_| op_error())?,
                         status.as_str(),
                     ],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             if status == StepStatus::Ready {
                 event(&transaction, id, "step_ready", &step.id, status.as_str())?;
             }
         }
-        transaction.commit().map_err(|_| unavailable())?;
+        transaction.commit().map_err(|_| op_error())?;
         drop(connection);
-        self.get_run(id)?.ok_or_else(unavailable)
+        self.get_run(id)?.ok_or_else(op_error)
     }
 
-    fn get_run(&self, id: &str) -> Result<Option<Run>, String> {
-        let connection = self.connection.lock().map_err(|_| unavailable())?;
+    fn get_run(&self, id: &str) -> Result<Option<Run>, Error> {
+        let connection = self.connection.lock().map_err(|_| op_error())?;
         let header = connection
             .query_row(
-                "SELECT workflow, workspace, profile, provider, model, input,
+                "SELECT id, workflow, workspace, profile, provider, model, input,
                         forked_from_run_id, forked_from_event_seq, forked_from_step_id,
-                        status, definition_json
+                        status, definition_json, created_at
                  FROM workflow_runs WHERE id = ?1",
                 [id],
-                |row| {
-                    Ok((
-                        row.get::<String>(0)?,
-                        row.get::<String>(1)?,
-                        row.get::<String>(2)?,
-                        row.get::<String>(3)?,
-                        row.get::<String>(4)?,
-                        row.get::<String>(5)?,
-                        row.get::<Option<String>>(6)?,
-                        row.get::<Option<i64>>(7)?,
-                        row.get::<Option<String>>(8)?,
-                        row.get::<String>(9)?,
-                        row.get::<String>(10)?,
-                    ))
-                },
+                |row| raw_run(row, 0),
             )
             .optional()
-            .map_err(|_| unavailable())?;
-        let Some((
-            workflow,
-            workspace,
-            profile,
-            provider,
-            model,
-            input,
-            forked_from_run_id,
-            forked_from_event_seq,
-            forked_from_step_id,
-            status,
-            definition_json,
-        )) = header
-        else {
+            .map_err(|_| op_error())?;
+        let Some(header) = header else {
             return Ok(None);
         };
         let mut statement = connection
@@ -266,82 +372,20 @@ impl WorkflowStore for TursoWorkflowStore {
                         source_attempt
                  FROM workflow_steps WHERE run_id = ?1 ORDER BY position",
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         let rows = statement
-            .query_map([id], |row| {
-                Ok((
-                    row.get::<String>(0)?,
-                    row.get::<String>(1)?,
-                    row.get::<String>(2)?,
-                    row.get::<String>(3)?,
-                    row.get::<String>(4)?,
-                    row.get::<String>(5)?,
-                    row.get::<i64>(6)?,
-                    row.get::<String>(7)?,
-                    row.get::<String>(8)?,
-                    row.get::<String>(9)?,
-                    row.get::<Option<String>>(10)?,
-                    row.get::<Option<String>>(11)?,
-                    row.get::<Option<i64>>(12)?,
-                ))
-            })
-            .map_err(|_| unavailable())?;
+            .query_map([id], |row| raw_step(row, 0))
+            .map_err(|_| op_error())?;
         let mut steps = Vec::new();
         for row in rows {
-            let (
-                step_id,
-                kind,
-                agent,
-                prompt,
-                needs,
-                status,
-                attempt,
-                result,
-                error,
-                path,
-                source_run_id,
-                source_step_id,
-                source_attempt,
-            ) = row.map_err(|_| unavailable())?;
-            steps.push(StepRecord {
-                id: step_id,
-                kind: StepKind::parse(&kind)?,
-                agent,
-                prompt,
-                needs: serde_json::from_str(&needs).map_err(|_| unavailable())?,
-                status: StepStatus::parse(&status)?,
-                attempt: u32::try_from(attempt).map_err(|_| unavailable())?,
-                result,
-                error,
-                transcript_path: path,
-                source_run_id,
-                source_step_id,
-                source_attempt: source_attempt
-                    .map(u32::try_from)
-                    .transpose()
-                    .map_err(|_| unavailable())?,
-            });
+            steps.push(row.map_err(|_| op_error())?.decode()?);
         }
-        Ok(Some(Run {
-            id: id.to_string(),
-            workflow,
-            workspace,
-            profile,
-            provider,
-            model,
-            input,
-            forked_from_run_id,
-            forked_from_event_seq,
-            forked_from_step_id,
-            status: RunStatus::parse(&status)?,
-            steps,
-            definition: serde_json::from_str(&definition_json).map_err(|_| unavailable())?,
-        }))
+        Ok(Some(header.decode(steps)?))
     }
 
-    fn fork_run(&self, id: &str, source_run_id: &str, after_step: &str) -> Result<Run, String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    fn fork_run(&self, id: &str, source_run_id: &str, after_step: &str) -> Result<Run, Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let source = transaction
             .query_row(
                 "SELECT workflow, definition_json, definition_hash, workspace, profile,
@@ -362,8 +406,8 @@ impl WorkflowStore for TursoWorkflowStore {
                 },
             )
             .optional()
-            .map_err(|_| unavailable())?
-            .ok_or_else(|| "workflow run not found".to_string())?;
+            .map_err(|_| op_error())?
+            .ok_or_else(|| Error::not_found("workflow run not found"))?;
         let boundary_seq: i64 = transaction
             .query_row(
                 "SELECT seq FROM workflow_events
@@ -374,9 +418,9 @@ impl WorkflowStore for TursoWorkflowStore {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| unavailable())?
-            .ok_or_else(|| "workflow fork boundary is not a committed success".to_string())?;
-        let definition: Definition = serde_json::from_str(&source.1).map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?
+            .ok_or_else(|| Error::conflict("workflow fork boundary is not a committed success"))?;
+        let definition: Definition = serde_json::from_str(&source.1).map_err(|_| op_error())?;
         let copied = copied_steps_at(&transaction, source_run_id, boundary_seq)?;
         let now = timestamp();
         transaction
@@ -403,7 +447,7 @@ impl WorkflowStore for TursoWorkflowStore {
                     now,
                 ],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         event(&transaction, id, "run_forked", after_step, "running")?;
         for (position, step) in definition.steps.iter().enumerate() {
             let copied_step = copied.get(step.id.as_str());
@@ -433,7 +477,7 @@ impl WorkflowStore for TursoWorkflowStore {
                         step.kind.as_str(),
                         step.agent,
                         step.prompt,
-                        serde_json::to_string(&step.needs).map_err(|_| unavailable())?,
+                        serde_json::to_string(&step.needs).map_err(|_| op_error())?,
                         status.as_str(),
                         copied_step.map(|step| step.attempt).unwrap_or(0),
                         copied_step.map(|step| step.result.as_str()).unwrap_or(""),
@@ -445,7 +489,7 @@ impl WorkflowStore for TursoWorkflowStore {
                         copied_step.map(|step| step.attempt),
                     ],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             if let Some(copied_step) = copied_step {
                 let kind = match step.kind {
                     StepKind::Approval => "approval_approved",
@@ -460,9 +504,9 @@ impl WorkflowStore for TursoWorkflowStore {
             }
         }
         settle_run(&transaction, id)?;
-        transaction.commit().map_err(|_| unavailable())?;
+        transaction.commit().map_err(|_| op_error())?;
         drop(connection);
-        self.get_run(id)?.ok_or_else(unavailable)
+        self.get_run(id)?.ok_or_else(op_error)
     }
 
     fn claim_ready(
@@ -470,9 +514,9 @@ impl WorkflowStore for TursoWorkflowStore {
         run_id: &str,
         step_id: &str,
         transcript_path: &str,
-    ) -> Result<u32, String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    ) -> Result<u32, Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let current = transaction
             .query_row(
                 "SELECT status, attempt FROM workflow_steps WHERE run_id = ?1 AND id = ?2",
@@ -480,12 +524,12 @@ impl WorkflowStore for TursoWorkflowStore {
                 |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)),
             )
             .optional()
-            .map_err(|_| unavailable())?
-            .ok_or_else(|| "workflow step not found".to_string())?;
+            .map_err(|_| op_error())?
+            .ok_or_else(|| Error::not_found("workflow step not found"))?;
         if current.0 != "ready" {
-            return Err("workflow step is not ready".to_string());
+            return Err(Error::conflict("workflow step is not ready"));
         }
-        let attempt = current.1.checked_add(1).ok_or_else(unavailable)?;
+        let attempt = current.1.checked_add(1).ok_or_else(op_error)?;
         let now = timestamp();
         transaction
             .execute(
@@ -494,7 +538,7 @@ impl WorkflowStore for TursoWorkflowStore {
                  WHERE run_id = ?1 AND id = ?2",
                 params![run_id, step_id, attempt, transcript_path],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         transaction
             .execute(
                 "INSERT INTO workflow_attempts (
@@ -502,10 +546,10 @@ impl WorkflowStore for TursoWorkflowStore {
                  ) VALUES (?1, ?2, ?3, 'running', ?4, ?5)",
                 params![run_id, step_id, attempt, transcript_path, now],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         event(&transaction, run_id, "step_started", step_id, "running")?;
-        transaction.commit().map_err(|_| unavailable())?;
-        u32::try_from(attempt).map_err(|_| unavailable())
+        transaction.commit().map_err(|_| op_error())?;
+        u32::try_from(attempt).map_err(|_| op_error())
     }
 
     fn finish_attempt(
@@ -514,9 +558,9 @@ impl WorkflowStore for TursoWorkflowStore {
         step_id: &str,
         attempt: u32,
         result: Result<&str, &str>,
-    ) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    ) -> Result<(), Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let matches: i64 = transaction
             .query_row(
                 "SELECT COUNT(*) FROM workflow_steps
@@ -524,28 +568,29 @@ impl WorkflowStore for TursoWorkflowStore {
                 params![run_id, step_id, attempt],
                 |row| row.get(0),
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         if matches != 1 {
-            return Err("workflow attempt is not running".to_string());
+            return Err(Error::conflict("workflow attempt is not running"));
         }
         let now = timestamp();
         match result {
             Ok(result) => {
+                let result = bounded(result);
                 transaction
                     .execute(
                         "UPDATE workflow_attempts SET status = 'succeeded', result = ?4,
                             finished_at = ?5
                          WHERE run_id = ?1 AND step_id = ?2 AND attempt = ?3",
-                        params![run_id, step_id, attempt, result, now],
+                        params![run_id, step_id, attempt, result.as_ref(), now],
                     )
-                    .map_err(|_| unavailable())?;
+                    .map_err(|_| op_error())?;
                 transaction
                     .execute(
                         "UPDATE workflow_steps SET status = 'succeeded', result = ?3
                          WHERE run_id = ?1 AND id = ?2",
-                        params![run_id, step_id, result],
+                        params![run_id, step_id, result.as_ref()],
                     )
-                    .map_err(|_| unavailable())?;
+                    .map_err(|_| op_error())?;
                 event(&transaction, run_id, "step_succeeded", step_id, "succeeded")?;
                 advance_ready(&transaction, run_id)?;
                 settle_run(&transaction, run_id)?;
@@ -558,25 +603,29 @@ impl WorkflowStore for TursoWorkflowStore {
                          WHERE run_id = ?1 AND step_id = ?2 AND attempt = ?3",
                         params![run_id, step_id, attempt, error, now],
                     )
-                    .map_err(|_| unavailable())?;
+                    .map_err(|_| op_error())?;
                 transaction
                     .execute(
                         "UPDATE workflow_steps SET status = 'failed', error = ?3
                          WHERE run_id = ?1 AND id = ?2",
                         params![run_id, step_id, error],
                     )
-                    .map_err(|_| unavailable())?;
+                    .map_err(|_| op_error())?;
                 transaction
                     .execute(
                         "UPDATE workflow_steps SET status = 'canceled'
                          WHERE run_id = ?1 AND status IN ('pending','ready','waiting')",
                         [run_id],
                     )
-                    .map_err(|_| unavailable())?;
+                    .map_err(|_| op_error())?;
                 event(&transaction, run_id, "step_failed", step_id, "failed")?;
+                // A failure is durable the moment it commits: settle the run here
+                // so a crash before the driver's next observation cannot leave it
+                // `running` with no owner.
+                settle_run(&transaction, run_id)?;
             }
         }
-        transaction.commit().map_err(|_| unavailable())
+        transaction.commit().map_err(|_| op_error())
     }
 
     fn interrupt_attempt(
@@ -585,9 +634,9 @@ impl WorkflowStore for TursoWorkflowStore {
         step_id: &str,
         attempt: u32,
         error: &str,
-    ) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    ) -> Result<(), Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let now = timestamp();
         let changed = transaction
             .execute(
@@ -596,9 +645,9 @@ impl WorkflowStore for TursoWorkflowStore {
                  WHERE run_id = ?1 AND step_id = ?2 AND attempt = ?3 AND status = 'running'",
                 params![run_id, step_id, attempt, error, now],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         if changed != 1 {
-            return Err("workflow attempt is not running".to_string());
+            return Err(Error::conflict("workflow attempt is not running"));
         }
         transaction
             .execute(
@@ -606,7 +655,7 @@ impl WorkflowStore for TursoWorkflowStore {
                  WHERE run_id = ?1 AND id = ?2 AND attempt = ?3 AND status = 'running'",
                 params![run_id, step_id, attempt, error],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         event(
             &transaction,
             run_id,
@@ -616,12 +665,12 @@ impl WorkflowStore for TursoWorkflowStore {
         )?;
         // Keep the run non-retryable until every parallel owner has settled.
         settle_run(&transaction, run_id)?;
-        transaction.commit().map_err(|_| unavailable())
+        transaction.commit().map_err(|_| op_error())
     }
 
-    fn recover(&self, workspace: &str) -> Result<usize, String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    fn recover(&self, workspace: &str) -> Result<usize, Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let running = {
             let mut statement = transaction
                 .prepare(
@@ -630,7 +679,7 @@ impl WorkflowStore for TursoWorkflowStore {
                      JOIN workflow_runs r ON r.id = s.run_id
                      WHERE s.status = 'running' AND r.workspace = ?1",
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             let rows = statement
                 .query_map([workspace], |row| {
                     Ok((
@@ -639,11 +688,10 @@ impl WorkflowStore for TursoWorkflowStore {
                         row.get::<i64>(2)?,
                     ))
                 })
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             rows.collect::<crate::storage::Result<Vec<_>>>()
-                .map_err(|_| unavailable())?
+                .map_err(|_| op_error())?
         };
-        let mut runs = HashSet::new();
         for (run_id, step_id, attempt) in &running {
             transaction
                 .execute(
@@ -651,14 +699,14 @@ impl WorkflowStore for TursoWorkflowStore {
                      WHERE run_id = ?1 AND id = ?2",
                     params![run_id, step_id],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             transaction
                 .execute(
                     "UPDATE workflow_attempts SET status = 'interrupted', finished_at = ?4
                      WHERE run_id = ?1 AND step_id = ?2 AND attempt = ?3",
                     params![run_id, step_id, attempt, timestamp()],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             event(
                 &transaction,
                 run_id,
@@ -666,31 +714,41 @@ impl WorkflowStore for TursoWorkflowStore {
                 step_id,
                 "interrupted",
             )?;
-            runs.insert(run_id.clone());
         }
-        for run_id in &runs {
-            transaction
-                .execute(
-                    "UPDATE workflow_runs SET status = 'paused', updated_at = ?2 WHERE id = ?1",
-                    params![run_id, timestamp()],
+        // Settle every unfinished run in this workspace. A run whose steps all
+        // settled before the process died must reach its durable outcome instead
+        // of staying `running` with no owner.
+        let unfinished = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT id FROM workflow_runs
+                     WHERE workspace = ?1
+                       AND status NOT IN ('succeeded','failed','canceled')",
                 )
-                .map_err(|_| unavailable())?;
-            event(&transaction, run_id, "run_paused", "", "paused")?;
+                .map_err(|_| op_error())?;
+            let rows = statement
+                .query_map([workspace], |row| row.get::<String>(0))
+                .map_err(|_| op_error())?;
+            rows.collect::<crate::storage::Result<Vec<_>>>()
+                .map_err(|_| op_error())?
+        };
+        for run_id in &unfinished {
+            settle_run(&transaction, run_id)?;
         }
-        transaction.commit().map_err(|_| unavailable())?;
+        transaction.commit().map_err(|_| op_error())?;
         Ok(running.len())
     }
 
-    fn pause_run(&self, run_id: &str) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    fn pause_run(&self, run_id: &str, error: &str) -> Result<(), Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let status: String = transaction
             .query_row(
                 "SELECT status FROM workflow_runs WHERE id = ?1",
                 [run_id],
                 |row| row.get(0),
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         if !matches!(status.as_str(), "running" | "waiting") {
             return Ok(());
         }
@@ -700,23 +758,23 @@ impl WorkflowStore for TursoWorkflowStore {
                     "SELECT id, attempt FROM workflow_steps
                      WHERE run_id = ?1 AND attempt > 0 AND status IN ('running','canceled')",
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             let rows = statement
                 .query_map([run_id], |row| {
                     Ok((row.get::<String>(0)?, row.get::<i64>(1)?))
                 })
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             rows.collect::<crate::storage::Result<Vec<_>>>()
-                .map_err(|_| unavailable())?
+                .map_err(|_| op_error())?
         };
         for (step_id, attempt) in attempts {
             transaction
                 .execute(
-                    "UPDATE workflow_steps SET status = 'interrupted'
+                    "UPDATE workflow_steps SET status = 'interrupted', error = ?3
                      WHERE run_id = ?1 AND id = ?2 AND status IN ('running','canceled')",
-                    params![run_id, step_id],
+                    params![run_id, step_id, error],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             transaction
                 .execute(
                     "UPDATE workflow_attempts SET status = 'interrupted', finished_at = ?4
@@ -724,7 +782,7 @@ impl WorkflowStore for TursoWorkflowStore {
                        AND status IN ('running','canceled')",
                     params![run_id, step_id, attempt, timestamp()],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             event(
                 &transaction,
                 run_id,
@@ -739,66 +797,9 @@ impl WorkflowStore for TursoWorkflowStore {
                  WHERE id = ?1 AND status IN ('running','waiting')",
                 params![run_id, timestamp()],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         event(&transaction, run_id, "run_paused", "", "paused")?;
-        transaction.commit().map_err(|_| unavailable())
-    }
-
-    fn finalize_interrupted_batch(&self, run_id: &str) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
-        let running: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM workflow_steps
-                 WHERE run_id = ?1 AND status = 'running'",
-                [run_id],
-                |row| row.get(0),
-            )
-            .map_err(|_| unavailable())?;
-        if running != 0 {
-            return Err("workflow interruption is not ready to finalize".to_string());
-        }
-        let changed = transaction
-            .execute(
-                "UPDATE workflow_runs SET status = 'paused', updated_at = ?2
-                 WHERE id = ?1 AND status = 'running'
-                   AND EXISTS (
-                       SELECT 1 FROM workflow_steps
-                       WHERE run_id = ?1 AND status = 'interrupted'
-                   )",
-                params![run_id, timestamp()],
-            )
-            .map_err(|_| unavailable())?;
-        if changed == 1 {
-            event(&transaction, run_id, "run_paused", "", "paused")?;
-        }
-        transaction.commit().map_err(|_| unavailable())
-    }
-
-    fn finalize_failed(&self, run_id: &str) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
-        let (running, failed): (i64, i64) = transaction
-            .query_row(
-                "SELECT
-                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
-                 FROM workflow_steps WHERE run_id = ?1",
-                [run_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|_| unavailable())?;
-        if running != 0 || failed == 0 {
-            return Err("workflow failure is not ready to finalize".to_string());
-        }
-        transaction
-            .execute(
-                "UPDATE workflow_runs SET status = 'failed', updated_at = ?2 WHERE id = ?1",
-                params![run_id, timestamp()],
-            )
-            .map_err(|_| unavailable())?;
-        event(&transaction, run_id, "run_failed", "", "failed")?;
-        transaction.commit().map_err(|_| unavailable())
+        transaction.commit().map_err(|_| op_error())
     }
 
     fn request_approval(
@@ -806,9 +807,9 @@ impl WorkflowStore for TursoWorkflowStore {
         request_id: &str,
         run_id: &str,
         step_id: &str,
-    ) -> Result<ApprovalRequest, String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    ) -> Result<ApprovalRequest, Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let row = transaction
             .query_row(
                 "SELECT kind, status, prompt FROM workflow_steps WHERE run_id = ?1 AND id = ?2",
@@ -822,10 +823,10 @@ impl WorkflowStore for TursoWorkflowStore {
                 },
             )
             .optional()
-            .map_err(|_| unavailable())?
-            .ok_or_else(|| "workflow step not found".to_string())?;
+            .map_err(|_| op_error())?
+            .ok_or_else(|| Error::not_found("workflow step not found"))?;
         if row.0 != "approval" || row.1 != "ready" {
-            return Err("workflow approval step is not ready".to_string());
+            return Err(Error::conflict("workflow approval step is not ready"));
         }
         let now = timestamp();
         transaction
@@ -833,15 +834,44 @@ impl WorkflowStore for TursoWorkflowStore {
                 "UPDATE workflow_steps SET status = 'waiting' WHERE run_id = ?1 AND id = ?2",
                 params![run_id, step_id],
             )
-            .map_err(|_| unavailable())?;
-        transaction
-            .execute(
-                "INSERT INTO workflow_requests (
-                    id, run_id, step_id, prompt, status, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
-                params![request_id, run_id, step_id, row.2, now],
+            .map_err(|_| op_error())?;
+        // `workflow_requests` is unique per (run, step): re-asking a gate keeps a
+        // still-pending request id, and a re-asked answered gate takes a fresh id
+        // so the approval service presents it again.
+        let existing = transaction
+            .query_row(
+                "SELECT id, status FROM workflow_requests
+                 WHERE run_id = ?1 AND step_id = ?2",
+                params![run_id, step_id],
+                |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
             )
-            .map_err(|_| unavailable())?;
+            .optional()
+            .map_err(|_| op_error())?;
+        let request_id = match existing {
+            Some((existing_id, status)) if status == "pending" => existing_id,
+            Some((existing_id, _)) => {
+                transaction
+                    .execute(
+                        "UPDATE workflow_requests SET id = ?2, prompt = ?3,
+                            status = 'pending', responded_at = NULL
+                         WHERE id = ?1",
+                        params![existing_id, request_id, row.2],
+                    )
+                    .map_err(|_| op_error())?;
+                request_id.to_string()
+            }
+            None => {
+                transaction
+                    .execute(
+                        "INSERT INTO workflow_requests (
+                            id, run_id, step_id, prompt, status, created_at
+                         ) VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+                        params![request_id, run_id, step_id, row.2, now],
+                    )
+                    .map_err(|_| op_error())?;
+                request_id.to_string()
+            }
+        };
         event(
             &transaction,
             run_id,
@@ -850,9 +880,9 @@ impl WorkflowStore for TursoWorkflowStore {
             "waiting",
         )?;
         settle_run(&transaction, run_id)?;
-        transaction.commit().map_err(|_| unavailable())?;
+        transaction.commit().map_err(|_| op_error())?;
         Ok(ApprovalRequest {
-            id: request_id.to_string(),
+            id: request_id,
             run_id: run_id.to_string(),
             step_id: step_id.to_string(),
             prompt: row.2,
@@ -860,9 +890,9 @@ impl WorkflowStore for TursoWorkflowStore {
         })
     }
 
-    fn respond(&self, request_id: &str, approved: bool) -> Result<String, String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    fn respond(&self, request_id: &str, approved: bool) -> Result<String, Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let row = transaction
             .query_row(
                 "SELECT run_id, step_id, status FROM workflow_requests WHERE id = ?1",
@@ -876,14 +906,16 @@ impl WorkflowStore for TursoWorkflowStore {
                 },
             )
             .optional()
-            .map_err(|_| unavailable())?
-            .ok_or_else(|| "approval request not found".to_string())?;
+            .map_err(|_| op_error())?
+            .ok_or_else(|| Error::not_found("approval request not found"))?;
         let wanted = if approved { "approved" } else { "rejected" };
         if row.2 == wanted {
             return Ok(row.0);
         }
         if row.2 != "pending" {
-            return Err("approval request already answered differently".to_string());
+            return Err(Error::conflict(
+                "approval request already answered differently",
+            ));
         }
         let now = timestamp();
         transaction
@@ -891,7 +923,7 @@ impl WorkflowStore for TursoWorkflowStore {
                 "UPDATE workflow_requests SET status = ?2, responded_at = ?3 WHERE id = ?1",
                 params![request_id, wanted, now],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         if approved {
             transaction
                 .execute(
@@ -899,7 +931,7 @@ impl WorkflowStore for TursoWorkflowStore {
                      WHERE run_id = ?1 AND id = ?2 AND status = 'waiting'",
                     params![row.0, row.1],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             event(
                 &transaction,
                 &row.0,
@@ -916,13 +948,27 @@ impl WorkflowStore for TursoWorkflowStore {
                      WHERE run_id = ?1 AND status NOT IN ('succeeded','failed','canceled')",
                     [row.0.as_str()],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
+            transaction
+                .execute(
+                    "UPDATE workflow_attempts SET status = 'canceled', finished_at = ?2
+                     WHERE run_id = ?1 AND status = 'running'",
+                    params![row.0, now],
+                )
+                .map_err(|_| op_error())?;
+            transaction
+                .execute(
+                    "UPDATE workflow_requests SET status = 'canceled', responded_at = ?2
+                     WHERE run_id = ?1 AND status = 'pending'",
+                    params![row.0, now],
+                )
+                .map_err(|_| op_error())?;
             transaction
                 .execute(
                     "UPDATE workflow_runs SET status = 'canceled', updated_at = ?2 WHERE id = ?1",
                     params![row.0, now],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             event(
                 &transaction,
                 &row.0,
@@ -932,48 +978,85 @@ impl WorkflowStore for TursoWorkflowStore {
             )?;
             event(&transaction, &row.0, "run_canceled", "", "canceled")?;
         }
-        transaction.commit().map_err(|_| unavailable())?;
+        transaction.commit().map_err(|_| op_error())?;
         Ok(row.0)
     }
 
-    fn retry(&self, run_id: &str, step_id: &str) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    fn settle(&self, run_id: &str) -> Result<(), Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
+        settle_run(&transaction, run_id)?;
+        transaction.commit().map_err(|_| op_error())
+    }
+
+    fn retry(&self, run_id: &str, step_id: &str) -> Result<(), Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let run_status: String = transaction
             .query_row(
                 "SELECT status FROM workflow_runs WHERE id = ?1",
                 [run_id],
                 |row| row.get(0),
             )
-            .map_err(|_| unavailable())?;
-        if run_status != "paused" {
-            return Err("workflow run is not paused".to_string());
+            .map_err(|_| op_error())?;
+        if !matches!(run_status.as_str(), "paused" | "failed") {
+            return Err(Error::conflict("workflow run is not paused or failed"));
         }
         let changed = transaction
             .execute(
                 "UPDATE workflow_steps SET status = 'ready', result = '', error = ''
-                 WHERE run_id = ?1 AND id = ?2 AND status = 'interrupted'",
+                 WHERE run_id = ?1 AND id = ?2 AND status IN ('failed','interrupted')",
                 params![run_id, step_id],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         if changed != 1 {
-            return Err("workflow step is not interrupted".to_string());
+            return Err(Error::conflict("workflow step is not retryable"));
+        }
+        // Siblings canceled by the failure never ran to completion, so a retry
+        // re-admits them as pending; `advance_ready` schedules them again once
+        // their dependencies succeed.
+        let revived = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT id FROM workflow_steps
+                     WHERE run_id = ?1 AND status = 'canceled' ORDER BY position",
+                )
+                .map_err(|_| op_error())?;
+            let rows = statement
+                .query_map([run_id], |row| row.get::<String>(0))
+                .map_err(|_| op_error())?;
+            rows.collect::<crate::storage::Result<Vec<_>>>()
+                .map_err(|_| op_error())?
+        };
+        if !revived.is_empty() {
+            transaction
+                .execute(
+                    "UPDATE workflow_steps SET status = 'pending', result = '', error = ''
+                     WHERE run_id = ?1 AND status = 'canceled'",
+                    [run_id],
+                )
+                .map_err(|_| op_error())?;
         }
         transaction
             .execute(
                 "UPDATE workflow_runs SET status = 'running', updated_at = ?2
-                 WHERE id = ?1 AND status = 'paused'",
+                 WHERE id = ?1 AND status IN ('paused','failed')",
                 params![run_id, timestamp()],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
+        for revived_id in &revived {
+            event(&transaction, run_id, "step_pending", revived_id, "pending")?;
+        }
         event(&transaction, run_id, "step_ready", step_id, "ready")?;
         event(&transaction, run_id, "run_resumed", "", "running")?;
-        transaction.commit().map_err(|_| unavailable())
+        advance_ready(&transaction, run_id)?;
+        settle_run(&transaction, run_id)?;
+        transaction.commit().map_err(|_| op_error())
     }
 
-    fn cancel_attempt(&self, run_id: &str, step_id: &str, attempt: u32) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    fn cancel_attempt(&self, run_id: &str, step_id: &str, attempt: u32) -> Result<(), Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let now = timestamp();
         transaction
             .execute(
@@ -981,21 +1064,23 @@ impl WorkflowStore for TursoWorkflowStore {
                  WHERE run_id = ?1 AND step_id = ?2 AND attempt = ?3 AND status = 'running'",
                 params![run_id, step_id, attempt, now],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         transaction
             .execute(
                 "UPDATE workflow_steps SET status = 'canceled'
                  WHERE run_id = ?1 AND id = ?2 AND status = 'running' AND attempt = ?3",
                 params![run_id, step_id, attempt],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         event(&transaction, run_id, "step_canceled", step_id, "canceled")?;
-        transaction.commit().map_err(|_| unavailable())
+        // The caller that canceled the run records the run status; settling here
+        // would race it into `canceled` before `cancel_run` can commit.
+        transaction.commit().map_err(|_| op_error())
     }
 
-    fn cancel_run(&self, run_id: &str) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
-        let transaction = connection.transaction().map_err(|_| unavailable())?;
+    fn cancel_run(&self, run_id: &str) -> Result<(), Error> {
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
         let status: Option<String> = transaction
             .query_row(
                 "SELECT status FROM workflow_runs WHERE id = ?1",
@@ -1003,12 +1088,12 @@ impl WorkflowStore for TursoWorkflowStore {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         let Some(status) = status else {
-            return Err("workflow run not found".to_string());
+            return Err(Error::not_found("workflow run not found"));
         };
         if matches!(status.as_str(), "succeeded" | "failed" | "canceled") {
-            return Err("workflow run already finished".to_string());
+            return Err(Error::conflict("workflow run already finished"));
         }
         transaction
             .execute(
@@ -1016,51 +1101,88 @@ impl WorkflowStore for TursoWorkflowStore {
                  WHERE run_id = ?1 AND status NOT IN ('succeeded','failed','canceled')",
                 [run_id],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         transaction
             .execute(
                 "UPDATE workflow_requests SET status = 'canceled', responded_at = ?2
                  WHERE run_id = ?1 AND status = 'pending'",
                 params![run_id, timestamp()],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
+        transaction
+            .execute(
+                "UPDATE workflow_attempts SET status = 'canceled', finished_at = ?2
+                 WHERE run_id = ?1 AND status = 'running'",
+                params![run_id, timestamp()],
+            )
+            .map_err(|_| op_error())?;
         transaction
             .execute(
                 "UPDATE workflow_runs SET status = 'canceled', updated_at = ?2 WHERE id = ?1",
                 params![run_id, timestamp()],
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         event(&transaction, run_id, "run_canceled", "", "canceled")?;
-        transaction.commit().map_err(|_| unavailable())
+        transaction.commit().map_err(|_| op_error())
     }
 
-    fn list_runs(&self, workspace: &str) -> Result<Vec<Run>, String> {
-        let ids = {
-            let connection = self.connection.lock().map_err(|_| unavailable())?;
-            let mut statement = connection
-                .prepare(
-                    "SELECT id FROM workflow_runs WHERE workspace = ?1 ORDER BY created_at DESC",
-                )
-                .map_err(|_| unavailable())?;
-            let rows = statement
-                .query_map([workspace], |row| row.get::<String>(0))
-                .map_err(|_| unavailable())?;
-            rows.collect::<crate::storage::Result<Vec<_>>>()
-                .map_err(|_| unavailable())?
-        };
-        ids.into_iter()
-            .map(|id| self.get_run(&id)?.ok_or_else(unavailable))
-            .collect()
+    fn list_runs(&self, workspace: &str, query: &ListQuery) -> Result<Vec<Run>, Error> {
+        let connection = self.connection.lock().map_err(|_| op_error())?;
+        // One query per page: run headers and their steps are joined so a page
+        // does not cost a read per run. `LIMIT -1` means "no bound".
+        let mut statement = connection
+            .prepare(
+                "SELECT r.id, r.workflow, r.workspace, r.profile, r.provider, r.model,
+                        r.input, r.forked_from_run_id, r.forked_from_event_seq,
+                        r.forked_from_step_id, r.status, r.definition_json, r.created_at,
+                        s.id, s.kind, s.agent, s.prompt, s.needs_json, s.status, s.attempt,
+                        s.result, s.error, s.transcript_path, s.source_run_id,
+                        s.source_step_id, s.source_attempt
+                 FROM (
+                     SELECT id, workflow, workspace, profile, provider, model, input,
+                            forked_from_run_id, forked_from_event_seq,
+                            forked_from_step_id, status, definition_json, created_at
+                     FROM workflow_runs
+                     WHERE workspace = ?1 AND (?2 IS NULL OR created_at < ?2)
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?3
+                 ) r
+                 JOIN workflow_steps s ON s.run_id = r.id
+                 ORDER BY r.created_at DESC, r.id DESC, s.position",
+            )
+            .map_err(|_| op_error())?;
+        let limit = i64::try_from(query.limit.unwrap_or(0))
+            .map(|limit| if limit == 0 { -1 } else { limit })
+            .map_err(|_| op_error())?;
+        let rows = statement
+            .query_map(params![workspace, query.before, limit], |row| {
+                Ok((raw_run(row, 0)?, raw_step(row, RUN_COLUMNS)?))
+            })
+            .map_err(|_| op_error())?;
+        let mut pages: Vec<(RawRun, Vec<StepRecord>)> = Vec::new();
+        for row in rows {
+            let (run, step) = row.map_err(|_| op_error())?;
+            let step = step.decode()?;
+            match pages.last_mut() {
+                Some((last, steps)) if last.id == run.id => steps.push(step),
+                _ => pages.push((run, vec![step])),
+            }
+        }
+        let mut runs = Vec::with_capacity(pages.len());
+        for (run, steps) in pages {
+            runs.push(run.decode(steps)?);
+        }
+        Ok(runs)
     }
 
-    fn requests(&self, run_id: &str) -> Result<Vec<ApprovalRequest>, String> {
-        let connection = self.connection.lock().map_err(|_| unavailable())?;
+    fn requests(&self, run_id: &str) -> Result<Vec<ApprovalRequest>, Error> {
+        let connection = self.connection.lock().map_err(|_| op_error())?;
         let mut statement = connection
             .prepare(
                 "SELECT id, step_id, prompt, status FROM workflow_requests
                  WHERE run_id = ?1 ORDER BY created_at",
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         let rows = statement
             .query_map([run_id], |row| {
                 Ok(ApprovalRequest {
@@ -1071,15 +1193,15 @@ impl WorkflowStore for TursoWorkflowStore {
                     status: row.get(3)?,
                 })
             })
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         rows.collect::<crate::storage::Result<Vec<_>>>()
-            .map_err(|_| unavailable())
+            .map_err(|_| op_error())
     }
 
-    fn request(&self, request_id: &str) -> Result<Option<ApprovalRequest>, String> {
+    fn request(&self, request_id: &str) -> Result<Option<ApprovalRequest>, Error> {
         self.connection
             .lock()
-            .map_err(|_| unavailable())?
+            .map_err(|_| op_error())?
             .query_row(
                 "SELECT run_id, step_id, prompt, status FROM workflow_requests WHERE id = ?1",
                 [request_id],
@@ -1094,7 +1216,7 @@ impl WorkflowStore for TursoWorkflowStore {
                 },
             )
             .optional()
-            .map_err(|_| unavailable())
+            .map_err(|_| op_error())
     }
 
     /// Milliseconds from the run's `created_at` to now, for the run-finished
@@ -1112,14 +1234,14 @@ impl WorkflowStore for TursoWorkflowStore {
         u128::try_from((Utc::now() - created.with_timezone(&Utc)).num_milliseconds()).ok()
     }
 
-    fn events(&self, run_id: &str, after: i64) -> Result<Vec<EventRecord>, String> {
-        let connection = self.connection.lock().map_err(|_| unavailable())?;
+    fn events(&self, run_id: &str, after: i64) -> Result<Vec<EventRecord>, Error> {
+        let connection = self.connection.lock().map_err(|_| op_error())?;
         let mut statement = connection
             .prepare(
                 "SELECT seq, occurred_at, kind, step_id, status FROM workflow_events
                  WHERE run_id = ?1 AND seq > ?2 ORDER BY seq",
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         let rows = statement
             .query_map(params![run_id, after], |row| {
                 Ok(EventRecord {
@@ -1131,9 +1253,9 @@ impl WorkflowStore for TursoWorkflowStore {
                     status: row.get(4)?,
                 })
             })
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         rows.collect::<crate::storage::Result<Vec<_>>>()
-            .map_err(|_| unavailable())
+            .map_err(|_| op_error())
     }
 }
 
@@ -1174,18 +1296,18 @@ fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<b
 }
 
 impl StepKind {
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Self, Error> {
         match value {
             "agent" => Ok(Self::Agent),
             "handoff" => Ok(Self::Handoff),
             "approval" => Ok(Self::Approval),
-            _ => Err(unavailable()),
+            _ => Err(corrupt()),
         }
     }
 }
 
 impl RunStatus {
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Self, Error> {
         match value {
             "running" => Ok(Self::Running),
             "waiting" => Ok(Self::Waiting),
@@ -1193,13 +1315,13 @@ impl RunStatus {
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
             "canceled" => Ok(Self::Canceled),
-            _ => Err(unavailable()),
+            _ => Err(corrupt()),
         }
     }
 }
 
 impl StepStatus {
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Self, Error> {
         match value {
             "pending" => Ok(Self::Pending),
             "ready" => Ok(Self::Ready),
@@ -1209,19 +1331,19 @@ impl StepStatus {
             "failed" => Ok(Self::Failed),
             "canceled" => Ok(Self::Canceled),
             "interrupted" => Ok(Self::Interrupted),
-            _ => Err(unavailable()),
+            _ => Err(corrupt()),
         }
     }
 }
 
-fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Result<(), String> {
+fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Result<(), Error> {
     let run_status: String = transaction
         .query_row(
             "SELECT status FROM workflow_runs WHERE id = ?1",
             [run_id],
             |row| row.get(0),
         )
-        .map_err(|_| unavailable())?;
+        .map_err(|_| op_error())?;
     if !matches!(run_status.as_str(), "running" | "waiting") {
         return Ok(());
     }
@@ -1231,17 +1353,17 @@ fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Result<(), Stri
                 "SELECT id, needs_json FROM workflow_steps
                  WHERE run_id = ?1 AND status = 'pending' ORDER BY position",
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         let rows = statement
             .query_map([run_id], |row| {
                 Ok((row.get::<String>(0)?, row.get::<String>(1)?))
             })
-            .map_err(|_| unavailable())?;
+            .map_err(|_| op_error())?;
         rows.collect::<crate::storage::Result<Vec<_>>>()
-            .map_err(|_| unavailable())?
+            .map_err(|_| op_error())?
     };
     for (step_id, encoded) in pending {
-        let needs: Vec<String> = serde_json::from_str(&encoded).map_err(|_| unavailable())?;
+        let needs: Vec<String> = serde_json::from_str(&encoded).map_err(|_| op_error())?;
         let mut ready = true;
         for dependency in needs {
             let status: String = transaction
@@ -1250,7 +1372,7 @@ fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Result<(), Stri
                     params![run_id, dependency],
                     |row| row.get(0),
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             if status != "succeeded" {
                 ready = false;
                 break;
@@ -1262,7 +1384,7 @@ fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Result<(), Stri
                     "UPDATE workflow_steps SET status = 'ready' WHERE run_id = ?1 AND id = ?2",
                     params![run_id, step_id],
                 )
-                .map_err(|_| unavailable())?;
+                .map_err(|_| op_error())?;
             event(transaction, run_id, "step_ready", &step_id, "ready")?;
         }
     }
@@ -1273,7 +1395,7 @@ fn copied_steps_at(
     transaction: &Transaction<'_>,
     run_id: &str,
     boundary_seq: i64,
-) -> Result<HashMap<String, CopiedStep>, String> {
+) -> Result<HashMap<String, CopiedStep>, Error> {
     let mut statement = transaction
         .prepare(
             "SELECT e.step_id, e.seq, s.attempt, s.result, s.transcript_path
@@ -1283,7 +1405,7 @@ fn copied_steps_at(
                AND e.kind IN ('step_succeeded','approval_approved')
              ORDER BY e.seq",
         )
-        .map_err(|_| unavailable())?;
+        .map_err(|_| op_error())?;
     let rows = statement
         .query_map(params![run_id, boundary_seq], |row| {
             Ok((
@@ -1296,66 +1418,75 @@ fn copied_steps_at(
                 },
             ))
         })
-        .map_err(|_| unavailable())?;
+        .map_err(|_| op_error())?;
     rows.collect::<crate::storage::Result<HashMap<_, _>>>()
-        .map_err(|_| unavailable())
+        .map_err(|_| op_error())
 }
 
-fn settle_run(transaction: &Transaction<'_>, run_id: &str) -> Result<(), String> {
-    let (unfinished, active, waiting, interrupted): (i64, i64, i64, i64) = transaction
-        .query_row(
-            "SELECT
-                SUM(CASE WHEN status != 'succeeded' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN status IN ('ready','running') THEN 1 ELSE 0 END),
-                SUM(CASE WHEN status = 'waiting' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END)
-             FROM workflow_steps WHERE run_id = ?1",
-            [run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(|_| unavailable())?;
-    if unfinished == 0 {
-        transaction
-            .execute(
-                "UPDATE workflow_runs SET status = 'succeeded', updated_at = ?2 WHERE id = ?1",
-                params![run_id, timestamp()],
-            )
-            .map_err(|_| unavailable())?;
-        event(transaction, run_id, "run_succeeded", "", "succeeded")?;
-        return Ok(());
-    }
+/// Derives the run status from its steps and writes it: the single authority
+/// over run lifecycle. Every step transition settles, so a run can never be
+/// left `running` without an owner, and a status that does not change writes no
+/// second event.
+fn settle_run(transaction: &Transaction<'_>, run_id: &str) -> Result<(), Error> {
     let status: String = transaction
         .query_row(
             "SELECT status FROM workflow_runs WHERE id = ?1",
             [run_id],
             |row| row.get(0),
         )
-        .map_err(|_| unavailable())?;
-    if active == 0 && interrupted > 0 && status == "running" {
-        transaction
-            .execute(
-                "UPDATE workflow_runs SET status = 'paused', updated_at = ?2 WHERE id = ?1",
-                params![run_id, timestamp()],
-            )
-            .map_err(|_| unavailable())?;
-        event(transaction, run_id, "run_paused", "", "paused")?;
-    } else if active == 0 && waiting > 0 && status == "running" {
-        transaction
-            .execute(
-                "UPDATE workflow_runs SET status = 'waiting', updated_at = ?2 WHERE id = ?1",
-                params![run_id, timestamp()],
-            )
-            .map_err(|_| unavailable())?;
-        event(transaction, run_id, "run_waiting", "", "waiting")?;
-    } else if active > 0 && status == "waiting" {
-        transaction
-            .execute(
-                "UPDATE workflow_runs SET status = 'running', updated_at = ?2 WHERE id = ?1",
-                params![run_id, timestamp()],
-            )
-            .map_err(|_| unavailable())?;
-        event(transaction, run_id, "run_resumed", "", "running")?;
+        .map_err(|_| op_error())?;
+    // A canceled run is owned by the caller that canceled it; terminal runs are
+    // final.
+    if matches!(status.as_str(), "succeeded" | "failed" | "canceled") {
+        return Ok(());
     }
+    let (unfinished, active, waiting, interrupted, failed): (i64, i64, i64, i64, i64) = transaction
+        .query_row(
+            "SELECT
+                    SUM(CASE WHEN status != 'succeeded' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status IN ('ready','running') THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'waiting' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+                 FROM workflow_steps WHERE run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(|_| op_error())?;
+    let (next, kind, event_status) = if unfinished == 0 {
+        ("succeeded", "run_succeeded", "succeeded")
+    } else if active > 0 {
+        ("running", "run_resumed", "running")
+    } else if waiting > 0 {
+        ("waiting", "run_waiting", "waiting")
+    } else if interrupted > 0 {
+        ("paused", "run_paused", "paused")
+    } else if failed > 0 {
+        ("failed", "run_failed", "failed")
+    } else {
+        // Only canceled steps remain: nothing failed and nothing can advance
+        // them, so the run reaches its durable cancellation instead of staying
+        // `running` with no owner.
+        ("canceled", "run_canceled", "canceled")
+    };
+    if next == status {
+        return Ok(());
+    }
+    transaction
+        .execute(
+            "UPDATE workflow_runs SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run_id, next, timestamp()],
+        )
+        .map_err(|_| op_error())?;
+    event(transaction, run_id, kind, "", event_status)?;
     Ok(())
 }
 
@@ -1365,14 +1496,14 @@ fn event(
     kind: &str,
     step_id: &str,
     status: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     transaction
         .execute(
             "INSERT INTO workflow_events (run_id, occurred_at, kind, step_id, status)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![run_id, timestamp(), kind, step_id, status],
         )
-        .map_err(|_| unavailable())?;
+        .map_err(|_| op_error())?;
     Ok(())
 }
 
@@ -1382,6 +1513,14 @@ fn timestamp() -> String {
 
 fn unavailable() -> String {
     "workflow store unavailable".to_string()
+}
+
+fn op_error() -> Error {
+    Error::unavailable(unavailable())
+}
+
+fn corrupt() -> Error {
+    Error::internal("workflow record is corrupt")
 }
 
 #[cfg(test)]

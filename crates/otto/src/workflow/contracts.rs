@@ -153,6 +153,43 @@ pub struct Run {
     pub steps: Vec<StepRecord>,
     #[serde(skip_serializing)]
     pub definition: Definition,
+    /// Creation timestamp; also the cursor for [`ListQuery::before`].
+    pub created_at: String,
+}
+
+/// Default page size for a run listing.
+pub const DEFAULT_PAGE_LIMIT: usize = 50;
+/// Upper bound on a caller-requested page size.
+pub const MAX_PAGE_LIMIT: usize = 200;
+
+/// Bounds one read of a workspace's runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ListQuery {
+    /// Cap on returned runs; `None` returns every run in the workspace.
+    pub limit: Option<usize>,
+    /// Return runs created strictly before this `created_at` cursor.
+    pub before: Option<String>,
+}
+
+impl ListQuery {
+    pub fn page(limit: usize, before: Option<String>) -> Self {
+        Self {
+            limit: Some(limit),
+            before,
+        }
+    }
+
+    pub fn all() -> Self {
+        Self::default()
+    }
+}
+
+/// One page of runs plus the cursor for the next page. `next_before` is empty
+/// on the last page, matching the task listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunPage {
+    pub runs: Vec<Run>,
+    pub next_before: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

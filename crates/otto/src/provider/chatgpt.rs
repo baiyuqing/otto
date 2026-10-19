@@ -31,6 +31,7 @@
 //!     [`crate::provider::openaicompat`].
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::auth::token::TokenSource;
@@ -58,6 +59,9 @@ const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// `OpenAI-Beta` and `originator` mirror the Codex CLI.
 const BETA_HEADER: &str = "responses=experimental";
 const ORIGINATOR: &str = "codex_cli_rs";
+/// Codex catalog compatibility version, independent of Otto's release version.
+/// Keep this aligned with the upstream catalog protocol Otto supports.
+const CATALOG_CLIENT_VERSION: &str = "0.163.0";
 
 /// Longest wait for the TCP connect and TLS handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -137,6 +141,8 @@ pub struct Client {
     http: Result<reqwest::Client, String>,
     /// Longest time between model-output events on a response body.
     model_idle_timeout: Duration,
+    catalog_cache_path: Option<PathBuf>,
+    catalog_cache_lock: tokio::sync::Mutex<()>,
 }
 
 impl Client {
@@ -169,10 +175,29 @@ impl Client {
             if !redactor.allows_dynamic_content() {
                 return Err(super::catalog::failure(REQUEST_FAILED));
             }
+            let _guard = self.catalog_cache_lock.lock().await;
+            let identity = super::catalog_cache::identity(
+                &self.base_url,
+                &self.account_id,
+                CATALOG_CLIENT_VERSION,
+            );
+            if let Some(path) = &self.catalog_cache_path
+                && let Some(mut catalog) = super::catalog_cache::load(path, &identity)
+            {
+                super::catalog::sanitize(
+                    &mut catalog,
+                    &[
+                        &credentials.access_token,
+                        &credentials.refresh_token,
+                        &self.account_id,
+                    ],
+                );
+                return Ok(catalog);
+            }
             let http = super::catalog::http()?;
             let bytes = super::catalog::read(
                 http.get(format!("{}/models", self.base_url))
-                    .query(&[("client_version", env!("CARGO_PKG_VERSION"))])
+                    .query(&[("client_version", CATALOG_CLIENT_VERSION)])
                     .bearer_auth(&credentials.access_token)
                     .header("chatgpt-account-id", &self.account_id)
                     .header("OpenAI-Beta", BETA_HEADER)
@@ -189,6 +214,9 @@ impl Client {
                     &self.account_id,
                 ],
             );
+            if let Some(path) = &self.catalog_cache_path {
+                super::catalog_cache::store(path, identity, &catalog);
+            }
             Ok(catalog)
         })
         .await
@@ -204,6 +232,12 @@ impl Client {
     /// Overrides the model-output idle bound; tests use a short one.
     pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
         self.model_idle_timeout = timeout;
+        self
+    }
+
+    /// Persist successful model catalogs under the caller's private Otto home.
+    pub fn with_catalog_cache(mut self, path: PathBuf) -> Self {
+        self.catalog_cache_path = Some(path);
         self
     }
 
@@ -243,6 +277,8 @@ impl Client {
             hosted_web_search: false,
             http,
             model_idle_timeout: MODEL_IDLE_TIMEOUT,
+            catalog_cache_path: None,
+            catalog_cache_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -446,6 +482,12 @@ impl Client {
         let status = response.status().as_u16();
         observer.activity(otto_core::diagnostics::Phase::Headers, 0, Some(status));
         if !(200..300).contains(&status) {
+            if matches!(status, 400 | 404)
+                && let Some(path) = &self.catalog_cache_path
+            {
+                let _guard = self.catalog_cache_lock.lock().await;
+                super::catalog_cache::invalidate(path);
+            }
             if let Some(retry) = transient_http_retry(status, response.headers()) {
                 *retry_reason = Some(retry);
                 return ProviderSettlement::failed(
@@ -918,10 +960,7 @@ mod tests {
         assert_eq!(catalog.models[0].metadata["description"], "[REDACTED]");
         let requests = server.requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].target,
-            format!("/models?client_version={}", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(requests[0].target, "/models?client_version=0.163.0");
         assert_eq!(
             requests[0].header("authorization"),
             "Bearer catalog-access-secret"
@@ -930,6 +969,81 @@ mod tests {
             requests[0].header("chatgpt-account-id"),
             "catalog-account-secret"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_cache_survives_client_restart_and_rejects_stale_or_other_accounts() {
+        let server = testserver::spawn(|_| {
+            testserver::json_response(r#"{"models":[{"slug":"fixture-text"}]}"#)
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache/models.json");
+        let client = |account: &str| {
+            Client::with_base_url(&server.url, static_tokens("access"), account)
+                .with_catalog_cache(path.clone())
+        };
+        assert_eq!(
+            client("account-a")
+                .catalog(&CancellationToken::new())
+                .await
+                .unwrap()
+                .models[0]
+                .id,
+            "fixture-text"
+        );
+        assert_eq!(server.count(), 1);
+        client("account-a")
+            .catalog(&CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(server.count(), 1, "fresh JSON cache should skip HTTP");
+
+        let mut entry: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        entry["fetched_at"] = 0.into();
+        std::fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
+        client("account-a")
+            .catalog(&CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(server.count(), 2, "expired JSON should refresh");
+
+        client("account-b")
+            .catalog(&CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(server.count(), 3, "another account must refresh");
+    }
+
+    #[tokio::test]
+    async fn empty_catalog_is_not_persisted_and_rejection_invalidates_cache() {
+        let empty = testserver::spawn(|_| testserver::json_response(r#"{"models":[]}"#)).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache/models.json");
+        let client = Client::with_base_url(&empty.url, static_tokens("access"), "account")
+            .with_catalog_cache(path.clone());
+        client.catalog(&CancellationToken::new()).await.unwrap();
+        client.catalog(&CancellationToken::new()).await.unwrap();
+        assert_eq!(empty.count(), 2);
+        assert!(!path.exists());
+
+        let server = testserver::spawn(|request| {
+            if request.target.starts_with("/models") {
+                testserver::json_response(r#"{"models":[{"slug":"fixture-text"}]}"#)
+            } else {
+                testserver::status_response(404, "unavailable")
+            }
+        })
+        .await;
+        let client = Client::with_base_url(&server.url, static_tokens("access"), "account")
+            .with_catalog_cache(path.clone());
+        client.catalog(&CancellationToken::new()).await.unwrap();
+        assert!(path.exists());
+        client
+            .complete(&model_request(), &mut |_| {}, &CancellationToken::new())
+            .await;
+        assert!(!path.exists(), "rejected model should invalidate cache");
     }
 
     #[tokio::test]

@@ -1408,19 +1408,15 @@ impl App {
                         ..Entry::default()
                     })
                 } else {
-                    let queued = self.queued_input.take();
+                    // A queued next input belongs to a later submission. The
+                    // active turn can emit unrelated user messages meanwhile.
                     let expected_echo =
                         self.awaiting_user_echo.as_deref() == Some(event.text.as_str());
-                    let duplicate = queued.is_none()
-                        && self.entries.last().is_some_and(|entry| {
-                            entry.kind == Some(EntryKind::User) && entry.raw == event.text
-                        });
-                    let line = queued
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or_else(|| event.text.clone());
-                    if queued.is_none() && !expected_echo {
-                        self.composer.remember(&line);
+                    let duplicate = self.entries.last().is_some_and(|entry| {
+                        entry.kind == Some(EntryKind::User) && entry.raw == event.text
+                    });
+                    if !expected_echo {
+                        self.composer.remember(&event.text);
                     }
                     if expected_echo {
                         self.awaiting_user_echo = None;
@@ -1429,7 +1425,7 @@ impl App {
                         self.entries.push(Entry {
                             id: format!("user-{}", self.entries.len()),
                             kind: Some(EntryKind::User),
-                            raw: line,
+                            raw: event.text.clone(),
                             ..Entry::default()
                         });
                     }
@@ -2066,6 +2062,23 @@ mod tests {
         });
         app.composer.edit(Edit::PreviousHistory);
         assert_eq!(app.composer.input.iter().collect::<String>(), line);
+    }
+
+    #[test]
+    fn unrelated_user_message_does_not_consume_queued_next_input() {
+        let (mut app, _) = app();
+        app.attached = false;
+        app.start_turn();
+        app.queued_input = Some("/memory search vim".into());
+
+        app.apply_event(&WireEvent {
+            event_type: USER_MESSAGE.into(),
+            text: "guidance for current turn".into(),
+            ..Default::default()
+        });
+
+        assert_eq!(app.queued_input.as_deref(), Some("/memory search vim"));
+        assert_eq!(app.entries.last().unwrap().raw, "guidance for current turn");
     }
 
     #[test]

@@ -222,10 +222,14 @@ The selected model and OpenAI-compatible endpoint must support image input.
 
 Sub-agents let the model start bounded child tasks that run in parallel. They
 use the same workspace, sandbox, and provider as the parent, with a fresh
-context by default. To use lower-cost models for routine child tasks, configure
-an ordered `subagent_models` list on the active user profile; see
+context by default. For both providers, the parent discovers the active
+connection's model catalog on demand with `list_models`, then chooses an
+economical adequate model for each task. It reuses discovery within the current
+connection, not a full catalog on every request. Explicit user choices and named
+agent defaults take precedence. Discovery failure or uncertain suitability uses
+the session model; no manual model list is required. The optional deprecated
+`subagent_models` override retains its existing order and fallback behavior; see
 [sub-agent model selection](docs/manual/getting-started.md#configuration).
-Without a list or a named agent model, children inherit the parent model.
 
 Optional named definitions live under:
 

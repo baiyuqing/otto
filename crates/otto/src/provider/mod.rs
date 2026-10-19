@@ -4,5 +4,6 @@
 //! live in `otto-core`; this module owns the transport: connection settings,
 //! the retry policy, and credential redaction.
 
+pub mod catalog;
 pub mod chatgpt;
 pub mod openaicompat;

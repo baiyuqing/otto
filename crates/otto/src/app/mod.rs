@@ -860,6 +860,34 @@ impl Controller {
             .unwrap_or_default()
     }
 
+    /// All discovered skills, including those excluded from the active runner.
+    pub(crate) fn discovered_skills(&self) -> crate::skill::Catalog {
+        self.lock()
+            .current
+            .as_ref()
+            .map(|current| current.runner.discovered_skills.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn managed_skills(&self) -> Result<management::SkillManager, String> {
+        let config = crate::config::load(&self.builder().config_path)
+            .map_err(|e| format!("cannot read skill configuration: {e}"))?;
+        let active = self.skills();
+        Ok(management::SkillManager {
+            global_enabled: config.skills.enabled.unwrap_or(true),
+            skills: self
+                .discovered_skills()
+                .skills()
+                .iter()
+                .map(|skill| management::ManagedSkill {
+                    skill: skill.clone(),
+                    enabled: !config.skills.disabled.contains(&skill.name),
+                    loaded: active.lookup(&skill.name).is_some(),
+                })
+                .collect(),
+        })
+    }
+
     /// The automatic skill contract checker, when the feature is enabled and
     /// the current runner has sub-agents built.
     pub fn skill_checker(&self) -> Option<Arc<crate::skill::check::Checker>> {

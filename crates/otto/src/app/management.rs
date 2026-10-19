@@ -9,6 +9,27 @@ use crate::memory::{
 use crate::skill;
 use chrono::Utc;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkillManager {
+    /// Latest persisted global execution switch, independent of row preferences.
+    pub global_enabled: bool,
+    pub skills: Vec<ManagedSkill>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManagedSkill {
+    pub skill: skill::Skill,
+    pub enabled: bool,
+    pub loaded: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkillInfo {
+    pub skill: skill::Skill,
+    pub body: String,
+    pub contract_check: Option<String>,
+}
+
 const SEARCH_LIMIT: usize = 20;
 const SEARCH_TOKEN_BUDGET: usize = 4000;
 
@@ -54,6 +75,8 @@ pub(crate) enum Request {
         text: String,
     },
     Skills,
+    SkillManager,
+    SkillInfo(String),
     SkillDetail(String),
     SkillSet {
         name: String,
@@ -84,6 +107,8 @@ pub(crate) enum Reply {
     MemoryReviewed(ReviewDecision, Box<memory::ReviewResult>),
     Remembered(memory::Record),
     Skills(skill::Catalog),
+    SkillManager(SkillManager),
+    SkillInfo(SkillInfo),
     SkillDetail {
         skill: skill::Skill,
         body: String,
@@ -595,6 +620,23 @@ impl Controller {
                 ))
             }
             Skills => Ok(Reply::Skills(self.skills())),
+            SkillManager => self.managed_skills().map(Reply::SkillManager),
+            SkillInfo(name) => {
+                let catalog = self.discovered_skills();
+                let found = catalog
+                    .lookup(&name)
+                    .ok_or_else(|| format!("unknown skill: {name}"))?;
+                let body = skill::load(found).map_err(|e| format!("skill {name}: {e}"))?;
+                let contract_check = found.contract.as_ref().and_then(|_| {
+                    self.skill_checker()
+                        .map(|c| format!("Contract check: {}", c.display(found)))
+                });
+                Ok(Reply::SkillInfo(crate::app::management::SkillInfo {
+                    skill: found.clone(),
+                    body,
+                    contract_check,
+                }))
+            }
             SkillDetail(name) => {
                 let catalog = self.skills();
                 let found = catalog
@@ -629,7 +671,7 @@ impl Controller {
                 )
                 .map_err(|e| format!("skill {name}: {e}"))?;
                 Ok(Reply::SkillSet(format!(
-                    "skill {name} is {}; restart Otto to apply the active catalog",
+                    "skill {name} preference is {}; restart Otto to apply the active catalog (activation also requires [skills].enabled = true)",
                     if enabled { "enabled" } else { "disabled" }
                 )))
             }

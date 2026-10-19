@@ -154,7 +154,12 @@ const ENTRIES: &[Entry] = &[
     entry!("/context", "inspect context", false, context),
     entry!("/trace", "show the turn timeline", false, trace),
     entry!("/timers", "list or cancel reminders", true, timers),
-    entry!("/skill", "list, inspect or configure skills", true, skill),
+    entry!(
+        "/skill",
+        "browse or configure skills (Space toggles)",
+        false,
+        skill
+    ),
     entry!("/mcp", "inspect MCP servers or authenticate one", true, mcp),
 ];
 
@@ -385,7 +390,11 @@ fn remember(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     management("remember", args)
 }
 fn skill(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    management("skill", args)
+    if args.is_empty() {
+        push(super::skills::Skills::default())
+    } else {
+        management("skill", args)
+    }
 }
 fn timers(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     management("timers", args)

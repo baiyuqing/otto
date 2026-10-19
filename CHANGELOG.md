@@ -191,6 +191,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- The TUI `/skill` command opens a searchable skill manager with highlighted
+  keyboard navigation, scrollable read-only details, and enable/disable controls.
+  Disabled skills remain manageable; saved configuration and current-session
+  loading are shown separately, with saving errors and restart guidance. Existing
+  text commands remain available. See [skills](docs/manual/memory-and-extensions.md#skills).
+
 - The `agent` tool accepts `fork_before`, the text of an earlier user prompt.
   The sub-agent then starts with the parent conversation as it was before
   that prompt's turn, read from the session file, including turns compaction

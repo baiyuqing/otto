@@ -146,6 +146,54 @@ impl Client {
         Self::with_base_url(DEFAULT_BASE_URL, tokens, account_id)
     }
 
+    /// Fetch the subscription catalog on demand, using the same native token source.
+    /// Wire contract: openai/codex@8c076942cb70fba8e5c4732c23f1faabc4aed484,
+    /// codex-rs/codex-api/src/endpoint/models.rs and protocol/src/openai_models.rs.
+    pub async fn catalog(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<super::catalog::ModelCatalog, ProviderError> {
+        super::catalog::controlled(cancel, async {
+            let credentials = self.tokens.token(cancel).await.map_err(|error| {
+                if matches!(error, crate::auth::AuthError::Cancelled) {
+                    ProviderError::Cancelled
+                } else {
+                    super::catalog::failure(AUTHORIZATION_FAILED)
+                }
+            })?;
+            if credentials.access_token.trim().is_empty() || self.account_id.trim().is_empty() {
+                return Err(super::catalog::failure(AUTHORIZATION_FAILED));
+            }
+            let redactor =
+                Redactor::new(&[credentials.access_token.clone(), self.account_id.clone()]);
+            if !redactor.allows_dynamic_content() {
+                return Err(super::catalog::failure(REQUEST_FAILED));
+            }
+            let http = super::catalog::http()?;
+            let bytes = super::catalog::read(
+                http.get(format!("{}/models", self.base_url))
+                    .query(&[("client_version", env!("CARGO_PKG_VERSION"))])
+                    .bearer_auth(&credentials.access_token)
+                    .header("chatgpt-account-id", &self.account_id)
+                    .header("OpenAI-Beta", BETA_HEADER)
+                    .header("originator", ORIGINATOR)
+                    .header("Accept", "application/json"),
+            )
+            .await?;
+            let mut catalog = super::catalog::parse(&bytes, true)?;
+            super::catalog::sanitize(
+                &mut catalog,
+                &[
+                    &credentials.access_token,
+                    &credentials.refresh_token,
+                    &self.account_id,
+                ],
+            );
+            Ok(catalog)
+        })
+        .await
+    }
+
     /// Whether requests also advertise the backend-hosted `web_search` tool.
     /// The backend runs the search itself; Otto sees no tool call for it.
     pub fn with_hosted_web_search(mut self, enabled: bool) -> Self {
@@ -855,6 +903,52 @@ mod tests {
             std::path::PathBuf::from("/nonexistent/chatgpt.json"),
             CancellationToken::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn catalog_uses_subscription_auth_and_official_models_shape() {
+        let server = testserver::spawn(|_| testserver::json_response( r#"{"models":[{"slug":"fixture-text","visibility":"list","input_modalities":["text"],"supported_in_api":false,"description":"catalog-access-secret"}]}"#)).await;
+        let client = Client::with_base_url(
+            &server.url,
+            static_tokens("catalog-access-secret"),
+            "catalog-account-secret",
+        );
+        let catalog = client.catalog(&CancellationToken::new()).await.unwrap();
+        assert_eq!(catalog.models[0].id, "fixture-text");
+        assert_eq!(catalog.models[0].metadata["description"], "[REDACTED]");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].target,
+            format!("/models?client_version={}", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            requests[0].header("authorization"),
+            "Bearer catalog-access-secret"
+        );
+        assert_eq!(
+            requests[0].header("chatgpt-account-id"),
+            "catalog-account-secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_missing_auth_and_pre_cancel_are_safe() {
+        let client = Client::with_base_url("http://127.0.0.1:1", static_tokens(""), "acct");
+        assert!(
+            client
+                .catalog(&CancellationToken::new())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("otto login")
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            client.catalog(&cancel).await,
+            Err(ProviderError::Cancelled)
+        ));
     }
 
     fn model_request() -> Request {

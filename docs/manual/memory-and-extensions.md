@@ -980,7 +980,8 @@ What's wired:
   name. The sub-agent listing follows the same rule.
 - A skill name in `disabled` remains on disk but is excluded from the model-visible
   listing, the `skill` tool, and skill-derived sub-agent definitions after Otto
-  restarts. Use `/skill set <name> enabled|disabled` to maintain this list.
+  restarts. Use the TUI `/skill` manager or `/skill set <name> enabled|disabled`
+  to maintain this list.
 - The `skill` tool for the model to load instructions by name or read supporting
   files.
 - Automatic appending of existing skill roots to Seatbelt read paths at process
@@ -992,7 +993,7 @@ What's wired:
   declaring what the skill expects to be given and what it returns. They must
   be declared together; declaring one alone, leaving one blank, or exceeding
   the bound prints one stderr warning and the skill keeps working as if
-  neither were declared. `/skills` marks a skill that declares both with
+  neither were declared. The text `/skill` list marks a skill that declares both with
   `[contract]`. They are Otto's own addition to the Agent Skills format, so
   other tools ignore them. See the
   [sub-agent execution design](../specs/2026-09-22-skill-subagent-execution.md)
@@ -1012,9 +1013,29 @@ What's wired:
   is never marked `exec="agent"` unless it really was registered.
 - `/skill generated` and `/skill revert <name>` list and undo the skills that
   [reflection](memory-and-extensions.md#reflection) wrote.
-- `/skill` lists every available skill; `/skill <name>` displays its description,
-  location, contract-check status, and instructions; `/skill set <name>
-  enabled|disabled` persists its state change. `/skills` is not a command.
+- In the TUI, `/skill` opens an interactive manager. Type to filter by name or
+  description; Backspace edits the filter. Use Up/Down or Page Up/Page Down to
+  move the highlighted selection, Enter to open read-only full details, and
+  Space to enable or disable the selected skill. Details include the skill's
+  description, location and instructions, with contract information where
+  available; Up/Down and Page Up/Page Down scroll them. Esc returns from details
+  to the list, then closes the manager. Enter never executes a skill.
+- The manager includes discovered disabled skills so they can be re-enabled,
+  including an inventory when skills are globally disabled. It distinguishes
+  the saved global switch, each skill's enabled/disabled preference, and whether
+  the skill is loaded in the current session. While globally disabled, details
+  remain available but TUI toggles are blocked: set `[skills].enabled = true`
+  in Otto configuration and restart (the serving process for attached TUI).
+  Restarting alone does not override global disablement. Saving uses the same configuration writer
+  as `/skill set`; while a write is pending, duplicate changes are blocked.
+  Success requires restarting Otto (or the serving `otto serve` for an attached
+  TUI) to apply the saved configuration; there is no in-session hot reload.
+  On failure the confirmed state is retained and an error is shown: resolve
+  the reported configuration or permission problem, then retry. Disabling a
+  skill does not remove its files or previously loaded instructions from history.
+- Text frontends retain the `/skill` listing. `/skill <name>` displays its
+  description, location, contract-check status, and instructions; `/skill set
+  <name> enabled|disabled` persists its state change. `/skills` is not a command.
 - Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is
   fixed within a session. A loaded body is a normal tool result stored in the
   session and re-sent on every later request until compaction.

@@ -5,6 +5,7 @@ mod choice;
 mod collection;
 mod commands;
 mod review;
+pub(super) mod skills;
 #[cfg(test)]
 mod tests;
 mod trace;
@@ -29,6 +30,7 @@ pub(crate) trait Presenter: Send {
     fn start(&mut self) -> Option<Request> {
         self.refresh()
     }
+    fn failed(&mut self, _: &str) {}
     fn refresh(&self) -> Option<Request> {
         None
     }

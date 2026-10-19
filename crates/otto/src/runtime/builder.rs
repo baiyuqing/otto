@@ -781,6 +781,7 @@ pub struct Runner {
     pub(crate) reminders: Option<Arc<crate::tool::remind::Reminders>>,
     /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
     pub(crate) skills: Catalog,
+    pub(crate) discovered_skills: Catalog,
     /// Named child definitions used by durable workflow discovery.
     pub(crate) agents: crate::subagent::Catalog,
     /// The MCP servers connected for this runner. `/mcp` reads its status
@@ -1577,6 +1578,7 @@ impl Runner {
             tasks: Some(tasks),
             subagents: None,
             skills: Catalog::default(),
+            discovered_skills: Catalog::default(),
             agents: crate::subagent::Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
             task_control,
@@ -2905,6 +2907,7 @@ impl Builder {
             subagents: subagents.runner,
             reminders: subagents.reminders,
             skills: catalogs.skills.clone(),
+            discovered_skills: catalogs.discovered_skills.clone(),
             agents: catalogs.agent_catalog.clone(),
             mcp: mcp_servers,
             task_control,

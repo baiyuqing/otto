@@ -832,6 +832,51 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn skill_manager_renders_selection_preview_and_scrolling_in_small_terminals() {
+        use crate::tui::features::Presenter;
+        use crate::tui::interaction::Intent;
+        let remote = crate::tui::attach::Remote::offline(Vec::new());
+        let mut app = App::new(&crate::tui::app::Backend::Attach(&remote));
+        let mut skills = crate::tui::features::skills::Skills::default();
+        let rows = (0..80)
+            .map(|i| crate::app::management::ManagedSkill {
+                skill: crate::skill::Skill {
+                    name: format!("skill-{i:02}"),
+                    description: format!("Preview description {i}"),
+                    contract: None,
+                    directory: "/skills/demo".into(),
+                    path: "/skills/demo/SKILL.md".into(),
+                },
+                enabled: false,
+                loaded: true,
+            })
+            .collect();
+        skills.receive(crate::tui::backend::Reply::Management(
+            crate::app::management::Reply::SkillManager(crate::app::management::SkillManager {
+                global_enabled: true,
+                skills: rows,
+            }),
+        ));
+        let view = skills.view();
+        app.surfaces.push(Box::new(skills), &view);
+        let wide = screen_rows(&app, 120, 35).join("\n");
+        assert!(wide.contains("Preview description 0"), "{wide}");
+        assert!(wide.contains("[disabled]"), "{wide}");
+        assert!(wide.contains("Configured: disabled"), "{wide}");
+        app.surfaces
+            .top_mut()
+            .unwrap()
+            .state
+            .handle(&view, Intent::Move(79));
+        let scrolled = screen_rows(&app, 120, 35).join("\n");
+        assert!(scrolled.contains("skill-79"), "{scrolled}");
+        for (width, height) in [(40, 8), (55, 15), (10, 3)] {
+            let rows = screen_rows(&app, width, height);
+            assert_eq!(rows.len(), height as usize);
+        }
+    }
+
     fn trace_app() -> App {
         let remote = crate::tui::attach::Remote::offline(Vec::new());
         let mut app = App::new(&crate::tui::app::Backend::Attach(&remote));

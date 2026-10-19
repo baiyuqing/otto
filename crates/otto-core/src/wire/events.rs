@@ -15,7 +15,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// The first frame of a turn a client started.
+/// A submitted prompt or delivered in-turn user guidance.
 pub const USER_MESSAGE: &str = "user_message";
 /// The last frame of every turn.
 pub const TURN_END: &str = "turn_end";
@@ -164,7 +164,7 @@ pub struct WireEvent {
 }
 
 impl WireEvent {
-    /// `user_message`: the prompt text of a turn a client started.
+    /// `user_message`: submitted prompt text or delivered in-turn user guidance.
     pub fn user_message(text: &str, image: bool) -> Self {
         Self {
             event_type: USER_MESSAGE.to_string(),
@@ -303,6 +303,11 @@ pub fn to_wire(event: &Event) -> WireEvent {
             wire.usage_present = Some(*present);
             wire.cached_input_tokens_present = (*present).then_some(*cached_input_tokens_present);
         }
+        Event::Notification {
+            kind: Some(crate::agent::inbox::NotificationKind::UserMessage),
+            text,
+            ..
+        } => return WireEvent::user_message(text, false),
         Event::Notification {
             kind: _,
             task_id,
@@ -479,6 +484,20 @@ mod tests {
                 cached_input_tokens_present: false,
             }),
             r#"{"type":"provider_usage","usage":{"input_tokens":0,"output_tokens":0},"usage_present":false}"#
+        );
+    }
+
+    #[test]
+    fn delivered_guidance_is_a_user_message_not_a_system_notification() {
+        assert_eq!(
+            json(&Event::Notification {
+                kind: Some(crate::agent::inbox::NotificationKind::UserMessage),
+                task_id: String::new(),
+                text: "我发的 queued input 又看不到了".into(),
+                usage: Usage::default(),
+                present: false,
+            }),
+            r#"{"type":"user_message","text":"我发的 queued input 又看不到了"}"#
         );
     }
 

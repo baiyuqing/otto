@@ -511,6 +511,40 @@ mod tests {
     }
 
     #[test]
+    fn delivered_guidance_remains_a_user_message_in_live_and_replayed_frames() {
+        let (turn, metrics) = turn();
+        let text = "我发的 queued input 又看不到了";
+        let mut emit = turn.emitter(&metrics);
+        emit(Event::Notification {
+            kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
+            task_id: String::new(),
+            text: text.into(),
+            usage: Usage::default(),
+            present: false,
+        });
+        drop(emit);
+        let (live, _) = turn.snapshot(0);
+        assert_eq!(live, vec![WireEvent::user_message(text, false)]);
+        turn.finish(None, false);
+        let (replayed, terminal) = turn.snapshot(0);
+        assert!(terminal);
+        assert_eq!(replayed[0], WireEvent::user_message(text, false));
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|event| event.event_type == "user_message")
+                .count(),
+            1
+        );
+        assert!(
+            turn.snapshot(1)
+                .0
+                .iter()
+                .all(|event| event.event_type != "user_message")
+        );
+    }
+
+    #[test]
     fn emit_accumulates_notification_usage() {
         let (turn, metrics) = turn();
         let mut emit = turn.emitter(&metrics);

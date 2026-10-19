@@ -9,6 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- Delivered queued input remains a visible user message in server/attached TUI
+  streams after the queued banner clears. Rebuild and restart `otto serve`, then
+  reconnect clients; no configuration or history migration is needed.
+  ([#519](https://github.com/baiyuqing/otto/pull/519))
+
 - Memory now defaults to editable files in `~/.otto/memory/`, not a Turso
   database. Recall injects standing preferences and bounded in-scope records;
   search uses case-insensitive substrings. Invalid files are reported by

@@ -17,6 +17,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Delivered queued input now appears as a user message in server event streams,
+  including attached TUI sessions, instead of losing its user-message type as a
+  system notification. Local and attached clients share the same conversion;
+  upgrade and restart Otto/`otto serve` to apply the fix. Session history and
+  queued-input admission behavior are unchanged.
+
 - Stop secret-scanning approval content, including credential-shaped text and
   configured exact secret matches. Approval text may be displayed and persisted;
   do not include actual secrets. Policy, permissions, human checkpoints, model

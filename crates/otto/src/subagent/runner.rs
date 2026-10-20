@@ -403,6 +403,7 @@ impl Runner {
         let mut preview = capped_text_result(text, cap).content;
         if task.is_final() {
             preview.push_str(&self.reports.handoff(
+                self.scratch_root.get(),
                 &task.id,
                 &self.redactor().redact_string(&task.result),
                 text.len() > cap,

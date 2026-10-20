@@ -167,7 +167,7 @@ impl Workspace {
             Ok(metadata) => MutationKey::Entry {
                 device: std::os::unix::fs::MetadataExt::dev(&metadata),
                 inode: std::os::unix::fs::MetadataExt::ino(&metadata),
-                name: base(&cleaned),
+                name: fold_name_case(base(&cleaned)),
             },
             Err(_) => MutationKey::Path(cleaned),
         }
@@ -451,6 +451,17 @@ fn escapes_workspace(path: &[u8]) -> io::Error {
     )
 }
 
+/// Lower-cases a final name for the lock key when it is valid UTF-8. On a
+/// case-insensitive filesystem `Foo.rs` and `foo.rs` are one file and must
+/// share one lock; on a case-sensitive one this only makes two distinct files
+/// share a lock, which serializes them and does not affect correctness.
+fn fold_name_case(name: Vec<u8>) -> Vec<u8> {
+    match String::from_utf8(name) {
+        Ok(text) => text.to_lowercase().into_bytes(),
+        Err(error) => error.into_bytes(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,5 +728,15 @@ mod identity_tests {
         ] {
             assert!(workspace.write_relative(Path::new(name)).is_err(), "{name}");
         }
+    }
+
+    #[test]
+    fn mutation_key_ignores_the_case_of_the_final_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        assert_eq!(
+            workspace.mutation_key(Path::new("Foo.rs")),
+            workspace.mutation_key(Path::new("foo.rs"))
+        );
     }
 }

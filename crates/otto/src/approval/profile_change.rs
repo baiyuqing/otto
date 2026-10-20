@@ -1,6 +1,7 @@
 //! Profile changes retain typed operations and hashes, not whole config copies.
 use super::{Domain, Error, Result};
 use crate::config::{ProfileChange, ProfileChangePreview};
+use crate::hex::to_hex;
 use otto_core::approval::{Request, State};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -39,7 +40,7 @@ impl Artifact {
 }
 fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
+    to_hex(&Sha256::digest(bytes))
 }
 pub struct Adapter {
     pub path: PathBuf,

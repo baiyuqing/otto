@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::hex::to_hex;
 use otto_core::config::update_sandbox;
 
 /// One `[sandbox]` change a frontend applies to the configuration file while a
@@ -124,7 +125,7 @@ pub fn amend_sandbox_config_checked(
     let original = original.unwrap_or_default();
     if let Some(expected) = expected {
         use sha2::Digest;
-        if format!("{:x}", sha2::Sha256::digest(&original)) != expected {
+        if to_hex(&sha2::Sha256::digest(&original)) != expected {
             return Err("configuration changed after approval; request approval again".into());
         }
     }

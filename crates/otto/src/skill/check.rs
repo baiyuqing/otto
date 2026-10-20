@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 
+use crate::hex::to_hex;
 use crate::skill::check_repository::{CheckStore, NewRow, ResultJson, Row};
 use crate::skill::frontmatter;
 use crate::tool::root::Root;
@@ -205,10 +206,6 @@ const QUESTIONS: [Question; 4] = [
         criteria: Criteria::Score(&["does not match", "partly matches", "matches"]),
     },
 ];
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
 
 /// `sha256(SKILL.md bytes)`.
 fn content_sha256(bytes: &[u8]) -> String {

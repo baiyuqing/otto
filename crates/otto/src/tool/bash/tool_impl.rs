@@ -1,6 +1,7 @@
 //! The `Tool` trait implementation for the bash tool.
 
 use super::*;
+use crate::hex::to_hex;
 
 #[async_trait::async_trait]
 impl Tool for BashTool {
@@ -66,7 +67,7 @@ impl Tool for BashTool {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![],
                 Err(_) => return Err(self.argument_error("configuration is unavailable")),
             };
-            format!("{:x}", sha2::Sha256::digest(&bytes))
+            to_hex(&sha2::Sha256::digest(&bytes))
         } else {
             String::new()
         };

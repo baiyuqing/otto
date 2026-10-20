@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::catalog::{MAX_BODY, ModelCatalog};
+use crate::hex::to_hex;
 
 pub const TTL: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 
@@ -24,7 +25,7 @@ pub fn identity(base_url: &str, account_id: &str, client_version: &str) -> Strin
         digest.update((value.len() as u64).to_le_bytes());
         digest.update(value.as_bytes());
     }
-    format!("{:x}", digest.finalize())
+    to_hex(&digest.finalize())
 }
 
 fn now() -> Option<u64> {

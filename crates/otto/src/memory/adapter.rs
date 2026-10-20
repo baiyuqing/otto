@@ -16,6 +16,7 @@ use otto_core::{memory as port, operation::OperationControl};
 use sha2::{Digest, Sha256};
 
 use super::{Candidate, CandidateAction, CandidateState, Record, Scope, Service};
+use crate::hex::to_hex;
 
 pub struct BuiltinAdapter {
     service: Arc<Service>,
@@ -273,7 +274,7 @@ fn fingerprint(service: &str, candidate: &Candidate) -> port::Result<String> {
         candidate.created_at.timestamp_micros(),
     ))
     .map_err(|_| error(port::ErrorKind::InvalidInput))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(to_hex(&Sha256::digest(bytes)))
 }
 
 #[async_trait::async_trait]

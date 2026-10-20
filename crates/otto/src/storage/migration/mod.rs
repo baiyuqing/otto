@@ -8,6 +8,7 @@ pub use contracts::*;
 
 use std::io::Write;
 
+use crate::hex::to_hex;
 use sha2::{Digest, Sha256};
 
 pub struct Coordinator<'a> {
@@ -348,7 +349,7 @@ pub fn chunk_hash(chunk: &Chunk, max_bytes: usize) -> Result<String> {
         remaining: max_bytes,
     };
     serde_json::to_writer(&mut writer, chunk).map_err(|error| Error::Invalid(error.to_string()))?;
-    Ok(format!("{:x}", writer.hash.finalize()))
+    Ok(to_hex(&writer.hash.finalize()))
 }
 
 #[cfg(test)]

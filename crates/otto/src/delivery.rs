@@ -19,6 +19,7 @@ use serde_json::{json, value::RawValue};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use crate::hex::to_hex;
 use crate::sandbox::{CommandExecutor, Request as SandboxRequest, Streams};
 use crate::storage::{Connection, OptionalExtension, params};
 use crate::tool::result::decode_strict_json;
@@ -319,7 +320,7 @@ fn canonical_line(output: &str, message: &str) -> Result<PathBuf, String> {
 fn hash(value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(value.as_bytes());
-    format!("{:x}", digest.finalize())
+    to_hex(&digest.finalize())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

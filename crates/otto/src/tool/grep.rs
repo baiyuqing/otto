@@ -7,6 +7,7 @@
 //! limit stopped the search.
 
 use std::io::{self, Read};
+use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -50,13 +51,13 @@ struct GrepArgs {
 }
 
 /// Searches workspace file contents.
-pub struct GrepTool<'a> {
-    workspace: &'a Workspace,
+pub struct GrepTool {
+    workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }
 
-impl<'a> GrepTool<'a> {
-    pub fn new(workspace: &'a Workspace, max_output_bytes: usize) -> Self {
+impl GrepTool {
+    pub fn new(workspace: Arc<Workspace>, max_output_bytes: usize) -> Self {
         Self {
             workspace,
             max_output_bytes: max_output_bytes.min(super::result::RETRIEVAL_BYTES),
@@ -112,7 +113,7 @@ pub(crate) const GREP_RETRY: (&str, otto_core::model::RetrySafety) =
     ("grep", otto_core::model::RetrySafety::ReadOnly);
 
 #[async_trait::async_trait]
-impl Tool for GrepTool<'_> {
+impl Tool for GrepTool {
     fn retry_safety(&self) -> otto_core::model::RetrySafety {
         GREP_RETRY.1
     }
@@ -163,7 +164,7 @@ impl Tool for GrepTool<'_> {
             Ok(root) => root.to_string_lossy().into_owned(),
             Err(error) => return error_result(error),
         };
-        match search_root_inside_git(self.workspace, search_path, &root) {
+        match search_root_inside_git(&self.workspace, search_path, &root) {
             Ok(true) => return ToolResult::default(),
             Ok(false) => {}
             Err(error) => return error_result(error),
@@ -385,8 +386,8 @@ mod tests {
             "match with a long result line\n".repeat(1000),
         )
         .unwrap();
-        let workspace = Workspace::new(dir.path()).unwrap();
-        let tool = GrepTool::new(&workspace, 51200);
+        let workspace = Arc::new(Workspace::new(dir.path()).unwrap());
+        let tool = GrepTool::new(Arc::clone(&workspace), 51200);
         let args =
             serde_json::value::to_raw_value(&json!({"pattern":"match", "limit":1000})).unwrap();
         let result = tool.execute(&args, &CancellationToken::new()).await;
@@ -403,7 +404,7 @@ mod tests {
             write_search_file(root.path(), name, "needle here\n");
         }
         let workspace = workspace(root.path());
-        let tool = GrepTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let ignored = run(&tool, r#"{"pattern":"needle"}"#).await;
         assert!(!ignored.is_error, "{ignored:?}");
@@ -436,7 +437,7 @@ mod tests {
         .unwrap();
 
         let workspace = workspace(root.path());
-        let tool = GrepTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let result = run(&tool, r#"{"pattern":"TODO|FIXME","glob":"**/*.go"}"#).await;
         assert!(!result.is_error, "{result:?}");
@@ -462,7 +463,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_search_file(root.path(), "a.txt", "match one\nmatch two\n");
         let workspace = workspace(root.path());
-        let tool = GrepTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let limited = run(&tool, r#"{"pattern":"match","limit":1}"#).await;
         assert!(!limited.is_error, "{limited:?}");
@@ -505,7 +506,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_search_file(root.path(), ".git/config", "match secret\n");
         let workspace = workspace(root.path());
-        let tool = GrepTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         for search_path in [".git", ".git/config"] {
             let result = run(
                 &tool,
@@ -524,7 +525,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_search_file(root.path(), "file.txt", "matching long output line\n");
         let workspace = workspace(root.path());
-        let result = run(&GrepTool::new(&workspace, 8), r#"{"pattern":"matching"}"#).await;
+        let result = run(
+            &GrepTool::new(Arc::clone(&workspace), 8),
+            r#"{"pattern":"matching"}"#,
+        )
+        .await;
         assert!(!result.is_error, "{result:?}");
         assert!(result.content.contains("truncated"), "{result:?}");
         // A truncated result ends with fixed narrowing guidance; only the

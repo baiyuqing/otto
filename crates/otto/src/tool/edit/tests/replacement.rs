@@ -7,7 +7,7 @@ async fn an_exact_single_match_is_replaced_and_diffed() {
     let (root, path) = sample("hello world\n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"world","new_text":"there"}"#,
     )
     .await;
@@ -23,7 +23,7 @@ async fn dropping_the_line_break_ending_old_text_adds_a_note() {
     let (root, path) = sample("a\nb\nc\n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"a\nb\n","new_text":"x\ny"}"#,
     )
     .await;
@@ -42,7 +42,7 @@ async fn a_joining_fuzzy_match_in_a_batch_gets_a_numbered_note() {
     let (root, path) = sample("one \ntwo\nthree\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","edits":[{"old_text":"three","new_text":"3"},{"old_text":"one\n","new_text":"1"}]}"#,
         )
         .await;
@@ -66,7 +66,7 @@ async fn kept_or_deleted_line_breaks_add_no_note() {
         let (root, path) = sample("a\nb\nc\n");
         let workspace = workspace(root.path());
         let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             &format!(r#"{{"path":"sample.txt","old_text":"{old_text}","new_text":"{new_text}"}}"#),
         )
         .await;
@@ -81,7 +81,7 @@ async fn an_array_of_edits_is_applied() {
     let (root, path) = sample("one\ntwo\nthree\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","edits":[{"old_text":"one","new_text":"ONE"},{"old_text":"three","new_text":"THREE"}]}"#,
         )
         .await;
@@ -93,7 +93,7 @@ async fn an_array_of_edits_is_applied() {
 async fn untyped_edit_shapes_are_rejected() {
     let (root, path) = sample("a b c\n");
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
 
     for (name, arguments) in [
         (
@@ -128,7 +128,7 @@ async fn untyped_edit_shapes_are_rejected() {
 async fn mixed_argument_forms_explain_how_to_retry_without_writing() {
     let (root, path) = sample("a b c\n");
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
     let result = run(
             &tool,
             r#"{"path":"sample.txt","old_text":"a","new_text":"A","edits":[{"old_text":"c","new_text":"C"}]}"#,
@@ -164,7 +164,7 @@ async fn an_empty_edits_key_allows_a_single_replacement() {
         let (root, path) = sample("a\n");
         let workspace = workspace(root.path());
         let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             &format!(r#"{{"path":"sample.txt","old_text":"a","new_text":"A","edits":{edits}}}"#),
         )
         .await;
@@ -181,7 +181,7 @@ async fn blank_single_keys_allow_an_array_of_edits() {
     let (root, path) = sample("one\ntwo\nthree\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","old_text":"","new_text":"","edits":[{"old_text":"one","new_text":"ONE"},{"old_text":"three","new_text":"THREE"}]}"#,
         )
         .await;
@@ -194,7 +194,7 @@ async fn whitespace_quotes_and_dashes_match_fuzzily() {
     let (root, path) = sample("const msg = \u{201c}hello\u{201d}  \nconst dash = \"a\u{2014}b\"\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","old_text":"const msg = \"hello\"\nconst dash = \"a-b\"","new_text":"const msg = \"hi\"\nconst dash = \"a-b\""}"#,
         )
         .await;
@@ -266,7 +266,7 @@ async fn a_fuzzy_match_rewrites_only_the_changed_span() {
             "new_text": new_text,
         })
         .to_string();
-        let result = run(&EditTool::new(&workspace), &arguments).await;
+        let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
         assert!(!result.is_error, "{name}: {result:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{name}");
     }
@@ -277,7 +277,7 @@ async fn whitespace_only_old_text_is_rejected() {
     let (root, path) = sample("abc  \n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"\t\n","new_text":"X"}"#,
     )
     .await;
@@ -300,7 +300,7 @@ async fn a_bom_only_old_text_is_rejected() {
         "new_text": "X",
     })
     .to_string();
-    let result = run(&EditTool::new(&workspace), &arguments).await;
+    let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
     assert!(
         result.is_error && result.content.contains("old_text was not found"),
         "{result:?}"
@@ -343,7 +343,7 @@ async fn trailing_old_text_whitespace_matches_only_at_a_line_end() {
             "new_text": new_text,
         })
         .to_string();
-        let result = run(&EditTool::new(&workspace), &arguments).await;
+        let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
         match want {
             Some(want) => {
                 assert!(!result.is_error, "{name}: {result:?}");
@@ -371,7 +371,7 @@ async fn a_bom_prefixed_old_text_matches() {
             "new_text": new_text,
         })
         .to_string();
-        let result = run(&EditTool::new(&workspace), &arguments).await;
+        let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
         assert!(!result.is_error, "new_text {new_text:?}: {result:?}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -386,7 +386,7 @@ async fn a_stray_cr_does_not_change_the_detected_newline() {
     let (root, path) = sample("a\rb\nc\n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"c","new_text":"x\ny"}"#,
     )
     .await;

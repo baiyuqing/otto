@@ -11,10 +11,9 @@ pub(crate) struct WriterRegistry {
 
 impl WriterRegistry {
     pub(crate) fn register(&self, session: &Arc<dyn SessionHandle>) {
-        self.sessions
-            .lock()
-            .expect("writer registry mutex")
-            .push(Arc::downgrade(session));
+        let mut registered = self.sessions.lock().expect("writer registry mutex");
+        registered.retain(|session| session.strong_count() > 0);
+        registered.push(Arc::downgrade(session));
     }
 
     pub(crate) fn holds_writer(&self) -> bool {
@@ -87,5 +86,16 @@ mod tests {
 
         drop(handle);
         assert!(!registry.holds_writer());
+    }
+
+    #[test]
+    fn register_drops_handles_that_no_longer_exist() {
+        let registry = WriterRegistry::default();
+        let dropped: Arc<dyn SessionHandle> = Arc::new(MemoryHandle::new(Header::default()));
+        registry.register(&dropped);
+        drop(dropped);
+        let live: Arc<dyn SessionHandle> = Arc::new(MemoryHandle::new(Header::default()));
+        registry.register(&live);
+        assert_eq!(registry.sessions.lock().unwrap().len(), 1);
     }
 }

@@ -151,11 +151,12 @@ impl Connection {
         let Some(mailbox) = session.controller.notification_mailbox() else {
             return;
         };
-        let mut updates = crate::runtime::workflow_notifications::updates(mailbox.as_ref());
         let mut loops = self.wake_loops.lock().expect("wake loops");
         if loops.contains_key(session_id) {
             return;
         }
+        // Registered after the check: a mailbox listener is never removed.
+        let mut updates = crate::runtime::workflow_notifications::updates(mailbox.as_ref());
         let stop = self.task_stop.clone();
         loops.insert(
             session_id.to_string(),

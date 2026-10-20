@@ -20,10 +20,6 @@ use super::markdown;
 /// long line back into the block of text the fold removed.
 const TOOL_PREVIEW_LIMIT: usize = 64;
 
-/// How many result lines a folded tool call shows before the rest collapse
-/// into a count. Three is enough for the shape of a test summary or a short
-/// error, and still cannot push a reply off the screen.
-
 /// The band behind a prompt, which is what a reader scrolling back looks for
 /// to find where a turn started.
 ///

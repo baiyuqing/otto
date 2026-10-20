@@ -206,6 +206,7 @@ impl Component {
 /// The first step of a turn.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant)] // one short-lived value per turn; boxing would change the public API
 pub enum Input<'a> {
     /// A user message.
     Text(&'a str),

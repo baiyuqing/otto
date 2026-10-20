@@ -89,12 +89,13 @@ impl App {
         let info = backend.info();
         if old == (info.workspace.clone(), info.session_id.clone()) {
             for entry in &mut entries {
-                if entry.tool_done && entry.operation_id.is_some() {
-                    if let Some(previous) = self.entries.iter().find(|previous| {
+                if entry.tool_done
+                    && entry.operation_id.is_some()
+                    && let Some(previous) = self.entries.iter().find(|previous| {
                         previous.tool_done && previous.operation_id == entry.operation_id
-                    }) {
-                        entry.tool_elapsed = previous.tool_elapsed;
-                    }
+                    })
+                {
+                    entry.tool_elapsed = previous.tool_elapsed;
                 }
             }
         }

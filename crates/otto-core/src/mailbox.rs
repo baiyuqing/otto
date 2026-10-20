@@ -29,6 +29,10 @@ pub use crate::agent::inbox::{
 /// effect succeeds; acknowledging an entry that is already absent is harmless.
 /// `remove` supports domain cancellation of a pending notification.
 pub trait Mailbox: Debug + Send + Sync {
+    /// Observe changes independently of any subagent registry. The callback
+    /// must not reenter the mailbox. Adapters may ignore this when their host
+    /// supplies a separate wake path.
+    fn on_change(&self, _callback: Box<dyn Fn() + Send + Sync>) {}
     /// Appends a notification after every notification already visible and
     /// returns its sequence number. A notification whose non-empty `id` is
     /// already queued is not added again. A durable adapter assigns an id to
@@ -60,6 +64,9 @@ pub trait Mailbox: Debug + Send + Sync {
 }
 
 impl Mailbox for Inbox {
+    fn on_change(&self, callback: Box<dyn Fn() + Send + Sync>) {
+        Inbox::on_change(self, callback);
+    }
     fn enqueue(&self, notification: Notification) -> Result<u64, MailboxError> {
         Inbox::enqueue(self, notification)
     }

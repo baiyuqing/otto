@@ -25,12 +25,16 @@ const MAX_STEPS: usize = 32;
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     definitions: Vec<Definition>,
+    diagnostics: Vec<String>,
 }
 
 impl Catalog {
     #[cfg(test)]
     pub(crate) fn from_definitions(definitions: Vec<Definition>) -> Self {
-        Self { definitions }
+        Self {
+            definitions,
+            diagnostics: Vec::new(),
+        }
     }
 
     pub fn discover(
@@ -69,6 +73,7 @@ impl Catalog {
                 };
                 match parse_definition(name, &data, &|agent| agents.lookup(agent).is_some()) {
                     Ok(mut definition) => {
+                        definition.source = path.display().to_string();
                         let names: HashSet<String> = definition
                             .steps
                             .iter()
@@ -112,6 +117,7 @@ impl Catalog {
         (
             Self {
                 definitions: by_name.into_values().collect(),
+                diagnostics: warnings.clone(),
             },
             warnings,
         )
@@ -282,7 +288,14 @@ struct ActiveRun {
     relaunch_requested: bool,
 }
 
+#[async_trait::async_trait]
+pub(crate) trait Delivery: Send + Sync {
+    fn stop(&self);
+    async fn join(&self);
+}
+
 pub struct Controller {
+    deliveries: Mutex<Option<Vec<Arc<dyn Delivery>>>>,
     pub(crate) approval_service: Mutex<Option<std::sync::Weak<crate::approval::Service>>>,
     pub(crate) store: Arc<dyn WorkflowStore>,
     catalog: Catalog,
@@ -335,6 +348,7 @@ impl Controller {
         logger: Arc<Logger>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            deliveries: Mutex::new(Some(Vec::new())),
             approval_service: Mutex::new(None),
             store,
             catalog,
@@ -350,6 +364,15 @@ impl Controller {
         })
     }
 
+    /// Construction-time catalog, including invalid-definition diagnostics.
+    pub fn catalog(&self) -> (&[Definition], &[String]) {
+        (&self.catalog.definitions, &self.catalog.diagnostics)
+    }
+
+    pub fn inspect(&self, name: &str) -> Result<Definition, Error> {
+        self.catalog.lookup(name).cloned().ok_or_else(|| Error::not_found("workflow not found; use workflow_list and restart the owner after editing definitions"))
+    }
+
     pub fn set_guard(&self, guard: Box<dyn Send>) {
         *self
             .guard
@@ -358,6 +381,7 @@ impl Controller {
     }
 
     pub async fn start(self: &Arc<Self>, workflow: &str, input: &str) -> Result<Run, Error> {
+        super::provenance::admit_start()?;
         let definition = self
             .catalog
             .lookup(workflow)
@@ -374,6 +398,45 @@ impl Controller {
             input,
         )?;
         self.launch(id)?;
+        Ok(run)
+    }
+
+    /// Admits only a trusted parent binding; the workflow executor has no binding.
+    pub(crate) async fn start_parent(
+        self: &Arc<Self>,
+        workflow: &str,
+        input: &str,
+        session: &str,
+        operation: &str,
+    ) -> Result<Run, Error> {
+        super::provenance::admit_start()?;
+        if let Some(run) = self.store.origin_run(&self.workspace, session, operation)? {
+            if run.workflow != workflow || run.input != input {
+                return Err(Error::conflict(
+                    "operation receipt conflicts with workflow/input; inspect original run instead of replaying",
+                ));
+            }
+            return Ok(run);
+        }
+        let definition = self
+            .catalog
+            .lookup(workflow)
+            .ok_or_else(|| Error::not_found("workflow not found; use workflow_list"))?;
+        validate_write_coordination(definition)?;
+        let id = random_id().map_err(|_| Error::internal("generate workflow id failed"))?;
+        let (run, created) = self.store.create_origin_run(
+            &id,
+            definition,
+            &self.workspace,
+            &self.runtime,
+            input,
+            session,
+            operation,
+        )?;
+        // Reconciliation must never relaunch an existing run after uncertain effects.
+        if created {
+            self.launch(run.id.clone())?;
+        }
         Ok(run)
     }
 
@@ -438,6 +501,7 @@ impl Controller {
         run_id: &str,
         retry_step: Option<&str>,
     ) -> Result<Run, Error> {
+        super::provenance::admit_start()?;
         let run = self.get(run_id)?;
         if run.profile != self.runtime.profile
             || run.provider != self.runtime.provider
@@ -462,6 +526,7 @@ impl Controller {
     }
 
     pub async fn fork(self: &Arc<Self>, run_id: &str, after_step: &str) -> Result<Run, Error> {
+        super::provenance::admit_start()?;
         let source = self.get(run_id)?;
         if source.profile != self.runtime.profile
             || source.provider != self.runtime.provider
@@ -597,7 +662,27 @@ impl Controller {
             .len()
     }
 
+    pub(crate) fn register_delivery(&self, binding: Arc<dyn Delivery>) {
+        let mut deliveries = self.deliveries.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(deliveries) = deliveries.as_mut() {
+            deliveries.push(binding);
+        } else {
+            binding.stop();
+        }
+    }
     pub async fn close(&self) {
+        let deliveries = self
+            .deliveries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .unwrap_or_default();
+        for binding in &deliveries {
+            binding.stop();
+        }
+        for binding in deliveries {
+            binding.join().await;
+        }
         let active: Vec<(String, CancellationToken, Arc<Notify>)> = self
             .active
             .lock()
@@ -770,7 +855,7 @@ impl Controller {
                         .step_timeout
                         .map_or_else(Deadline::unlimited, Deadline::after);
                     let control = Control::new(deadline);
-                    let execute = executor.execute(attempt.clone(), &control);
+                    let execute = super::provenance::non_parent(executor.execute(attempt.clone(), &control));
                     tokio::pin!(execute);
                     let mut timed_out = false;
                     let result = tokio::select! {
@@ -1094,6 +1179,7 @@ pub(crate) fn parse_definition(
     Ok(Definition {
         name: name.to_string(),
         description: file.description,
+        source: String::new(),
         steps,
         agents: Vec::new(),
         hash: format!("{:x}", Sha256::digest(data)),
@@ -1806,6 +1892,7 @@ needs = ["first"]
             store,
             Catalog {
                 definitions: vec![definition],
+                diagnostics: Vec::new(),
             },
             Arc::new(FakeExecutor),
             "/workspace".into(),
@@ -1860,6 +1947,7 @@ needs = ["first"]
             Arc::new(Store::open_in_memory()),
             Catalog {
                 definitions: vec![definition],
+                diagnostics: Vec::new(),
             },
             Arc::new(FakeExecutor),
             "/workspace".into(),

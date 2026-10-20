@@ -179,6 +179,7 @@ fn schedule(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 fn workflow(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     let store = factory.workflow(endpoint(address)).ok()?;
     let definition = otto::workflow::Definition {
+        source: String::new(),
         name: "contract".into(),
         description: String::new(),
         steps: vec![otto::workflow::Step {

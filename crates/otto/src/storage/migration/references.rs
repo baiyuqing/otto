@@ -205,6 +205,31 @@ pub fn validate_records(
                     return Err(invalid("workflow fork provenance differs"));
                 }
             }
+            "workflow_pending" => {
+                let event = lookup(&logical, "workflow_event", &[field(record, "seq")?.clone()])?;
+                let owned = logical.values().any(|origin| {
+                    origin.kind == "workflow_origin"
+                        && field(origin, "workspace").ok() == field(record, "workspace").ok()
+                        && field(origin, "session_id").ok() == field(record, "session_id").ok()
+                        && field(origin, "run_id").ok() == field(event, "run_id").ok()
+                });
+                if !owned {
+                    return Err(invalid("workflow pending event has no exact source origin"));
+                }
+            }
+            "workflow_origin" => {
+                let run = lookup(
+                    &logical,
+                    "workflow_run",
+                    &[field(record, "run_id")?.clone()],
+                )?;
+                if field(run, "workspace")? != field(record, "workspace")?
+                    || field(run, "definition_hash")? != field(record, "definition_hash")?
+                    || field(run, "input")? != field(record, "input")?
+                {
+                    return Err(invalid("workflow origin receipt differs from admitted run"));
+                }
+            }
             "workflow_step" | "workflow_attempt" => {
                 transcript(text(record, "transcript_path")?, journals)?;
                 if record.kind == "workflow_attempt" {

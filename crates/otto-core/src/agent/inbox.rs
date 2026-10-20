@@ -123,6 +123,7 @@ pub type IdSource = Box<dyn Fn() -> String + Send + Sync>;
 #[derive(Default)]
 pub struct Inbox {
     state: Mutex<State>,
+    listeners: Mutex<Vec<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     on_change: Option<Box<dyn Fn() + Send + Sync>>,
     /// Set at most once, before the inbox is shared with producers. Runs
     /// under the state lock on every mutation; see the module documentation.
@@ -150,6 +151,7 @@ impl Inbox {
     pub fn new(on_change: Option<Box<dyn Fn() + Send + Sync>>) -> Self {
         Self {
             state: Mutex::new(State::default()),
+            listeners: Mutex::new(Vec::new()),
             on_change,
             persist: OnceLock::new(),
             id_source: OnceLock::new(),
@@ -222,7 +224,13 @@ impl Inbox {
                     .iter()
                     .find(|entry| entry.notification.id == notification.id)
             {
-                return Ok(existing.seq);
+                let seq = existing.seq;
+                // A previous enqueue may still exist only in memory after a
+                // persistence failure. Dedup is not durable evidence by itself.
+                return self
+                    .persist(&state.items)
+                    .map(|()| seq)
+                    .map_err(|reason| MailboxError::NotPersisted { seq, reason });
             }
             let seq = state.next_seq;
             state.next_seq += 1;
@@ -336,7 +344,23 @@ impl Inbox {
         }
     }
 
+    /// Independent session notification signal, including without child tasks.
+    pub fn on_change(&self, callback: Box<dyn Fn() + Send + Sync>) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(std::sync::Arc::from(callback));
+    }
+
     fn notify(&self) {
+        let listeners = self
+            .listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        for callback in listeners {
+            callback();
+        }
         if let Some(on_change) = &self.on_change {
             on_change();
         }

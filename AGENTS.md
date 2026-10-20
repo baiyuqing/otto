@@ -67,6 +67,9 @@ advertise other providers or planned roadmap features.
 - Name files and modules after their domain (`memory_types.rs`), never a
   generic container: `utils`, `util`, `helpers`, `helper`, `common`, `misc`,
   `types`, `config`.
+- A Rust file under `crates/*/src` has a directory or file named `tests` or
+  `<domain>_tests` in its path exactly when it is compiled only under
+  `#[cfg(test)]`.
 - The pre-commit hook and `make code-limits` enforce the size and file-name
   rules; see [code limits](docs/development/workflow.md#code-limits).
 

@@ -387,6 +387,25 @@ fn run_guard(guard: &dyn ContentGuard, fields: Vec<GuardField>) -> Result<()> {
     guard.check(&input)
 }
 
+/// The guard memory writes pass through: shape rules plus the literal secret
+/// values the process holds. Values longer than `MAX_EXACT_GUARD_VALUE_BYTES`
+/// are left out of the exact set.
+pub(crate) fn content_guard(
+    secret_values: &[String],
+) -> std::result::Result<CompositeGuard, String> {
+    let exact_values: Vec<String> = secret_values
+        .iter()
+        .filter(|value| value.len() <= MAX_EXACT_GUARD_VALUE_BYTES)
+        .cloned()
+        .collect();
+    let exact =
+        ExactGuard::new(&exact_values).map_err(|_| "build memory secret guard".to_string())?;
+    Ok(CompositeGuard::new(vec![
+        Box::new(DefaultGuard),
+        Box::new(exact),
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

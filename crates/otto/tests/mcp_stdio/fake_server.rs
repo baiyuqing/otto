@@ -39,7 +39,21 @@ pub(super) fn run_fake_server() {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        handle_message(&mode, message, &stdout_lock, cancel_marker.clone());
+        // `stall-stdin` behaves like `modern` and stops reading stdin after the
+        // last tool-list page, so a large request fills the stdin pipe.
+        let stall_after_reply = mode == "stall-stdin"
+            && message.pointer("/params/cursor").and_then(Value::as_str) == Some("page2");
+        let handled_mode = if mode == "stall-stdin" {
+            "modern"
+        } else {
+            &mode
+        };
+        handle_message(handled_mode, message, &stdout_lock, cancel_marker.clone());
+        if stall_after_reply {
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
     }
     std::process::exit(0);
 }

@@ -309,7 +309,12 @@ impl Transport for StdioTransport {
             let cleanup_done_notify = self.cleanup_done_notify.clone();
             let close = self.close.clone();
             tokio::spawn(async move {
-                stdin.lock().await.take();
+                // A writer blocked on a full pipe holds this lock. Leave stdin
+                // open then: the signals sent by `ChildOwner` end the child and
+                // the blocked write fails with EPIPE.
+                if let Ok(mut stdin_guard) = stdin.try_lock() {
+                    stdin_guard.take();
+                }
                 fail_pending(&pending, CallError::Interrupted).await;
                 cleanup_requested.notify_one();
                 wait_for_completion(&cleanup_done, &cleanup_done_notify).await;
@@ -414,7 +419,9 @@ impl ChildOwner {
         };
         let explicit_cleanup = cleanup_signal || self.stopping.load(Ordering::Acquire);
 
-        self.stdin.lock().await.take();
+        if let Ok(mut stdin_guard) = self.stdin.try_lock() {
+            stdin_guard.take();
+        }
         if explicit_cleanup {
             fail_pending(&self.pending, CallError::Interrupted).await;
         }

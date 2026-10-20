@@ -1670,6 +1670,7 @@ mod tests {
             },
             "",
             true,
+            true,
         );
         tasks.finish(
             &reviewed.id,

@@ -310,6 +310,12 @@ impl Controller {
             )
         })
     }
+    /// Exact current session destination; never redirects a producer after /new.
+    pub(crate) fn notification_mailbox(&self) -> Option<Arc<dyn otto_core::mailbox::Mailbox>> {
+        self.current_runner()
+            .map(|runner| Arc::clone(runner.mailbox()))
+    }
+
     pub(crate) fn subagent_tasks(&self) -> Option<Arc<crate::subagent::tasks::Tasks>> {
         self.current_runner()?.tasks.clone()
     }

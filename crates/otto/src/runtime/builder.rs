@@ -287,7 +287,25 @@ pub struct SharedSession(
     Arc<dyn SessionHandle>,
     Arc<otto_core::agent::hooks::State>,
     Recorder,
+    Arc<Mutex<Option<Arc<super::workflow_notifications::Binding>>>>,
 );
+
+pub(crate) struct WeakWorkflowSession(
+    std::sync::Weak<dyn SessionHandle>,
+    std::sync::Weak<otto_core::agent::hooks::State>,
+    std::sync::Weak<std::sync::Mutex<Option<Vec<Message>>>>,
+    std::sync::Weak<Mutex<Option<Arc<super::workflow_notifications::Binding>>>>,
+);
+impl WeakWorkflowSession {
+    pub(crate) fn upgrade(&self) -> Option<SharedSession> {
+        Some(SharedSession(
+            self.0.upgrade()?,
+            self.1.upgrade()?,
+            self.2.upgrade()?,
+            self.3.upgrade()?,
+        ))
+    }
+}
 
 /// Conversation messages appended while recording is on; `None` when off.
 /// Shared by clones, so the frontend and the agent see one recorder.
@@ -296,13 +314,14 @@ type Recorder = Arc<std::sync::Mutex<Option<Vec<Message>>>>;
 impl SharedSession {
     pub fn new(handle: Arc<dyn SessionHandle>) -> Self {
         crate::failover::ownership::register_writer_session(&handle);
-        Self(handle, Arc::default(), Arc::default())
+        Self(handle, Arc::default(), Arc::default(), Arc::default())
     }
 
     /// A `--no-session` transcript.
     pub fn memory(header: Header) -> Self {
         Self(
             Arc::new(MemoryHandle::new(header)),
+            Arc::default(),
             Arc::default(),
             Arc::default(),
         )
@@ -356,7 +375,38 @@ impl SharedSession {
         self.0.update_runtime(runtime)
     }
 
+    pub(crate) fn workflow_closed(&self) -> tokio_util::sync::CancellationToken {
+        self.1.closed.clone()
+    }
+    pub(crate) fn downgrade_workflow(&self) -> WeakWorkflowSession {
+        WeakWorkflowSession(
+            Arc::downgrade(&self.0),
+            Arc::downgrade(&self.1),
+            Arc::downgrade(&self.2),
+            Arc::downgrade(&self.3),
+        )
+    }
+    pub(crate) fn replace_workflow_binding(
+        &self,
+        binding: Arc<super::workflow_notifications::Binding>,
+    ) {
+        let mut current = self.3.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(old) = current.replace(binding) {
+            old.stop();
+            tokio::spawn(async move {
+                old.join().await;
+            });
+        }
+    }
     pub fn close(&self) -> Result<(), String> {
+        if let Some(binding) = self.3.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            binding.stop();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    binding.join().await;
+                });
+            }
+        }
         self.1.closed.cancel();
         self.0.close()
     }
@@ -757,6 +807,7 @@ impl RequestSizer for ScriptedSizer {
 }
 
 pub struct Runner {
+    workflow_binding: Option<Arc<super::workflow_notifications::Binding>>,
     output_logs: Arc<crate::tool::bash_output::Logs>,
     authorization_run: Arc<Mutex<String>>,
     approvals: Option<(Arc<crate::approval::Service>, otto_core::approval::Scope)>,
@@ -1466,6 +1517,15 @@ impl Runner {
     /// cleanup owner, so cancellation or timeout of either waiter cannot lose
     /// the clients being closed.
     pub fn close(&self) {
+        if let Some(binding) = &self.workflow_binding {
+            binding.stop();
+            let binding = binding.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    binding.join().await;
+                });
+            }
+        }
         let _ = self.agent.close();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let mcp = Arc::clone(&self.mcp);
@@ -1480,6 +1540,9 @@ impl Runner {
     /// nothing to release for `Servers::default()`, so this returns
     /// immediately for a runner built without MCP servers.
     pub async fn close_mcp(&self) {
+        if let Some(binding) = &self.workflow_binding {
+            binding.join().await;
+        }
         let _ = tokio::time::timeout(Duration::from_secs(5), self.mcp.close()).await;
     }
 
@@ -1546,6 +1609,7 @@ impl Runner {
         let inbox = tasks.notifications().clone();
         let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = inbox.clone();
         Self {
+            workflow_binding: None,
             output_logs: Arc::default(),
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
@@ -1762,6 +1826,8 @@ impl ParentToolSlot {
 /// `OTTO_TRACE` writer. None of them changes the order below; each only appends
 /// tools or wraps the client.
 pub struct Builder {
+    /// One controller/lock for every parent runner in this workspace.
+    pub(crate) workflows: tokio::sync::OnceCell<Result<Arc<crate::workflow::Controller>, String>>,
     /// Everything built once per process. Field access on `Builder` reaches
     /// these through `Deref`, so `self.config`, `self.environment`, and the
     /// rest of `Shared`'s fields read the same as before the split.
@@ -1823,6 +1889,7 @@ impl Builder {
         let sandbox_secrets_complete = shared.sandbox_secrets_baseline_complete;
         let web = crate::tool::web::Runtime::new();
         Builder {
+            workflows: tokio::sync::OnceCell::new(),
             shared,
             web,
             workspace,
@@ -2465,8 +2532,33 @@ impl Builder {
         if redactor.allows_dynamic_content() {
             tools.extend(extensions.tools());
         }
-        let catalogs =
+        let mut catalogs =
             self.build_catalogs_with_plugins(&mut tools, max_output, warnings, &plugins)?;
+        // Disabling conversational delegation must not disable named workflow
+        // execution. This internal runner never exposes parent tools.
+        if !include_parent_tools {
+            let mut discovery = self.config.clone();
+            discovery.agents.enabled = Some(true);
+            catalogs.agents = otto_core::config::resolve_agents(
+                &discovery,
+                &self.environment,
+                &self.workspace_path,
+            )
+            .map_err(|error| error.to_string())?;
+            let roots = crate::config::layered::catalog_roots(
+                &discovery,
+                Path::new(&self.home),
+                Path::new(&self.workspace_path),
+                &catalogs.agents.roots,
+                "agents",
+            )?;
+            let paths: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
+            let (catalog, diagnostics) = crate::subagent::Catalog::discover(&paths);
+            catalogs.agent_catalog = catalog;
+            for warning in diagnostics {
+                let _ = writeln!(warnings, "warning: {warning}");
+            }
+        }
         mark_build_trace(&mut trace, "runner/catalogs");
         let (mcp_tools, mcp_connected, mcp_servers) = if connect_mcp {
             self.connect_mcp_with_plugins(
@@ -2546,7 +2638,8 @@ impl Builder {
         ) {
             child_tools = guard.tools(child_tools);
         }
-        let subagents = self.build_subagents(
+        let mut workflow_binding = None;
+        let mut subagents = self.build_subagents(
             &mut tools,
             &catalogs,
             &client,
@@ -2631,6 +2724,47 @@ impl Builder {
                 tools.push(Box::new(crate::tool::reflect::ReflectTool::new(
                     Arc::clone(&reflection),
                 )));
+            }
+            if include_parent_tools {
+                if subagents.inbox.is_none() {
+                    let inbox = Arc::new(otto_core::agent::inbox::Inbox::default());
+                    let source = session.clone();
+                    let no_session = self.no_session;
+                    crate::runtime::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
+                        let path = source.path();
+                        (!no_session && !path.is_empty())
+                            .then(|| Path::new(&path).with_extension("inbox.json"))
+                    });
+                    let path = session.path();
+                    if !self.no_session && !path.is_empty() {
+                        if let Some(warning) = crate::runtime::sidecar_mailbox::load(
+                            &inbox,
+                            &Path::new(&path).with_extension("inbox.json"),
+                        ) {
+                            let _ = writeln!(warnings, "warning: {warning}");
+                        }
+                    }
+                    subagents.inbox = Some(inbox);
+                }
+                let controller = Box::pin(crate::runtime::workflow::shared_controller(
+                    self, runtime, warnings,
+                ))
+                .await;
+                if !self.no_session
+                    && let (Ok(controller), Some(mailbox)) = (&controller, &subagents.inbox)
+                {
+                    workflow_binding = Some(crate::runtime::workflow_notifications::bind(
+                        controller,
+                        session.clone(),
+                        mailbox,
+                    ));
+                }
+                let parent = crate::tool::workflow::Parent::new(
+                    controller,
+                    session.header().id.clone(),
+                    !self.no_session,
+                );
+                tools.extend(parent.tools());
             }
             if include_parent_tools && let Some(factory) = self.shared.parent_tool_factory.get() {
                 tools.extend(factory.tools(&ParentToolContext {
@@ -2820,7 +2954,10 @@ impl Builder {
                 "",
                 self.boundary_redactor(Some(runtime)),
             ),
-            hooks: (extensions.has_hooks() && redactor.allows_dynamic_content()).then(|| {
+            hooks: (include_parent_tools
+                && extensions.has_hooks()
+                && redactor.allows_dynamic_content())
+            .then(|| {
                 extensions.bind(
                     session.header().id,
                     None,
@@ -2882,6 +3019,7 @@ impl Builder {
         }
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
         let runner = Runner {
+            workflow_binding,
             output_logs,
             authorization_run,
             review_context: tokio::sync::Mutex::new(review_context),
@@ -2916,7 +3054,7 @@ impl Builder {
             presentation_origin,
             reflection,
         };
-        if extensions.has_hooks() && runner.allows_dynamic_content() {
+        if include_parent_tools && extensions.has_hooks() && runner.allows_dynamic_content() {
             if hook_state.claim_start() {
                 let state = hook_state.clone();
                 let port = hook_port.expect("enabled hooks have a port");
@@ -3911,6 +4049,339 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_tools_and_durable_mailbox_exist_with_conversational_agents_disabled() {
+        let (dir, _) = crate::workflow::conversation_tests::fixture();
+        let mut builder = builder(dir.path());
+        builder.shared_mut().config = toml::from_str("[agents]\nenabled = false\n").unwrap();
+        let source = crate::workflow::conversation_tests::session("source");
+        let runner = builder.build_runner(&source, &runtime()).await.unwrap();
+        assert!(runner.tasks.is_none());
+        for name in crate::tool::workflow::NAMES {
+            assert!(tool_names(&runner).contains(&name.to_string()));
+        }
+        let controller = builder.workflows.get().unwrap().as_ref().unwrap();
+        assert!(
+            controller.inspect("documentation-review").is_ok(),
+            "internal workflow agents must still discover named definitions"
+        );
+        let mut updates =
+            crate::runtime::workflow_notifications::updates(runner.mailbox().as_ref());
+        runner
+            .mailbox()
+            .enqueue(otto_core::mailbox::Notification {
+                id: "workflow:test:1".into(),
+                text: "controlled lifecycle notice".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(updates.has_changed().unwrap());
+        updates.borrow_and_update();
+        let app = crate::app::Controller::new(builder, true, source, runner, Default::default());
+        assert!(
+            app.prepare_wake().unwrap().is_some(),
+            "mailbox wake admission must not require Tasks"
+        );
+        app.close_workflows().await;
+        app.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation() {
+        use crate::subagent::testsupport::{
+            FakeProvider, assistant_text, assistant_tool_call, match_any,
+        };
+        use crate::workflow::{RunStatus, WorkflowStore};
+        use otto_core::mailbox::Mailbox;
+        use otto_core::model::Usage;
+        let (dir, catalog) = crate::workflow::conversation_tests::fixture();
+        let store = Arc::new(crate::workflow::Store::open(&dir.path().join("flow.db")).unwrap());
+        let owner = crate::workflow::conversation_tests::controller(
+            store.clone(),
+            catalog,
+            "/w",
+            dir.path(),
+        );
+        let approvals = Arc::new(crate::approval::Service::in_memory().unwrap());
+        owner.attach_approvals(&approvals).unwrap();
+        let source = SharedSession::new(Arc::new(
+            crate::session::Store::create(
+                dir.path().join("sessions"),
+                Header {
+                    id: "0123456789abcdef0123456789abcdef".into(),
+                    workspace: "/w".into(),
+                    provider: "openai-compatible".into(),
+                    model: "test-model".into(),
+                    created_at: Utc::now(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ));
+        let source_id = source.header().id;
+        let path = source.path();
+        let weak = Arc::downgrade(source.handle());
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![
+                assistant_tool_call(
+                    "start",
+                    "workflow_start",
+                    r#"{"name":"documentation-review","input":"scope"}"#,
+                    Usage::default(),
+                ),
+                assistant_text("Waiting for human acceptance.", Usage::default()),
+                assistant_text("Lifecycle received.", Usage::default()),
+                assistant_text("Completed.", Usage::default()),
+                assistant_text("Reopened.", Usage::default()),
+            ],
+        );
+        let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+        let inbox = tasks.notifications_inbox().clone();
+        let sidecar = Path::new(&path).with_extension("inbox.json");
+        let sidecar_path = sidecar.clone();
+        crate::runtime::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
+            Some(sidecar_path.clone())
+        });
+        let mailbox: Arc<dyn Mailbox> = inbox.clone();
+        let mut changes = crate::runtime::workflow_notifications::updates(mailbox.as_ref());
+        let old_mailbox: Arc<dyn Mailbox> = Arc::new(otto_core::mailbox::Inbox::default());
+        let old_binding =
+            crate::runtime::workflow_notifications::bind(&owner, source.clone(), &old_mailbox);
+        let binding =
+            crate::runtime::workflow_notifications::bind(&owner, source.clone(), &mailbox);
+        tokio::time::timeout(Duration::from_secs(2), old_binding.join())
+            .await
+            .unwrap();
+        let parent = crate::tool::workflow::Parent::new(Ok(owner.clone()), source_id.clone(), true);
+        let runner = Runner::scripted_with_tools(source.clone(), provider, tasks, parent.tools());
+        runner
+            .run("Review scope", &mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        let run = store.origin_runs("/w", &source_id).unwrap().pop().unwrap();
+        assert_eq!(owner.wait(&run).await.unwrap().status, RunStatus::Waiting);
+        assert!(
+            old_mailbox.is_empty(),
+            "replaced adapter must not write to retained mailbox"
+        );
+        let domain = owner.requests(&run).unwrap().pop().unwrap();
+        let request = crate::approval::workflow::publish(&approvals, "/w", &domain).unwrap();
+        assert_eq!(request.state, otto_core::approval::State::Pending);
+        assert!(request.decision.is_none(), "no human decision exists yet");
+        assert!(
+            !owner
+                .events(&run, 0)
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "run_succeeded")
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if inbox
+                    .snapshot()
+                    .iter()
+                    .any(|n| n.text.contains("run_waiting"))
+                {
+                    break;
+                }
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let app = crate::app::Controller::new(
+            builder(dir.path()),
+            true,
+            source.clone(),
+            runner,
+            Default::default(),
+        );
+        app.prepare_wake()
+            .unwrap()
+            .unwrap()
+            .run(&mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        // Real test-human action through the existing shared authority, not store.respond.
+        approvals
+            .decide(
+                &request.id,
+                &request.scope,
+                request.revision,
+                true,
+                "accepted by test human",
+                &crate::approval::Actor::local("test-human"),
+            )
+            .unwrap();
+        approvals.apply_available("/w").unwrap();
+        assert_eq!(owner.wait(&run).await.unwrap().status, RunStatus::Succeeded);
+        let terminal = owner
+            .events(&run, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "run_succeeded")
+            .unwrap();
+        let terminal_id = format!("workflow:{run}:{}", terminal.seq);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if inbox.snapshot().iter().any(|n| n.id == terminal_id) {
+                    break;
+                }
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        // Crash boundary: terminal is durable in sidecar but not yet in transcript.
+        assert!(!source.has_input(&terminal_id));
+        binding.join().await;
+        let restored = otto_core::mailbox::Inbox::default();
+        assert!(crate::runtime::sidecar_mailbox::load(&restored, &sidecar).is_none());
+        assert!(restored.snapshot().iter().any(|n| n.id == terminal_id));
+        app.prepare_wake()
+            .unwrap()
+            .unwrap()
+            .run(&mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(source.has_input(&terminal_id));
+        let count = source
+            .messages()
+            .iter()
+            .filter(|m| m.text().contains(&terminal_id))
+            .count();
+        assert_eq!(count, 1);
+        // Append-before-ack: restore the prior persisted notification into the live inbox.
+        inbox.load(restored.queued());
+        app.prepare_wake()
+            .unwrap()
+            .unwrap()
+            .run(&mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            source
+                .messages()
+                .iter()
+                .filter(|m| m.text().contains(&terminal_id))
+                .count(),
+            1
+        );
+        // /new closes exact source while old mailbox and controller Arcs remain retained.
+        source.close().unwrap();
+        let old_len = inbox.len();
+        let outstanding = owner
+            .start_parent("documentation-review", "later", &source_id, "later")
+            .await
+            .unwrap();
+        owner.wait(&outstanding.id).await.unwrap();
+        let replacement = crate::workflow::conversation_tests::session("replacement");
+        let replacement_inbox: Arc<dyn Mailbox> = Arc::new(otto_core::mailbox::Inbox::default());
+        let replacement_binding = crate::runtime::workflow_notifications::bind(
+            &owner,
+            replacement.clone(),
+            &replacement_inbox,
+        );
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        assert_eq!(
+            inbox.len(),
+            old_len,
+            "closed source must not write despite retained old Arcs"
+        );
+        assert!(
+            replacement_inbox.is_empty(),
+            "/new must never redirect old-source events"
+        );
+        let (reopened, warnings) = crate::session::Store::open(&path).unwrap();
+        assert!(warnings.is_empty());
+        let reopened = SharedSession::new(Arc::new(reopened));
+        assert!(reopened.has_input(&terminal_id));
+        let catchup = Arc::new(otto_core::mailbox::Inbox::default());
+        let catchup_mailbox: Arc<dyn Mailbox> = catchup.clone();
+        let catchup_binding = crate::runtime::workflow_notifications::bind(
+            &owner,
+            reopened.clone(),
+            &catchup_mailbox,
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while catchup.is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            catchup
+                .snapshot()
+                .iter()
+                .all(|n| n.task_id == outstanding.id)
+        );
+        tokio::time::timeout(Duration::from_secs(2), owner.close())
+            .await
+            .unwrap();
+        catchup_binding.join().await;
+        replacement_binding.join().await;
+        app.close().unwrap();
+        drop(app);
+        drop(source);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect(
+            "stopped adapter must release saved session even with old mailbox/controller retained",
+        );
+        reopened.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn workflow_controller_slot_is_shared_across_parents_and_retains_lock() {
+        let (dir, catalog) = crate::workflow::conversation_tests::fixture();
+        let builder = builder(dir.path());
+        let store = Arc::new(crate::workflow::Store::open_in_memory());
+        let controller = crate::workflow::conversation_tests::controller(
+            store,
+            catalog,
+            &builder.workspace_path,
+            dir.path(),
+        );
+        let lock = crate::runtime::workflow::lock_workspace(&builder.home, &builder.workspace_path)
+            .unwrap();
+        controller.set_guard(Box::new(lock));
+        builder.workflows.set(Ok(controller.clone())).ok().unwrap();
+        let first =
+            crate::runtime::workflow::shared_controller(&builder, &runtime(), &mut Vec::new())
+                .await
+                .unwrap();
+        let second =
+            crate::runtime::workflow::shared_controller(&builder, &runtime(), &mut Vec::new())
+                .await
+                .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &controller));
+        assert!(
+            crate::runtime::workflow::lock_workspace(&builder.home, &builder.workspace_path)
+                .is_err()
+        );
+        crate::runtime::workflow::close(&builder).await;
+        // Closing joins work, but clones retain the one ownership guard.
+        drop(builder);
+        drop(controller);
+        drop(first);
+        assert!(
+            crate::runtime::workflow::lock_workspace(
+                &dir.path().to_string_lossy(),
+                &second.workspace
+            )
+            .is_err()
+        );
+        drop(second);
+    }
+
+    #[tokio::test]
     async fn parent_tool_factory_is_fresh_per_parent_runner_and_absent_from_children() {
         let dir = tempfile::tempdir().expect("temp dir");
         let builder = builder(dir.path());
@@ -4025,6 +4496,10 @@ mod tests {
                 "schedule_cancel",
                 "task_queue",
                 "update_plan",
+                "workflow_list",
+                "workflow_inspect",
+                "workflow_start",
+                "workflow_status",
                 "otto_help"
             ]
         );
@@ -4424,7 +4899,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, submit_verification, web_fetch, web_search, list_models, agent, agent_status, agent_yield, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, submit_verification, web_fetch, web_search, list_models, agent, agent_status, agent_yield, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, workflow_list, workflow_inspect, workflow_start, workflow_status, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

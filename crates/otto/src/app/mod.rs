@@ -1052,6 +1052,12 @@ impl Controller {
         }
     }
 
+    /// Join this workspace's shared workflow owner before process shutdown.
+    /// Session replacement does not close it.
+    pub async fn close_workflows(&self) {
+        crate::runtime::workflow::close(&self.builder).await;
+    }
+
     /// Shuts every connected MCP server down, waiting up to 5 seconds. A
     /// no-op on a controller with no current runner (already closed, or
     /// never opened). [`Self::close`] also starts an MCP close, but only in

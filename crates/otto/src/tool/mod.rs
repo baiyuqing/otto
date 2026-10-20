@@ -41,6 +41,7 @@ pub mod skill;
 pub(crate) mod task_control;
 pub mod verification;
 pub mod web;
+pub(crate) mod workflow;
 pub mod workspace;
 pub mod write;
 

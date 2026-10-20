@@ -1576,7 +1576,7 @@ pub async fn run(
     .await;
     delivery.attach_workspaces(&workspaces);
     let factory: Arc<dyn Factory> = Arc::new(ServeFactory {
-        workspaces,
+        workspaces: Arc::clone(&workspaces),
         delivery: Some(Arc::clone(&delivery)),
         runtime: runtime.clone(),
         cancel: serve_cancel.clone(),
@@ -1656,6 +1656,13 @@ pub async fn run(
     }
     let close_error = server.close().await.err();
     delivery.shutdown().await;
+    // Every loaded workspace owns its own controller, not only startup.
+    let hosts: Vec<_> = workspaces.loaded.lock().await.values().cloned().collect();
+    for host in hosts {
+        if let Some(controller) = &host.workflows {
+            controller.close().await;
+        }
+    }
     let sandbox_error = control.close().await.err();
 
     let redact = |message: &str| -> String { format!("serve: {message}") };

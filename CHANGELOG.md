@@ -133,6 +133,26 @@ commit ledger; Git and release tags retain the full history. See the
 - A stdio MCP call whose request is blocked writing to a server that stopped
   reading stdin now times out at `call_timeout` and stops the server. Before,
   the call and the server shutdown waited indefinitely.
+- Concurrency fixes:
+  - A workflow attempt that stops early cancels its sub-agent, and a
+    sub-agent that finishes while being cancelled keeps its result.
+  - A parent `agent_send` message that arrives during a sub-agent's last
+    provider call is delivered before the sub-agent finishes.
+  - The idle session sweeper no longer closes a session that started a turn
+    or was pinned after the sweep selected it.
+  - A client that disconnects during `/compact` or `/reflect` no longer leaves
+    the session refusing turns with `409`.
+  - A repeated ACP `session/load` no longer runs a restored queued prompt twice,
+    and a `session/cancel` sent right after `session/prompt` cancels it.
+  - Closing or failing to open a session releases its lease, so the next open
+    no longer waits 35 s for a takeover.
+  - A temporary file left by a crashed fork no longer makes retries of that
+    fork fail.
+  - Edits of `Foo.rs` and `foo.rs` on a case-insensitive file system are
+    serialized.
+  - chat-connector starts a new agent process when the ACP connection closes
+    while the old process is still running, and no longer blocks other
+    requests during the restart delay.
 - Sub-agents can fork from an earlier prompt, yield while dependencies run,
   report verification outcomes and return persistent research reports. Delivery
   recovery distinguishes a still-running target from a completed result.

@@ -126,6 +126,14 @@ commit ledger; Git and release tags retain the full history. See the
   need at most 1.03 MB.
 - Rust is pinned to 1.99.0. Provider TLS and connector WebSocket dependencies
   receive security updates. `otto --version` includes the checkout commit.
+- Rust dependencies are upgraded to their latest releases, including tokio
+  1.54, turso 0.8.3, sha2 0.11, jsonschema 0.59 and reqwest 0.13; base64
+  stays at 0.22.1, the version turso uses. With reqwest 0.13, HTTPS
+  certificates are verified by rustls-platform-verifier (the macOS trust
+  evaluation; the system root store on Linux) over the aws-lc-rs provider,
+  instead of rustls-native-certs roots over ring. `license-check` allows
+  CDLA-Permissive-2.0 for webpki-root-certs, a wasm32-only dependency of the
+  verifier. Rebuild with `make install`; no configuration change is needed.
 - The repository has no CI. Run focused checks locally; full `make` gates are
   opt-in. The macOS gate includes PTY and core WASM tests; browser UI development
   remains in the separate [otto-plus](https://github.com/baiyuqing/otto-plus) repository.

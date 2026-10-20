@@ -264,6 +264,22 @@ pub fn build_context(
                     resolved.usage_present = true;
                 }
             }
+            "custom_message" => {
+                let custom = entry
+                    .custom_message
+                    .as_ref()
+                    .ok_or_else(|| PiError::invalid("custom_message payload is required"))?;
+                // A notification (such as a finished sub-agent task) reports
+                // its own token cost in the Otto extension, and that cost
+                // belongs to this session's totals the same way an assistant
+                // round trip's does.
+                if let Some(details) = decode_pi_otto_details(custom.details.as_deref())?
+                    && let Some(usage) = details.usage
+                {
+                    resolved.usage = add_resolved_usage(resolved.usage, Some(&usage));
+                    resolved.usage_present = true;
+                }
+            }
             "custom" => {
                 let custom = entry
                     .custom
@@ -669,6 +685,7 @@ pub fn pi_entry_to_context_messages(entry: &PiEntry) -> Result<Vec<Message>, PiE
             );
             if let Some(details) = decode_pi_otto_details(custom.details.as_deref())? {
                 message.input_id = details.input_id;
+                message.usage = details.usage;
                 if !details.task_id.is_empty() {
                     message.context_metadata = Some(ContextMetadata {
                         task_id: details.task_id,
@@ -1224,7 +1241,8 @@ fn model_context_message_to_pi_entry(
     if !message.input_id.is_empty() && !crate::model::is_input_id(&message.input_id) {
         return Err(PiError::invalid("invalid input id"));
     }
-    if message.context_metadata.is_some() || !message.input_id.is_empty() {
+    if message.context_metadata.is_some() || !message.input_id.is_empty() || message.usage.is_some()
+    {
         custom.details = Some(encode_pi_otto_details(&PiOttoDetails {
             task_id: message
                 .context_metadata
@@ -1232,6 +1250,10 @@ fn model_context_message_to_pi_entry(
                 .map(|metadata| metadata.task_id.clone())
                 .unwrap_or_default(),
             input_id: message.input_id.clone(),
+            // `piCustomMessage` has no usage field in the Pi v3 format, so a
+            // notification's token cost (such as a finished sub-agent task's)
+            // travels in the Otto extension instead of being dropped.
+            usage: message.usage,
             ..PiOttoDetails::default()
         })?);
     }
@@ -1243,8 +1265,6 @@ fn model_context_message_to_pi_entry(
         custom_message: Some(Box::new(custom)),
         ..PiEntry::default()
     };
-    // Usage is dropped: piCustomMessage has no usage field in the Pi v3
-    // format, so a notification's token cost is not persisted.
     let persisted = Message {
         id: entry_id.to_owned(),
         role: Role::Context,
@@ -1254,6 +1274,7 @@ fn model_context_message_to_pi_entry(
         display: message.display,
         context_metadata: message.context_metadata.clone(),
         input_id: message.input_id.clone(),
+        usage: message.usage,
         ..Message::default()
     };
     Ok((entry, persisted))
@@ -1952,7 +1973,8 @@ mod tests {
     use crate::session::codec::decode_pi_entry;
     use crate::session::codec::tests::read_pi_fixture;
     use crate::session::pi::{
-        PiBranchSummary, PiCompaction, PiContextEdit, PiCustom, PiModelChange, PiSessionInfo,
+        PiBranchSummary, PiCompaction, PiContextEdit, PiCustom, PiCustomMessage, PiModelChange,
+        PiSessionInfo,
     };
 
     macro_rules! test {
@@ -2116,6 +2138,79 @@ mod tests {
             .expect("raw details"),
         );
         assert!(pi_entry_to_context_messages(&malformed).is_err());
+    }
+
+    #[test]
+    fn a_context_message_keeps_its_usage_in_the_otto_details() {
+        let usage = Usage {
+            input_tokens: 40,
+            output_tokens: 5,
+            cached_input_tokens: 30,
+        };
+        let message = Message {
+            id: "n1".into(),
+            role: Role::Context,
+            blocks: vec![Block::text("[task-notification] task t1 succeeded")],
+            created_at: DateTime::from_timestamp(1, 0).expect("in range"),
+            context_type: TASK_NOTIFICATION_CONTEXT_TYPE.into(),
+            display: true,
+            context_metadata: Some(ContextMetadata {
+                task_id: "t1".into(),
+            }),
+            usage: Some(usage),
+            ..Message::default()
+        };
+
+        let (entry, persisted) =
+            model_message_to_pi_entry(&message, "e1", None, &Header::default()).expect("encode");
+
+        assert_eq!(
+            persisted.usage,
+            Some(usage),
+            "the replayable message keeps the notification's tokens"
+        );
+        let details = entry
+            .custom_message
+            .as_ref()
+            .expect("custom_message")
+            .details
+            .as_ref()
+            .expect("details")
+            .get();
+        assert!(
+            details.contains(
+                r#""usage":{"input_tokens":40,"output_tokens":5,"cached_input_tokens":30}"#
+            ),
+            "{details}"
+        );
+        let decoded = pi_entry_to_context_messages(&entry).expect("decode");
+        assert_eq!(decoded[0].usage, Some(usage));
+    }
+
+    #[test]
+    fn a_notification_without_usage_writes_no_usage_detail() {
+        let message = Message {
+            id: "n1".into(),
+            role: Role::Context,
+            blocks: vec![Block::text("[task-notification] task t1 canceled")],
+            created_at: DateTime::from_timestamp(1, 0).expect("in range"),
+            context_type: TASK_NOTIFICATION_CONTEXT_TYPE.into(),
+            display: true,
+            ..Message::default()
+        };
+
+        let (entry, _) =
+            model_message_to_pi_entry(&message, "e1", None, &Header::default()).expect("encode");
+
+        assert!(
+            entry
+                .custom_message
+                .as_ref()
+                .expect("custom_message")
+                .details
+                .is_none(),
+            "no details are written for a notification without usage"
+        );
     }
 
     #[test]
@@ -3038,6 +3133,58 @@ mod tests {
                 output_tokens: 6,
                 cached_input_tokens: 0,
             }
+        );
+    });
+
+    test!(build_context_counts_a_task_notification_usage {
+        let assistant = assistant_entry(
+            "91000001",
+            None,
+            "answer",
+            "openai-compatible",
+            "model",
+            10,
+            3,
+            "stop",
+        );
+        let task_usage = Usage {
+            input_tokens: 40,
+            output_tokens: 5,
+            cached_input_tokens: 30,
+        };
+        let mut notification = entry("custom_message", "91000002", Some("91000001"));
+        notification.custom_message = Some(Box::new(PiCustomMessage {
+            custom_type: TASK_NOTIFICATION_CONTEXT_TYPE.into(),
+            content_text: Some("[task-notification] task t1 succeeded".into()),
+            display: true,
+            details: Some(
+                encode_pi_otto_details(&PiOttoDetails {
+                    task_id: "t1".into(),
+                    usage: Some(task_usage),
+                    ..PiOttoDetails::default()
+                })
+                .expect("encode details"),
+            ),
+            ..PiCustomMessage::default()
+        }));
+
+        let (context, _) =
+            build_context(&[assistant, notification], "91000002").expect("build context");
+
+        assert_eq!(
+            context.usage,
+            Usage {
+                input_tokens: 50,
+                output_tokens: 8,
+                cached_input_tokens: 30,
+            },
+            "the sub-agent's tokens belong to the session totals"
+        );
+        assert!(context.usage_present);
+        assert_eq!(
+            context.messages[1].usage,
+            Some(task_usage),
+            "the replayed notification also carries its own usage"
         );
     });
 

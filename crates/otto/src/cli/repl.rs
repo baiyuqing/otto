@@ -2405,6 +2405,7 @@ Justification: \"push branch\"\n"
                 text: "[task-notification] done".to_string(),
                 usage: Default::default(),
                 present: false,
+                cached_input_tokens_present: false,
             },
         ];
         let mut rendered_error = false;

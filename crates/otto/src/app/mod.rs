@@ -1400,6 +1400,7 @@ impl Controller {
             text,
             usage: Usage::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
         Ok(())
     }
@@ -1500,6 +1501,7 @@ impl Controller {
             text: text.into(),
             usage: Usage::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
         Ok(())
     }

@@ -76,8 +76,14 @@ impl Builder {
             let _ = writeln!(warnings, "warning: {reason}");
         }
         let client = self.provider_client(runtime)?;
+        let plugins =
+            crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
+        let extensions = self.plugin_runtime(&plugins, &redaction_values)?;
+        let memory_client = self
+            .runner_memory_client(&plugins, &extensions, runtime, warnings)
+            .await?;
         let advisor = if self.memory_usable()
-            && self.memory.extension.is_none()
+            && !self.memory.external()
             && self.boundary_allows_dynamic(Some(runtime))
         {
             crate::approval::memory::attach(
@@ -128,10 +134,10 @@ impl Builder {
             ));
             advisor
         } else {
-            if self.memory.extension.is_some()
+            if self.memory.external()
                 && self.memory_usable()
                 && self.boundary_allows_dynamic(Some(runtime))
-                && let Some(client) = &self.memory.client
+                && let Some(client) = &memory_client
             {
                 tools.extend(crate::tool::memory_service::tools(
                     client.clone(),
@@ -145,9 +151,6 @@ impl Builder {
             None
         };
         mark_build_trace(&mut trace, "runner/setup");
-        let plugins =
-            crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
-        let extensions = self.plugin_runtime(&plugins, &redaction_values)?;
         let hook_guard = crate::plugin::hooks::session_guard(
             {
                 let session = session.clone();
@@ -626,7 +629,7 @@ impl Builder {
                 consecutive_failures: runtime.progress.consecutive_failures,
             },
             memory: match self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
-                true => Some(self.bind_selected_memory(session.header().id)?),
+                true => self.bind_selected_memory(session.header().id, memory_client.clone())?,
                 false => None,
             },
             memory_recall_limit: self.memory.recall_limit,
@@ -684,6 +687,7 @@ impl Builder {
             mcp: mcp_servers,
             task_control,
             advisor,
+            memory_client,
             schedule_origin,
             presentation_origin,
             reflection,

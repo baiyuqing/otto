@@ -1,6 +1,8 @@
 # External memory as a plugin through hooks
 
 Status: approved 2026-10-20 (changes 1 and 2; phase 2 as a separate PR).
+The decision that the plugin runs beside the built-in memory is replaced by
+[a plugin as the memory source](2026-10-20-memory-provider-plugin.md).
 
 ## Problem
 

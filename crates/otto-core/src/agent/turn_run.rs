@@ -130,7 +130,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         if self.redactor.allows_dynamic_content() {
             self.preflight_ordinary_turn(user_text, image.as_ref(), system_context, followup)?;
         }
-        if self.options.hooks.is_none() || !self.redactor.allows_dynamic_content() {
+        let observes_turns = self
+            .options
+            .memory
+            .as_ref()
+            .is_some_and(|binding| binding.observes_turns());
+        if (self.options.hooks.is_none() && !observes_turns)
+            || !self.redactor.allows_dynamic_content()
+        {
             return self
                 .run_inner(user_text, image, system_context, emit, control, followup)
                 .await;
@@ -175,9 +182,25 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .take()
             .unwrap_or_default();
         let mut turn_end_data = serde_json::json!({"status":status,"stop_reason":control.stop_reason(),"error":result.as_ref().err().map(|e|self.redactor.redact_string(&e.to_string()))});
-        turn_end_data["turn"] = hooks::turn_json(&turn_messages);
+        let turn = hooks::turn_json(&turn_messages);
+        turn_end_data["turn"] = turn.clone();
         if let Err(message) = self.hook("turn_end", turn_end_data, &end_control).await {
             self.hook_warning(emit, &message);
+        }
+        if observes_turns
+            && !turn_messages.is_empty()
+            && let Some(binding) = &self.options.memory
+        {
+            let turn_id = self
+                .hook_turn_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Err(error) = binding.observe_turn(&turn_id, &turn, &end_control).await {
+                emit(Event::MemoryWarning {
+                    message: error.to_string(),
+                });
+            }
         }
         self.hook_turn_id
             .lock()

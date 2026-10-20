@@ -477,3 +477,21 @@ fn status_redacts_the_configured_path_and_reports_the_warning() {
         assert!(stdout.contains(want), "stdout = {stdout:?}, want {want:?}");
     }
 }
+
+#[test]
+fn a_plugin_source_refuses_otto_memory_and_opens_no_file_store() {
+    let home = tempfile::tempdir().expect("home");
+    let config = home.path().join("otto.toml");
+    std::fs::write(&config, "[memory]\nbackend = \"plugin:memfix\"\n").expect("write config");
+    let (code, stdout, stderr) = memory(
+        &["status", "--config", &config.to_string_lossy()],
+        home.path(),
+    );
+    assert_eq!(code, 1);
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "otto: memory source plugin:memfix does not support otto memory; the plugin manages its records\n"
+    );
+    assert!(!store_dir(home.path()).exists());
+}

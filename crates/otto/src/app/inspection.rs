@@ -17,7 +17,12 @@ impl Controller {
 
     pub fn memory_service(&self) -> Option<Arc<crate::memory::client::Client>> {
         self.dynamic_content_available()
-            .then(|| self.builder.memory.client.clone())
+            .then(|| {
+                self.builder.memory.client.clone().or_else(|| {
+                    self.current_runner()
+                        .and_then(|runner| runner.memory_client.clone())
+                })
+            })
             .flatten()
             .filter(|client| !client.is_closed())
     }

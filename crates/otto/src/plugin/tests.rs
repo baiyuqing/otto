@@ -717,7 +717,7 @@ async fn otto_commands_require_content_trust_and_revoke_without_reloading() {
         snapshot
             .diagnostics
             .iter()
-            .any(|s| s.contains("hooks and custom tools disabled"))
+            .any(|s| s.contains("hooks, custom tools and memory disabled"))
     );
     f.service().change("command-example", "trust").unwrap();
     let snapshot = Snapshot::load(f.home.path(), &File::default(), &f.env());

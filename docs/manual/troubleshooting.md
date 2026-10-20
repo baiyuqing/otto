@@ -102,5 +102,6 @@ history was deleted; see [Sessions](interactive-use.md#sessions).
 ### Startup fails with `[memory.remote] was removed` or `memory backend "remote" was removed`
 
 The remote memory backend no longer exists. Delete `[memory.remote]` and
-`backend = "remote"` from `config.toml`. To use an external memory service, run
-it as a plugin; see [external memory services](memory-and-extensions.md#external-memory-services-run-as-plugins).
+`backend = "remote"` from `config.toml`. To use an external memory service,
+install it as a plugin package and set `backend = "plugin:<package>"`; see
+[plugin memory source](memory-and-extensions.md#plugin-memory-source).

@@ -550,6 +550,7 @@ impl Runner {
             mcp: Arc::new(crate::mcp::Servers::default()),
             task_control,
             advisor: None,
+            memory_client: None,
             schedule_origin: Default::default(),
             presentation_origin: Default::default(),
             reflection: Default::default(),

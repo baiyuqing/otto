@@ -15,6 +15,11 @@ pub(crate) fn open_memory(
 ) -> Result<(), String> {
     let resolved = runtime;
     let workspace_path = builder.workspace_path.clone();
+    if let (Some(_), Some(package)) = (&builder.memory.extension, memory_config.plugin_package()) {
+        return Err(format!(
+            "an injected memory extension cannot be combined with backend = \"plugin:{package}\""
+        ));
+    }
     if dynamic_content && memory_config.enabled {
         builder.workspace_scope =
             crate::runtime::wiring::workspace_memory_scope(memory_config, &workspace_path)?;
@@ -23,17 +28,7 @@ pub(crate) fn open_memory(
                 .user_scope
                 .validate()
                 .map_err(|error| error.to_string())?;
-            let guard_values: Vec<String> = builder
-                .secret_values(Some(runtime))
-                .into_iter()
-                .filter(|value| value.len() <= crate::memory::MAX_EXACT_GUARD_VALUE_BYTES)
-                .collect();
-            let exact = crate::memory::guard::ExactGuard::new(&guard_values)
-                .map_err(|_| "build memory secret guard".to_string())?;
-            let guard = crate::memory::guard::CompositeGuard::new(vec![
-                Box::new(crate::memory::guard::DefaultGuard),
-                Box::new(exact),
-            ]);
+            let guard = crate::memory::guard::content_guard(&builder.secret_values(Some(runtime)))?;
             let client = extension
                 .client()
                 .map_err(|error| error.to_string())?
@@ -46,6 +41,16 @@ pub(crate) fn open_memory(
             }
             let shared = builder.shared_mut();
             shared.memory.client = Some(Arc::new(client));
+            shared.memory.usable = true;
+        } else if let Some(package) = memory_config.plugin_package() {
+            // The client is built for each runner, where the plugin runtime exists.
+            let shared = builder.shared_mut();
+            shared.memory.plugin = Some(crate::runtime::wiring::PluginMemorySelection {
+                package: package.to_string(),
+                required: memory_config.required,
+                require_encryption: memory_config.require_encryption,
+            });
+            shared.memory.user_scope = crate::memory::Scope::new("user", "default");
             shared.memory.usable = true;
         } else {
             let secrets = builder.secret_values(Some(resolved));
@@ -77,7 +82,7 @@ pub(crate) fn open_memory(
             }
         }
     }
-    let advice_audit = if builder.memory.usable && builder.memory.extension.is_none() {
+    let advice_audit = if builder.memory.usable && !builder.memory.external() {
         match builder
             .storage
             .memory_advice(&Path::new(home).join(".otto/memory-advice.db"))

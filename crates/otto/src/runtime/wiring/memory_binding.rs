@@ -46,7 +46,7 @@ impl Builder {
         advisor: Option<Arc<crate::memory::advice::Advisor>>,
         turn: Option<(&str, Arc<crate::schedule::tools::TurnOrigin>)>,
     ) -> Vec<Box<dyn Tool + Send + Sync>> {
-        if self.memory.extension.is_some() {
+        if self.memory.external() {
             return self
                 .memory
                 .client
@@ -92,7 +92,7 @@ impl Builder {
         model: &str,
         usage: Option<crate::usage::Collector>,
     ) -> Option<Arc<crate::memory::advice::Advisor>> {
-        if !self.memory.usable || self.memory.extension.is_some() {
+        if !self.memory.usable || self.memory.external() {
             return None;
         }
         let key = self
@@ -137,24 +137,30 @@ impl Builder {
             .map_err(|error| format!("bind memory: {error}"))
     }
 
+    /// Binds the memory source of the runner for one session. `client` is the
+    /// runner's client; it is ignored for the file store.
     pub fn bind_selected_memory(
         &self,
         session_id: String,
-    ) -> Result<Arc<dyn otto_core::agent::memory::MemoryRecall + Send + Sync>, BuildError> {
-        if self.memory.extension.is_some() {
-            let client = self
-                .memory
-                .client
-                .clone()
-                .ok_or("memory service unavailable")?;
-            Ok(Arc::new(ServiceBinding {
+        client: Option<Arc<crate::memory::client::Client>>,
+    ) -> Result<Option<Arc<dyn otto_core::agent::memory::MemoryRecall + Send + Sync>>, BuildError>
+    {
+        if !self.memory.external() {
+            return Ok(Some(Arc::new(self.bind_memory()?)));
+        }
+        Ok(client.map(|client| {
+            let observes = client.mode() == otto_core::memory::AuthorizationMode::DelegatedLearning
+                && client
+                    .describe()
+                    .capability(otto_core::memory::Operation::Observe)
+                    .is_ok_and(|capability| capability.supports_delegated_learning);
+            Arc::new(ServiceBinding {
                 client,
+                observes,
                 context: self.memory_context(otto_core::memory::Origin::Model, Some(session_id)),
                 closed: AtomicBool::new(false),
-            }))
-        } else {
-            Ok(Arc::new(self.bind_memory()?))
-        }
+            }) as Arc<dyn otto_core::agent::memory::MemoryRecall + Send + Sync>
+        }))
     }
 
     /// The memory, skill and sub-agent halves of `boundaryToolDefinitions`. The
@@ -162,6 +168,15 @@ impl Builder {
     pub fn boundary_memory_definitions(&self, max_output: usize) -> Vec<ToolDefinition> {
         if !self.memory.usable {
             return Vec::new();
+        }
+        // The plugin's capabilities are known only after it starts, so the
+        // check sees every memory tool it could register.
+        if self.memory.plugin.is_some() {
+            use otto_core::memory::Operation;
+            return [Operation::Recall, Operation::Remember, Operation::Forget]
+                .into_iter()
+                .map(crate::tool::memory_service::service_definition)
+                .collect();
         }
         self.memory_tools(max_output, None, None)
             .iter()

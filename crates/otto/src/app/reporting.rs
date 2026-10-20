@@ -49,7 +49,7 @@ impl Controller {
     /// and when `commit` installs a replacement session.
     pub(super) fn notify_memory_state(&self) {
         let memory = &self.builder.memory;
-        if !memory.usable {
+        if !memory.usable || memory.external() {
             return;
         }
         let scopes = [

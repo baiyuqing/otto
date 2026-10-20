@@ -49,9 +49,10 @@ fn channel_metadata_is_structured_and_never_changes_prompt_text() {
 async fn reloading_a_session_rebinds_notices_to_the_current_controller() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let first = Arc::new(crate::cli::testutil::controller(workspace.path(), sessions.path()).await);
+    let first =
+        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
     let second =
-        Arc::new(crate::cli::testutil::controller(workspace.path(), sessions.path()).await);
+        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
     let id = first.info().session_id;
     let builder = Arc::clone(first.builder());
     let (out, mut frames) = mpsc::unbounded_channel();
@@ -59,7 +60,7 @@ async fn reloading_a_session_rebinds_notices_to_the_current_controller() {
         workspace: workspace.path().to_path_buf(),
         backend: Backend::Local(Box::new(Local {
             config: Config {
-                runtime: crate::cli::testutil::initial_runtime(&builder),
+                runtime: crate::cli::fixture_tests::initial_runtime(&builder),
                 builder,
                 workspace: workspace.path().to_path_buf(),
                 sandbox: None,
@@ -145,7 +146,7 @@ async fn reloading_a_session_rebinds_notices_to_the_current_controller() {
 async fn idle_wake_checks_do_not_signal_slot_release() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+    let controller = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
     let session = Session {
         controller: Arc::new(controller),
         prompt: Arc::new(PromptSlot::default()),

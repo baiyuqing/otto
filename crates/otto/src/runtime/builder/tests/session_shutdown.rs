@@ -178,9 +178,9 @@ fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transc
 /// either, and it gets exactly one "moved" notification naming both.
 #[tokio::test]
 async fn migrate_cancels_running_and_queued_subagent_tasks_and_notifies_the_parent() {
+    use crate::subagent::doubles_tests::{FakeProvider, assistant_text, match_any, wait_status};
     use crate::subagent::runner::StartRequest;
     use crate::subagent::tasks::TaskStatus;
-    use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any, wait_status};
     use otto_core::agent::inbox::NotificationKind;
     use otto_core::model::Usage;
 
@@ -196,7 +196,7 @@ async fn migrate_cancels_running_and_queued_subagent_tasks_and_notifies_the_pare
     child_provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
 
     let mut child_config =
-        crate::subagent::testsupport::test_config(&child_provider, &tasks, Vec::new());
+        crate::subagent::doubles_tests::test_config(&child_provider, &tasks, Vec::new());
     child_config.max_parallel = 1;
     let child_parent = parent_path.clone();
     child_config.child_session = Some(Arc::new(move |task_id: &str| {

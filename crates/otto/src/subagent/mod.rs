@@ -11,6 +11,8 @@
 //! tools.
 
 pub mod definition;
+#[cfg(test)]
+pub(crate) mod doubles_tests;
 pub mod format;
 pub mod inherit;
 pub mod interrupted;
@@ -21,8 +23,6 @@ mod reports;
 pub mod runner;
 mod scratch;
 pub mod tasks;
-#[cfg(test)]
-pub(crate) mod testsupport;
 pub mod tools;
 
 pub use definition::{Catalog, Definition, WritePolicy, from_skill};

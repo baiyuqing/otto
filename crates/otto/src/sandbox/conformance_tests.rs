@@ -130,11 +130,11 @@ macro_rules! contract_check {
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn $check() {
             let case = $case;
-            if let Some(reason) = $crate::sandbox::conformance::Contract::skip_reason(&case) {
+            if let Some(reason) = $crate::sandbox::conformance_tests::Contract::skip_reason(&case) {
                 eprintln!("SKIP {}: {reason}", stringify!($check));
                 return;
             }
-            $crate::sandbox::conformance::$check(&case).await;
+            $crate::sandbox::conformance_tests::$check(&case).await;
         }
     };
 }
@@ -142,49 +142,49 @@ macro_rules! contract_check {
 /// Declares the whole shared driver contract for one [`Contract`] adapter.
 macro_rules! driver_contract {
     ($case:expr) => {
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             ordinary_and_nonzero_exits_with_separate_streams
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             supplied_environment_exactly_replaces_host_environment
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             pre_cancellation_does_not_start_a_child
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             deadline_cancellation_removes_the_process_group
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             an_ignored_term_escalates_to_kill_and_removes_the_group
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             normal_leader_exit_removes_a_background_process
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             driver_close_drains_active_work_and_is_idempotent
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             executor_clones_requests_before_delegation
         );
-        $crate::sandbox::conformance::contract_check!(
+        $crate::sandbox::conformance_tests::contract_check!(
             $case,
             canonical_paths_with_spaces_unicode_and_quotes
         );
-        $crate::sandbox::conformance::contract_check!($case, validation_errors_are_bounded);
-        $crate::sandbox::conformance::contract_check!($case, concurrent_calls_complete);
-        $crate::sandbox::conformance::contract_check!($case, advertised_read_confinement);
-        $crate::sandbox::conformance::contract_check!($case, advertised_write_confinement);
-        $crate::sandbox::conformance::contract_check!($case, advertised_local_tcp_allow);
-        $crate::sandbox::conformance::contract_check!($case, advertised_local_tcp_deny);
-        $crate::sandbox::conformance::contract_check!($case, advertised_unix_socket_deny);
+        $crate::sandbox::conformance_tests::contract_check!($case, validation_errors_are_bounded);
+        $crate::sandbox::conformance_tests::contract_check!($case, concurrent_calls_complete);
+        $crate::sandbox::conformance_tests::contract_check!($case, advertised_read_confinement);
+        $crate::sandbox::conformance_tests::contract_check!($case, advertised_write_confinement);
+        $crate::sandbox::conformance_tests::contract_check!($case, advertised_local_tcp_allow);
+        $crate::sandbox::conformance_tests::contract_check!($case, advertised_local_tcp_deny);
+        $crate::sandbox::conformance_tests::contract_check!($case, advertised_unix_socket_deny);
     };
 }
 

@@ -33,7 +33,7 @@ async fn footer_omits_the_profile_and_uses_compact_status_labels() {
     app.info.profile = "terra".to_string();
     app.info.model = "gpt-5.6-terra".to_string();
     app.info.thinking.clear();
-    app.info.sandbox = testutil::seatbelt_info(crate::runtime::info::SandboxNetwork::Allowed);
+    app.info.sandbox = fixture_tests::seatbelt_info(crate::runtime::info::SandboxNetwork::Allowed);
 
     let footer = footer_text(&app);
 

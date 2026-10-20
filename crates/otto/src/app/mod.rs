@@ -50,10 +50,10 @@ fn project_invocation_identity(
                     pending.entry(call_id).or_default().push((mi, bi));
                 }
                 otto_core::model::BlockType::ToolResult => {
-                    if let Some(calls) = pending.get_mut(&call_id) {
-                        if !calls.is_empty() {
-                            calls.remove(0);
-                        }
+                    if let Some(calls) = pending.get_mut(&call_id)
+                        && !calls.is_empty()
+                    {
+                        calls.remove(0);
                     }
                 }
                 _ => {}

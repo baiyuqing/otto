@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use super::{Controller, WakeOperation};
 
 /// The first step of a turn.
+#[allow(clippy::large_enum_variant)] // one short-lived value per turn
 pub enum Step<'a> {
     Text(&'a str),
     Image(&'a str, Block),

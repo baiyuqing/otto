@@ -369,13 +369,14 @@ impl Builder {
                             .then(|| Path::new(&path).with_extension("inbox.json"))
                     });
                     let path = session.path();
-                    if !self.no_session && !path.is_empty() {
-                        if let Some(warning) = crate::runtime::sidecar_mailbox::load(
+                    if !self.no_session
+                        && !path.is_empty()
+                        && let Some(warning) = crate::runtime::sidecar_mailbox::load(
                             &inbox,
                             &Path::new(&path).with_extension("inbox.json"),
-                        ) {
-                            let _ = writeln!(warnings, "warning: {warning}");
-                        }
+                        )
+                    {
+                        let _ = writeln!(warnings, "warning: {warning}");
                     }
                     subagents.inbox = Some(inbox);
                 }

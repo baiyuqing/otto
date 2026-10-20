@@ -1,4 +1,3 @@
-
 use super::project_invocation_identity;
 use otto_core::model::{Block, BlockType, Message, OperationId};
 use otto_core::session::{OperationFact, OperationLedger};

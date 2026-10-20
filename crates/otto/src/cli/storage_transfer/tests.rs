@@ -1,4 +1,3 @@
-
 use super::*;
 use otto_core::approval::ApprovalMode;
 use std::os::unix::fs::DirBuilderExt;

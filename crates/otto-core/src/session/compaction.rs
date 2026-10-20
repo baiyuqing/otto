@@ -19,7 +19,7 @@ use super::context::{
     optional_pi_usage_to_model,
 };
 use super::pi::{PiCompaction, PiEntry, PiUsage};
-use super::types::{CompactionCheckpoint, CompactionDetails, CompactionMetadata};
+use super::session_types::{CompactionCheckpoint, CompactionDetails, CompactionMetadata};
 use super::{PiError, PiErrorKind};
 
 /// Largest summary a checkpoint may carry, in bytes.

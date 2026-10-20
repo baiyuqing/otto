@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::tool::testutil::{run, run_cancelled};
 use std::sync::Mutex;

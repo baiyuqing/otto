@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn write_agent(root: &Path, name: &str, frontmatter_extra: &str, body: &str) -> PathBuf {

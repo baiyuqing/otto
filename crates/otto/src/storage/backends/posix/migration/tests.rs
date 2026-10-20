@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::storage::migration::{DomainDigest, DomainSnapshot, FrozenSnapshot, Progress};
 

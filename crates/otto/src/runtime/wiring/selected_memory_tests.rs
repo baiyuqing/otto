@@ -1,4 +1,3 @@
-
 use super::*;
 use otto_core::{agent::memory::MemoryRecall, memory as port, operation::OperationControl};
 

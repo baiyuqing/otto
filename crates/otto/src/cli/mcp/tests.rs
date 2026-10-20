@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// Writes `[mcp.servers.<name>]` config at the default path under `home`

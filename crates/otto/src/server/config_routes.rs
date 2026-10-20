@@ -301,7 +301,7 @@ pub(super) async fn preview(
             "approval service unavailable",
         );
     };
-    let artifact = crate::approval::config::Artifact::prepare(change, &preview);
+    let artifact = crate::approval::profile_change::Artifact::prepare(change, &preview);
     let details = match serde_json::to_string(&artifact) {
         Ok(json) => json,
         Err(_) => {

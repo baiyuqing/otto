@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::model::{Block, BlockType, FinishReason, Message, Role};
 use serde_json::value::RawValue;

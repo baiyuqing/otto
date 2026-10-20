@@ -217,16 +217,16 @@ guards these dependency directions.
 | Active-task guidance and model follow-ups | `otto-core/src/agent/steering.rs`, `app/task_control.rs`, `tool/task_control.rs` | runtime tool/prompt wiring, HTTP/ACP and connector routing |
 | Per-turn chat channel context | `app/channel.rs`, then ACP prompt parsing | Core per-run system context, HTTP turn queue, `client/`, and `chat-connector/` |
 | Reflection commands and background notices | `app/auto_reflection.rs`, `reflection/` | HTTP reflection routes, ACP commands, and chat updates |
-| Model-requested reflection (`reflect` tool) and run logs | `tool/reflect.rs` (port), `app/requested_reflection.rs` (binding), `reflection/runlog.rs` (`/reflect list|show`) | `cli/repl_commands.rs` (`reflect_runs_report`) |
-| Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | `runtime/builder.rs` (`web_tools`), `reflection/taint.rs` |
+| Model-requested reflection (`reflect` tool) and run logs | `tool/reflect.rs` (port), `app/requested_reflection.rs` (binding), `reflection/runlog.rs` (`/reflect list|show`) | `cli/repl_commands/reflect_reports.rs` (`reflect_runs_report`) |
+| Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | `runtime/builder/runner_entry.rs` (`web_tools`), `reflection/taint.rs` |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Bash command parsing for approval rules, review facts and effect classification | `crates/otto/src/tool/shell.rs` | `tool/bash.rs`, `approval/policy.rs`, `otto-core/src/approval/rules.rs` |
 | Web API or browser behavior | `crates/otto/src/server/` or external otto-plus | `otto-core` for shared wire codecs |
 | ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `chat-connector/` for chat connector behavior |
 | Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | the `wake-replies` HTTP route, `client/`, `chat-connector/internal/bridge` |
-| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | turn origin in `app/approval.rs`, the worker spawn in `cli/run.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `chat-connector/internal/bridge`, external otto-plus |
+| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | turn origin in `app/approval.rs`, the worker spawn in `cli/run/process.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `chat-connector/internal/bridge`, external otto-plus |
 | Persistent memories, sessions, workflow runs, or token aggregates | The matching native state module | Its store and lifecycle tests |
-| Cross-workspace delivery tasks (target admission, approval, worktree setup, handoff) | `crates/otto/src/delivery.rs`, then `cli/serve.rs` (`DeliveryManager`, `DeliveryBroker`, `DeliveryToolFactory`) | [user manual](manual/servers-and-connectors.md#cross-workspace-deliveries), `runtime/workspace_admission.rs`, `ParentToolSlot` in `runtime/builder.rs`, the receipt/task ledger tests |
+| Cross-workspace delivery tasks (target admission, approval, worktree setup, handoff) | `crates/otto/src/delivery.rs`, then `cli/serve/delivery.rs` (`DeliveryManager`, `DeliveryBroker`, `DeliveryToolFactory`) | [user manual](manual/servers-and-connectors.md#cross-workspace-deliveries), `runtime/workspace_admission.rs`, `ParentToolSlot` in `runtime/builder.rs`, the receipt/task ledger tests |
 
 ## Dependency and documentation rules
 

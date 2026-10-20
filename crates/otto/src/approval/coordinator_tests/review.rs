@@ -366,3 +366,28 @@ async fn context_change_fences_a_human_decision_before_the_pending_row_refresh()
     ));
     assert_eq!(service.store.load(&human.id).unwrap().state, State::Pending);
 }
+
+#[tokio::test]
+async fn unregister_reviewer_removes_only_the_still_registered_provider() {
+    let (service, first) = configured(ReviewOutcome::Allow);
+    let first: Arc<dyn ReviewProvider> = first;
+    let second: Arc<dyn ReviewProvider> = Arc::new(Unavailable);
+    let (workspace, session) = (scope().workspace, scope().session_id);
+    service
+        .register_reviewer(&workspace, &session, second.clone())
+        .unwrap();
+    service
+        .unregister_reviewer(&workspace, &session, &first)
+        .unwrap();
+    {
+        let state = service.review_state.read().unwrap();
+        assert_eq!(state.providers.len(), 1);
+        assert_eq!(state.contexts.len(), 1);
+    }
+    service
+        .unregister_reviewer(&workspace, &session, &second)
+        .unwrap();
+    let state = service.review_state.read().unwrap();
+    assert!(state.providers.is_empty());
+    assert!(state.contexts.is_empty());
+}

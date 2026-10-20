@@ -124,6 +124,12 @@ commit ledger; Git and release tags retain the full history. See the
   cache scoped to endpoint/account/version; rejected model requests invalidate
   it. ChatGPT compaction handles opaque provider context without exposing it as
   model-visible text or undercounting it.
+- ChatGPT token refresh is serialized across runners and Otto processes by a
+  lock on `~/.otto/auth/chatgpt.json.lock`. Under the lock the credential file
+  is re-read: a valid token another runner saved is reused, and an expired one
+  is refreshed with the file's latest refresh token. A refresh that completed
+  is saved even when the call was cancelled afterwards, and a file holding
+  another account's login is not overwritten.
 - A stdio MCP call whose request is blocked writing to a server that stopped
   reading stdin now times out at `call_timeout` and stops the server. Before,
   the call and the server shutdown waited indefinitely.
@@ -132,6 +138,14 @@ commit ledger; Git and release tags retain the full history. See the
   recovery distinguishes a still-running target from a completed result.
 - Usage reporting distinguishes logical provider calls, transport attempts and
   token reports instead of inferring one from another.
+- A long-running `otto serve` no longer retains memory or file descriptors per
+  workspace load, delivery task, runner build, sub-agent task or written file.
+  A workspace (one directory descriptor) is freed when its last runner closes;
+  write locks, delivery approval state, stopped workflow bindings, session
+  reviewers, dead writer handles and sub-agent report directory descriptors
+  are released when no longer used. chat-connector deletes a session's prompt
+  lock when no prompt holds or waits for it and splits an agent stderr line at
+  64 KiB.
 
 ### Build and verification
 

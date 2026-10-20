@@ -180,7 +180,7 @@ pub(crate) fn compose(
     });
     let builder = Builder::for_workspace(
         shared,
-        prepared.workspace,
+        Arc::clone(&prepared.workspace),
         workspace_path.to_string(),
         mcp_config,
     );

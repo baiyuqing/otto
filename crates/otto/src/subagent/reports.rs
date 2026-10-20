@@ -16,8 +16,10 @@ pub(super) struct Reports {
     tasks: Mutex<HashMap<String, Option<Report>>>,
 }
 
+/// Holds the directory name, not an fd: a runner prepares one report per task
+/// attempt, and a pinned fd each would stay open for the runner's lifetime.
 struct Report {
-    directory: Root,
+    name: String,
     path: String,
     handoff: Option<String>,
 }
@@ -36,7 +38,13 @@ impl Reports {
 
     /// Called only for final tasks. The result is already redacted. Keep the
     /// read pointer outside the preview cap so truncation cannot hide it.
-    pub(super) fn handoff(&self, task_id: &str, result: &str, overflow: bool) -> String {
+    pub(super) fn handoff(
+        &self,
+        workspace: Option<&Root>,
+        task_id: &str,
+        result: &str,
+        overflow: bool,
+    ) -> String {
         let mut tasks = self.tasks.lock().expect("report lock intact");
         let report = tasks.get_mut(task_id).and_then(Option::as_mut);
         let Some(report) = report else {
@@ -47,7 +55,11 @@ impl Reports {
             };
         };
         if report.handoff.is_none() && overflow {
-            report.handoff = Some(match report.save(result) {
+            let saved = workspace.map_or_else(
+                || Err(io::ErrorKind::NotFound.into()),
+                |root| report.save(root, result),
+            );
+            report.handoff = Some(match saved {
                 Ok(handoff) => handoff,
                 Err(_) => "\n[Full report file unavailable; automatic report storage failed. The result remains in task/session history.]".to_owned(),
             });
@@ -58,8 +70,7 @@ impl Reports {
 
 impl Report {
     fn new(workspace: &Root, task_id: &str) -> io::Result<Self> {
-        let otto = workspace.create_child_directory(".otto", Mode::S_IRWXU)?;
-        let parent = otto.create_child_directory("reports", Mode::S_IRWXU)?;
+        let parent = reports_directory(workspace)?;
         // Never replace an existing ignore file, symlink or other entry.
         match publish(&parent, ".gitignore", "*\n") {
             Ok(()) => {}
@@ -68,18 +79,20 @@ impl Report {
         }
         let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
         let name = format!("{task_id}-{id}");
-        let directory = parent.create_new_child_directory(&name, Mode::S_IRWXU)?;
+        parent.create_new_child_directory(&name, Mode::S_IRWXU)?;
         Ok(Self {
-            directory,
             path: format!(".otto/reports/{name}"),
+            name,
             handoff: None,
         })
     }
 
-    fn save(&self, result: &str) -> io::Result<String> {
-        publish(&self.directory, "final.md", result)?;
+    fn save(&self, workspace: &Root, result: &str) -> io::Result<String> {
+        let directory =
+            reports_directory(workspace)?.create_child_directory(&self.name, Mode::S_IRWXU)?;
+        publish(&directory, "final.md", result)?;
         let index = heading_index(result);
-        let index_hint = if publish(&self.directory, "index.md", &index).is_ok() {
+        let index_hint = if publish(&directory, "index.md", &index).is_ok() {
             format!(" Section index: {}/index.md.", self.path)
         } else {
             " Section index unavailable; read the report directly.".to_owned()
@@ -95,6 +108,12 @@ impl Report {
             index_hint,
         ))
     }
+}
+
+/// Opens `.otto/reports` one component at a time without following a link.
+fn reports_directory(workspace: &Root) -> io::Result<Root> {
+    let otto = workspace.create_child_directory(".otto", Mode::S_IRWXU)?;
+    otto.create_child_directory("reports", Mode::S_IRWXU)
 }
 
 fn publish(directory: &Root, name: &str, content: &str) -> io::Result<()> {
@@ -160,13 +179,13 @@ mod tests {
         let reports = Reports::default();
         let first = reports.prepare(Some(&root), "t1").unwrap();
         let text = format!("# 结论\n{}\n## 证据\nlast section\n", "研究".repeat(3000));
-        let hint = reports.handoff("t1", &text, true);
+        let hint = reports.handoff(Some(&root), "t1", &text, true);
         assert!(hint.contains(&format!("{first}/final.md")));
         assert!(hint.contains(&format!("{} UTF-8 bytes", text.len())));
-        assert_eq!(reports.handoff("t1", &text, true), hint);
+        assert_eq!(reports.handoff(Some(&root), "t1", &text, true), hint);
         let second = reports.prepare(Some(&root), "t1").unwrap();
         assert_ne!(first, second);
-        reports.handoff("t1", "second attempt", true);
+        reports.handoff(Some(&root), "t1", "second attempt", true);
         drop(reports);
         drop(root);
         assert_eq!(
@@ -193,6 +212,25 @@ mod tests {
     }
 
     #[test]
+    fn a_later_overflowing_handoff_still_saves_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root::open(dir.path()).unwrap();
+        let reports = Reports::default();
+        let path = reports.prepare(Some(&root), "t1").unwrap();
+        assert!(
+            reports
+                .handoff(Some(&root), "t1", "result", false)
+                .is_empty()
+        );
+        let hint = reports.handoff(Some(&root), "t1", "result", true);
+        assert!(hint.contains(&format!("{path}/final.md")));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(path).join("final.md")).unwrap(),
+            "result"
+        );
+    }
+
+    #[test]
     fn child_authored_report_survives_scratch_and_reports_drop() {
         let dir = tempfile::tempdir().unwrap();
         let root = Root::open(dir.path()).unwrap();
@@ -204,7 +242,7 @@ mod tests {
         std::fs::write(&report, "# Findings\nfull research").unwrap();
         assert!(
             reports
-                .handoff("t1", "short summary and report path", false)
+                .handoff(Some(&root), "t1", "short summary and report path", false)
                 .is_empty()
         );
         drop(scratch);
@@ -226,7 +264,7 @@ mod tests {
         assert!(reports.prepare(Some(&root), "t1").is_none());
         assert!(
             reports
-                .handoff("t1", "long report", true)
+                .handoff(Some(&root), "t1", "long report", true)
                 .contains("unavailable")
         );
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
@@ -236,7 +274,7 @@ mod tests {
         let target = outside.path().join("keep");
         std::fs::write(&target, "untouched").unwrap();
         symlink(&target, dir.path().join(path).join("final.md")).unwrap();
-        let hint = reports.handoff("t2", "must not overwrite", true);
+        let hint = reports.handoff(Some(&root), "t2", "must not overwrite", true);
         assert!(hint.contains("storage failed"));
         assert!(!hint.contains("Full report:"));
         assert_eq!(std::fs::read_to_string(target).unwrap(), "untouched");
@@ -249,7 +287,7 @@ mod tests {
         let reports = Reports::default();
         let path = reports.prepare(Some(&root), "t1").unwrap();
         std::fs::write(dir.path().join(&path).join("index.md"), "keep").unwrap();
-        let hint = reports.handoff("t1", "complete", true);
+        let hint = reports.handoff(Some(&root), "t1", "complete", true);
         assert!(hint.contains(&format!("{path}/final.md")));
         assert!(hint.contains("index unavailable"));
         assert_eq!(

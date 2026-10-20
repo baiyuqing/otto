@@ -7,6 +7,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -37,13 +38,13 @@ struct ReadArgs {
 }
 
 /// Reads a workspace file.
-pub struct ReadTool<'a> {
-    workspace: &'a Workspace,
+pub struct ReadTool {
+    workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }
 
-impl<'a> ReadTool<'a> {
-    pub fn new(workspace: &'a Workspace, max_output_bytes: usize) -> Self {
+impl ReadTool {
+    pub fn new(workspace: Arc<Workspace>, max_output_bytes: usize) -> Self {
         Self {
             workspace,
             max_output_bytes: max_output_bytes.min(RETRIEVAL_BYTES),
@@ -95,7 +96,7 @@ pub(crate) const READ_RETRY: (&str, otto_core::model::RetrySafety) =
     ("read", otto_core::model::RetrySafety::ReadOnly);
 
 #[async_trait::async_trait]
-impl Tool for ReadTool<'_> {
+impl Tool for ReadTool {
     fn retry_safety(&self) -> otto_core::model::RetrySafety {
         READ_RETRY.1
     }
@@ -247,7 +248,7 @@ mod execute_tests {
         let text = "你".repeat(2000);
         std::fs::write(dir.path().join("long.txt"), &text).unwrap();
         let workspace = workspace(dir.path());
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         let first = run(&tool, r#"{"path":"long.txt"}"#).await;
         assert!(first.content.contains("character_offset 1365"));
         let head = first.content.split("\n[truncated:").next().unwrap();
@@ -266,7 +267,7 @@ mod execute_tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("sample.txt"), "hello\n").unwrap();
         let workspace = workspace(root.path());
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         // Malformed JSON and trailing tokens cannot reach a tool: the stream
         // decoder rejects them before a `RawValue` exists. Those cases are
@@ -291,7 +292,7 @@ mod execute_tests {
         std::fs::write(root.path().join("binary"), [b'a', 0, b'b']).unwrap();
         std::fs::write(root.path().join("invalid.txt"), [0xff, 0xfe]).unwrap();
         let workspace = workspace(root.path());
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let binary = run(&tool, r#"{"path":"binary"}"#).await;
         assert!(
@@ -311,7 +312,7 @@ mod execute_tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("sample.txt"), "one\ntwo\nthree\nfour\n").unwrap();
         let workspace = workspace(root.path());
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         let result = run(&tool, r#"{"path":"sample.txt","offset":2,"limit":2}"#).await;
         assert!(!result.is_error, "{result:?}");
         assert_eq!(result.content, "two\nthree\n");
@@ -329,13 +330,13 @@ mod execute_tests {
         std::fs::write(root.path().join("accent.txt"), "é").unwrap();
         let workspace = workspace(root.path());
 
-        let capped = ReadTool::new(&workspace, 5);
+        let capped = ReadTool::new(Arc::clone(&workspace), 5);
         let result = run(&capped, r#"{"path":"sample.txt"}"#).await;
         assert!(!result.is_error, "{result:?}");
         assert!(result.content.starts_with("abcde"), "{result:?}");
         assert!(result.content.contains("truncated"), "{result:?}");
 
-        let tiny = ReadTool::new(&workspace, 1);
+        let tiny = ReadTool::new(Arc::clone(&workspace), 1);
         let accented = run(&tiny, r#"{"path":"accent.txt"}"#).await;
         assert!(!accented.is_error, "{accented:?}");
         assert!(accented.content.contains("truncated"), "{accented:?}");
@@ -348,7 +349,7 @@ mod execute_tests {
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(root.path().join("escape.txt"), "nope").unwrap();
         let workspace = workspace(&nested);
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         let result = run(&tool, r#"{"path":"../escape.txt"}"#).await;
         assert!(
             result.is_error && result.content.contains("escapes workspace"),
@@ -365,7 +366,7 @@ mod execute_tests {
         )
         .unwrap();
         let workspace = workspace(root.path());
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         let result = run(&tool, r#"{"path":"limit.txt"}"#).await;
         assert!(
             !result.is_error,
@@ -387,7 +388,7 @@ mod execute_tests {
         std::fs::write(outside.path().join("note.txt"), "outside secret").unwrap();
         std::os::unix::fs::symlink(outside.path(), &root).unwrap();
 
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         let result = run(&tool, r#"{"path":"note.txt"}"#).await;
         assert!(!result.is_error, "{result:?}");
         assert_eq!(result.content, "inside");
@@ -410,7 +411,7 @@ mod execute_tests {
         )
         .unwrap();
         let workspace = workspace(root.path());
-        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = ReadTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let oversized = run(&tool, r#"{"path":"huge.txt"}"#).await;
         assert!(

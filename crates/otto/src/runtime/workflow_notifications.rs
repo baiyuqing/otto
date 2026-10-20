@@ -42,6 +42,9 @@ impl crate::workflow::service::Delivery for Binding {
     fn stop(&self) {
         Binding::stop(self);
     }
+    fn is_stopped(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
     async fn join(&self) {
         Binding::join(self).await;
     }

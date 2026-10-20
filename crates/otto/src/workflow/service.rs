@@ -38,6 +38,7 @@ struct ActiveRun {
 #[async_trait::async_trait]
 pub(crate) trait Delivery: Send + Sync {
     fn stop(&self);
+    fn is_stopped(&self) -> bool;
     async fn join(&self);
 }
 
@@ -412,6 +413,8 @@ impl Controller {
     pub(crate) fn register_delivery(&self, binding: Arc<dyn Delivery>) {
         let mut deliveries = self.deliveries.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(deliveries) = deliveries.as_mut() {
+            // A closed runner stops its binding; drop it so the list stays bounded.
+            deliveries.retain(|registered| !registered.is_stopped());
             deliveries.push(binding);
         } else {
             binding.stop();

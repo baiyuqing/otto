@@ -378,12 +378,11 @@ func (c *chat) turn(m Message) {
 		if sid, err = c.session(ctx, m); err != nil {
 			break
 		}
-		lock := c.b.sessionLock(sid)
-		lock.Lock()
+		unlock := c.b.lockSession(sid)
 		c.mu.Lock()
 		if c.stopped {
 			c.mu.Unlock()
-			lock.Unlock()
+			unlock()
 			c.send(ctx, m.MessageID, "Stopped.")
 			return
 		}
@@ -410,7 +409,7 @@ func (c *chat) turn(m Message) {
 		delete(c.b.bySession, sid)
 		c.b.mu.Unlock()
 		c.finishTaskControl(generation)
-		lock.Unlock()
+		unlock()
 		if !errors.Is(err, agent.ErrNotOpen) {
 			break
 		}

@@ -214,6 +214,7 @@ fn a_crash_before_the_session_directory_sync_leaves_no_session_or_a_valid_one() 
 
 fn workflow_definition() -> otto::workflow::Definition {
     otto::workflow::Definition {
+        source: String::new(),
         name: "crash".into(),
         description: String::new(),
         steps: vec![otto::workflow::Step {

@@ -558,6 +558,16 @@ API-key variable or renew ChatGPT authentication with `otto login`, then start a
 new connection. A provider can reject a catalog ID; inspect partial work and
 possible side effects before deciding whether retrying the child is safe.
 
+### Workflow tools
+
+Parent conversations can discover, inspect, start and check existing durable
+workflows with `workflow_list`, `workflow_inspect`, `workflow_start` and
+`workflow_status`. These are distinct from interactive sub-agent delegation
+and from scheduling a future prompt. See [conversational workflow selection
+and setup](automation.md#choosing-workflows-from-conversation) for the tool
+roles, examples, human gates and recovery limitations. Child agents and
+workflow steps do not receive the parent workflow controls.
+
 ### Sub-agents
 
 The parent normally uses [`list_models`](#list_models) to choose an adequate

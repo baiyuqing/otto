@@ -81,7 +81,11 @@ pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
 /// because a child's plan would be shown nowhere; and delivery, which only a
 /// parent may start and which would otherwise let a child reach another
 /// workspace.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 16] = [
+pub const EXCLUDED_CHILD_TOOLS: [&str; 20] = [
+    "workflow_list",
+    "workflow_inspect",
+    "workflow_start",
+    "workflow_status",
     "agent",
     "agent_status",
     "agent_yield",
@@ -645,11 +649,14 @@ impl ToolExecutor for ChildTools {
                     .await,
                 );
             }
-            self.registry
-                .execute_with_scope(call, control, Some(&scope))
-                .await
+            crate::workflow::provenance::non_parent(self.registry.execute_with_scope(
+                call,
+                control,
+                Some(&scope),
+            ))
+            .await
         } else {
-            self.registry.execute(call, control).await
+            crate::workflow::provenance::non_parent(self.registry.execute(call, control)).await
         }
     }
 }

@@ -1354,16 +1354,24 @@ impl Server {
     /// so the next `changed()` returns at once and the re-check happens anyway,
     /// with one fewer moving part.
     fn start_wake_loop(self: &Arc<Self>, session: &Arc<OpenSession>) {
-        let Some(tasks) = session.ctrl.subagent_tasks() else {
+        let Some(mailbox) = session.ctrl.notification_mailbox() else {
             return;
         };
+        let mut updates = crate::runtime::workflow_notifications::updates(mailbox.as_ref());
+        let tasks = session.ctrl.subagent_tasks();
         let server = Arc::clone(self);
         let session = Arc::clone(session);
         let handle = tokio::spawn(async move {
             let mut seen = std::collections::BTreeMap::new();
-            let mut updates = tasks.updates();
+            let mut task_updates = tasks.as_ref().map(|tasks| tasks.updates());
+            // Recheck pre-existing queued inputs on open.
+            server.wake_turn(&session).await;
             loop {
                 tokio::select! {
+                    _ = async { match task_updates.as_mut() { Some(receiver) => { if receiver.changed().await.is_err() { std::future::pending::<()>().await; } }, None => std::future::pending::<()>().await } } => {
+                        if let Some(view) = session.ctrl.tasks() { server.metrics.diff_tasks(&mut seen, &view.list()); }
+                        server.status_changed.send_modify(|version| *version += 1);
+                    }
                     changed = updates.changed() => {
                         if changed.is_err() {
                             return;
@@ -1521,8 +1529,8 @@ impl Server {
         self.bump_status();
         let pending_wake = session
             .ctrl
-            .subagent_tasks()
-            .is_some_and(|tasks| !tasks.notifications().is_empty());
+            .notification_mailbox()
+            .is_some_and(|mailbox| !mailbox.is_empty());
         if !pending_wake {
             self.release_restored(session);
         }
@@ -6667,6 +6675,7 @@ mod tests {
         crate::workflow::Controller::new(
             store,
             crate::workflow::Catalog::from_definitions(vec![crate::workflow::Definition {
+                source: String::new(),
                 name: "review".to_string(),
                 description: String::new(),
                 hash: "0".repeat(64),

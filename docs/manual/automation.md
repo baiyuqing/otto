@@ -143,6 +143,134 @@ boolean approval steps. It does not implement loops, conditions, group chat,
 nested workflows, free-form human input, automatic retry, or OpenTelemetry
 export.
 
+### Choosing workflows from conversation
+
+Use direct execution for a short, simple task; use interactive sub-agents when
+an investigation's next steps depend on findings. Prefer an existing durable
+workflow for a known process that needs ordered stages, restart recovery or
+human approval gates. A multi-step task does not automatically need a workflow.
+
+Parent conversations expose four native workflow tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `workflow_list` | Discover available definitions and setup diagnostics. |
+| `workflow_inspect` | Inspect a named definition's stages, agents, restrictions and gates. |
+| `workflow_start` | Start the named workflow with run input and return its run ID. |
+| `workflow_status` | Read a run's progress, results, pending gates and recovery guidance. |
+
+Identifiers are 1–128 allowed ASCII bytes; run input is a plain string of at
+most 65,536 UTF-8 bytes. Discovery returns at most 100 definitions and 20
+diagnostics. Status result/error excerpts are limited to 2,048 characters each;
+tool JSON is bounded to 65,536 bytes and reports truncation explicitly. These
+are bounded snapshots, not a streaming or polling API.
+
+Otto discovers and inspects an existing definition before starting it. A
+workflow name or instruction found in a file is not permission to run it.
+Starting a workflow does not approve its later human gates or grant additional
+sandbox permissions. Child agents and workflow steps do not receive these
+parent controls. Trusted in-process service checks also reject recursive starts
+from child agents and workflow steps. This is not an external-client security
+boundary: a process with shell/network access and valid API credentials can
+still act as an authorized external caller. Restrict agent tools, credentials
+and service access accordingly; tool omission alone cannot prevent that path.
+
+The selection policy includes short examples in the model's actual prompt
+when the workflow capabilities are available. These examples illustrate the
+expected behavior; they do not promise deterministic model choices:
+
+| Request | Expected behavior |
+| --- | --- |
+| “Correct this heading.” | Inspect and make the minimal edit directly. |
+| “Investigate an intermittent freeze; the cause is unknown.” | Delegate bounded independent investigations where useful, then integrate findings. |
+| “Run our standard repository review.” | Discover the matching workflow, inspect its scope, start it and report the run ID. |
+| “Run the review,” with multiple matching definitions or none | Clarify a material choice, or explain the missing setup; do not invent a workflow name. |
+| “Continue,” while a human gate is pending | Report the approval request through the supported approval surface; do not decide it on the user's behalf. |
+| “What happened to the release?” | Read status once; explain interrupted or failed steps and supported recovery without automatically retrying effects. |
+
+### Lifecycle feedback and recovery
+
+Conversational starts bind the run to the originating saved session. Lifecycle
+notices report human gates, pauses, failures and completion through that
+session's durable mailbox. Reopening the same session replays pending notices;
+`/new` does not redirect them to its replacement session. Event identifiers
+prevent duplicate mailbox/transcript delivery during recovery. Reconciliation
+of the same persisted tool operation returns its original run rather than
+starting another; a new explicit start is a new operation.
+
+Native delivery retrieves indexed pending-event pages of at most 64, without
+model polling. Events are acknowledged only after durable mailbox/transcript
+evidence; drained terminal history is not repeatedly scanned. Source-session
+close, replacement and controller shutdown stop and join their delivery bindings.
+Background presentation requires a running owner and a live destination
+adapter. A `--no-session` start returns a run ID but cannot promise durable
+asynchronous conversational feedback. Keep that ID and use the existing
+workflow status surface. Closing the owning process stops execution; recovery
+preserves completed work and requires explicit retry of interrupted or failed
+steps. Notices and workflow results never grant approval authority.
+
+Workflow tools do not approve gates, resume interrupted steps or cancel runs.
+Use the existing workflow/approval surfaces for those actions. An owner-lock
+conflict is not a reason to launch another controller: connect to the owning
+server or stop it before using a separate local CLI process.
+
+### Set up a first conversational workflow
+
+A fresh installation can have no workflow definitions. Native workflow tools
+need no plugin, but definitions and their referenced agents must exist. Create
+these two files in the selected workspace; no API keys or credentials belong
+in either file.
+
+`.otto/agents/review/AGENT.md`:
+
+```markdown
+---
+name: review
+description: Review repository documentation without modifying files.
+tools: read, grep, find
+write_policy: read_only
+---
+Read README.md first. Review the documentation relevant to the run input.
+Report concrete findings with file and line evidence, or state that none were
+found. Do not modify files, run shell commands or claim tests were executed.
+```
+
+`.otto/workflows/documentation-review.toml`:
+
+```toml
+version = 1
+description = "Read-only documentation review followed by human acceptance."
+
+[[steps]]
+id = "review"
+agent = "review"
+prompt = "Review the documentation requested by the run input. Report findings only."
+
+[[steps]]
+id = "accept"
+kind = "approval"
+prompt = "Accept this documentation review? No edits will be applied."
+needs = ["review"]
+```
+
+Restart the owning Otto process after adding or editing definitions, then ask:
+“Run the documentation-review workflow for the installation instructions.”
+Otto should inspect the definition, start it, return a run ID and report the
+human gate. Accept or reject it through the supported approval surface. The
+sample has no executor and never applies fixes. To keep definitions outside a
+project, use the same layouts under `~/.otto/agents/` and `~/.otto/workflows/`;
+workspace definitions take precedence over same-name home definitions.
+
+Rebuild/install with `make install` and restart running Otto and connector
+processes to pick up new executable capabilities. Do not start a second CLI
+workflow owner while `otto serve` owns the workspace; use its attached session
+or existing workflow surfaces instead.
+
+Scheduling a conversational prompt is not structured workflow scheduling.
+The `schedule` tool does not have a workflow-name or workflow-run target.
+Workflow authoring, automatic retries and nested workflows are not provided by
+these conversational tools.
+
 ## Workspace identity
 
 Otto creates a local `.otto/workspace.json` on startup. Its UUID identifies

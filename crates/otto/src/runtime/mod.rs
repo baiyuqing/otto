@@ -20,5 +20,7 @@ pub(crate) mod sidecar_mailbox;
 pub(crate) mod startup;
 pub mod storage;
 pub mod wiring;
+pub mod workflow;
+pub(crate) mod workflow_notifications;
 pub mod workspace_admission;
 pub mod workspace_context;

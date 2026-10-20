@@ -32,7 +32,7 @@ regex = "=1.13.1"
 # openat/mkdirat/fstatat with O_NOFOLLOW, so the store calls them through libc.
 libc = "=0.2.191"
 # SHA-256 for the workspace directory key. No hash lives in std.
-sha2 = { version = "=0.10.9", default-features = false }
+sha2 = { version = "=0.11.1", default-features = false }
 # base64url for the OAuth PKCE challenge, the state parameter and the JWT
 # payload in `otto::auth`. Already in the lock file as a transitive dependency.
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }

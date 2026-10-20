@@ -1,6 +1,7 @@
 //! Workflow definition catalog, parsing and validation.
 
 use super::*;
+use crate::hex::to_hex;
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
@@ -86,10 +87,9 @@ impl Catalog {
                             continue;
                         }
                         definition.hash.clear();
-                        definition.hash = format!(
-                            "{:x}",
-                            Sha256::digest(serde_json::to_vec(&definition).unwrap_or_default())
-                        );
+                        definition.hash = to_hex(&Sha256::digest(
+                            serde_json::to_vec(&definition).unwrap_or_default(),
+                        ));
                         by_name.insert(definition.name.clone(), definition);
                     }
                     Err(error) => warnings.push(format!("workflow {}: {error}", path.display())),
@@ -379,7 +379,7 @@ pub(crate) fn parse_definition(
         source: String::new(),
         steps,
         agents: Vec::new(),
-        hash: format!("{:x}", Sha256::digest(data)),
+        hash: to_hex(&Sha256::digest(data)),
     })
 }
 

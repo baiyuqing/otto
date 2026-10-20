@@ -1,4 +1,5 @@
 //! Native discovery and executable trust. Never writes an effective configuration.
+use crate::hex::to_hex;
 use crate::tool::workspace::Workspace;
 use otto_core::config::{
     File,
@@ -484,7 +485,7 @@ fn digest(
         hash.update([0]);
         digest_tree(&path, &pinned, &mut hash, &mut sources, &mut total_bytes, 0)?;
     }
-    Ok((root, format!("{:x}", hash.finalize()), sources))
+    Ok((root, to_hex(&hash.finalize()), sources))
 }
 
 fn digest_tree(

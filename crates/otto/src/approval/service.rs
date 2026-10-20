@@ -3,6 +3,7 @@
 //! uncertain external action is never automatically replayed.
 use super::contracts::*;
 use super::repository::{ApprovalStore, Claim, ClaimChange};
+use crate::hex::to_hex;
 use chrono::Utc;
 use otto_core::approval::{
     ApplicationState, ApprovalMode, ApprovalSettings, Change, Choice, Decision, Kind, Request,
@@ -642,7 +643,7 @@ impl Service {
     }
 }
 pub fn digest(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    to_hex(&Sha256::digest(value.as_bytes()))
 }
 
 mod transitions;

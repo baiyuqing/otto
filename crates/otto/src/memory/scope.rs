@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use super::contracts::{
     Error, MAX_SCOPE_ID_BYTES, NAMESPACE_WORKSPACE, Result, Scope, invalid_request, valid_opaque_id,
 };
+use crate::hex::to_hex;
 
 /// `stable_override` wins when set. Otherwise the path is made absolute, its
 /// symlinks are resolved, and the ID is `workspace_id` of the result.
@@ -33,10 +34,7 @@ pub fn new_workspace_scope(canonical_path: &str, stable_override: &str) -> Resul
 
 /// Default workspace ID for a canonical path: `<name>-<12 hex of SHA-256(path)>`.
 pub fn workspace_id(physical: &str) -> String {
-    named_workspace_id(
-        physical,
-        &format!("{:x}", Sha256::digest(physical.as_bytes())),
-    )
+    named_workspace_id(physical, &to_hex(&Sha256::digest(physical.as_bytes())))
 }
 
 /// `<sanitized last component of path>-<first 12 chars of hex>`. The name keeps

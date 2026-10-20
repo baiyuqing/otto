@@ -23,6 +23,7 @@ pub mod faults;
 pub(crate) mod fsops;
 mod gourl;
 pub mod herdr;
+mod hex;
 pub mod log;
 pub mod mcp;
 pub mod memory;

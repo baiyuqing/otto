@@ -1,6 +1,7 @@
 //! Review facts and git/script targets bound into a bash approval version.
 
 use super::*;
+use crate::hex::to_hex;
 
 impl BashTool {
     /// Bounded read-only payload snapshots become part of the exact prepared
@@ -77,7 +78,7 @@ impl BashTool {
                     Ok(bytes) => {
                         let body = String::from_utf8_lossy(&bytes);
                         match self.redact_review_fact(&body) {
-                            Some(body) => json!({"path":path,"sha256":format!("{:x}",sha2::Sha256::digest(&bytes)),"body":body}),
+                            Some(body) => json!({"path":path,"sha256":to_hex(&sha2::Sha256::digest(&bytes)),"body":body}),
                             None => json!({"path":path,"unavailable":true}),
                         }
                     }

@@ -1,6 +1,7 @@
 //! Destination root, SQL codecs, database discovery and journal inputs.
 
 use super::*;
+use crate::hex::to_hex;
 
 pub(super) fn destination(options: &Options, source_identity: &str) -> Result<fsops::Dir> {
     let parent = pin_directory(
@@ -35,7 +36,7 @@ pub(super) fn destination(options: &Options, source_identity: &str) -> Result<fs
         Err(error) => return Err(unavailable(error)),
     }
     let bytes = serde_json::to_vec(&expected).map_err(unavailable)?;
-    let temporary = format!(".otto-transfer-{:x}", Sha256::digest(&bytes));
+    let temporary = format!(".otto-transfer-{}", to_hex(&Sha256::digest(&bytes)));
     let root = mkdir(&parent, &temporary)?;
     private_root(&root)?;
     let names = fsops::read_directory_names(&root, 1).map_err(unavailable)?;

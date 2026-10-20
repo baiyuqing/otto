@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::migration::{Files, conflict, identity, invalid, publish, read, unavailable};
+use crate::hex::to_hex;
 use crate::{
     fsops,
     storage::{
@@ -272,7 +273,7 @@ fn file_hash(file: &mut File) -> Result<String> {
         }
         hash.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(to_hex(&hash.finalize()))
 }
 
 fn validate_record(record: &FileRecord, domain: Domain) -> Result<()> {
@@ -337,7 +338,7 @@ fn digest(records: &BTreeMap<String, FileRecord>) -> Result<DomainDigest> {
     Ok(DomainDigest {
         records: records.len() as u64,
         blob_bytes: bytes,
-        sha256: format!("{:x}", hash.finalize()),
+        sha256: to_hex(&hash.finalize()),
     })
 }
 

@@ -114,3 +114,15 @@ mod network_deny {
         network: NetworkMode::Deny
     });
 }
+
+mod process_environment {
+    use super::SeatbeltContract;
+    use crate::sandbox::NetworkMode;
+
+    crate::sandbox::conformance_tests::contract_check!(
+        SeatbeltContract {
+            network: NetworkMode::Allow
+        },
+        sibling_process_environment_is_unreadable
+    );
+}

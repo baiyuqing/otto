@@ -69,6 +69,7 @@ async fn selected_readonly_service_recalls_without_granting_standing_authority()
     let binding = ServiceBinding {
         client: client.clone(),
         context: context(),
+        observes: false,
         closed: AtomicBool::new(false),
     };
     let result = binding
@@ -103,6 +104,7 @@ async fn selected_readonly_service_recalls_without_granting_standing_authority()
     let other = ServiceBinding {
         client: client.clone(),
         context: context(),
+        observes: false,
         closed: AtomicBool::new(false),
     };
     assert_eq!(
@@ -136,6 +138,7 @@ async fn selected_recall_enforces_host_budget_even_without_provider_token_count(
     let binding = ServiceBinding {
         client,
         context: context(),
+        observes: false,
         closed: AtomicBool::new(false),
     };
     let result = binding

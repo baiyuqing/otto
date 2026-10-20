@@ -316,6 +316,7 @@ async fn rig_with(auto: Auto, exchanges: usize, delay: std::time::Duration) -> R
     builder.shared_mut().memory = MemoryWiring {
         client: None,
         extension: None,
+        plugin: None,
         service: Arc::clone(&service),
         usable,
         user_scope: user_scope.clone(),

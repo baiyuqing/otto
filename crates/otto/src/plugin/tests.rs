@@ -464,7 +464,6 @@ done
     }
     servers.close().await;
 }
-
 #[tokio::test]
 async fn plugin_oauth_logout_accepts_logical_identity_without_network() {
     let f = Fixture::new();
@@ -699,6 +698,7 @@ async fn otto_commands_require_content_trust_and_revoke_without_reloading() {
         executor: Some(executor),
         workspace: root,
         environment: vec!["PATH=/usr/bin:/bin".into()],
+        package_environment: Default::default(),
         guard: None,
         secrets: Vec::new(),
         logger: Arc::new(crate::log::Logger::discard()),

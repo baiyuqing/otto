@@ -3,7 +3,7 @@
 //! removal leaves snapshots/data intact so existing sessions keep pinned files.
 pub mod hooks;
 pub mod package;
-mod runtime;
+pub(crate) mod runtime;
 use crate::hex::to_hex;
 use crate::{
     fsops,
@@ -518,5 +518,7 @@ fn thaw(path: &Path) -> Result<(), String> {
     permissions_tree(path, true)
 }
 
+#[cfg(test)]
+mod package_environment_tests;
 #[cfg(test)]
 mod tests;

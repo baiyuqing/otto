@@ -9,6 +9,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- Plugin hooks can now carry an external memory service:
+  - `turn_end` hook data includes `turn.messages` with the user, assistant,
+    tool-call and tool-result blocks appended during the run. When the input
+    would exceed 1 MiB it includes `turn_omitted: "size"` instead.
+  - A `[plugins.bindings.<package>]` key binds `env` for that package's hook
+    and tool commands only. Bash and other packages do not receive these
+    variables, and their values are redacted.
+
+  Existing hooks and `plugin:server` MCP bindings are unchanged. See
+  [hooks and custom tools](docs/manual/memory-and-extensions.md#hooks-and-custom-tools).
+
 - Parent conversations can discover, inspect, start and check durable workflows
   through four native tools, with conditional execution-selection guidance and
   six prompt examples. Shared workspace ownership, receipt-backed starts and

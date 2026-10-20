@@ -349,7 +349,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ..Message::default()
         };
         // `Session::append` is likewise not cancellable.
-        if let Err(source) = self.session.append(stored).await {
+        if let Err(source) = self.append_message(stored).await {
             return Err(self.fail(
                 emit,
                 AgentError::Persist {
@@ -447,12 +447,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 ..Message::default()
             };
             let appended = if notification.id.is_empty() {
-                self.session.append(message).await.map(|()| true)
+                self.append_message(message).await.map(|()| true)
             } else {
-                self.session
+                let recorded = message.clone();
+                let outcome = self
+                    .session
                     .append_input_if_absent(&notification.id, message)
                     .await
-                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended)
+                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended);
+                if matches!(outcome, Ok(true)) {
+                    self.record_turn_message(recorded);
+                }
+                outcome
             }
             .map_err(|source| AgentError::Persist {
                 kind: "notification".into(),
@@ -499,8 +505,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 (self.options.now)(),
                 None,
             );
-            self.session
-                .append(message)
+            self.append_message(message)
                 .await
                 .map_err(|source| AgentError::Persist {
                     kind: "capability update".into(),
@@ -545,12 +550,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 ..Message::default()
             };
             let appended = if steering.input_id.is_empty() {
-                self.session.append(message).await.map(|()| true)
+                self.append_message(message).await.map(|()| true)
             } else {
-                self.session
+                let recorded = message.clone();
+                let outcome = self
+                    .session
                     .append_input_if_absent(&steering.input_id, message)
                     .await
-                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended)
+                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended);
+                if matches!(outcome, Ok(true)) {
+                    self.record_turn_message(recorded);
+                }
+                outcome
             }
             .map_err(|source| AgentError::Persist {
                 kind: "steering message".into(),

@@ -40,11 +40,13 @@ base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 # and the setpgid/killpg process-group control the sandbox drivers need.
 nix = { version = "=0.31.3", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }
 tempfile = "=3.27.0"
-# Native-only HTTP transport for the provider client. rustls only:
-# `rustls-tls-native-roots` takes its trusted roots from the macOS trust store
-# without linking Security.framework through native-tls. `stream` gives the
-# chunked body reader the SSE assembler needs.
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+# Native-only HTTP transport for the provider client. rustls only, no
+# native-tls: `rustls` uses the aws-lc-rs provider and rustls-platform-verifier,
+# which checks certificates with the macOS trust evaluation (Security.framework)
+# and with the system root store on Linux. `stream` gives the chunked body
+# reader the SSE assembler needs; `query` and `form` give
+# `RequestBuilder::query` (client API) and `::form` (OAuth token request).
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream", "query", "form"] }
 # `TryStreamExt::try_next` over the reqwest byte stream.
 futures-util = { version = "=0.3.34", default-features = false }
 # otto-core only parses TOML (config loading is resolution-only there); the

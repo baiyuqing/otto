@@ -8,6 +8,17 @@ impl Builder {
         snapshot: &crate::plugin::Snapshot,
         secrets: &[String],
     ) -> Result<Arc<crate::plugin::hooks::Runtime>, String> {
+        let mut package_environment = std::collections::BTreeMap::new();
+        for installed in snapshot.packages.iter().filter(|p| p.trusted) {
+            let bound = crate::plugin::runtime::package_environment(
+                &self.config,
+                &installed.name,
+                &self.environment,
+            )?;
+            if !bound.is_empty() {
+                package_environment.insert(installed.name.clone(), bound);
+            }
+        }
         crate::plugin::hooks::Runtime::new(
             snapshot,
             Path::new(&self.home),
@@ -15,6 +26,7 @@ impl Builder {
             crate::plugin::hooks::Execution {
                 executor: self.command_executor.clone(),
                 environment: self.sandbox_environment.clone().unwrap_or_default(),
+                package_environment,
                 workspace: self.workspace.root().into(),
                 guard: crate::tool::project_guard::Guard::for_config(
                     &self.config,

@@ -355,6 +355,7 @@ async fn plugin_argument_rewrites_obey_child_owned_path_policy() {
             executor: Some(Arc::new(executor)),
             workspace,
             environment: vec!["PATH=/usr/bin:/bin".into()],
+            package_environment: Default::default(),
             guard: None,
             secrets: Vec::new(),
             logger: Arc::new(crate::log::Logger::discard()),

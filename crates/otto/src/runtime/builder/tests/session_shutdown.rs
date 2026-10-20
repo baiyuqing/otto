@@ -409,7 +409,7 @@ async fn plugin_packages_register_skills_tools_and_lifecycle_once_across_runner_
     let installed = service.install(package.to_str().unwrap(), None).unwrap();
     service.change("demo", "trust").unwrap();
     let mut builder = builder(temp.path());
-    let root = builder.workspace.root();
+    let root = builder.workspace.root().to_path_buf();
     builder.command_executor = Some(Arc::new(
         Executor::new(
             Arc::new(DirectDriver::new()),
@@ -417,7 +417,7 @@ async fn plugin_packages_register_skills_tools_and_lifecycle_once_across_runner_
                 filesystem: FilesystemMode::Unconfined,
                 network: NetworkMode::Allow,
             },
-            root,
+            &root,
         )
         .unwrap(),
     ));
@@ -460,7 +460,7 @@ async fn plugin_packages_register_skills_tools_and_lifecycle_once_across_runner_
 async fn closing_a_session_cancels_the_owned_startup_hook_after_build_waiter_drop() {
     let temp = tempfile::tempdir().unwrap();
     let mut builder = builder(temp.path());
-    let root = builder.workspace.root();
+    let root = builder.workspace.root().to_path_buf();
     builder.command_executor = Some(Arc::new(
         Executor::new(
             Arc::new(DirectDriver::new()),
@@ -468,7 +468,7 @@ async fn closing_a_session_cancels_the_owned_startup_hook_after_build_waiter_dro
                 filesystem: FilesystemMode::Unconfined,
                 network: NetworkMode::Allow,
             },
-            root,
+            &root,
         )
         .unwrap(),
     ));

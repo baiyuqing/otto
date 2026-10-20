@@ -413,9 +413,7 @@ pub struct Builder {
     /// these through `Deref`, so `self.config`, `self.environment`, and the
     /// rest of `Shared`'s fields read the same as before the split.
     pub shared: Arc<Shared>,
-    /// Leaked for the process lifetime so the file tools, which borrow it,
-    /// satisfy the registry's `'static` bound. See `leaked_workspace`.
-    pub workspace: &'static Workspace,
+    pub workspace: Arc<Workspace>,
     pub workspace_path: String,
     pub command_executor: Option<Arc<dyn CommandExecutor>>,
     pub bash_approvals: Option<Arc<bash::BashApprovals>>,
@@ -458,11 +456,11 @@ impl Builder {
     /// never use it; mcp resolution happens before the usage and
     /// task-recorder stores open). A later slice that loads a second
     /// workspace at runtime has no such fixed sequence to preserve and
-    /// should have `for_workspace` call `leaked_workspace` and `resolve_mcp`
+    /// should have `for_workspace` resolve the workspace and `resolve_mcp`
     /// itself.
     pub fn for_workspace(
         shared: Arc<Shared>,
-        workspace: &'static Workspace,
+        workspace: Arc<Workspace>,
         workspace_path: String,
         mcp: McpRuntime,
     ) -> Builder {
@@ -542,17 +540,6 @@ pub(crate) fn random_id() -> std::io::Result<String> {
 pub(crate) fn new_operation_id() -> Result<otto_core::model::OperationId, String> {
     let random = random_id().map_err(|error| format!("read operation randomness: {error}"))?;
     otto_core::model::OperationId::new(format!("op_{random}")).map_err(|error| error.to_string())
-}
-
-/// Leaks one workspace for the process lifetime.
-///
-/// ponytail: the file tools borrow `&'a Workspace` and the registry stores
-/// `Box<dyn Tool + 'static>`, so the workspace must outlive both. The CLI
-/// builds exactly one per process and never drops it before exit, so a leak
-/// costs one allocation. Swap for `Arc<Workspace>` only if the tools ever
-/// need to own their workspace.
-pub fn leaked_workspace(root: &Path) -> Result<&'static Workspace, std::io::Error> {
-    Ok(Box::leak(Box::new(Workspace::new(root)?)))
 }
 
 /// Installs the session-lease commit guard: a tool call through `registry`

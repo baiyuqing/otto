@@ -32,7 +32,7 @@ async fn git_config_is_refused_through_a_symlink() {
     std::fs::write(root.path().join(".git/config"), "old\n").unwrap();
     std::os::unix::fs::symlink(".git/config", root.path().join("link")).unwrap();
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
 
     for path in [".git/config", ".GIT/config", "link"] {
         let result = run(
@@ -55,7 +55,7 @@ async fn git_config_is_refused_through_a_symlink() {
 async fn unknown_fields_and_missing_arguments_are_rejected() {
     let (root, _) = sample("same\n");
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
 
     // Malformed JSON and trailing tokens are rejected by the stream
     // decoder before a `RawValue` exists; see `result::tests`.
@@ -92,7 +92,7 @@ async fn directory_sync_failure_after_edit_rename_is_unknown() {
     let workspace = workspace(root.path());
     let plan = publish_fault(PublishStep::DirSync);
     let ops = FaultyPublishOps::new(plan.clone());
-    let tool = EditTool::with_publish_ops(&workspace, &ops);
+    let tool = EditTool::with_publish_ops(Arc::clone(&workspace), &ops);
 
     let result = run(
         &tool,
@@ -116,7 +116,7 @@ async fn rename_failure_keeps_the_file_and_leaves_no_temporary_file() {
     let workspace = workspace(root.path());
     let plan = publish_fault(PublishStep::Rename);
     let ops = FaultyPublishOps::new(plan.clone());
-    let tool = EditTool::with_publish_ops(&workspace, &ops);
+    let tool = EditTool::with_publish_ops(Arc::clone(&workspace), &ops);
 
     let result = run(
         &tool,
@@ -145,7 +145,7 @@ async fn traversal_is_rejected() {
     std::fs::write(root.path().join("escape.txt"), "x").unwrap();
     let workspace = workspace(&nested);
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"../escape.txt","old_text":"x","new_text":"y"}"#,
     )
     .await;
@@ -163,7 +163,7 @@ async fn an_internal_final_symlink_is_edited_through() {
     std::os::unix::fs::symlink("target.txt", root.path().join("relative-link")).unwrap();
     std::os::unix::fs::symlink(&target, root.path().join("absolute-link")).unwrap();
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
 
     for (link, old, new) in [
         ("relative-link", "write", "edit"),

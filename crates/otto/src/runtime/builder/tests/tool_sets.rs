@@ -343,3 +343,22 @@ async fn child_bash_tools_run_excluded_commands_unconfined() {
         compound.content
     );
 }
+
+/// A dropped `Builder` and its file tools release the `Workspace` (open
+/// directory fd and lock map); nothing keeps it for the process lifetime.
+#[test]
+fn dropping_builder_and_file_tools_frees_the_workspace() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let builder = builder(dir.path());
+    let workspace = Arc::downgrade(&builder.workspace);
+    let tools = builder.builtin_file_tools(1024);
+    assert!(!tools.is_empty());
+
+    drop(builder);
+    assert!(
+        workspace.upgrade().is_some(),
+        "the file tools own the workspace"
+    );
+    drop(tools);
+    assert!(workspace.upgrade().is_none(), "the workspace is freed");
+}

@@ -429,6 +429,9 @@ impl Runner {
                 });
             }
         }
+        if let (Some((service, scope)), Some(provider)) = (&self.approvals, &self.review_provider) {
+            let _ = service.unregister_reviewer(&scope.workspace, &scope.session_id, provider);
+        }
         let _ = self.agent.close();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let mcp = Arc::clone(&self.mcp);
@@ -531,6 +534,7 @@ impl Runner {
                 },
             ),
             approvals: None,
+            review_provider: None,
             authorization_run: Arc::default(),
             review_context: tokio::sync::Mutex::new(Default::default()),
             pending_authorization: Mutex::new(Vec::new()),

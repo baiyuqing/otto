@@ -30,7 +30,7 @@ use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 use crate::tool::workspace::Workspace;
 
 use super::boundary::{self, BoundaryInputs};
-use super::builder::{Builder, Shared, leaked_workspace, resolve_initial_runtime};
+use super::builder::{Builder, Shared, resolve_initial_runtime};
 use super::sandbox_runtime::{
     OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
     open_sandbox_runtime, sandbox_runtime_warning, settings_from_config,

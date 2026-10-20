@@ -190,7 +190,7 @@ impl DeliveryRun for DeliveryRuntime {
     }
 }
 
-struct PreparedDelivery {
+pub(super) struct PreparedDelivery {
     primary_host: Arc<WorkspaceHost>,
     pub(super) executor: crate::delivery::WorktreeExecutor,
 }
@@ -204,7 +204,7 @@ pub(super) struct DeliveryService {
     /// Append-only source transcripts keyed by approval id. These are never
     /// passed to the target runner and contain no source filesystem handle.
     pub(super) source_sessions: Mutex<HashMap<String, crate::runtime::builder::SharedSession>>,
-    prepared: Mutex<HashMap<String, PreparedDelivery>>,
+    pub(super) prepared: Mutex<HashMap<String, PreparedDelivery>>,
     pub(super) runtimes: Mutex<HashMap<String, Box<dyn DeliveryRun>>>,
     /// Test-only injection at the post-setup worktree-runtime boundary. It
     /// is absent from production, so it cannot bypass constrained setup.
@@ -500,6 +500,37 @@ impl crate::delivery::Service for DeliveryService {
     }
 
     async fn start(
+        &self,
+        receipt: &crate::delivery::Receipt,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let outcome = self.start_inner(receipt, cancel).await;
+        self.release_delivery(&receipt.id).await;
+        outcome
+    }
+}
+
+impl DeliveryService {
+    /// Drops the per-approval source transcript, prepared target capability and
+    /// any runtime still registered (closed here) once `start` has returned.
+    async fn release_delivery(&self, approval_id: &str) {
+        if let Ok(mut sources) = self.source_sessions.lock() {
+            sources.remove(approval_id);
+        }
+        if let Ok(mut prepared) = self.prepared.lock() {
+            prepared.remove(approval_id);
+        }
+        let runtime = self
+            .runtimes
+            .lock()
+            .ok()
+            .and_then(|mut runtimes| runtimes.remove(approval_id));
+        if let Some(runtime) = runtime {
+            runtime.close().await;
+        }
+    }
+
+    async fn start_inner(
         &self,
         receipt: &crate::delivery::Receipt,
         cancel: &CancellationToken,

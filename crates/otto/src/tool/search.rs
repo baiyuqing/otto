@@ -558,18 +558,19 @@ mod git_alias_tests {
     use crate::tool::grep::GrepTool;
     use crate::tool::testutil::{MAX_OUTPUT_BYTES, run, workspace, write_search_file};
     use std::path::Path;
+    use std::sync::Arc;
 
     /// Runs both tools against `search_path` and asserts both produce no output.
     async fn both_are_empty(root: &Path, search_path: &str) {
         let workspace = workspace(root);
         let quoted = serde_json::to_string(search_path).unwrap();
         let found = run(
-            &FindTool::new(&workspace, MAX_OUTPUT_BYTES),
+            &FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES),
             &format!(r#"{{"pattern":"**","path":{quoted}}}"#),
         )
         .await;
         let grepped = run(
-            &GrepTool::new(&workspace, MAX_OUTPUT_BYTES),
+            &GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES),
             &format!(r#"{{"pattern":"match","path":{quoted}}}"#),
         )
         .await;
@@ -591,7 +592,7 @@ mod git_alias_tests {
         let workspace = workspace(root.path());
 
         let found = run(
-            &FindTool::new(&workspace, MAX_OUTPUT_BYTES),
+            &FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES),
             r#"{"pattern":"**"}"#,
         )
         .await;
@@ -600,7 +601,7 @@ mod git_alias_tests {
             "{found:?}"
         );
         let grepped = run(
-            &GrepTool::new(&workspace, MAX_OUTPUT_BYTES),
+            &GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES),
             r#"{"pattern":"match"}"#,
         )
         .await;
@@ -661,12 +662,12 @@ mod git_alias_tests {
         write_search_file(&root, "normal.txt", "match public\n");
         let workspace = workspace(&root);
         let found = run(
-            &FindTool::new(&workspace, MAX_OUTPUT_BYTES),
+            &FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES),
             r#"{"pattern":"**"}"#,
         )
         .await;
         let grepped = run(
-            &GrepTool::new(&workspace, MAX_OUTPUT_BYTES),
+            &GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES),
             r#"{"pattern":"match"}"#,
         )
         .await;
@@ -687,8 +688,8 @@ mod git_alias_tests {
         write_search_file(root.path(), ".git/config", "match secret\n");
         std::os::unix::fs::symlink(".git", root.path().join("alias")).unwrap();
         let workspace = workspace(root.path());
-        let find = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
-        let grep = GrepTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let find = FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
+        let grep = GrepTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let found = run(&find, r#"{"pattern":"**","path":"./dir/"}"#).await;
         assert!(!found.is_error, "find ./dir/: {found:?}");

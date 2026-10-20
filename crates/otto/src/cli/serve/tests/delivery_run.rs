@@ -480,5 +480,95 @@ async fn delivery_factory_complete_controlled_flow_persists_status_notifies_and_
     assert!(message.contains("completed controlled target work"));
     assert!(!message.contains(&target_path.to_string_lossy().to_string()));
     assert!(!message.contains(&worktree.to_string_lossy().to_string()));
+    assert!(manager.service.source_sessions.lock().unwrap().is_empty());
+    assert!(manager.service.prepared.lock().unwrap().is_empty());
+    assert!(manager.service.runtimes.lock().unwrap().is_empty());
     manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn delivery_start_error_releases_source_session_and_closes_registered_runtime() {
+    struct ClosableRun(Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait]
+    impl DeliveryRun for ClosableRun {
+        fn target_session(&self) -> String {
+            "target-session".into()
+        }
+
+        fn worktree(&self) -> String {
+            "/target/.otto/delivery-worktrees/delivery-1".into()
+        }
+
+        async fn run_frozen(
+            &self,
+            _prompt: &str,
+            _cancel: &CancellationToken,
+        ) -> Result<String, String> {
+            Ok(String::new())
+        }
+
+        async fn close(self: Box<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let home = tempfile::tempdir().expect("home");
+    let startup = tempfile::tempdir().expect("startup");
+    let startup_path = canonical_directory(startup.path()).expect("canonical");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let startup_host = dummy_host(&startup_path, sessions.path());
+    let shared = Arc::clone(&startup_host.builder.shared);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&startup_host.builder);
+    let manager = DeliveryManager::open(
+        &home.path().to_string_lossy(),
+        &shared,
+        runtime,
+        CancellationToken::new(),
+    )
+    .expect("manager");
+    let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
+        id: "source-session".into(),
+        workspace: "/source".into(),
+        ..otto_core::session::Header::default()
+    });
+    manager
+        .bind_source_session("approval-1", source)
+        .expect("bind source");
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    manager.service.runtimes.lock().unwrap().insert(
+        "approval-1".into(),
+        Box::new(ClosableRun(Arc::clone(&closed))),
+    );
+    let handoff = crate::delivery::handoff("ship", [("ref".into(), "text".into())]).unwrap();
+    let preview = crate::delivery::Preview {
+        source_workspace: "/source".into(),
+        plan: crate::delivery::WorktreePlan {
+            target: crate::delivery::Target {
+                repository: startup_path.clone(),
+                common_dir: startup_path.join(".git"),
+            },
+            delivery_id: "delivery-1".into(),
+            branch: "agent/test".into(),
+            path: startup_path.join(".otto/delivery-worktrees/delivery-1"),
+        },
+        base: "a".repeat(40),
+        handoff,
+    };
+    // No receipt was prepared in the store, so `receipts.begin` fails first.
+    let receipt = crate::delivery::Receipt {
+        id: "approval-1".into(),
+        base: preview.base.clone(),
+        preview,
+    };
+    use crate::delivery::Service;
+    manager
+        .service
+        .start(&receipt, &CancellationToken::new())
+        .await
+        .expect_err("unprepared receipt cannot start");
+    assert!(manager.service.source_sessions.lock().unwrap().is_empty());
+    assert!(manager.service.prepared.lock().unwrap().is_empty());
+    assert!(manager.service.runtimes.lock().unwrap().is_empty());
+    assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
 }

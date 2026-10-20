@@ -67,7 +67,7 @@ pub struct StartDeliveryTask {
     /// optional: no delivery approval may fall back to synchronous or bare
     /// Git inspection from a source runner.
     preflight: Arc<dyn Preflight>,
-    receipts: std::sync::Mutex<std::collections::HashMap<String, Receipt>>,
+    pub(super) receipts: std::sync::Mutex<std::collections::HashMap<String, Receipt>>,
 }
 
 impl StartDeliveryTask {
@@ -192,7 +192,7 @@ impl Tool for StartDeliveryTask {
         approval: &otto_core::approval::Request,
     ) -> ToolResult {
         let receipt = match self.receipts.lock() {
-            Ok(receipts) => receipts.get(&approval.id).cloned(),
+            Ok(mut receipts) => receipts.remove(&approval.id),
             Err(_) => return error_result("delivery receipt store unavailable").not_started(),
         };
         let Some(receipt) = receipt else {

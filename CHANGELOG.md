@@ -129,6 +129,14 @@ commit ledger; Git and release tags retain the full history. See the
   recovery distinguishes a still-running target from a completed result.
 - Usage reporting distinguishes logical provider calls, transport attempts and
   token reports instead of inferring one from another.
+- A long-running `otto serve` no longer retains memory or file descriptors per
+  workspace load, delivery task, runner build, sub-agent task or written file.
+  A workspace (one directory descriptor) is freed when its last runner closes;
+  write locks, delivery approval state, stopped workflow bindings, session
+  reviewers, dead writer handles and sub-agent report directory descriptors
+  are released when no longer used. chat-connector deletes a session's prompt
+  lock when no prompt holds or waits for it and splits an agent stderr line at
+  64 KiB.
 
 ### Build and verification
 

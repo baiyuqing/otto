@@ -8,6 +8,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -124,12 +125,12 @@ fn previous_text(workspace: &Workspace, path: &Path) -> Result<Option<String>, &
 
 /// Writes a workspace file.
 pub struct WriteTool<'a> {
-    workspace: &'a Workspace,
+    workspace: Arc<Workspace>,
     publish: &'a dyn PublishOps,
 }
 
 impl<'a> WriteTool<'a> {
-    pub fn new(workspace: &'a Workspace) -> Self {
+    pub fn new(workspace: Arc<Workspace>) -> Self {
         Self {
             workspace,
             publish: &PosixPublish,
@@ -137,7 +138,7 @@ impl<'a> WriteTool<'a> {
     }
 
     #[cfg(test)]
-    fn with_publish_ops(workspace: &'a Workspace, publish: &'a dyn PublishOps) -> Self {
+    fn with_publish_ops(workspace: Arc<Workspace>, publish: &'a dyn PublishOps) -> Self {
         Self { workspace, publish }
     }
 }
@@ -191,9 +192,9 @@ impl Tool for WriteTool<'_> {
             Err(error) => return preflight_error(error),
         };
         let _guard = self.workspace.lock_path(&relative).await;
-        let before = previous_text(self.workspace, &relative);
+        let before = previous_text(&self.workspace, &relative);
         if let Err(error) = write_file_atomic(
-            self.workspace,
+            &self.workspace,
             &relative,
             args.content.as_bytes(),
             self.publish,
@@ -316,7 +317,7 @@ mod tests {
     async fn successful_writes_report_the_change_made() {
         let root = tempfile::tempdir().unwrap();
         let workspace = workspace(root.path());
-        let tool = WriteTool::new(&workspace);
+        let tool = WriteTool::new(Arc::clone(&workspace));
 
         let created = run(&tool, r#"{"path":"file.txt","content":"one\ntwo\n"}"#).await;
         assert!(!created.is_error, "{created:?}");
@@ -351,7 +352,7 @@ mod tests {
         let workspace = workspace(root.path());
 
         let result = run(
-            &WriteTool::new(&workspace),
+            &WriteTool::new(Arc::clone(&workspace)),
             r#"{"path":"file.txt","content":"new"}"#,
         )
         .await;
@@ -368,7 +369,7 @@ mod tests {
         std::fs::write(root.path().join(".git/config"), "old").unwrap();
         std::os::unix::fs::symlink(".git", root.path().join("g")).unwrap();
         let workspace = workspace(root.path());
-        let tool = WriteTool::new(&workspace);
+        let tool = WriteTool::new(Arc::clone(&workspace));
 
         for path in [
             ".git/config",
@@ -447,7 +448,7 @@ mod tests {
     async fn unknown_fields_and_a_missing_path_are_rejected() {
         let root = tempfile::tempdir().unwrap();
         let workspace = workspace(root.path());
-        let tool = WriteTool::new(&workspace);
+        let tool = WriteTool::new(Arc::clone(&workspace));
 
         // Malformed JSON and trailing tokens are rejected by the stream
         // decoder before a `RawValue` exists; see `result::tests`.
@@ -480,7 +481,7 @@ mod tests {
         let workspace = workspace(root.path());
         let plan = publish_fault(PublishStep::DirSync);
         let ops = FaultyPublishOps::new(plan.clone());
-        let tool = WriteTool::with_publish_ops(&workspace, &ops);
+        let tool = WriteTool::with_publish_ops(Arc::clone(&workspace), &ops);
 
         let result = run(&tool, r#"{"path":"file.txt","content":"after"}"#).await;
         plan.assert_all_fired();
@@ -502,7 +503,7 @@ mod tests {
         let workspace = workspace(root.path());
         let plan = publish_fault(PublishStep::Rename);
         let ops = FaultyPublishOps::new(plan.clone());
-        let tool = WriteTool::with_publish_ops(&workspace, &ops);
+        let tool = WriteTool::with_publish_ops(Arc::clone(&workspace), &ops);
 
         let result = run(&tool, r#"{"path":"file.txt","content":"after"}"#).await;
 
@@ -523,7 +524,7 @@ mod tests {
     async fn writing_creates_parents_and_leaves_no_temporary_files() {
         let root = tempfile::tempdir().unwrap();
         let workspace = workspace(root.path());
-        let tool = WriteTool::new(&workspace);
+        let tool = WriteTool::new(Arc::clone(&workspace));
 
         let nested = run(&tool, r#"{"path":"nested/file.txt","content":"hello"}"#).await;
         assert!(!nested.is_error, "{nested:?}");
@@ -551,7 +552,7 @@ mod tests {
         let workspace = workspace(root.path());
 
         let result = run(
-            &WriteTool::new(&workspace),
+            &WriteTool::new(Arc::clone(&workspace)),
             r#"{"path":"file.txt","content":"after"}"#,
         )
         .await;
@@ -569,7 +570,7 @@ mod tests {
         let workspace = workspace(root.path());
 
         let result = run(
-            &WriteTool::new(&workspace),
+            &WriteTool::new(Arc::clone(&workspace)),
             r#"{"path":"link/file.txt","content":"hello"}"#,
         )
         .await;
@@ -592,7 +593,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &root).unwrap();
 
         let result = run(
-            &WriteTool::new(&workspace),
+            &WriteTool::new(Arc::clone(&workspace)),
             r#"{"path":"note.txt","content":"inside"}"#,
         )
         .await;
@@ -613,7 +614,7 @@ mod tests {
             "content": "inside",
         })
         .to_string();
-        let result = run(&WriteTool::new(&workspace), &arguments).await;
+        let result = run(&WriteTool::new(Arc::clone(&workspace)), &arguments).await;
         assert!(!result.is_error, "{result:?}");
     }
 
@@ -625,7 +626,7 @@ mod tests {
         let workspace = workspace(root.path());
 
         let result = run(
-            &WriteTool::new(&workspace),
+            &WriteTool::new(Arc::clone(&workspace)),
             r#"{"path":"link/../note.txt","content":"nope"}"#,
         )
         .await;
@@ -642,7 +643,7 @@ mod tests {
         std::os::unix::fs::symlink("target.txt", root.path().join("relative-link")).unwrap();
         std::os::unix::fs::symlink(&target, root.path().join("absolute-link")).unwrap();
         let workspace = workspace(root.path());
-        let tool = WriteTool::new(&workspace);
+        let tool = WriteTool::new(Arc::clone(&workspace));
 
         for link in ["relative-link", "absolute-link"] {
             let result = run(&tool, &format!(r#"{{"path":"{link}","content":"write"}}"#)).await;

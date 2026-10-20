@@ -221,6 +221,7 @@ async fn tool_binds_stable_subject_then_starts_only_prepared_receipt() {
     assert_eq!(service.prepares.lock().unwrap().as_slice(), ["a1"]);
     assert_eq!(service.starts.lock().unwrap().as_slice(), ["receipt-a1"]);
     assert_eq!(*preflight.previews.lock().unwrap(), 2);
+    assert!(tool.receipts.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

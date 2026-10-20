@@ -327,3 +327,39 @@ needs = ["first"]
     assert_eq!(done.status, RunStatus::Succeeded);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+struct StopFlagDelivery(AtomicBool);
+
+#[async_trait::async_trait]
+impl Delivery for StopFlagDelivery {
+    fn stop(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+    async fn join(&self) {}
+}
+
+#[test]
+fn register_delivery_drops_stopped_bindings() {
+    let transcripts = tempfile::tempdir().expect("transcripts");
+    let controller = Controller::new(
+        Arc::new(Store::open_in_memory()),
+        Catalog::from_definitions(Vec::new()),
+        Arc::new(FakeExecutor),
+        "/workspace".into(),
+        transcripts.path().into(),
+        RuntimeIdentity::default(),
+        1,
+    );
+    let first = Arc::new(StopFlagDelivery(AtomicBool::new(false)));
+    let second = Arc::new(StopFlagDelivery(AtomicBool::new(false)));
+    controller.register_delivery(first.clone());
+    first.stop();
+    controller.register_delivery(second.clone());
+    let deliveries = controller.deliveries.lock().unwrap();
+    let held = deliveries.as_ref().expect("open controller");
+    assert_eq!(held.len(), 1);
+    assert!(!held[0].is_stopped());
+}

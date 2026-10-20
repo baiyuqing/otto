@@ -84,8 +84,8 @@ async fn long_final_report_is_readable_after_child_exit_without_another_model_ca
     assert!(prompt.contains("Existing write permissions"));
     drop(runner);
 
-    let workspace = Workspace::new(dir.path()).unwrap();
-    let read = ReadTool::new(&workspace, 16384);
+    let workspace = std::sync::Arc::new(Workspace::new(dir.path()).unwrap());
+    let read = ReadTool::new(std::sync::Arc::clone(&workspace), 16384);
     let index_path = report_path.replace("/final.md", "/index.md");
     let index = run(&read, &serde_json::json!({"path": index_path}).to_string()).await;
     assert!(!index.is_error, "{}", index.content);

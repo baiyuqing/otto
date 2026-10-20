@@ -216,13 +216,24 @@ impl Runner {
             .await
             .map_err(|error| error.to_string())?;
         let id = task.id.clone();
-        let result = match self.config.tasks.wait(&id, cancel).await {
+        // The child runs in a detached task; cancel it if this future is
+        // dropped before a result is produced.
+        let mut cancel_on_drop = CancelOnDrop {
+            tasks: Arc::clone(&self.config.tasks),
+            id: id.clone(),
+            armed: true,
+        };
+        let waited = self.config.tasks.wait(&id, cancel).await;
+        cancel_on_drop.armed = false;
+        let result = match waited {
             Ok(task) => Ok(task),
             Err(TaskError::Canceled) => {
-                self.config
-                    .tasks
-                    .cancel(&id)
-                    .map_err(|error| error.to_string())?;
+                // The task may have become final between the wait and the
+                // cancel; its result is still collected below.
+                match self.config.tasks.cancel(&id) {
+                    Ok(()) | Err(TaskError::Finished(_)) => {}
+                    Err(error) => return Err(error.to_string()),
+                }
                 self.config
                     .tasks
                     .wait(&id, &CancellationToken::new())
@@ -235,5 +246,20 @@ impl Runner {
             self.config.tasks.remove_final(&id);
         }
         result
+    }
+}
+
+/// Cancels a started task when dropped while armed.
+struct CancelOnDrop {
+    tasks: Arc<Tasks>,
+    id: String,
+    armed: bool,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.tasks.cancel(&self.id);
+        }
     }
 }

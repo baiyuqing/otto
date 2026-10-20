@@ -1,2 +1,3 @@
 #!/bin/sh
-exec gitleaks git --pre-commit --staged --verbose --redact --ignore-gitleaks-allow
+gitleaks git --pre-commit --staged --verbose --redact --ignore-gitleaks-allow || exit 1
+exec node scripts/code-limits.mjs --staged

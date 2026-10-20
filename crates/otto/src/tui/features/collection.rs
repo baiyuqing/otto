@@ -65,7 +65,7 @@ impl Presenter for Context {
         let total: i64 = report.sections.iter().map(|s| s.tokens.max(0)).sum();
         let mut rows = Vec::new();
         for (si, section) in report.sections.iter().enumerate() {
-            let bar = if total > 0 {
+            let share_percent = if total > 0 {
                 (section.tokens.max(0) as usize * 100 / total as usize).min(100)
             } else {
                 0
@@ -75,7 +75,7 @@ impl Presenter for Context {
                 cells: vec![
                     section_name(section.kind, section.items.len()),
                     format_token_count(section.tokens),
-                    format!("{bar}%"),
+                    format!("{share_percent}%"),
                 ],
                 detail: String::new(),
             });
@@ -235,8 +235,23 @@ impl Presenter for Agents {
             title.push_str(" · no recorded tasks");
         }
         View {
-            collection:true,            title,
-            columns:["Status","Agent","Description","Workspace","Parent","Created","Duration","Steps","Calls","Tokens"].into_iter().map(str::to_owned).collect(),
+            collection: true,
+            title,
+            columns: [
+                "Status",
+                "Agent",
+                "Description",
+                "Workspace",
+                "Parent",
+                "Created",
+                "Duration",
+                "Steps",
+                "Calls",
+                "Tokens",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
             loading: self.loading,
             rows: self
                 .rows
@@ -244,7 +259,21 @@ impl Presenter for Agents {
                 .map(|row| Row {
                     id: serde_json::to_string(&(&row.parent_session, &row.task_id)).unwrap(),
                     cells: columns(row).into(),
-                    detail:format!("Task: {}\nStatus: {}\nWorkspace: {}\nParent: {}\nCreated: {}\nStarted: {}\nFinished: {}\nSteps: {} · Calls: {} · Tokens: {}\n\n{}",row.task_id,row.status,row.workspace,row.parent_session,row.created_at,row.started_at,row.finished_at,row.steps,row.tool_calls,format_token_count(row.input_tokens+row.output_tokens),row.description),
+                    detail: format!(
+                        "Task: {}\nStatus: {}\nWorkspace: {}\nParent: {}\nCreated: {}\nStarted: \
+                        {}\nFinished: {}\nSteps: {} · Calls: {} · Tokens: {}\n\n{}",
+                        row.task_id,
+                        row.status,
+                        row.workspace,
+                        row.parent_session,
+                        row.created_at,
+                        row.started_at,
+                        row.finished_at,
+                        row.steps,
+                        row.tool_calls,
+                        format_token_count(row.input_tokens + row.output_tokens),
+                        row.description
+                    ),
                 })
                 .collect(),
             actions: vec![

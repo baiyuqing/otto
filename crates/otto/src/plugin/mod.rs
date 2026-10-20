@@ -107,17 +107,17 @@ impl Service {
         if bytes.len() > 1 << 20 {
             return Err("plugin registry exceeds 1 MiB".into());
         }
-        let tmp = tempfile::Builder::new()
+        let staged_registry = tempfile::Builder::new()
             .prefix(".registry-")
             .tempfile_in(&self.root)
             .map_err(|_| "cannot stage plugin registry")?;
-        let name = tmp
+        let name = staged_registry
             .path()
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or("invalid staging name")?
             .to_owned();
-        let mut file = tmp.as_file();
+        let mut file = staged_registry.as_file();
         file.write_all(&bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| "cannot write plugin registry")?;
@@ -459,19 +459,19 @@ pub(crate) fn digest(path: &Path) -> Result<String, String> {
                 if !metadata.is_file() {
                     return Err("snapshot file changed".into());
                 }
-                let mut data = Vec::new();
+                let mut snapshot_file_bytes = Vec::new();
                 Read::by_ref(&mut file)
                     .take(MAX_BYTES - *total + 1)
-                    .read_to_end(&mut data)
+                    .read_to_end(&mut snapshot_file_bytes)
                     .map_err(|_| "cannot hash snapshot")?;
-                *total += data.len() as u64;
+                *total += snapshot_file_bytes.len() as u64;
                 if *total > MAX_BYTES {
                     return Err("snapshot exceeds byte limit".into());
                 }
                 hash.update(b"f");
                 hash.update([u8::from(metadata.permissions().mode() & 0o111 != 0)]);
-                hash.update((data.len() as u64).to_le_bytes());
-                hash.update(data);
+                hash.update((snapshot_file_bytes.len() as u64).to_le_bytes());
+                hash.update(snapshot_file_bytes);
             } else {
                 return Err("snapshot contains a non-regular file".into());
             }

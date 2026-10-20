@@ -290,7 +290,11 @@ fn a_hand_written_file_with_loose_json_and_a_short_source_is_read() {
     let (_dir, store) = open_temp();
     let scope = user(&store);
     let content = format!(
-        "---\nscope:   {{ \"namespace\" : \"user\", \"id\":\"{}\" }}\nkind: \"preference\"\nkey: \"k\"\nlabels: [ ]\nconfidence: 1\nrevision: 1\ncreated_at: \"2026-03-01T00:00:01Z\"\nupdated_at: \"2026-03-01T00:00:01Z\"\nexpires_at: null\nsource: {{\"origin\":\"human\"}}\nmetadata: {{}}\n---\nhand written\n",
+        "---\nscope:   {{ \"namespace\" : \"user\", \"id\":\"{}\" }}\nkind: \
+            \"preference\"\nkey: \"k\"\nlabels: [ ]\nconfidence: 1\nrevision: \
+            1\ncreated_at: \"2026-03-01T00:00:01Z\"\nupdated_at: \
+            \"2026-03-01T00:00:01Z\"\nexpires_at: null\nsource: \
+            {{\"origin\":\"human\"}}\nmetadata: {{}}\n---\nhand written\n",
         scope.id
     );
     fs::write(record_path(&store, "hand"), content).unwrap();

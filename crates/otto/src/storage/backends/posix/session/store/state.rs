@@ -133,13 +133,13 @@ impl StoreState {
         }
 
         // The suffix is not `.jsonl`: session scans read only `*.jsonl`.
-        let temp = format!(
+        let temp_name = format!(
             "{filename}.{}.tmp",
             crate::auth::random_hex::<8>()
                 .map_err(|error| PiError::other(format!("name session file: {error}")))?
         );
         let mut file = session_dir
-            .open_journal(&temp, JournalOpen::CreateNew)
+            .open_journal(&temp_name, JournalOpen::CreateNew)
             .map_err(|error| PiError::other(format!("create session file: {error}")))?;
 
         let mut published = false;
@@ -152,7 +152,7 @@ impl StoreState {
                 // A process exit before the publish leaves only the temporary
                 // file, which no session scan reads.
                 session_dir
-                    .publish_journal(&temp, filename)
+                    .publish_journal(&temp_name, filename)
                     .map_err(|error| PiError::other(format!("publish session file: {error}")))?;
                 published = true;
                 session_dir
@@ -164,7 +164,7 @@ impl StoreState {
             Ok(value) => value,
             Err(error) => {
                 drop(file);
-                let held = if published { filename } else { &temp };
+                let held = if published { filename } else { &temp_name };
                 if let Err(remove) = session_dir.remove_journal(held)
                     && remove.kind() != std::io::ErrorKind::NotFound
                 {
@@ -205,7 +205,7 @@ impl StoreState {
 
         let runtime_id = fsops::new_pi_entry_id(&HashSet::new())
             .map_err(|error| error.context("generate runtime entry id"))?;
-        let data = serde_json::to_string(&RuntimeMetadata {
+        let runtime_json = serde_json::to_string(&RuntimeMetadata {
             profile: self.header.profile.clone(),
             provider: self.header.provider.clone(),
             model: self.header.model.clone(),
@@ -214,7 +214,7 @@ impl StoreState {
         let mut entry = PiEntry::new("custom", &runtime_id, None, &timestamp);
         entry.custom = Some(PiCustom {
             custom_type: OTTO_RUNTIME_CUSTOM_TYPE.to_owned(),
-            data: Some(raw_value(data)?),
+            data: Some(raw_value(runtime_json)?),
         });
         file_bytes += write_pi_record(file, &encode_pi_record(PiRecord::Entry(&entry))?)
             .map_err(|error| error.context("write runtime metadata"))?;

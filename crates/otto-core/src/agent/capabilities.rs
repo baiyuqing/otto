@@ -80,7 +80,9 @@ pub(super) fn notice(
                 _ => ("", String::new()),
             };
             lines.push(format!(
-                "The tools or documentation available in this session changed after the earlier messages were written{version}. Those messages may show tools, parameters or documentation that no longer apply."
+                "The tools or documentation available in this session changed after the \
+                    earlier messages were written{version}. Those messages may show tools, \
+                    parameters or documentation that no longer apply."
             ));
             for (label, list) in [
                 ("Added", &added),

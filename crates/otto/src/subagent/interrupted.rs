@@ -108,8 +108,8 @@ fn scan_one(path: &Path) -> Option<ChildRecord> {
         if custom.custom_type != TASK_RESULT_CUSTOM_TYPE {
             return None;
         }
-        let data = custom.data.as_ref()?;
-        serde_json::from_str::<serde_json::Value>(data.get())
+        let result_json = custom.data.as_ref()?;
+        serde_json::from_str::<serde_json::Value>(result_json.get())
             .ok()?
             .get("status")?
             .as_str()
@@ -156,13 +156,13 @@ fn scan_one(path: &Path) -> Option<ChildRecord> {
 pub fn mark_interrupted(path: &Path) -> Result<(), String> {
     let (store, _warnings) =
         crate::session::Store::open(path).map_err(|error| error.to_string())?;
-    let data = serde_json::to_string(&TaskResultData {
+    let result_json = serde_json::to_string(&TaskResultData {
         status: INTERRUPTED_STATUS,
         error: "",
     })
     .map_err(|error| error.to_string())?;
     store
-        .append_custom_entry(TASK_RESULT_CUSTOM_TYPE, &data)
+        .append_custom_entry(TASK_RESULT_CUSTOM_TYPE, &result_json)
         .map_err(|error| error.to_string())
 }
 

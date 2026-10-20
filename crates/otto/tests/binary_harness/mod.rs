@@ -67,7 +67,11 @@ pub fn two_tool_call_reply(
     let arguments1 = serde_json::to_string(arguments1).expect("encode arguments1");
     let arguments2 = serde_json::to_string(arguments2).expect("encode arguments2");
     format!(
-        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id1}\",\"type\":\"function\",\"function\":{{\"name\":\"{name1}\",\"arguments\":{arguments1}}}}},{{\"index\":1,\"id\":\"{id2}\",\"type\":\"function\",\"function\":{{\"name\":\"{name2}\",\"arguments\":{arguments2}}}}}]}}}}]}}\n\n\
+        "data: \
+            {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id1}\",\
+            \"type\":\"function\",\"function\":{{\"name\":\"{name1}\",\"arguments\":{arguments1}}}}\
+            },{{\"index\":1,\"id\":\"{id2}\",\"type\":\"function\",\
+            \"function\":{{\"name\":\"{name2}\",\"arguments\":{arguments2}}}}}]}}}}]}}\n\n\
          data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
          data: [DONE]\n\n"
     )

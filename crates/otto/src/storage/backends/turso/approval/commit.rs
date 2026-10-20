@@ -94,7 +94,21 @@ impl Store {
         match claim {
             ClaimChange::None => {}
             ClaimChange::Start(claim) => {
-                tx.execute("INSERT INTO approval_claims (approval_id,owner,pid,started,recovery) VALUES (?1,?2,?3,?4,?5)", params![expected.id,claim.owner,claim.pid,claim.started,if claim.native { "native" } else { "domain" }]).map_err(|error| match error { crate::storage::Error::Constraint(_) => Error::Conflict, other => storage_error(other) })?;
+                tx.execute(
+                    "INSERT INTO approval_claims (approval_id,owner,pid,started,recovery) \
+                    VALUES (?1,?2,?3,?4,?5)",
+                    params![
+                        expected.id,
+                        claim.owner,
+                        claim.pid,
+                        claim.started,
+                        if claim.native { "native" } else { "domain" }
+                    ],
+                )
+                .map_err(|error| match error {
+                    crate::storage::Error::Constraint(_) => Error::Conflict,
+                    other => storage_error(other),
+                })?;
             }
             ClaimChange::Finish(owner) => {
                 let actual = tx
@@ -129,7 +143,21 @@ impl Store {
                 .is_some_and(|d| d.transport == "auto-review")
             && let Some(metadata) = &next.review
         {
-            tx.execute("INSERT INTO approval_review_denials VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(workspace,session_id,task_id,run_id,evidence_digest) DO UPDATE SET denials=CASE WHEN excluded.denials=0 THEN 0 ELSE approval_review_denials.denials+1 END",params![next.scope.workspace,next.scope.session_id,next.scope.task_id,next.scope.run_id,metadata.evidence_digest,if next.state == State::Rejected {1} else {0}]).map_err(storage_error)?;
+            tx.execute(
+                "INSERT INTO approval_review_denials VALUES (?1,?2,?3,?4,?5,?6) ON \
+                CONFLICT(workspace,session_id,task_id,run_id,evidence_digest) DO UPDATE \
+                SET denials=CASE WHEN excluded.denials=0 THEN 0 ELSE \
+                approval_review_denials.denials+1 END",
+                params![
+                    next.scope.workspace,
+                    next.scope.session_id,
+                    next.scope.task_id,
+                    next.scope.run_id,
+                    metadata.evidence_digest,
+                    if next.state == State::Rejected { 1 } else { 0 }
+                ],
+            )
+            .map_err(storage_error)?;
         }
         tx.commit().map_err(storage_error)?;
         Ok(next.clone())

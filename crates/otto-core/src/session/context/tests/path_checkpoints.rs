@@ -73,7 +73,11 @@ test!(build_context_falls_back_to_the_retained_tail {
 
 test!(build_context_carries_tokens_before_from_a_compaction_summary_message {
     let built = decode_entry(
-        r#"{"type":"message","id":"cf000001","parentId":null,"timestamp":"2026-08-28T10:00:00Z","message":{"role":"compactionSummary","summary":"message summary","tokensBefore":321,"timestamp":1787911200000}}"#,
+        concat!(
+            r#"{"type":"message","id":"cf000001","parentId":null,"#,
+            r#""timestamp":"2026-08-28T10:00:00Z","message":{"role":"compactionSummary","#,
+            r#""summary":"message summary","tokensBefore":321,"timestamp":1787911200000}}"#,
+        ),
     );
     let leaf = built.id.clone();
     let (context, _) = build_context(&[built], &leaf).expect("build context");
@@ -105,7 +109,12 @@ test!(build_context_uses_the_legacy_first_kept_entry_id {
 test!(build_context_keeps_an_image_on_the_active_branch_only {
     let root = user_entry("10000001", None, "root");
     let image = decode_entry(
-        r#"{"type":"message","id":"10000002","parentId":"10000001","timestamp":"2026-08-27T12:00:02Z","message":{"role":"user","content":[{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}],"timestamp":2}}"#,
+        concat!(
+            r#"{"type":"message","id":"10000002","parentId":"10000001","#,
+            r#""timestamp":"2026-08-27T12:00:02Z","message":{"role":"user","#,
+            r#""content":[{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}],"#,
+            r#""timestamp":2}}"#,
+        ),
     );
     let text = user_entry("10000003", Some("10000001"), "text leaf");
     let entries = vec![root, image, text];
@@ -120,7 +129,12 @@ test!(build_context_keeps_an_image_on_the_active_branch_only {
 
 test!(build_context_rejects_an_unsupported_message_on_the_active_branch_only {
     let bash = decode_entry(
-        r#"{"type":"message","id":"20000001","parentId":null,"timestamp":"2026-08-27T12:00:01Z","message":{"role":"bashExecution","command":"pwd","output":"/workspace","exitCode":0,"cancelled":false,"truncated":false,"timestamp":1}}"#,
+        concat!(
+            r#"{"type":"message","id":"20000001","parentId":null,"#,
+            r#""timestamp":"2026-08-27T12:00:01Z","message":{"role":"bashExecution","#,
+            r#""command":"pwd","output":"/workspace","exitCode":0,"cancelled":false,"#,
+            r#""truncated":false,"timestamp":1}}"#,
+        ),
     );
     let text = user_entry("20000002", None, "supported root");
     let entries = vec![bash, text];
@@ -132,7 +146,16 @@ test!(build_context_rejects_an_unsupported_message_on_the_active_branch_only {
 
 test!(build_context_rejects_provider_required_content_on_the_active_branch_only {
     let provider_specific = decode_entry(
-        r#"{"type":"message","id":"21000001","parentId":null,"timestamp":"2026-08-27T12:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"README.md"},"thoughtSignature":"provider-state"}],"api":"provider-api","provider":"provider","model":"model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1}}"#,
+        concat!(
+            r#"{"type":"message","id":"21000001","parentId":null,"#,
+            r#""timestamp":"2026-08-27T12:00:01Z","message":{"role":"assistant","#,
+            r#""content":[{"type":"toolCall","id":"call-1","name":"read","#,
+            r#""arguments":{"path":"README.md"},"thoughtSignature":"provider-state"}],"#,
+            r#""api":"provider-api","provider":"provider","model":"model","usage":{"input":1,"#,
+            r#""output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"#,
+            r#""output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","#,
+            r#""timestamp":1}}"#,
+        ),
     );
     let supported = user_entry("21000002", None, "supported root");
     let entries = vec![provider_specific, supported];
@@ -354,7 +377,11 @@ test!(build_context_frames_branch_and_custom_messages {
 
 test!(build_context_supports_custom_agent_messages {
     let built = decode_entry(
-        r#"{"type":"message","id":"41000001","parentId":null,"timestamp":"2026-08-27T12:00:01Z","message":{"role":"custom","customType":"agent.fixture","content":"injected","display":false,"timestamp":1}}"#,
+        concat!(
+            r#"{"type":"message","id":"41000001","parentId":null,"#,
+            r#""timestamp":"2026-08-27T12:00:01Z","message":{"role":"custom","#,
+            r#""customType":"agent.fixture","content":"injected","display":false,"timestamp":1}}"#,
+        ),
     );
     let (context, _) = build_context(&[built], "41000001").expect("build context");
     assert_eq!(

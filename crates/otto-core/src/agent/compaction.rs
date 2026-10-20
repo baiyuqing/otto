@@ -332,7 +332,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             })?;
         result.checkpoint_id = metadata.id;
         let token = CancellationToken::new();
-        if let Err(message) = self.hook("after_compaction", serde_json::json!({"checkpoint_id":result.checkpoint_id,"reason":format!("{reason:?}")}), &token).await { self.hook_warning(emit,&message); }
+        if let Err(message) = self
+            .hook(
+                "after_compaction",
+                serde_json::json!({
+                    "checkpoint_id": result.checkpoint_id,
+                    "reason": format!("{reason:?}")
+                }),
+                &token,
+            )
+            .await
+        {
+            self.hook_warning(emit, &message);
+        }
         emit(Event::CompactionCompleted {
             compaction: result.clone(),
         });

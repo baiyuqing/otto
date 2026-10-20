@@ -258,7 +258,18 @@ impl WorkflowStore for TursoWorkflowStore {
         session: &str,
         operation: &str,
     ) -> Result<Option<Run>, Error> {
-        let id: Option<String> = self.connection.lock().map_err(|_|op_error())?.query_row("SELECT run_id FROM workflow_origins WHERE workspace=?1 AND session_id=?2 AND operation_id=?3",params![workspace,session,operation],|row|row.get(0)).optional().map_err(|_|op_error())?;
+        let id: Option<String> = self
+            .connection
+            .lock()
+            .map_err(|_| op_error())?
+            .query_row(
+                "SELECT run_id FROM workflow_origins WHERE workspace=?1 AND \
+            session_id=?2 AND operation_id=?3",
+                params![workspace, session, operation],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| op_error())?;
         match id {
             Some(id) => self.get_run(&id),
             None => Ok(None),
@@ -271,7 +282,13 @@ impl WorkflowStore for TursoWorkflowStore {
         limit: usize,
     ) -> Result<Vec<EventRecord>, Error> {
         let connection = self.connection.lock().map_err(|_| op_error())?;
-        let mut statement = connection.prepare("SELECT e.seq,e.run_id,e.occurred_at,e.kind,e.step_id,e.status FROM workflow_pending p JOIN workflow_events e ON e.seq=p.seq WHERE p.workspace=?1 AND p.session_id=?2 ORDER BY p.seq LIMIT ?3").map_err(|_| op_error())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT e.seq,e.run_id,e.occurred_at,e.kind,e.step_id,e.status FROM \
+            workflow_pending p JOIN workflow_events e ON e.seq=p.seq WHERE \
+            p.workspace=?1 AND p.session_id=?2 ORDER BY p.seq LIMIT ?3",
+            )
+            .map_err(|_| op_error())?;
         let rows = statement
             .query_map(
                 params![workspace, session, limit.clamp(1, 64) as i64],
@@ -451,7 +468,15 @@ fn event(
             params![run_id, timestamp(), kind, step_id, status],
         )
         .map_err(|_| op_error())?;
-    transaction.execute("INSERT OR IGNORE INTO workflow_pending(workspace,session_id,seq) SELECT o.workspace,o.session_id,e.seq FROM workflow_origins o JOIN workflow_events e ON e.run_id=o.run_id WHERE e.seq=(SELECT MAX(seq) FROM workflow_events) AND e.run_id=?1", params![run_id]).map_err(|_|op_error())?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO workflow_pending(workspace,session_id,seq) SELECT \
+        o.workspace,o.session_id,e.seq FROM workflow_origins o JOIN \
+        workflow_events e ON e.run_id=o.run_id WHERE e.seq=(SELECT MAX(seq) \
+        FROM workflow_events) AND e.run_id=?1",
+            params![run_id],
+        )
+        .map_err(|_| op_error())?;
     Ok(())
 }
 
@@ -562,8 +587,16 @@ impl TursoWorkflowStore {
             }
         }
         if let Some((session, operation)) = origin {
-            transaction.execute("INSERT INTO workflow_origins(workspace,session_id,operation_id,run_id,definition_hash,input) VALUES (?1,?2,?3,?4,?5,?6)", params![workspace,session,operation,id,definition.hash,input]).map_err(|_| op_error())?;
-            transaction.execute("INSERT OR IGNORE INTO workflow_pending(workspace,session_id,seq) SELECT ?1,?2,seq FROM workflow_events WHERE run_id=?3",params![workspace,session,id]).map_err(|_|op_error())?;
+            transaction.execute("INSERT INTO \
+                workflow_origins(workspace,session_id,operation_id,run_id,definition_hash,input) VALUES \
+                (?1,?2,?3,?4,?5,?6)", params![workspace,session,operation,id,definition.hash,input]).map_err(|_| op_error())?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO workflow_pending(workspace,session_id,seq) SELECT \
+                ?1,?2,seq FROM workflow_events WHERE run_id=?3",
+                    params![workspace, session, id],
+                )
+                .map_err(|_| op_error())?;
         }
         transaction.commit().map_err(|_| op_error())?;
         drop(connection);

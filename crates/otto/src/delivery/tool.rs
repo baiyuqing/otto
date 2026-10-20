@@ -42,7 +42,11 @@ impl TryFrom<ToolArgs> for Request {
 pub fn start_definition() -> ToolDefinition {
     definition(
         TOOL_NAME,
-        "Prepare a separately authorized delivery task in another admitted Git repository. The source workspace stays read-only; a future target worktree becomes the task's only writable root. This always requires user authorization and does not grant GitHub, network, or unsandboxed Bash access.",
+        "Prepare a separately authorized delivery task in another admitted Git \
+            repository. The source workspace stays read-only; a future target \
+            worktree becomes the task's only writable root. This always requires \
+            user authorization and does not grant GitHub, network, or unsandboxed \
+            Bash access.",
         json!({
             "type":"object", "additionalProperties":false,
             "properties": {

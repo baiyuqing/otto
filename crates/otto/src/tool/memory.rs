@@ -62,7 +62,11 @@ struct MemorySearchArgs {
 pub fn memory_search_definition() -> ToolDefinition {
     definition(
         "memory_search",
-        "Search remembered facts and preferences for the current user and workspace. Query terms match as case-insensitive substrings of record text, kind, key and labels; an empty query lists recently updated records. Previous turns retain only record IDs; use id to read the current scope and revision before proposing an update or forget.",
+        "Search remembered facts and preferences for the current user and \
+            workspace. Query terms match as case-insensitive substrings of record \
+            text, kind, key and labels; an empty query lists recently updated \
+            records. Previous turns retain only record IDs; use id to read the \
+            current scope and revision before proposing an update or forget.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -230,7 +234,10 @@ struct RememberArgs {
 pub fn remember_definition() -> ToolDefinition {
     definition(
         "remember",
-        "Propose a fact or preference to remember. Returns a version-bound candidate and its state. Otto's approval authority reviews its content and scope before applying it; AUTO uses original user evidence and MANUAL requires a person. Pending is not a completed memory change.",
+        "Propose a fact or preference to remember. Returns a version-bound \
+            candidate and its state. Otto's approval authority reviews its content \
+            and scope before applying it; AUTO uses original user evidence and \
+            MANUAL requires a person. Pending is not a completed memory change.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -238,7 +245,11 @@ pub fn remember_definition() -> ToolDefinition {
                 "kind": {"type": "string", "description": "Record category, e.g. preference, instruction, fact"},
                 "key": {"type": "string", "description": "Stable key for updating this record later"},
                 "text": {"type": "string", "description": "Text to remember"},
-                "scope": {"type": "string", "enum": ["user", "workspace"], "description": "user applies in every workspace and is for how the user wants the agent to work (working habits, communication preferences); workspace (default) is for this project only. For an update, use the scope of the target record as returned by memory_search. A user-scope preference or instruction needs a key"},
+                "scope": {"type": "string", "enum": ["user", "workspace"], "description": "user applies in every workspace and is for how the user wants the agent \
+                    to work (working habits, communication preferences); workspace \
+                    (default) is for this project only. For an update, use the scope of the \
+                    target record as returned by memory_search. A user-scope preference or \
+                    instruction needs a key"},
                 "labels": {"type": "array", "items": {"type": "string"}},
                 "confidence": {"type": "number", "description": "Confidence from 0 to 1"},
                 "reason": {"type": "string", "description": "Why this should be remembered"},
@@ -373,7 +384,11 @@ struct ForgetArgs {
 pub fn forget_definition() -> ToolDefinition {
     definition(
         "forget",
-        "Propose forgetting a remembered record found via memory_search. Returns a version-bound candidate and its state; Otto's approval authority reviews scope before applying it. If only the record ID is available, first call memory_search with id to read its current scope and revision. Pending is not a completed deletion.",
+        "Propose forgetting a remembered record found via memory_search. Returns \
+            a version-bound candidate and its state; Otto's approval authority \
+            reviews scope before applying it. If only the record ID is available, \
+            first call memory_search with id to read its current scope and \
+            revision. Pending is not a completed deletion.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -445,7 +460,10 @@ impl Tool for ForgetTool {
 /// Tells the model how the person decides a queued candidate, so it can point
 /// them there instead of claiming nobody can. It grants the model nothing:
 /// every path named here is a human command.
-const REVIEW_HINT: &str = "You cannot approve it yourself. Otto's approval authority reviews this exact candidate against original user evidence and live policy. If a human decision is needed, use /memory in chat or /memory review in the terminal. Report its actual state; queued does not mean applied.";
+const REVIEW_HINT: &str = "You cannot approve it yourself. Otto's approval authority reviews this \
+    exact candidate against original user evidence and live policy. If a \
+    human decision is needed, use /memory in chat or /memory review in the \
+    terminal. Report its actual state; queued does not mean applied.";
 
 fn proposal_result(outcome: crate::memory::Result<Vec<crate::memory::Candidate>>) -> ToolResult {
     let candidates = match outcome {

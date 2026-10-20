@@ -130,7 +130,10 @@ mod tests {
         let updated = update_sandbox(old.as_bytes(), &raw()).expect("update");
         assert_eq!(
             String::from_utf8(updated).expect("utf-8"),
-            "[sandbox] # boundary\n# driver = 'off'  # only for debugging\nnetwork = 'deny' # default\nread_paths = ['/tmp/gh']\nallow_env = ['GH_CONFIG_DIR']\n\n# profiles follow\n[profiles.demo]\nmodel = 'keep'\n"
+            "[sandbox] # boundary\n# driver = 'off'  # only for debugging\nnetwork = \
+                'deny' # default\nread_paths = ['/tmp/gh']\nallow_env = \
+                ['GH_CONFIG_DIR']\n\n# profiles follow\n[profiles.demo]\nmodel = \
+                'keep'\n"
         );
     }
 

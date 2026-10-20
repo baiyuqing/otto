@@ -85,7 +85,9 @@ impl Controller {
                     "1 standing preference is not recalled because the standing set is over its {budget}-token budget. Forget one with /memory forget <id>; list them with /memory list --scope user."
                 ),
                 omitted => format!(
-                    "{omitted} standing preferences are not recalled because the standing set is over its {budget}-token budget. Forget some with /memory forget <id>; list them with /memory list --scope user."
+                    "{omitted} standing preferences are not recalled because the standing \
+                        set is over its {budget}-token budget. Forget some with /memory forget \
+                        <id>; list them with /memory list --scope user."
                 ),
             });
         }

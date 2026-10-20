@@ -55,7 +55,12 @@ impl<'a> ReadTool<'a> {
 pub fn read_definition() -> ToolDefinition {
     definition(
         "read",
-        "Read a UTF-8 workspace file, including persistent sub-agent reports and indexes, or temporary bash output (removed after its turn and child tasks finish); use offset and limit for relevant excerpts. Returns at most 4 KiB of selected text (or the smaller configured cap); truncation gives character_offset to resume within the same line range. Returns an error for unreadable, binary or oversized files.",
+        "Read a UTF-8 workspace file, including persistent sub-agent reports and \
+            indexes, or temporary bash output (removed after its turn and child \
+            tasks finish); use offset and limit for relevant excerpts. Returns at \
+            most 4 KiB of selected text (or the smaller configured cap); truncation \
+            gives character_offset to resume within the same line range. Returns an \
+            error for unreadable, binary or oversized files.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -71,7 +76,10 @@ pub fn read_definition() -> ToolDefinition {
                 "character_offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Zero-based Unicode character offset within the selected offset/limit line range; default 0. Use the returned value with the same path, offset and limit to continue a truncated range, including a long single line"
+                    "description": "Zero-based Unicode character offset within the selected offset/limit \
+                        line range; default 0. Use the returned value with the same path, \
+                        offset and limit to continue a truncated range, including a long single \
+                        line"
                 },
                 "limit": {
                     "type": "integer",
@@ -161,17 +169,17 @@ pub(crate) fn read_validated_text_file(file: std::fs::File, path: &str) -> Resul
     if metadata.len() > MAX_READ_FILE_BYTES {
         return Err(too_large(metadata.len()));
     }
-    let mut data = Vec::new();
+    let mut file_bytes = Vec::new();
     file.take(MAX_READ_FILE_BYTES + 1)
-        .read_to_end(&mut data)
+        .read_to_end(&mut file_bytes)
         .map_err(|error| error.to_string())?;
-    if data.len() as u64 > MAX_READ_FILE_BYTES {
-        return Err(too_large(data.len() as u64));
+    if file_bytes.len() as u64 > MAX_READ_FILE_BYTES {
+        return Err(too_large(file_bytes.len() as u64));
     }
-    if data.contains(&0) {
+    if file_bytes.contains(&0) {
         return Err(format!("binary file not supported: {path}"));
     }
-    String::from_utf8(data).map_err(|_| format!("file is not valid UTF-8: {path}"))
+    String::from_utf8(file_bytes).map_err(|_| format!("file is not valid UTF-8: {path}"))
 }
 
 fn too_large(size: u64) -> String {

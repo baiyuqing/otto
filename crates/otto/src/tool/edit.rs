@@ -217,7 +217,10 @@ pub fn edit_definition() -> ToolDefinition {
             "An empty new_text deletes the matched text. Batch edits apply together against the original file. When old_text has ",
             "no exact match, a match that ignores trailing whitespace and treats curly quotes, dashes, and ",
             "non-breaking spaces as ASCII is used, and only the part of old_text that new_text changes is rewritten. ",
-            "The result shows a diff and notes when new_text drops the line break that ends old_text, joining the next line. After three successful single replacements to one file in a turn, a one-time batching advisory is appended; the edit still succeeds. ",
+            "The result shows a diff and notes when new_text drops the line break \
+                that ends old_text, joining the next line. After three successful \
+                single replacements to one file in a turn, a one-time batching advisory \
+                is appended; the edit still succeeds. ",
             "Validation and match errors write nothing. When old_text matches more than once, the error lists the line numbers of up to 5 matches ",
             "with the line before and after each; when old_text is not found, it shows the current file lines that best align with old_text.",
         ),
@@ -239,7 +242,10 @@ pub fn edit_definition() -> ToolDefinition {
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Batch replacements: combine all known changes to this file in one call; put every replacement here and omit top-level old_text/new_text. Omit for a single top-level replacement. Entries must not overlap and each matches against the original file.",
+                    "description": "Batch replacements: combine all known changes to this file in one call; \
+                        put every replacement here and omit top-level old_text/new_text. Omit \
+                        for a single top-level replacement. Entries must not overlap and each \
+                        matches against the original file.",
                     "items": {
                         "type": "object",
                         "additionalProperties": false,

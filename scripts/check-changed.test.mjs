@@ -71,7 +71,15 @@ test('module and integration test steps run in that order', () => {
 });
 
 test('test support directories and crate entry files select full tests', () => {
-  for (const p of ['crates/otto/tests/binary_harness/mod.rs', 'crates/otto/tests/fixtures/x.json', 'crates/otto/src/lib.rs', 'crates/otto/build.rs', 'crates/otto/Cargo.toml', 'testdata/x.json', 'crates/other/src/a.rs']) {
+  for (const p of [
+    'crates/otto/tests/binary_harness/mod.rs',
+    'crates/otto/tests/fixtures/x.json',
+    'crates/otto/src/lib.rs',
+    'crates/otto/build.rs',
+    'crates/otto/Cargo.toml',
+    'testdata/x.json',
+    'crates/other/src/a.rs',
+  ]) {
     assert.ok(plan([p]).steps.includes(FULL), p);
   }
   assert.ok(!plan(['testdata/x.json']).steps.includes(FMT));

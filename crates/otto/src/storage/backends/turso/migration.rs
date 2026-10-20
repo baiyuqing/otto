@@ -291,7 +291,11 @@ impl Stage {
         Ok(())
     }
 }
-const STAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS otto_migration_stage (singleton INTEGER PRIMARY KEY CHECK(singleton=1), migration_id TEXT NOT NULL, identity TEXT NOT NULL, source TEXT NOT NULL, max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes>0), sealed INTEGER NOT NULL CHECK(sealed IN (0,1))) STRICT;
+const STAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS otto_migration_stage (singleton INTEGER \
+    PRIMARY KEY CHECK(singleton=1), migration_id TEXT NOT NULL, identity \
+    TEXT NOT NULL, source TEXT NOT NULL, max_chunk_bytes INTEGER NOT NULL \
+    CHECK(max_chunk_bytes>0), sealed INTEGER NOT NULL CHECK(sealed IN \
+    (0,1))) STRICT;
 CREATE TABLE IF NOT EXISTS otto_migration_chunks (migration_id TEXT NOT NULL, domain TEXT NOT NULL, cursor TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(migration_id,domain,cursor)) STRICT;";
 
 #[async_trait]
@@ -373,7 +377,19 @@ impl StageImport for Stage {
                 ));
             }
             let source = serde_json::to_string(&manifest.source).map_err(json_error)?;
-            let matches: i64 = connection.query_row("SELECT COUNT(*) FROM otto_migration_stage WHERE migration_id=?1 AND identity=?2 AND source=?3 AND max_chunk_bytes=?4", params![manifest.migration_id,self.identity,source,manifest.max_chunk_bytes], |r| r.get(0)).map_err(sql_error)?;
+            let matches: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM otto_migration_stage WHERE migration_id=?1 AND \
+                identity=?2 AND source=?3 AND max_chunk_bytes=?4",
+                    params![
+                        manifest.migration_id,
+                        self.identity,
+                        source,
+                        manifest.max_chunk_bytes
+                    ],
+                    |r| r.get(0),
+                )
+                .map_err(sql_error)?;
             if matches != 1 {
                 return Err(Error::Conflict(
                     "staging namespace belongs to another migration".into(),
@@ -401,7 +417,19 @@ impl StageImport for Stage {
                 ],
             )
             .map_err(sql_error)?;
-            let matches: i64 = tx.query_row("SELECT COUNT(*) FROM otto_migration_stage WHERE migration_id=?1 AND identity=?2 AND source=?3 AND max_chunk_bytes=?4", params![manifest.migration_id,self.identity,source,manifest.max_chunk_bytes], |r| r.get(0)).map_err(sql_error)?;
+            let matches: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM otto_migration_stage WHERE migration_id=?1 AND \
+                identity=?2 AND source=?3 AND max_chunk_bytes=?4",
+                    params![
+                        manifest.migration_id,
+                        self.identity,
+                        source,
+                        manifest.max_chunk_bytes
+                    ],
+                    |r| r.get(0),
+                )
+                .map_err(sql_error)?;
             if matches != 1 {
                 return Err(Error::Conflict(
                     "stage already belongs to another migration".into(),
@@ -594,7 +622,17 @@ fn receipt_from(
     domain: &str,
     cursor: &str,
 ) -> Result<Option<ChunkReceipt>> {
-    connection.query_row("SELECT body FROM otto_migration_chunks WHERE migration_id=?1 AND domain=?2 AND cursor=?3", params![id,domain,cursor], |r| r.get::<String>(0)).optional().map_err(sql_error)?.map(|body| serde_json::from_str(&body).map_err(json_error)).transpose()
+    connection
+        .query_row(
+            "SELECT body FROM otto_migration_chunks WHERE migration_id=?1 AND \
+        domain=?2 AND cursor=?3",
+            params![id, domain, cursor],
+            |r| r.get::<String>(0),
+        )
+        .optional()
+        .map_err(sql_error)?
+        .map(|body| serde_json::from_str(&body).map_err(json_error))
+        .transpose()
 }
 fn scan(connection: &Connection, codec: &dyn SqlDomainCodec) -> Result<(DomainDigest, String)> {
     scan_version(connection, codec, codec.version())

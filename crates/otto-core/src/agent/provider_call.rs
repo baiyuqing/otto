@@ -147,9 +147,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             usage: message.and_then(|message| message.usage),
             request: Some(request_estimate(call.request, call.memory)),
         };
-        let data = serde_json::to_string(&record).expect("provider call record serializes");
+        let record_json = serde_json::to_string(&record).expect("provider call record serializes");
         self.session
-            .append_custom(PROVIDER_CALL_CUSTOM_TYPE, &data)
+            .append_custom(PROVIDER_CALL_CUSTOM_TYPE, &record_json)
             .await
             .map_err(|source| AgentError::Persist {
                 kind: "provider call".into(),

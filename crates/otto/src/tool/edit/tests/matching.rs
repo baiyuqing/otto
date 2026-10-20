@@ -69,7 +69,9 @@ async fn overlapping_occurrences_are_ambiguous() {
         assert_eq!(
             result.content,
             format!(
-                "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\nmatch 1, line 1:\n1 | {line}\nmatch 2, line 1:\n1 | {line}"
+                "edit failed: old_text matched 2 locations in sample.txt; include more \
+                    surrounding context to make it unique. Lines around each match:\nmatch \
+                    1, line 1:\n1 | {line}\nmatch 2, line 1:\n1 | {line}"
             ),
             "{name}"
         );
@@ -300,7 +302,9 @@ async fn a_long_file_line_is_cut_in_an_error() {
     assert_eq!(
         result.content,
         format!(
-            "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\nmatch 1, line 1:\n1 | {cut}\n2 | {cut}\nmatch 2, line 2:\n1 | {cut}\n2 | {cut}"
+            "edit failed: old_text matched 2 locations in sample.txt; include more \
+                surrounding context to make it unique. Lines around each match:\nmatch \
+                1, line 1:\n1 | {cut}\n2 | {cut}\nmatch 2, line 2:\n1 | {cut}\n2 | {cut}"
         )
     );
 }

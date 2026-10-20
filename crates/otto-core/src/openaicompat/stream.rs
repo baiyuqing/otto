@@ -206,12 +206,12 @@ impl StreamAssembler {
         if self.data_lines.is_empty() {
             return Ok(());
         }
-        let data = std::mem::take(&mut self.data_lines).join(&b'\n');
-        if data == b"[DONE]" {
+        let event_bytes = std::mem::take(&mut self.data_lines).join(&b'\n');
+        if event_bytes == b"[DONE]" {
             self.done = true;
             return Ok(());
         }
-        let chunk: WireChunk = serde_json::from_slice(&data)
+        let chunk: WireChunk = serde_json::from_slice(&event_bytes)
             .map_err(|error| StreamError::Decode(error.to_string()))?;
         if let Some(usage) = &chunk.usage {
             self.cached_input_tokens_present = usage.cached_tokens_present();
@@ -419,7 +419,11 @@ mod tests {
             concat!(
                 ": keepalive\r\n\r\n",
                 "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{large}\"}}}}]}}\r\n\r\n",
-                "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":3,\"id\":\"third\",\"function\":{{\"name\":\"write\",\"arguments\":\"{{\\\"pa\"}}}},{{\"index\":1,\"id\":\"first\",\"function\":{{\"name\":\"read\",\"arguments\":\"{{\\\"path\\\":\\\"A\\\"}}\"}}}}]}}}}]}}\r\n\r\n",
+                "data: \
+                    {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":3,\"id\":\"third\",\
+                    \"function\":{{\"name\":\"write\",\"arguments\":\"{{\\\"pa\"}}}},\
+                    {{\"index\":1,\"id\":\"first\",\"function\":{{\"name\":\"read\",\
+                    \"arguments\":\"{{\\\"path\\\":\\\"A\\\"}}\"}}}}]}}}}]}}\r\n\r\n",
                 "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":3,\"function\":{{\"arguments\":\"th\\\":\\\"B\\\"}}\"}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}\r\n\r\n",
                 "data: {{\"choices\":[],\r\ndata: \"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":9}}}}\r\n\r\n",
                 "event: completion\r\ndata: [DONE]\r\n\r\n",
@@ -458,7 +462,11 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn emits_stable_tool_call_identity_for_interleaved_continuations() {
         let body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"pa\"}},{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}}]}}]}\n\n",
+            "data: \
+                {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\
+                \"function\":{\"name\":\"write\",\"arguments\":\"{\\\"pa\"}},{\"index\":0,\
+                \"id\":\"call-a\",\"function\":{\"name\":\"read\",\
+                \"arguments\":\"{\\\"pa\"}}]}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"A\\\"}\"}}]}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"th\\\":\\\"B\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n",
@@ -514,7 +522,10 @@ mod tests {
             ),
             (
                 "malformed tool arguments",
-                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bad\",\"function\":{\"name\":\"read\",\"arguments\":\"{\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+                "data: \
+                    {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bad\",\
+                    \"function\":{\"name\":\"read\",\"arguments\":\"{\"}}]},\
+                    \"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
                 "tool call \"bad\" has malformed arguments",
             ),
         ];

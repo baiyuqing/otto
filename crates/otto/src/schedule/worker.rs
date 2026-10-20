@@ -135,7 +135,16 @@ impl Worker {
                             Ok(conflicts) => {
                                 if conflicts != previous {
                                     if !conflicts.is_empty() {
-                                        telemetry.logger.warn("schedule_delivery_conflict", &[("platforms", conflicts.join(",")), ("reason", "multiple clients offer this platform; legacy delivery suspended".into())]);
+                                        telemetry.logger.warn(
+                                            "schedule_delivery_conflict",
+                                            &[
+                                                ("platforms", conflicts.join(",")),
+                                                (
+                                                    "reason",
+                                                    "multiple clients offer this platform; legacy delivery suspended".into(),
+                                                ),
+                                            ],
+                                        );
                                     }
                                     previous = conflicts;
                                 }

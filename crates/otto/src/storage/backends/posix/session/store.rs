@@ -496,12 +496,12 @@ impl Store {
 
         let timestamp = format_persisted_timestamp(Utc::now(), "runtime update")?;
         let entry_id = state.new_entry_id("runtime")?;
-        let data = serde_json::to_string(runtime)
+        let runtime_json = serde_json::to_string(runtime)
             .map_err(|error| PiError::other(format!("encode runtime metadata: {error}")))?;
         let mut entry = PiEntry::new("custom", &entry_id, state.leaf_id.clone(), &timestamp);
         entry.custom = Some(PiCustom {
             custom_type: OTTO_RUNTIME_CUSTOM_TYPE.to_owned(),
-            data: Some(raw_value(data)?),
+            data: Some(raw_value(runtime_json)?),
         });
         state.append_entry(entry, entry_id)?;
         state.header.profile = runtime.profile.clone();

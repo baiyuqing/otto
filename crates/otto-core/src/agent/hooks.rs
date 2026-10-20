@@ -81,14 +81,14 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
     pub(super) async fn hook(
         &self,
         event: &str,
-        data: Value,
+        hook_payload: Value,
         control: &dyn OperationControl,
     ) -> Result<Response, String> {
         if !self.redactor.allows_dynamic_content() {
             return Ok(Response::default());
         }
-        let mut data = data;
-        if let Some(object) = data.as_object_mut() {
+        let mut hook_payload = hook_payload;
+        if let Some(object) = hook_payload.as_object_mut() {
             object.insert(
                 "turn_id".into(),
                 self.hook_turn_id
@@ -99,7 +99,7 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
             );
         }
         match &self.options.hooks {
-            Some(hooks) => hooks.run(event, data, control).await,
+            Some(hooks) => hooks.run(event, hook_payload, control).await,
             None => Ok(Response::default()),
         }
     }

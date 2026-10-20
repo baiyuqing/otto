@@ -184,7 +184,15 @@ fn managed_force_survives_cli_and_session_overrides() {
 }
 #[test]
 fn managed_destinations_credentials_sandbox_and_ceilings_fail_closed() {
-    let policy: ManagedPolicy = toml::from_str("require_sandbox=true\nallowed_provider_hosts=[]\nallowed_mcp_hosts=[]\nallowed_credential_variables=['SAFE']\n[ceilings]\n'agent.max_output_bytes'=100").unwrap();
+    let policy: ManagedPolicy = toml::from_str(
+        "require_sandbox=true\
+         \nallowed_provider_hosts=[]\
+         \nallowed_mcp_hosts=[]\
+         \nallowed_credential_variables=['SAFE']\
+         \n[ceilings]\
+         \n'agent.max_output_bytes'=100",
+    )
+    .unwrap();
     let runtime = super::super::Runtime {
         provider: "openai-compatible".into(),
         base_url: "https://evil.test/v1".into(),

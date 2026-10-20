@@ -181,7 +181,9 @@ const QUESTIONS: [Question; 4] = [
     Question {
         id: "self_contained",
         kind: "noul",
-        instructions: "A sub-agent starts with an empty context and receives only what the `input` field describes. Can it carry out the body's steps without information from the conversation that delegated to it?",
+        instructions: "A sub-agent starts with an empty context and receives only what the \
+            `input` field describes. Can it carry out the body's steps without \
+            information from the conversation that delegated to it?",
         criteria: Criteria::Noul {
             when_true: "everything the steps need is named in `input` or in the skill package.",
             when_false: "the steps depend on earlier conversation, the user's recent messages, or files not named in `input`.",

@@ -172,14 +172,14 @@ fn write_bytes_with(
     }
     let suffix = crate::runtime::builder::random_id()
         .map_err(|_| "cannot create temporary configuration")?;
-    let temp = format!(".otto-config-{suffix}");
+    let temp_name = format!(".otto-config-{suffix}");
     let (parent, name) =
         fsops::open_parent(path).map_err(|_| "cannot create temporary configuration")?;
     fsops::publish_file(
         &parent,
         &Publish {
             name,
-            temp: &temp,
+            temp: &temp_name,
             permissions: 0o600,
             mode: PublishMode::Replace,
         },
@@ -440,29 +440,29 @@ fn create_bytes_if_absent(path: &Path, contents: &[u8]) -> Result<(), &'static s
     let directory = parent_directory(path);
     let suffix = crate::runtime::builder::random_id()
         .map_err(|_| "cannot create temporary configuration")?;
-    let temp = directory.join(format!(".otto-config-{suffix}"));
+    let temp_path = directory.join(format!(".otto-config-{suffix}"));
     let result = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&temp)
+        .open(&temp_path)
         .map_err(|_| "cannot create temporary configuration")
         .and_then(|mut file| {
             file.write_all(contents)
                 .and_then(|()| file.sync_all())
                 .map_err(|_| "cannot write configuration")
         })
-        .and_then(|()| match fs::hard_link(&temp, path) {
+        .and_then(|()| match fs::hard_link(&temp_path, path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 Err("configuration already exists; no changes made")
             }
             Err(_) => Err("cannot create configuration"),
         })
-        .and_then(|()| fs::remove_file(&temp).map_err(|_| "cannot create configuration"))
+        .and_then(|()| fs::remove_file(&temp_path).map_err(|_| "cannot create configuration"))
         .and_then(|()| sync_directory(directory));
     if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        let _ = fs::remove_file(&temp_path);
     }
     result
 }

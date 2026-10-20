@@ -514,7 +514,11 @@ fn set_default_profile_updates_existing_line() {
     let path = write(
         dir.path(),
         "config.toml",
-        "default_profile = \"old\"\n[profiles.old]\nprovider = \"openai-compatible\"\nmodel = \"old-model\"\nbase_url = \"https://old.example/v1\"\napi_key_env = \"OLD_KEY\"\n[profiles.new]\nprovider = \"chatgpt\"\nmodel = \"gpt-5-codex\"\n",
+        "default_profile = \"old\"\n[profiles.old]\nprovider = \
+            \"openai-compatible\"\nmodel = \"old-model\"\nbase_url = \
+            \"https://old.example/v1\"\napi_key_env = \
+            \"OLD_KEY\"\n[profiles.new]\nprovider = \"chatgpt\"\nmodel = \
+            \"gpt-5-codex\"\n",
     );
     set_default_profile_file_impl(&path, &default, "new").expect("set_default_profile_file");
 
@@ -546,7 +550,9 @@ fn set_default_profile_changes_only_the_value() {
 #[test]
 fn set_profile_thinking_changes_only_the_value() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let original = "default_profile = \"a\"\n\n# the main profile\n[profiles.a]\nprovider = \"chatgpt\"\nmodel = \"m\" # fast\nthinking = \"low\"   # cheap\n\n# a second one\n[profiles.b]\nprovider = \"chatgpt\"\n\n# trailing note\n";
+    let original = "default_profile = \"a\"\n\n# the main profile\n[profiles.a]\nprovider = \
+        \"chatgpt\"\nmodel = \"m\" # fast\nthinking = \"low\"   # cheap\n\n# a \
+        second one\n[profiles.b]\nprovider = \"chatgpt\"\n\n# trailing note\n";
     let path = write(dir.path(), "config.toml", original);
 
     set_profile_thinking_file(&path, "a", "high").expect("set thinking");
@@ -609,7 +615,9 @@ fn set_default_profile_rejects_empty_profile_name() {
 #[test]
 fn profile_change_preview_commits_a_redacted_byte_preserving_field_edit() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let original = "# retained\ndefault_profile = \"local\"\n[profiles.local]\nprovider = \"openai-compatible\"\nmodel = \"old\" # comment\nbase_url = \"https://example.test/v1\"\napi_key_env = \"LOCAL_KEY\"\n";
+    let original = "# retained\ndefault_profile = \"local\"\n[profiles.local]\nprovider = \
+        \"openai-compatible\"\nmodel = \"old\" # comment\nbase_url = \
+        \"https://example.test/v1\"\napi_key_env = \"LOCAL_KEY\"\n";
     let path = write(dir.path(), "config.toml", original);
     let preview = preview_profile_change(
         &path,

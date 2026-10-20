@@ -585,11 +585,23 @@ impl Relay {
                             let confirmation=shared.as_ref().is_some_and(|r|r.kind==otto_core::approval::Kind::Confirmation);
                             let (method,mut params)=if confirmation {
                                 if caps.pointer("/clientCapabilities/elicitation/form").is_none_or(Value::is_null) {
-                                    connection.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("Approval {} is pending. This client cannot display confirmation; use Otto's approval UI.",event.approval_id)}}}}));
+                                    connection.send(json!({"jsonrpc":"2.0",
+                                        "method":"session/update",
+                                        "params":{"sessionId":session_id,
+                                        "update":{"sessionUpdate":"agent_message_chunk",
+                                        "content":{"type":"text",
+                                        "text":format!("Approval {} is pending. This client cannot display confirmation; use \
+                                        Otto's approval UI.",event.approval_id)}}}}));
                                     continue;
                                 }
                                 let request=shared.as_ref().expect("confirmation has request");
-                                ("elicitation/create",json!({"sessionId":session_id,"mode":"form","message":format!("{}\n{}\n{}",request.title,request.subject.details,request.reason),"requestedSchema":{"type":"object","properties":{"approved":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved"]}}))
+                                ("elicitation/create",json!({"sessionId":session_id,
+                                    "mode":"form",
+                                    "message":format!("{}\n{}\n{}",request.title,request.subject.details,request.reason),
+                                    "requestedSchema":{"type":"object",
+                                    "properties":{"approved":{"type":"boolean"},
+                                    "feedback":{"type":"string"}},
+                                    "required":["approved"]}}))
                             } else {("session/request_permission",permission_params(session_id,&event.tool_call_id,&event.command,&event.read_path,&event.justification))};
                             if let Some(request) = &shared {
                                 params["_meta"] = json!({"otto":{"approvalId":request.id,"revision":request.revision,"subjectVersion":request.subject.version}});

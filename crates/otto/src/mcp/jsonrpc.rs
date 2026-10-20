@@ -102,34 +102,34 @@ pub fn parse_incoming(text: &str) -> Result<Incoming, String> {
         return Err("batch requests not supported".to_string());
     }
 
-    let obj = value
+    let message_object = value
         .as_object()
         .ok_or_else(|| "message must be an object".to_string())?;
 
     // Check jsonrpc field
-    if obj.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+    if message_object.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
         return Err("missing or invalid jsonrpc: expected \"2.0\"".to_string());
     }
 
     // Reject if both result and error are present
-    if obj.contains_key("result") && obj.contains_key("error") {
+    if message_object.contains_key("result") && message_object.contains_key("error") {
         return Err("message must not have both result and error".to_string());
     }
 
-    let id = obj.get("id").cloned();
-    let method = obj
+    let id = message_object.get("id").cloned();
+    let method = message_object
         .get("method")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    if let Some(result) = obj.get("result") {
+    if let Some(result) = message_object.get("result") {
         // Response with result
         let id = id.ok_or_else(|| "response missing id".to_string())?;
         Ok(Incoming::Response {
             id,
             result: result.clone(),
         })
-    } else if let Some(error) = obj.get("error") {
+    } else if let Some(error) = message_object.get("error") {
         // Response with error
         let id = id.ok_or_else(|| "error response missing id".to_string())?;
         let error: RpcError =
@@ -141,13 +141,13 @@ pub fn parse_incoming(text: &str) -> Result<Incoming, String> {
             Ok(Incoming::Request {
                 id,
                 method,
-                params: obj.get("params").cloned().unwrap_or(Value::Null),
+                params: message_object.get("params").cloned().unwrap_or(Value::Null),
             })
         } else {
             // Notification (no id)
             Ok(Incoming::Notification {
                 method,
-                params: obj.get("params").cloned().unwrap_or(Value::Null),
+                params: message_object.get("params").cloned().unwrap_or(Value::Null),
             })
         }
     } else {
@@ -157,13 +157,13 @@ pub fn parse_incoming(text: &str) -> Result<Incoming, String> {
 
 /// Insert modern protocol metadata into params. Returns params if already empty, or merges into existing _meta.
 pub fn modern_meta(params: Value) -> Value {
-    let mut obj = if params.is_null() {
+    let mut params_object = if params.is_null() {
         serde_json::Map::new()
     } else {
         params.as_object().cloned().unwrap_or_default()
     };
 
-    let mut meta = obj
+    let mut meta = params_object
         .get("_meta")
         .and_then(|v| v.as_object())
         .cloned()
@@ -185,8 +185,8 @@ pub fn modern_meta(params: Value) -> Value {
         }),
     );
 
-    obj.insert("_meta".to_string(), json!(meta));
-    Value::Object(obj)
+    params_object.insert("_meta".to_string(), json!(meta));
+    Value::Object(params_object)
 }
 
 /// Build the initialize request parameters for the legacy protocol version.
@@ -203,11 +203,11 @@ pub fn initialize_params() -> Value {
 
 /// Decode the initialize response to extract the server's protocolVersion.
 pub fn decode_initialize(result: &Value) -> Result<String, String> {
-    let obj = result
+    let initialize_object = result
         .as_object()
         .ok_or_else(|| "initialize result must be an object".to_string())?;
 
-    let version = obj
+    let version = initialize_object
         .get("protocolVersion")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing or invalid protocolVersion".to_string())?;
@@ -222,11 +222,11 @@ pub fn decode_initialize(result: &Value) -> Result<String, String> {
 /// Decode a tools/list response into a vector of ToolInfo and optional nextCursor.
 /// Entries that fail to decode are skipped (not fatal); unknown fields are ignored.
 pub fn decode_tools_list(result: &Value) -> Result<(Vec<ToolInfo>, Option<String>), String> {
-    let obj = result
+    let tools_list_object = result
         .as_object()
         .ok_or_else(|| "tools/list result must be an object".to_string())?;
 
-    let tools_array = obj
+    let tools_array = tools_list_object
         .get("tools")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "missing or invalid tools array".to_string())?;
@@ -239,7 +239,7 @@ pub fn decode_tools_list(result: &Value) -> Result<(Vec<ToolInfo>, Option<String
         // Skip entries that fail to decode; not fatal
     }
 
-    let next_cursor = obj
+    let next_cursor = tools_list_object
         .get("nextCursor")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
@@ -252,24 +252,27 @@ pub fn decode_tools_list(result: &Value) -> Result<(Vec<ToolInfo>, Option<String
 /// required field, are skipped. On a modern server a `resultType` other than
 /// `"complete"` is an error.
 pub fn decode_call_result(result: &Value, era: &Era) -> Result<CallOutcome, String> {
-    let obj = result
+    let call_result_object = result
         .as_object()
         .ok_or_else(|| "call result must be an object".to_string())?;
     if *era == Era::Modern
-        && let Some(result_type) = obj.get("resultType").and_then(Value::as_str)
+        && let Some(result_type) = call_result_object.get("resultType").and_then(Value::as_str)
         && result_type != "complete"
     {
         return Err(format!("unsupported resultType {result_type}"));
     }
-    let content = obj
+    let content = call_result_object
         .get("content")
         .and_then(Value::as_array)
         .map(|blocks| blocks.iter().filter_map(decode_block).collect())
         .unwrap_or_default();
     Ok(CallOutcome {
         content,
-        structured_content: obj.get("structuredContent").cloned(),
-        is_error: obj.get("isError").and_then(Value::as_bool).unwrap_or(false),
+        structured_content: call_result_object.get("structuredContent").cloned(),
+        is_error: call_result_object
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -425,8 +428,8 @@ mod tests {
     #[test]
     fn test_modern_meta_merges_into_empty() {
         let result = modern_meta(Value::Null);
-        let obj = result.as_object().unwrap();
-        let meta = obj.get("_meta").unwrap().as_object().unwrap();
+        let result_object = result.as_object().unwrap();
+        let meta = result_object.get("_meta").unwrap().as_object().unwrap();
         assert_eq!(
             meta.get("io.modelcontextprotocol/protocolVersion").unwrap(),
             &json!(MODERN_VERSION)
@@ -438,23 +441,30 @@ mod tests {
     fn test_modern_meta_merges_into_existing() {
         let input = json!({"_meta": {"existing": "value"}, "other": "data"});
         let result = modern_meta(input);
-        let obj = result.as_object().unwrap();
-        let meta = obj.get("_meta").unwrap().as_object().unwrap();
+        let result_object = result.as_object().unwrap();
+        let meta = result_object.get("_meta").unwrap().as_object().unwrap();
         assert_eq!(meta.get("existing").unwrap(), &json!("value"));
         assert_eq!(
             meta.get("io.modelcontextprotocol/protocolVersion").unwrap(),
             &json!(MODERN_VERSION)
         );
-        assert_eq!(obj.get("other").unwrap(), &json!("data"));
+        assert_eq!(result_object.get("other").unwrap(), &json!("data"));
     }
 
     #[test]
     fn test_initialize_params() {
         let params = initialize_params();
-        let obj = params.as_object().unwrap();
-        assert_eq!(obj.get("protocolVersion").unwrap(), &json!(LEGACY_VERSION));
-        assert!(obj.contains_key("capabilities"));
-        let client_info = obj.get("clientInfo").unwrap().as_object().unwrap();
+        let params_object = params.as_object().unwrap();
+        assert_eq!(
+            params_object.get("protocolVersion").unwrap(),
+            &json!(LEGACY_VERSION)
+        );
+        assert!(params_object.contains_key("capabilities"));
+        let client_info = params_object
+            .get("clientInfo")
+            .unwrap()
+            .as_object()
+            .unwrap();
         assert_eq!(client_info.get("name").unwrap(), &json!("otto"));
     }
 

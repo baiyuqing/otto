@@ -32,7 +32,16 @@ impl Server {
             server.wake_turn(&session).await;
             loop {
                 tokio::select! {
-                    _ = async { match task_updates.as_mut() { Some(receiver) => { if receiver.changed().await.is_err() { std::future::pending::<()>().await; } }, None => std::future::pending::<()>().await } } => {
+                    _ = async {
+                        match task_updates.as_mut() {
+                            Some(receiver) => {
+                                if receiver.changed().await.is_err() {
+                                    std::future::pending::<()>().await;
+                                }
+                            },
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
                         if let Some(view) = session.ctrl.tasks() { server.metrics.diff_tasks(&mut seen, &view.list()); }
                         server.status_changed.send_modify(|version| *version += 1);
                     }

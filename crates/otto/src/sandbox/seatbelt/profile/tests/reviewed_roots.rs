@@ -48,7 +48,10 @@ fn network_allow_grants_certificate_trust_broker() {
 #[test]
 fn xcode_selector_uses_only_exact_read_and_traversal_metadata() {
     let profile = new_fixture().render();
-    const EXACT_METADATA_RULE: &str = "(allow file-read-metadata\n  (literal \"/var\")\n  (literal \"/var/select\")\n  (literal \"/private/var/select\")\n  (literal \"/var/select/developer_dir\")\n  (literal \"/private/var/select/developer_dir\"))";
+    const EXACT_METADATA_RULE: &str = "(allow file-read-metadata\n  (literal \"/var\")\n  (literal \
+        \"/var/select\")\n  (literal \"/private/var/select\")\n  (literal \
+        \"/var/select/developer_dir\")\n  (literal \
+        \"/private/var/select/developer_dir\"))";
     assert!(
         profile.contains(EXACT_METADATA_RULE),
         "Git/xcrun compatibility lacks the reviewed metadata-only selector rule"

@@ -326,11 +326,20 @@ impl Tool for McpTool {
         if self.redact(&details) != details {
             return Err(error_result("MCP approval would expose credentials").not_started());
         }
-        Ok(Some(super::ApprovalSpec { version:crate::approval::digest(arguments.get()),source:"mcp".into(),
-            authority:otto_core::approval::Authority::Boundary,
-            title:format!("Authorize {}?",self.name),
-            reason:"This external tool can affect an external system.".into(),persistent:false,
-            details:serde_json::json!({"tool":self.name,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).map_err(|_| error_result("invalid MCP arguments"))?,"untrusted_tool_description":self.description}).to_string(),
+        Ok(Some(super::ApprovalSpec {
+            version: crate::approval::digest(arguments.get()),
+            source: "mcp".into(),
+            authority: otto_core::approval::Authority::Boundary,
+            title: format!("Authorize {}?", self.name),
+            reason: "This external tool can affect an external system.".into(),
+            persistent: false,
+            details: serde_json::json!({
+                "tool":self.name,
+                "arguments":serde_json::from_str::<serde_json::Value>(arguments.get())
+                    .map_err(|_| error_result("invalid MCP arguments"))?,
+                "untrusted_tool_description":self.description
+            })
+            .to_string(),
         }))
     }
 
@@ -429,7 +438,9 @@ impl Tool for McpSearchTools {
     fn definition(&self) -> ToolDefinition {
         definition(
             "mcp_search_tools",
-            "Search connected MCP tools by name or description. Use this before calling mcp_call_tool when you need an MCP server such as Notion. Returns compact tool names and descriptions, not full schemas.",
+            "Search connected MCP tools by name or description. Use this before \
+                calling mcp_call_tool when you need an MCP server such as Notion. \
+                Returns compact tool names and descriptions, not full schemas.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -506,7 +517,10 @@ impl Tool for McpCallTool {
     fn definition(&self) -> ToolDefinition {
         definition(
             "mcp_call_tool",
-            "Call one connected MCP tool by the full name returned from mcp_search_tools. Provide arguments as a JSON object. This keeps large MCP tool schemas out of the main context until a concrete call is needed.",
+            "Call one connected MCP tool by the full name returned from \
+                mcp_search_tools. Provide arguments as a JSON object. This keeps large \
+                MCP tool schemas out of the main context until a concrete call is \
+                needed.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

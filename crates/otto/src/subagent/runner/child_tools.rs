@@ -162,7 +162,19 @@ impl ChildTools {
     /// [`ChildTools::report`].
     fn agent_report_definition() -> ToolDefinition {
         let description = format!(
-            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, raw logs, source dumps or interim findings. Keep the answer or blocker within 4 KiB; the parent transport truncates longer reports. For longer answers, write a persistent report when permitted and send its summary, path and section index; this call does not automatically save overflow. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
+            "Send a message to the parent agent without ending this sub-agent task. \
+                Use it only to answer a question the parent sent as a [parent-message], \
+                or to report a blocker that needs a parent decision while you keep \
+                working on other parts of the task. Do not use it for progress updates, \
+                plans, raw logs, source dumps or interim findings. Keep the answer or \
+                blocker within 4 KiB; the parent transport truncates longer reports. \
+                For longer answers, write a persistent report when permitted and send \
+                its summary, path and section index; this call does not automatically \
+                save overflow. Limited to {REPORT_BUDGET} reports per task on your own \
+                initiative, plus one more for each [parent-message] received; a call \
+                past the limit returns an error instead of reaching the parent. A \
+                report that cannot be saved to the parent's pending-notification file \
+                also returns an error and does not reach the parent."
         );
         definition(
             "agent_report",

@@ -220,14 +220,14 @@ pub(super) fn move_aside_log(
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         // 0600, matching the mode `Store` creates session logs with.
-        let mut temp = std::fs::OpenOptions::new()
+        let mut temp_file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_CLOEXEC)
             .open(&temp_path)?;
-        temp.write_all(&bytes)?;
-        temp.sync_all()?;
+        temp_file.write_all(&bytes)?;
+        temp_file.sync_all()?;
         std::fs::rename(&temp_path, session_path)?;
         Ok(())
     })();

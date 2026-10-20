@@ -391,7 +391,19 @@ async fn plugin_packages_register_skills_tools_and_lifecycle_once_across_runner_
         "---\nname: example\ndescription: Example skill\n---\nDo the example task.\n",
     )
     .unwrap();
-    let components = serde_json::json!({"version":1,"hooks":{"session_start":[{"command":["/bin/sh","-c","read input; echo start >> lifecycle.log"]}],"session_end":[{"command":["/bin/sh","-c","read input; sleep 0.05; echo end >> lifecycle.log"]}]},"tools":[{"name":"echo","description":"Echo a value","command":["/bin/sh","-c","read input; printf '{}'"],"input_schema":{"type":"object"}}]});
+    let components = serde_json::json!({"version":1,
+        "hooks":{"session_start":[{"command":["/bin/sh",
+        "-c",
+        "read input; echo start >> lifecycle.log"]}],
+        "session_end":[{"command":["/bin/sh",
+        "-c",
+        "read input; sleep 0.05; echo end >> lifecycle.log"]}]},
+        "tools":[{"name":"echo",
+        "description":"Echo a value",
+        "command":["/bin/sh",
+        "-c",
+        "read input; printf '{}'"],
+        "input_schema":{"type":"object"}}]});
     std::fs::write(package.join("plugin.json"),serde_json::json!({"$schema":crate::plugin::package::PLUGIN_SCHEMA,"name":"demo","extensions":{"dev.otto":components}}).to_string()).unwrap();
     let service = crate::plugin::Service::new(temp.path());
     let installed = service.install(package.to_str().unwrap(), None).unwrap();

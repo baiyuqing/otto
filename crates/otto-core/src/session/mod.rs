@@ -291,9 +291,9 @@ pub trait Session: SessionBounds {
         &self,
         checkpoint: RemoteCompaction,
     ) -> Result<(), SessionError> {
-        let data = encode_remote_compaction(&checkpoint)
+        let checkpoint_json = encode_remote_compaction(&checkpoint)
             .map_err(|error| SessionError::Persist(error.to_string()))?;
-        self.append_custom(REMOTE_COMPACTION_CUSTOM_TYPE, &data)
+        self.append_custom(REMOTE_COMPACTION_CUSTOM_TYPE, &checkpoint_json)
             .await
     }
 

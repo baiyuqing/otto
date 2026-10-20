@@ -232,7 +232,12 @@ test!(build_context_projects_dangling_repairs_from_the_operation_ledger {
                 operation_entry(
                     "63200004",
                     Some("63200003"),
-                    r#"{"event":"terminal","schemaVersion":1,"operationId":"op_terminal","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read","disposition":"succeeded","effectCertainty":"completed"}"#,
+                    concat!(
+                        r#"{"event":"terminal","schemaVersion":1,"operationId":"op_terminal","#,
+                        r#""attempt":1,"kind":"tool_call","toolCallId":"call-1","#,
+                        r#""toolName":"read","disposition":"succeeded","#,
+                        r#""effectCertainty":"completed"}"#,
+                    ),
                 ),
                 user_entry("63200005", Some("63200004"), "next"),
             ],

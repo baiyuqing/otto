@@ -5,7 +5,9 @@ fn legacy_delivery_backfill_is_once_and_idle_plan_uses_pending_index() {
     let store = TursoWorkflowStore::open_in_memory();
     let connection = store.connection.lock().unwrap();
     // Simulate old schema populated before conversational delivery ledger existed.
-    connection.execute("INSERT INTO workflow_runs(id,workflow,definition_json,definition_hash,workspace,profile,provider,model,input,status,created_at,updated_at) VALUES ('legacy','flow','{}','hash','/w','','','','','succeeded','now','now')",()).unwrap();
+    connection.execute("INSERT INTO \
+        workflow_runs(id,workflow,definition_json,definition_hash,workspace,profile,provider,model,input,status,created_at,updated_at) VALUES \
+        ('legacy','flow','{}','hash','/w','','','','','succeeded','now','now')",()).unwrap();
     connection.execute("INSERT INTO workflow_origins(workspace,session_id,operation_id,run_id,definition_hash,input) VALUES('/w','source','op','legacy','hash','')",()).unwrap();
     connection.execute("INSERT INTO workflow_events(seq,run_id,occurred_at,kind) VALUES(1,'legacy','now','run_succeeded')",()).unwrap();
     connection
@@ -17,7 +19,13 @@ fn legacy_delivery_backfill_is_once_and_idle_plan_uses_pending_index() {
     store.acknowledge_event("/w", "source", 1).unwrap();
     let connection = store.connection.lock().unwrap();
     migrate_schema(&connection).unwrap();
-    let mut query=connection.prepare("EXPLAIN QUERY PLAN SELECT e.seq FROM workflow_pending p JOIN workflow_events e ON e.seq=p.seq WHERE p.workspace='/w' AND p.session_id='source' ORDER BY p.seq LIMIT 64").unwrap();
+    let mut query = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT e.seq FROM workflow_pending p JOIN \
+        workflow_events e ON e.seq=p.seq WHERE p.workspace='/w' AND \
+        p.session_id='source' ORDER BY p.seq LIMIT 64",
+        )
+        .unwrap();
     let plan = query
         .query_map((), |row| row.get::<String>(3))
         .unwrap()

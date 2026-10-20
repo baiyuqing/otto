@@ -44,14 +44,16 @@ impl Catalog {
                 let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
                     continue;
                 };
-                let data = match read_definition_file(&path) {
-                    Ok(data) => data,
+                let definition_bytes = match read_definition_file(&path) {
+                    Ok(definition_bytes) => definition_bytes,
                     Err(error) => {
                         warnings.push(format!("workflow {}: {error}", path.display()));
                         continue;
                     }
                 };
-                match parse_definition(name, &data, &|agent| agents.lookup(agent).is_some()) {
+                match parse_definition(name, &definition_bytes, &|agent| {
+                    agents.lookup(agent).is_some()
+                }) {
                     Ok(mut definition) => {
                         definition.source = path.display().to_string();
                         let names: HashSet<String> = definition
@@ -242,17 +244,17 @@ pub(super) fn read_definition_file(path: &Path) -> std::io::Result<Vec<u8>> {
             "file exceeds 1 MiB",
         ));
     }
-    let mut data = Vec::new();
+    let mut definition_bytes = Vec::new();
     file.by_ref()
         .take((MAX_DEFINITION_BYTES + 1) as u64)
-        .read_to_end(&mut data)?;
-    if data.len() > MAX_DEFINITION_BYTES {
+        .read_to_end(&mut definition_bytes)?;
+    if definition_bytes.len() > MAX_DEFINITION_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "file exceeds 1 MiB",
         ));
     }
-    Ok(data)
+    Ok(definition_bytes)
 }
 
 #[derive(Deserialize)]

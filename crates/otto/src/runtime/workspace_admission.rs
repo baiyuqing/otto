@@ -75,11 +75,11 @@ mod tests {
 
     #[test]
     fn admits_only_canonical_descendants_of_human_roots() {
-        let temp = tempfile::tempdir().unwrap();
-        let startup = temp.path().join("startup");
-        let root = temp.path().join("root");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let startup = temp_dir.path().join("startup");
+        let root = temp_dir.path().join("root");
         let child = root.join("child");
-        let sibling = temp.path().join("root-other");
+        let sibling = temp_dir.path().join("root-other");
         for path in [&startup, &root, &child, &sibling] {
             std::fs::create_dir_all(path).unwrap();
         }
@@ -103,10 +103,10 @@ mod tests {
 
     #[test]
     fn rejects_relative_and_symlink_escape_requests() {
-        let temp = tempfile::tempdir().unwrap();
-        let startup = temp.path().join("startup");
-        let root = temp.path().join("root");
-        let outside = temp.path().join("outside");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let startup = temp_dir.path().join("startup");
+        let root = temp_dir.path().join("root");
+        let outside = temp_dir.path().join("outside");
         std::fs::create_dir_all(&startup).unwrap();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();

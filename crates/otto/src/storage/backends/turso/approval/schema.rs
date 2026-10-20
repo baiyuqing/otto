@@ -92,7 +92,12 @@ pub(super) fn initialize_tx(tx: &Transaction<'_>) -> Result<()> {
     }
     tx.execute_batch(SCHEMA).map_err(storage_error)?;
     if version < 4 {
-        tx.execute_batch("INSERT OR IGNORE INTO approval_settings SELECT workspace,session_id,'on_request',CASE mode WHEN 'manual' THEN 'user' WHEN 'yolo' THEN 'bypass' ELSE 'auto_review' END,1 FROM approval_modes").map_err(storage_error)?;
+        tx.execute_batch(
+            "INSERT OR IGNORE INTO approval_settings SELECT \
+            workspace,session_id,'on_request',CASE mode WHEN 'manual' THEN 'user' \
+            WHEN 'yolo' THEN 'bypass' ELSE 'auto_review' END,1 FROM approval_modes",
+        )
+        .map_err(storage_error)?;
     }
     tx.execute_batch("PRAGMA user_version=4")
         .map_err(storage_error)?;

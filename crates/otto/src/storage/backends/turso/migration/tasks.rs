@@ -39,15 +39,16 @@ impl SqlDomainCodec for TaskCodec {
         if version != 1 {
             return Err(Error::Invalid("unsupported task codec version".into()));
         }
-        let mut data: NamedRecord = serde_json::from_slice(&record.payload).map_err(json_error)?;
+        let mut task_record: NamedRecord =
+            serde_json::from_slice(&record.payload).map_err(json_error)?;
         // A legacy source has no routing provenance. Do not hide a changed value
         // from digest verification merely because its descriptor predates it.
-        if data.fields.remove("model_source") != Some(serde_json::json!("unknown")) {
+        if task_record.fields.remove("model_source") != Some(serde_json::json!("unknown")) {
             return Err(Error::Invalid(
                 "legacy task has model source provenance".into(),
             ));
         }
-        record.payload = serde_json::to_vec(&data).map_err(json_error)?;
+        record.payload = serde_json::to_vec(&task_record).map_err(json_error)?;
         Ok(record)
     }
     fn committed_cursor(&self, connection: &Connection) -> Result<String> {
@@ -69,14 +70,16 @@ impl SqlDomainCodec for TaskCodec {
         named::next(connection, KINDS, cursor, max_bytes, interrupted)
     }
     fn import_record(&self, connection: &Connection, record: &Record) -> Result<()> {
-        let mut data: NamedRecord = serde_json::from_slice(&record.payload).map_err(json_error)?;
-        if data.version == 1 && data.kind == "subagent_task" {
-            data.fields
+        let mut task_record: NamedRecord =
+            serde_json::from_slice(&record.payload).map_err(json_error)?;
+        if task_record.version == 1 && task_record.kind == "subagent_task" {
+            task_record
+                .fields
                 .entry("model_source".into())
                 .or_insert_with(|| serde_json::json!("unknown"));
         }
         let mut compatible = record.clone();
-        compatible.payload = serde_json::to_vec(&data).map_err(json_error)?;
+        compatible.payload = serde_json::to_vec(&task_record).map_err(json_error)?;
         named::import(connection, KINDS, &compatible).map(|_| ())
     }
     fn validate(&self, connection: &Connection) -> Result<()> {
@@ -120,10 +123,10 @@ mod tests {
             .next_record(&connection, "", 1024 * 1024)
             .unwrap()
             .unwrap();
-        let mut data: NamedRecord = serde_json::from_slice(&record.payload).unwrap();
-        data.fields.remove("model_source");
-        record.payload = serde_json::to_vec(&data).unwrap();
-        assert_eq!(data.version, 1); // Logical record envelopes remain v1.
+        let mut task_record: NamedRecord = serde_json::from_slice(&record.payload).unwrap();
+        task_record.fields.remove("model_source");
+        record.payload = serde_json::to_vec(&task_record).unwrap();
+        assert_eq!(task_record.version, 1); // Logical record envelopes remain v1.
         let bytes = serde_json::to_vec(&record).unwrap();
         let mut hash = Sha256::new();
         hash.update((bytes.len() as u64).to_be_bytes());
@@ -196,10 +199,12 @@ mod tests {
                 .is_err()
         );
         let mut malformed = chunk.clone();
-        let mut data: NamedRecord = serde_json::from_slice(&malformed.records[0].payload).unwrap();
-        data.fields
+        let mut task_record: NamedRecord =
+            serde_json::from_slice(&malformed.records[0].payload).unwrap();
+        task_record
+            .fields
             .insert("untrusted_extra".into(), serde_json::json!("value"));
-        malformed.records[0].payload = serde_json::to_vec(&data).unwrap();
+        malformed.records[0].payload = serde_json::to_vec(&task_record).unwrap();
         let hash = chunk_hash(&malformed, manifest.max_chunk_bytes).unwrap();
         assert!(
             stage

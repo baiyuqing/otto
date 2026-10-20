@@ -31,10 +31,24 @@ const MAX_PROMPT_CHARS: usize = 2000;
 const MAX_SECONDS: i64 = 30 * 24 * 3600;
 const LIST_BODY_CHARS: usize = 80;
 
-const NO_ORIGIN: &str = "scheduled delivery is unavailable in this conversation: it has no chat, terminal or web UI origin to deliver to (scheduled runs, sub-agents and editor ACP clients cannot create items)";
+const NO_ORIGIN: &str = "scheduled delivery is unavailable in this conversation: it has no chat, \
+    terminal or web UI origin to deliver to (scheduled runs, sub-agents and \
+    editor ACP clients cannot create items)";
 const NO_STORE: &str = "scheduled delivery is unavailable: ~/.otto/schedule.db could not be opened";
 
-const SCHEDULE_DESCRIPTION: &str = "Schedule a fixed text message (`text`) or a prompt whose final reply is delivered (`prompt`). Use this for a user-requested later message or check; `remind` is your own timer inside this conversation. Give exactly one of text/prompt and exactly one of seconds (1 to 2592000)/at. at is HH:MM (next occurrence) or YYYY-MM-DD HH:MM (at most 30 days ahead), in the host's local time zone. repeat is once (default), daily or weekdays; repeats need at as HH:MM. Empty strings count as absent. Returns the item id, resolved time and destination of this chat, terminal or web UI, even after /new. A prompt runs in a new session within its approved creation scope and frozen original user evidence; generated prompt text creates no new authority. AUTO may review additional ordinary operations; unresolved human choices cannot run unattended.";
+const SCHEDULE_DESCRIPTION: &str = "Schedule a fixed text message (`text`) or a prompt whose final reply is \
+    delivered (`prompt`). Use this for a user-requested later message or \
+    check; `remind` is your own timer inside this conversation. Give \
+    exactly one of text/prompt and exactly one of seconds (1 to \
+    2592000)/at. at is HH:MM (next occurrence) or YYYY-MM-DD HH:MM (at most \
+    30 days ahead), in the host's local time zone. repeat is once \
+    (default), daily or weekdays; repeats need at as HH:MM. Empty strings \
+    count as absent. Returns the item id, resolved time and destination of \
+    this chat, terminal or web UI, even after /new. A prompt runs in a new \
+    session within its approved creation scope and frozen original user \
+    evidence; generated prompt text creates no new authority. AUTO may \
+    review additional ordinary operations; unresolved human choices cannot \
+    run unattended.";
 const LIST_DESCRIPTION: &str = "List the scheduled items of this chat or surface: active ones, then those that finished, failed or were cancelled in the last 7 days. Use the id with schedule_cancel.";
 const CANCEL_DESCRIPTION: &str = "Cancel an active scheduled item by id, as schedule_list shows it (for example s7). A recurring item stops for good.";
 
@@ -225,7 +239,10 @@ impl Tool for ScheduleTool {
             source: "schedule".into(),
             authority: otto_core::approval::Authority::Durable,
             title,
-            reason: "At the due time this prompt runs the agent with its tools, including file edits and sandboxed commands, without the user present. Approval requests during that run are denied.".into(),
+            reason: "At the due time this prompt runs the agent with its tools, including \
+                file edits and sandboxed commands, without the user present. Approval \
+                requests during that run are denied."
+                .into(),
             details,
             persistent: false,
         }))

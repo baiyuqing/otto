@@ -268,9 +268,9 @@ pub(super) fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::
     let json = serde_json::to_vec(&WorkspaceListFile { workspaces })
         .expect("a list of strings always serializes");
     let suffix = crate::runtime::builder::random_id()?;
-    let temp = directory.join(format!(".serve-workspaces-{suffix}.json"));
-    std::fs::write(&temp, &json)?;
-    std::fs::rename(&temp, workspace_list_path(home))
+    let temp_path = directory.join(format!(".serve-workspaces-{suffix}.json"));
+    std::fs::write(&temp_path, &json)?;
+    std::fs::rename(&temp_path, workspace_list_path(home))
 }
 
 /// Adds `path` to the persisted workspace list (sorted, deduplicated). A

@@ -216,7 +216,13 @@ impl Connection {
             .pointer("/clientCapabilities/elicitation/form")
             .is_none_or(Value::is_null)
         {
-            self.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":request.scope.session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("Approval pending: {}\\n{}\\nThis client cannot display confirmation. Use Otto's approval UI or _otto/approvals/decide for request {}.",request.title,request.subject.details,request.id)}}}}));
+            self.send(json!({"jsonrpc":"2.0",
+                "method":"session/update",
+                "params":{"sessionId":request.scope.session_id,
+                "update":{"sessionUpdate":"agent_message_chunk",
+                "content":{"type":"text",
+                "text":format!("Approval pending: {}\\n{}\\nThis client cannot display confirmation. \
+                Use Otto's approval UI or _otto/approvals/decide for request {}.",request.title,request.subject.details,request.id)}}}}));
             return match ctrl
                 .approval_service()
                 .wait(&request.id, &request.scope, cancel)

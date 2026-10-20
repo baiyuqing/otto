@@ -117,3 +117,35 @@ async fn input_and_output_are_redacted_and_after_failure_does_not_skip_later_hoo
         .unwrap();
     assert_eq!(response.content.as_deref(), Some("[REDACTED]"));
 }
+#[tokio::test]
+async fn oversized_turn_end_input_drops_the_turn_and_still_runs_the_hook() {
+    let mut turn_end = hook(
+        "input=$(cat); case \"$input\" in *'\"turn\":'*) exit 4;; *'\"turn_omitted\":\"size\"'*) ;; *) exit 5;; esac",
+    );
+    turn_end.timeout = "10s".into();
+    let (_temp, runtime) = runtime(otto_core::config::plugins::Hooks {
+        turn_end: vec![turn_end],
+        ..Default::default()
+    });
+    let bound = runtime.bind("s".into(), None, String::new(), "new", None);
+    let oversized_text = "a".repeat(MAX_INPUT + 1);
+    bound
+        .run(
+            "turn_end",
+            json!({"status":"success","turn":{"messages":[{"role":"user","blocks":[{"type":"text","text":oversized_text}]}]}}),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    // Input still over the limit without a `turn` is an error.
+    assert!(
+        bound
+            .run(
+                "turn_end",
+                json!({"status":oversized_text}),
+                &CancellationToken::new(),
+            )
+            .await
+            .is_err()
+    );
+}

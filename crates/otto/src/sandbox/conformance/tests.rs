@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// A child that has been signalled and has left the process table

@@ -1,4 +1,3 @@
-
 use super::*;
 use otto_core::model::{ContextMetadata, OperationId, ToolResultMetadata};
 

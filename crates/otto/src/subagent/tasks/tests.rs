@@ -1,4 +1,3 @@
-
 use std::time::Duration;
 
 use otto_core::model::{Block, BlockType, Role};

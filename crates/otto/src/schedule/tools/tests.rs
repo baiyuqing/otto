@@ -1,4 +1,3 @@
-
 use otto_core::model::EffectCertainty;
 
 use super::*;

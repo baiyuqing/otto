@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::memory::{NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest, SearchRequest};
 use otto_core::agent::inbox::Inbox;

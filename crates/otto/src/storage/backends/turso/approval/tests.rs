@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::approval::{Actor, Proposal, Service};
 use otto_core::approval::ApprovalMode;

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::tool::testutil::raw;
 use crate::tool::{definition, text_result};

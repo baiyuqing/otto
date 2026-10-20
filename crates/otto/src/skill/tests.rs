@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn write_skill(root: &Path, name: &str, frontmatter_extra: &str, body: &str) -> PathBuf {

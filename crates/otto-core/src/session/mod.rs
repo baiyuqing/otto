@@ -27,9 +27,9 @@ pub mod pi;
 pub mod plan;
 pub mod provider_call;
 pub mod remote_compaction;
+pub mod session_types;
 pub mod trace;
 pub mod turn;
-pub mod types;
 
 pub use codec::{PiRecord, decode_pi_entry, decode_pi_file, decode_pi_header, encode_pi_record};
 pub use context::{
@@ -68,13 +68,13 @@ pub use remote_compaction::{
     REMOTE_COMPACTION_SCHEMA_VERSION, RemoteCompaction, decode_remote_compaction,
     encode_remote_compaction, validate_remote_compaction,
 };
+pub use session_types::{
+    CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, CompactionMetadata, Header,
+    ListResult, RuntimeMetadata, SessionInfo, Snapshot, Warning,
+};
 pub use turn::{
     InterruptedTurn, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, decode_turn_record,
     encode_turn_record,
-};
-pub use types::{
-    CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, CompactionMetadata, Header,
-    ListResult, RuntimeMetadata, SessionInfo, Snapshot, Warning,
 };
 
 /// Which error class a [`PiError`] corresponds to.

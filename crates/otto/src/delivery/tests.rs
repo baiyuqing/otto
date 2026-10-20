@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::sandbox::{Denial, Error as SandboxError, ExitStatus};
 use std::sync::Mutex;

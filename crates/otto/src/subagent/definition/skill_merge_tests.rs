@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn write_skill(root: &Path, name: &str, contract: bool) {

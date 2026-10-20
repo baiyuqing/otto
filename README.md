@@ -95,7 +95,7 @@ Seatbelt behavior; Linux checks do not establish sandbox conformance.
 
 Read [`AGENTS.md`](AGENTS.md), the [code organization map](docs/code-organization.md)
 and [development guide](docs/development.md). Work in a dedicated branch/worktree,
-install the secret-scanning hook with `make setup-git-hooks` (requires Gitleaks),
+install the pre-commit hook with `make setup-git-hooks` (requires Gitleaks and Node),
 and run the checks for the code you change. The repository has no CI; PRs must
 report local verification.
 

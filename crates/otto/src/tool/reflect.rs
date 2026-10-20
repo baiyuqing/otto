@@ -88,7 +88,13 @@ impl Tool for ReflectTool {
     fn definition(&self) -> ToolDefinition {
         definition(
             NAME,
-            "Reflect on this session the way /reflect does. Writes a retrospective of the session to the run log under ~/.otto/reflection/runs/ and queues memory and skill proposals for the user's review; it writes no memory or skill itself. Call it only when the user asks for a retrospective, a review of the session, or to distil lessons or skills. Do not write retrospective files yourself. Returns the result line, the run log path and the retrospective.",
+            "Reflect on this session the way /reflect does. Writes a retrospective \
+                of the session to the run log under ~/.otto/reflection/runs/ and queues \
+                memory and skill proposals for the user's review; it writes no memory \
+                or skill itself. Call it only when the user asks for a retrospective, a \
+                review of the session, or to distil lessons or skills. Do not write \
+                retrospective files yourself. Returns the result line, the run log path \
+                and the retrospective.",
             json!({
                 "type": "object",
                 "additionalProperties": false,

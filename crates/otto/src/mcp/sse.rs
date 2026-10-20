@@ -79,10 +79,10 @@ impl SseParser {
                     if line.is_empty() {
                         // Empty line: dispatch event if data is non-empty
                         if !self.event_data.is_empty() {
-                            let data = self.event_data.join("\n");
+                            let joined_data = self.event_data.join("\n");
                             events.push(SseEvent {
                                 event: self.event_name.take(),
-                                data,
+                                data: joined_data,
                             });
                             self.event_data.clear();
                             self.event_bytes = 0;
@@ -187,10 +187,10 @@ impl SseParser {
 
         // Dispatch trailing event if data is non-empty
         if !self.event_data.is_empty() {
-            let data = self.event_data.join("\n");
+            let joined_data = self.event_data.join("\n");
             Ok(Some(SseEvent {
                 event: self.event_name,
-                data,
+                data: joined_data,
             }))
         } else {
             Ok(None)
@@ -341,9 +341,9 @@ mod tests {
     fn test_bom_skipped() {
         let mut parser = SseParser::new(10000);
         // UTF-8 BOM (EF BB BF) followed by event
-        let mut data = vec![0xEF, 0xBB, 0xBF];
-        data.extend_from_slice(b"data: bom\n\n");
-        let events = parser.feed(&data).unwrap();
+        let mut bom_input = vec![0xEF, 0xBB, 0xBF];
+        bom_input.extend_from_slice(b"data: bom\n\n");
+        let events = parser.feed(&bom_input).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "bom");
     }

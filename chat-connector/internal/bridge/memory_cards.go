@@ -189,5 +189,7 @@ func memoryCardText(cand agent.MemoryCandidate) string {
 	if cand.Advice != "" {
 		advice = "\n" + cand.Advice
 	}
-	return fmt.Sprintf("Memory review: %s %s/%s\n\n%s\n\nReason: %s\nOrigin: %s%s\n\n/memory accept %s or /memory reject %s", cand.Action, cand.Kind, cand.Key, cand.Text, cand.Reason, cand.Origin, advice, cand.ID, cand.ID)
+	return fmt.Sprintf(
+		"Memory review: %s %s/%s\n\n%s\n\nReason: %s\nOrigin: %s%s\n\n/memory accept %s or /memory reject %s",
+		cand.Action, cand.Kind, cand.Key, cand.Text, cand.Reason, cand.Origin, advice, cand.ID, cand.ID)
 }

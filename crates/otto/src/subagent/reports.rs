@@ -85,7 +85,10 @@ impl Report {
             " Section index unavailable; read the report directly.".to_owned()
         };
         Ok(format!(
-            "\n[Full report: {}/final.md ({} UTF-8 bytes, {} lines).{} Use read with path, offset and limit; follow its character_offset cursor with the same line range for more. Report persists after task exit; do not resume a completed task to read it.]",
+            "\n[Full report: {}/final.md ({} UTF-8 bytes, {} lines).{} Use read with \
+                path, offset and limit; follow its character_offset cursor with the \
+                same line range for more. Report persists after task exit; do not \
+                resume a completed task to read it.]",
             self.path,
             result.len(),
             result.lines().count(),

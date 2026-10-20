@@ -36,7 +36,9 @@ use crate::reflection::{self, Error, Report, Trigger};
 use crate::runtime::builder::{Builder, Runner, SharedSession};
 
 /// What the tool returns while another run holds the single-flight flag.
-pub(super) const ALREADY_RUNNING: &str = "A reflection is already running for this session. Its result will appear as a reflection notice when it finishes; tell the user so and do not write a retrospective yourself.";
+pub(super) const ALREADY_RUNNING: &str = "A reflection is already running for this session. Its result will \
+    appear as a reflection notice when it finishes; tell the user so and do \
+    not write a retrospective yourself.";
 
 pub(super) struct Requested {
     builder: Arc<Builder>,

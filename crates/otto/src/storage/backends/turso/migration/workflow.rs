@@ -75,13 +75,32 @@ impl SqlDomainCodec for WorkflowCodec {
     }
     fn validate(&self, connection: &Connection) -> Result<()> {
         named::validate(connection, KINDS, &["workflow_delivery_schema"])?;
-        let broken:i64=connection.query_row("SELECT (SELECT COUNT(*) FROM workflow_runs r LEFT JOIN workflow_runs s ON s.id=r.forked_from_run_id WHERE r.forked_from_run_id IS NOT NULL AND s.id IS NULL)+(SELECT COUNT(*) FROM workflow_steps s LEFT JOIN workflow_steps p ON p.run_id=s.source_run_id AND p.id=s.source_step_id WHERE s.source_run_id IS NOT NULL AND p.id IS NULL)",(),|r|r.get(0)).map_err(sql_error)?;
+        let broken: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM workflow_runs r LEFT JOIN workflow_runs s \
+            ON s.id=r.forked_from_run_id WHERE r.forked_from_run_id IS NOT NULL AND \
+            s.id IS NULL)+(SELECT COUNT(*) FROM workflow_steps s LEFT JOIN \
+            workflow_steps p ON p.run_id=s.source_run_id AND p.id=s.source_step_id \
+            WHERE s.source_run_id IS NOT NULL AND p.id IS NULL)",
+                (),
+                |r| r.get(0),
+            )
+            .map_err(sql_error)?;
         if broken != 0 {
             return Err(Error::Invalid(
                 "workflow fork reference closure failed".into(),
             ));
         }
-        let invalid_pending: i64 = connection.query_row("SELECT COUNT(*) FROM workflow_pending p LEFT JOIN workflow_events e ON e.seq=p.seq WHERE e.seq IS NULL OR NOT EXISTS(SELECT 1 FROM workflow_origins o WHERE o.workspace=p.workspace AND o.session_id=p.session_id AND o.run_id=e.run_id)",(),|r|r.get(0)).map_err(sql_error)?;
+        let invalid_pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_pending p LEFT JOIN workflow_events e ON \
+            e.seq=p.seq WHERE e.seq IS NULL OR NOT EXISTS(SELECT 1 FROM \
+            workflow_origins o WHERE o.workspace=p.workspace AND \
+            o.session_id=p.session_id AND o.run_id=e.run_id)",
+                (),
+                |r| r.get(0),
+            )
+            .map_err(sql_error)?;
         if invalid_pending != 0 {
             return Err(Error::Invalid(
                 "workflow pending reference closure failed".into(),

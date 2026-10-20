@@ -293,7 +293,12 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         ),
         (
             "scan_conceal_from_user",
-            r"(?i)\b(do not|don't|never)\b[^.\n]{0,30}\b(tell|inform|notify|mention|reveal|show|report)\b[^.\n]{0,30}\b(the )?(user|human|operator)\b|\bwithout (telling|informing|notifying) the (user|human)\b",
+            concat!(
+                r"(?i)\b(do not|don't|never)\b[^.\n]{0,30}",
+                r"\b(tell|inform|notify|mention|reveal|show|report)\b[^.\n]{0,30}",
+                r"\b(the )?(user|human|operator)\b|",
+                r"\bwithout (telling|informing|notifying) the (user|human)\b",
+            ),
         ),
         (
             "scan_conceal_from_user_zh",

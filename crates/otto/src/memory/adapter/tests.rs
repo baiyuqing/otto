@@ -1,0 +1,263 @@
+use super::*;
+use port::MemoryService;
+use tokio_util::sync::CancellationToken;
+
+fn setup() -> (
+    tempfile::TempDir,
+    Arc<Service>,
+    BuiltinAdapter,
+    port::MemoryContext,
+) {
+    let (directory, store) = super::super::files::testsupport::open_temp();
+    let service = Arc::new(Service::new(store, super::super::decide_default_policy));
+    let scope = core_scope(&service.identity().unwrap().user_scope);
+    let context = port::MemoryContext {
+        organization_id: None,
+        principal: "human".into(),
+        scopes: vec![scope.clone()],
+        write_scope: Some(scope),
+        workspace_id: None,
+        session_id: None,
+        task_id: None,
+        origin: port::Origin::Human,
+    };
+    let adapter = BuiltinAdapter::new(service.clone()).unwrap();
+    (directory, service, adapter, context)
+}
+fn request(context: port::MemoryContext) -> port::RememberRequest {
+    port::RememberRequest {
+        key: None,
+        context,
+        request_id: "remember-1".into(),
+        content: port::Content::Text("apricot orchard".into()),
+        target: None,
+        metadata: Default::default(),
+    }
+}
+async fn list(adapter: &BuiltinAdapter, context: &port::MemoryContext) -> Vec<port::RecallItem> {
+    adapter
+        .inspect(
+            &port::InspectRequest {
+                context: context.clone(),
+                query: port::InspectQuery::List {
+                    scope: context.scopes[0].clone(),
+                    limit: 10,
+                    cursor: String::new(),
+                },
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+#[tokio::test]
+async fn recall_inspect_and_shared_close_preserve_domain_records() {
+    let (_directory, service, adapter, context) = setup();
+    let cancel = CancellationToken::new();
+    let written = adapter
+        .remember(&request(context.clone()), &cancel)
+        .await
+        .unwrap();
+    let reference = written.items[0].reference.clone().unwrap();
+    assert_eq!(reference.service, service.identity().unwrap().database_id);
+    assert_eq!(list(&adapter, &context).await.len(), 1);
+    let recalled = adapter
+        .recall(
+            &port::RecallRequest {
+                scope_filter: None,
+                context: context.clone(),
+                query: "apricot".into(),
+                limit: 10,
+                token_budget: 1000,
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(recalled.items.len(), 1);
+    assert_eq!(recalled.items[0].metadata["otto.kind"], "fact");
+    let mut wrong = context.clone();
+    wrong.scopes = vec![port::Scope {
+        namespace: "workspace".into(),
+        id: "other".into(),
+    }];
+    wrong.write_scope = Some(wrong.scopes[0].clone());
+    assert!(list(&adapter, &wrong).await.is_empty());
+    adapter.close(&cancel).await.unwrap();
+    assert!(
+        service
+            .get(&super::super::RecordRef {
+                scope: native_scope(&reference.scope),
+                id: reference.id
+            })
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn model_writes_require_persisted_review_and_application() {
+    let (_directory, _service, adapter, mut context) = setup();
+    let cancel = CancellationToken::new();
+    context.origin = port::Origin::Model;
+    assert_eq!(
+        adapter
+            .remember(&request(context.clone()), &cancel)
+            .await
+            .unwrap_err()
+            .kind,
+        port::ErrorKind::Unauthorized
+    );
+    let prepared = adapter
+        .prepare(
+            &port::PrepareRequest {
+                operation: port::MutatingRequest::Remember(request(context.clone())),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(list(&adapter, &context).await.is_empty());
+    context.origin = port::Origin::Human;
+    let mut apply = port::ApplyRequest {
+        context: context.clone(),
+        request_id: "apply-1".into(),
+        preparation: prepared.reference,
+    };
+    let saved = apply.preparation.clone();
+    apply.preparation = format!("other:{}", saved.split_once(':').unwrap().1);
+    assert_eq!(
+        adapter.apply(&apply, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Conflict
+    );
+    apply.preparation = saved;
+    apply.context.principal = "other-human".into();
+    assert_eq!(
+        adapter.apply(&apply, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Conflict
+    );
+    apply.context = context.clone();
+    let receipt = adapter.apply(&apply, &cancel).await.unwrap();
+    assert_eq!(list(&adapter, &context).await.len(), 1);
+    assert_eq!(
+        adapter.apply(&apply, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Conflict
+    );
+    let target = receipt.items[0].reference.clone().unwrap();
+    context.origin = port::Origin::Model;
+    let forget = port::ForgetRequest {
+        context,
+        request_id: "forget-model".into(),
+        target: port::ForgetTarget::Item(target),
+        coverage: port::ForgetLevel::DeleteActive,
+    };
+    assert_eq!(
+        adapter.forget(&forget, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Unauthorized
+    );
+}
+
+#[tokio::test]
+async fn wrong_scope_stale_revision_and_unsupported_forget_have_no_effect() {
+    let (_directory, _service, adapter, context) = setup();
+    let cancel = CancellationToken::new();
+    let written = adapter
+        .remember(&request(context.clone()), &cancel)
+        .await
+        .unwrap();
+    let mut target = written.items[0].reference.clone().unwrap();
+    let original = target.clone();
+    target.revision = Some("999".into());
+    let mut forget = port::ForgetRequest {
+        context: context.clone(),
+        request_id: "forget-1".into(),
+        target: port::ForgetTarget::Item(target),
+        coverage: port::ForgetLevel::DeleteActive,
+    };
+    assert_eq!(
+        adapter.forget(&forget, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Conflict
+    );
+    forget.target = port::ForgetTarget::Item(original.clone());
+    forget.coverage = port::ForgetLevel::DeleteDerived;
+    assert_eq!(
+        adapter.forget(&forget, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Unsupported
+    );
+    forget.target = port::ForgetTarget::Scope(context.scopes[0].clone());
+    forget.coverage = port::ForgetLevel::DeleteActive;
+    assert_eq!(
+        adapter.forget(&forget, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Unsupported
+    );
+    forget.target = port::ForgetTarget::Source(port::SourceRef {
+        id: "source-1".into(),
+        role: "human".into(),
+        occurred_at: None,
+        trust: port::Trust::External,
+    });
+    assert_eq!(
+        adapter.forget(&forget, &cancel).await.unwrap_err().kind,
+        port::ErrorKind::Unsupported
+    );
+    let mut model = context.clone();
+    model.origin = port::Origin::Model;
+    let prepared = adapter
+        .prepare(
+            &port::PrepareRequest {
+                operation: port::MutatingRequest::Remember(request(model)),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let mut wrong = context.clone();
+    wrong.scopes[0].id = "different".into();
+    wrong.write_scope = Some(wrong.scopes[0].clone());
+    assert_eq!(
+        adapter
+            .apply(
+                &port::ApplyRequest {
+                    context: wrong,
+                    request_id: "wrong-scope".into(),
+                    preparation: prepared.reference
+                },
+                &cancel
+            )
+            .await
+            .unwrap_err()
+            .kind,
+        port::ErrorKind::Conflict
+    );
+    assert_eq!(list(&adapter, &context).await.len(), 1);
+}
+
+#[tokio::test]
+async fn cancellation_and_resource_content_are_rejected_before_effects() {
+    let (_directory, _service, adapter, context) = setup();
+    let canceled = CancellationToken::new();
+    canceled.cancel();
+    assert_eq!(
+        adapter
+            .remember(&request(context.clone()), &canceled)
+            .await
+            .unwrap_err()
+            .kind,
+        port::ErrorKind::Canceled
+    );
+    let mut resource = request(context.clone());
+    resource.content = port::Content::Resource {
+        uri: "file:///example".into(),
+        media_type: "text/plain".into(),
+    };
+    assert_eq!(
+        adapter
+            .remember(&resource, &CancellationToken::new())
+            .await
+            .unwrap_err()
+            .kind,
+        port::ErrorKind::Unsupported
+    );
+    assert!(list(&adapter, &context).await.is_empty());
+}

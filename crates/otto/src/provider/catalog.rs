@@ -205,7 +205,15 @@ mod tests {
     use super::*;
     #[test]
     fn catalog_parser_preserves_metadata_without_ranking() {
-        let c = parse(br#"{"models":[{"slug":"subscription-model","supported_in_api":false,"input_modalities":["text"],"description":"untrusted"},{"slug":"hidden","visibility":"hide"},{"slug":"audio","input_modalities":["audio"]},{"slug":"bad\nid"}]}"#, true).unwrap();
+        let c = parse(
+            b"{\"models\":[{\"slug\":\"subscription-model\",\"supported_in_api\":false,\
+                \"input_modalities\":[\"text\"],\"description\":\"untrusted\"},\
+                {\"slug\":\"hidden\",\"visibility\":\"hide\"},\
+                {\"slug\":\"audio\",\"input_modalities\":[\"audio\"]},\
+                {\"slug\":\"bad\\nid\"}]}",
+            true,
+        )
+        .unwrap();
         assert_eq!(c.models.len(), 1);
         assert_eq!(c.models[0].metadata["supported_in_api"], false);
         assert_eq!(c.omitted, 3);

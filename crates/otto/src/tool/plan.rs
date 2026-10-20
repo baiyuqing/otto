@@ -57,7 +57,20 @@ impl Tool for UpdatePlan {
         definition(
             UPDATE_PLAN_TOOL,
             &format!(
-                "Record your plan for the current work as a checklist the user can follow, replacing any earlier plan. Use it for work of three or more steps, not for single-step requests: keep exactly one step in_progress while you work and mark each step completed as soon as it is done, sending the update in the same batch as the next tool call. It records progress only and runs nothing; use task_queue to schedule a later prompt and request_approval to ask the user to approve an approach. steps: 0 to {MAX_PLAN_STEPS} items in order, each with one line of 1 to {MAX_PLAN_STEP_CHARS} characters of text and a status of pending, in_progress or completed; at most one in_progress. An empty list clears the plan. Returns a one-line summary such as \"Plan updated: 2 of 5 completed; in progress: <step>.\", or an error naming the broken rule, in which case the plan is unchanged. The plan is saved with the session and shown to the user."
+                "Record your plan for the current work as a checklist the user can \
+                    follow, replacing any earlier plan. Use it for work of three or more \
+                    steps, not for single-step requests: keep exactly one step in_progress \
+                    while you work and mark each step completed as soon as it is done, \
+                    sending the update in the same batch as the next tool call. It records \
+                    progress only and runs nothing; use task_queue to schedule a later \
+                    prompt and request_approval to ask the user to approve an approach. \
+                    steps: 0 to {MAX_PLAN_STEPS} items in order, each with one line of 1 to \
+                    {MAX_PLAN_STEP_CHARS} characters of text and a status of pending, \
+                    in_progress or completed; at most one in_progress. An empty list clears \
+                    the plan. Returns a one-line summary such as \"Plan updated: 2 of 5 \
+                    completed; in progress: <step>.\", or an error naming the broken rule, \
+                    in which case the plan is unchanged. The plan is saved with the session \
+                    and shown to the user."
             ),
             json!({
                 "type": "object",

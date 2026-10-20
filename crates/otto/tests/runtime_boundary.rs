@@ -27,11 +27,14 @@ fn sources(path: &Path) -> Vec<PathBuf> {
     for entry in std::fs::read_dir(path).expect("a readable source directory") {
         let path = entry.expect("a readable entry").path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
+        let stem = name.trim_end_matches(".rs");
+        if stem == "tests" || stem.ends_with("_tests") {
+            continue;
+        }
         if path.is_dir() {
-            if name != "tests" {
-                found.extend(sources(&path));
-            }
-        } else if path.extension().is_some_and(|ext| ext == "rs") && name != "tests.rs" {
+            found.extend(sources(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
             found.push(path);
         }
     }

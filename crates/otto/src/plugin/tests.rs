@@ -220,7 +220,17 @@ fn legacy_inline_mcp_and_custom_skill_paths_load_with_diagnostics() {
     fs::remove_file(path.join("plugin.json")).unwrap();
     fs::create_dir(path.join(".claude-plugin")).unwrap();
     fs::rename(path.join("skills"), path.join("custom-skills")).unwrap();
-    fs::write(path.join(".claude-plugin/plugin.json"),json!({"name":"example","skills":"./custom-skills","hooks":"./hooks.json","mcpServers":{"tools":{"command":"sh","args":["${CLAUDE_PLUGIN_ROOT}/server.sh"]}}}).to_string()).unwrap();
+    fs::write(
+        path.join(".claude-plugin/plugin.json"),
+        json!({
+            "name":"example",
+            "skills":"./custom-skills",
+            "hooks":"./hooks.json",
+            "mcpServers":{"tools":{"command":"sh","args":["${CLAUDE_PLUGIN_ROOT}/server.sh"]}}
+        })
+        .to_string(),
+    )
+    .unwrap();
     fs::write(path.join("server.sh"), "").unwrap();
     f.install(&path);
     let snapshot = Snapshot::load(f.home.path(), &File::default(), &f.env());
@@ -270,7 +280,15 @@ fn portable_placeholders_do_not_expand_host_secrets_and_bindings_are_redacted() 
 fn transport_cwd_reserved_variables_and_managed_policy_are_enforced() {
     let f = Fixture::new();
     let path = f.package("example");
-    f.mcp(&path,json!({"cwd":{"type":"stdio","command":"sh","cwd":"${PLUGIN_ROOT}/.."},"reserved":{"type":"stdio","command":"sh","env":{"PLUGIN_ROOT":"evil"}},"remote":{"type":"streamable-http","url":"http://example.test/mcp"},"good":{"type":"stdio","command":"sh"}}));
+    f.mcp(
+        &path,
+        json!({
+            "cwd":{"type":"stdio","command":"sh","cwd":"${PLUGIN_ROOT}/.."},
+            "reserved":{"type":"stdio","command":"sh","env":{"PLUGIN_ROOT":"evil"}},
+            "remote":{"type":"streamable-http","url":"http://example.test/mcp"},
+            "good":{"type":"stdio","command":"sh"}
+        }),
+    );
     f.install(&path);
     let snapshot = Snapshot::load(f.home.path(), &File::default(), &f.env());
     assert_eq!(snapshot.servers.len(), 1);
@@ -643,7 +661,24 @@ async fn otto_commands_require_content_trust_and_revoke_without_reloading() {
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy, direct::DirectDriver};
     let f = Fixture::new();
     let path = f.package("command-example");
-    let components = json!({"version":1,"hooks":{"before_tool":[{"matcher":["write"],"command":["/bin/sh","-c","read input; printf '%s' '{\"decision\":\"deny\",\"reason\":\"blocked\"}'"]}]},"tools":[{"name":"echo","description":"Echo the value","input_schema":{"type":"object","required":["value"],"properties":{"value":{"type":"integer","minimum":1}},"additionalProperties":false},"command":["/bin/sh","-c","read input; printf '%s' '{\"content\":\"done\"}'"]}]});
+    let components = json!({
+        "version":1,
+        "hooks":{"before_tool":[{
+            "matcher":["write"],
+            "command":["/bin/sh","-c","read input; printf '%s' '{\"decision\":\"deny\",\"reason\":\"blocked\"}'"]
+        }]},
+        "tools":[{
+            "name":"echo",
+            "description":"Echo the value",
+            "input_schema":{
+                "type":"object",
+                "required":["value"],
+                "properties":{"value":{"type":"integer","minimum":1}},
+                "additionalProperties":false
+            },
+            "command":["/bin/sh","-c","read input; printf '%s' '{\"content\":\"done\"}'"]
+        }]
+    });
     fs::write(path.join("plugin.json"),json!({"$schema":package::PLUGIN_SCHEMA,"name":"command-example","extensions":{"dev.otto":components}}).to_string()).unwrap();
     f.install(&path);
     let workspace = tempfile::tempdir().unwrap();

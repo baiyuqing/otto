@@ -151,7 +151,10 @@ func TestOngoingPromptGetsHumanCardWhenReviewStatusChanges(t *testing.T) {
 	h.waitCall("start:wait")
 	c := h.b.chat(h.plat, "c1")
 	sid := h.store.Session("fake:c1")
-	r := agent.SharedApproval{ID: "same-request", Revision: 1, State: "pending", Title: "Action", Blocking: true, PresentationOrigin: c.presentationOrigin(), Review: &agent.ReviewMetadata{Status: "queued"}}
+	r := agent.SharedApproval{
+		ID: "same-request", Revision: 1, State: "pending", Title: "Action", Blocking: true,
+		PresentationOrigin: c.presentationOrigin(), Review: &agent.ReviewMetadata{Status: "queued"},
+	}
 	for _, status := range []string{"queued", "reviewing"} {
 		r.Review.Status = status
 		c.showApprovals(context.Background(), sid, []agent.SharedApproval{r})

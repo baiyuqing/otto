@@ -387,8 +387,8 @@ mod tests {
         }
 
         fn custom(&mut self, custom_type: &str, data: &str) -> String {
-            let data: Value = serde_json::from_str(data).unwrap();
-            self.push(json!({"type":"custom","customType":custom_type,"data":data}))
+            let data_value: Value = serde_json::from_str(data).unwrap();
+            self.push(json!({"type":"custom","customType":custom_type,"data":data_value}))
         }
 
         fn start(&mut self, turn: &str, trigger: TurnTrigger) -> String {

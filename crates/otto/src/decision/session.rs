@@ -8,7 +8,10 @@ use std::fmt::Write as _;
 use super::{Answer, Failure, Kind, NO, Question, YES};
 
 /// The system prompt of an advice request. Fixed text.
-pub const SYSTEM_PROMPT: &str = "You give advisory hints on a memory candidate that a person will review. You never decide anything. Reply with one JSON object and no other text: no code fence, no explanation. Use exactly the keys named in the questions.";
+pub const SYSTEM_PROMPT: &str = "You give advisory hints on a memory candidate that a person will \
+    review. You never decide anything. Reply with one JSON object and no \
+    other text: no code fence, no explanation. Use exactly the keys named \
+    in the questions.";
 
 /// The user text: the candidate state, then each question with its allowed
 /// values.

@@ -20,8 +20,8 @@ use std::{
     process::Stdio,
 };
 
-mod common;
-use common::{Script, serve, text_reply, tool_call_reply};
+mod binary_harness;
+use binary_harness::{Script, serve, text_reply, tool_call_reply};
 
 /// Reads the single session file the run left under `$HOME/.otto/sessions`.
 fn only_session_transcript(home: &std::path::Path) -> String {

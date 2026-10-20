@@ -1,0 +1,471 @@
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+use super::*;
+use crate::schedule::{Kind, NewItem, State, Store};
+
+#[tokio::test(start_paused = true)]
+async fn overdue_unclaimable_items_wait_instead_of_polling_at_minimum_idle() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let now = Utc::now();
+    store
+        .create(
+            NewItem {
+                origin: Origin::web(),
+                session_id: "s".into(),
+                workspace: "/work".into(),
+                kind: Kind::Text,
+                body: "another client's item".into(),
+                repeat: None,
+                local_time: None,
+                due_at: now - TimeDelta::seconds(1),
+            },
+            now,
+        )
+        .unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&calls);
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let worker = tokio::spawn(async move {
+        idle_loop(store.as_ref(), &stop, |_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(false)
+        })
+        .await;
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    cancel.cancel();
+    worker.await.unwrap();
+}
+
+fn telegram() -> Origin {
+    Origin::chat("telegram", "42").unwrap()
+}
+
+fn new_item(origin: Origin, kind: Kind, body: &str) -> NewItem {
+    NewItem {
+        origin,
+        session_id: "sess".into(),
+        workspace: "/work".into(),
+        kind,
+        body: body.into(),
+        repeat: None,
+        local_time: None,
+        due_at: Utc::now(),
+    }
+}
+
+#[derive(Default)]
+struct FakeSink {
+    sent: Mutex<Vec<(Origin, String)>>,
+    fail_with: Mutex<Option<String>>,
+}
+
+#[async_trait::async_trait]
+impl Sink for FakeSink {
+    async fn deliver(&self, origin: &Origin, text: &str) -> Result<(), String> {
+        if let Some(error) = self.fail_with.lock().unwrap().clone() {
+            return Err(error);
+        }
+        self.sent
+            .lock()
+            .unwrap()
+            .push((origin.clone(), text.to_string()));
+        Ok(())
+    }
+}
+
+impl FakeSink {
+    fn sent(&self) -> Vec<String> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct FakeRunner {
+    outcomes: Mutex<VecDeque<RunOutcome>>,
+    calls: Mutex<Vec<(String, String)>>,
+    /// Wait for cancellation instead of returning.
+    block: bool,
+}
+
+#[async_trait::async_trait]
+impl PromptRunner for FakeRunner {
+    async fn run(&self, workspace: &str, text: &str, cancel: &CancellationToken) -> RunOutcome {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((workspace.into(), text.into()));
+        if self.block {
+            cancel.cancelled().await;
+            return RunOutcome::Reply("late reply after cancellation".into());
+        }
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("an outcome")
+    }
+}
+
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Capture {
+    fn logger(&self) -> Arc<Logger> {
+        Arc::new(Logger::new(Box::new(self.clone())))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+struct Harness {
+    log: Capture,
+    metrics: Arc<Metrics>,
+    store: Arc<Store>,
+    sink: Arc<FakeSink>,
+    runner: Arc<FakeRunner>,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+fn start(runner: FakeRunner, deliver_scope: Scope, run_workspace: Option<&str>) -> Harness {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sink = Arc::new(FakeSink::default());
+    let runner = Arc::new(runner);
+    let cancel = CancellationToken::new();
+    let log = Capture::default();
+    let metrics = Arc::new(Metrics::new());
+    let store_port: Arc<dyn ScheduleStore> = store.clone();
+    let worker = Worker {
+        store: store_port,
+        run: Some(RunRole {
+            scope: Scope::Any,
+            workspace: run_workspace.map(str::to_owned),
+            runner: runner.clone(),
+        }),
+        deliver: Some(DeliverRole {
+            scope: deliver_scope,
+            sink: sink.clone(),
+        }),
+        logger: log.logger(),
+        metrics: Some(Arc::clone(&metrics)),
+    };
+    let task = tokio::spawn(worker.run(cancel.clone()));
+    Harness {
+        log,
+        metrics,
+        store,
+        sink,
+        runner,
+        cancel,
+        task,
+    }
+}
+
+impl Harness {
+    fn create(&self, item: NewItem) -> i64 {
+        self.store.create(item, Utc::now()).unwrap().id
+    }
+
+    fn item(&self, origin: &Origin, id: i64) -> crate::schedule::Item {
+        self.store
+            .list(origin, Utc::now())
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == id)
+            .unwrap()
+    }
+
+    async fn stop(self) {
+        self.cancel.cancel();
+        self.task.await.unwrap();
+    }
+}
+
+async fn wait_for(step: Duration, mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(3600), async {
+        while !condition() {
+            tokio::time::sleep(step).await;
+        }
+    })
+    .await
+    .expect("condition not reached");
+}
+
+const STEP: Duration = Duration::from_millis(5);
+
+#[tokio::test]
+async fn a_due_text_item_is_delivered_once() {
+    let harness = start(FakeRunner::default(), Scope::Any, None);
+    let id = harness.create(new_item(telegram(), Kind::Text, "stand up"));
+    wait_for(STEP, || harness.item(&telegram(), id).state == State::Done).await;
+    assert_eq!(harness.sink.sent(), ["⏰ stand up"]);
+    assert_eq!(harness.sink.sent.lock().unwrap()[0].0, telegram());
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_finished_run_writes_its_event_and_counts_it() {
+    let runner = FakeRunner::default();
+    runner
+        .outcomes
+        .lock()
+        .unwrap()
+        .push_back(RunOutcome::Reply("done".into()));
+    let harness = start(runner, Scope::Any, Some("/work"));
+    let id = harness.create(new_item(telegram(), Kind::Prompt, "p"));
+    wait_for(STEP, || harness.item(&telegram(), id).state == State::Done).await;
+    let text = harness.log.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("msg=schedule_run_finished"))
+        .unwrap_or_else(|| panic!("no run event in:\n{text}"));
+    for field in [
+        "level=INFO",
+        &format!("schedule_id={id}"),
+        "outcome=reply",
+        "duration_ms=",
+        "due_at=",
+    ] {
+        assert!(line.contains(field), "{field} missing in {line}");
+    }
+    assert!(
+        harness
+            .metrics
+            .render()
+            .contains("otto_schedule_runs_total{outcome=\"reply\"} 1")
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_failed_delivery_writes_a_warning_and_counts_it() {
+    let harness = start(FakeRunner::default(), Scope::Any, None);
+    *harness.sink.fail_with.lock().unwrap() = Some("platform down".into());
+    // A distinctive opaque ID cannot accidentally match the log timestamp.
+    let chat_id = "private-chat-id-42";
+    let origin = Origin::chat("telegram", chat_id).unwrap();
+    let id = harness.create(new_item(origin.clone(), Kind::Text, "hi"));
+    wait_for(STEP, || harness.item(&origin, id).attempts == 1).await;
+    let text = harness.log.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("msg=schedule_delivery_finished"))
+        .unwrap_or_else(|| panic!("no delivery event in:\n{text}"));
+    for field in [
+        "level=WARN",
+        "channel=telegram",
+        "outcome=error",
+        "error=\"platform down\"",
+    ] {
+        assert!(line.contains(field), "{field} missing in {line}");
+    }
+    assert!(
+        !line.contains(chat_id),
+        "the chat id must not be logged: {line}"
+    );
+    assert!(
+        harness
+            .metrics
+            .render()
+            .contains("otto_schedule_deliveries_total{channel=\"telegram\",outcome=\"error\"} 1")
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_store_failure_is_written_as_a_warning() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.poison_for_test();
+    let log = Capture::default();
+    let cancel = CancellationToken::new();
+    let worker = Worker {
+        store,
+        run: Some(RunRole {
+            scope: Scope::Any,
+            workspace: None,
+            runner: Arc::new(FakeRunner::default()),
+        }),
+        deliver: None,
+        logger: log.logger(),
+        metrics: None,
+    };
+    let task = tokio::spawn(worker.run(cancel.clone()));
+    wait_for(STEP, || log.text().contains("operation=claim_run")).await;
+    cancel.cancel();
+    task.await.unwrap();
+    let text = log.text();
+    assert!(
+        text.contains("level=WARN msg=schedule_store_error operation=sweep"),
+        "{text}"
+    );
+    assert!(
+        text.contains("error=\"schedule store unavailable\""),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_send_is_recorded_for_a_later_retry() {
+    let harness = start(FakeRunner::default(), Scope::Any, None);
+    *harness.sink.fail_with.lock().unwrap() = Some("platform down".into());
+    let id = harness.create(new_item(telegram(), Kind::Text, "hi"));
+    wait_for(STEP, || harness.item(&telegram(), id).attempts == 1).await;
+    let row = harness.item(&telegram(), id);
+    assert_eq!(
+        (row.state, row.last_error.as_str()),
+        (State::Ready, "platform down")
+    );
+    assert!(row.next_try_at > Utc::now() + chrono::TimeDelta::seconds(20));
+    assert!(harness.sink.sent().is_empty());
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_prompt_reply_is_delivered_after_a_run_in_the_item_workspace() {
+    let runner = FakeRunner::default();
+    runner
+        .outcomes
+        .lock()
+        .unwrap()
+        .push_back(RunOutcome::Reply("sunny, 24C".into()));
+    let harness = start(runner, Scope::Any, Some("/work"));
+    let id = harness.create(new_item(telegram(), Kind::Prompt, "weather in Beijing"));
+    wait_for(STEP, || harness.item(&telegram(), id).state == State::Done).await;
+    assert_eq!(harness.sink.sent(), ["⏰ sunny, 24C"]);
+    let calls = harness.runner.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "/work");
+    assert!(
+        calls[0].1.ends_with("\n\nweather in Beijing"),
+        "{}",
+        calls[0].1
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_failure_before_tools_is_retried_not_delivered() {
+    let runner = FakeRunner::default();
+    runner
+        .outcomes
+        .lock()
+        .unwrap()
+        .push_back(RunOutcome::FailedBeforeTools("503".into()));
+    let harness = start(runner, Scope::Any, None);
+    let id = harness.create(new_item(telegram(), Kind::Prompt, "p"));
+    wait_for(STEP, || harness.item(&telegram(), id).attempts == 1).await;
+    let row = harness.item(&telegram(), id);
+    assert_eq!(
+        (row.state, row.last_error.as_str()),
+        (State::Waiting, "503")
+    );
+    assert!(harness.sink.sent().is_empty());
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_failure_after_tools_is_delivered_as_failure_text() {
+    let runner = FakeRunner::default();
+    runner
+        .outcomes
+        .lock()
+        .unwrap()
+        .push_back(RunOutcome::Failed("tool crashed".into()));
+    let harness = start(runner, Scope::Any, None);
+    let id = harness.create(new_item(telegram(), Kind::Prompt, "p"));
+    wait_for(STEP, || harness.item(&telegram(), id).state == State::Done).await;
+    assert_eq!(
+        harness.sink.sent(),
+        [format!("⏰ Scheduled prompt s{id} failed: tool crashed")]
+    );
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn items_outside_the_scope_or_workspace_are_left_alone() {
+    let harness = start(FakeRunner::default(), Scope::Web, Some("/elsewhere"));
+    let text = harness.create(new_item(telegram(), Kind::Text, "chat text"));
+    let prompt = harness.create(new_item(Origin::web(), Kind::Prompt, "p"));
+    let web = harness.create(new_item(Origin::web(), Kind::Text, "web text"));
+    wait_for(STEP, || {
+        harness.item(&Origin::web(), web).state == State::Done
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(harness.sink.sent(), ["⏰ web text"]);
+    assert_eq!(harness.item(&telegram(), text).state, State::Waiting);
+    assert_eq!(harness.item(&Origin::web(), prompt).state, State::Waiting);
+    assert!(harness.runner.calls.lock().unwrap().is_empty());
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn cancelling_the_worker_cancels_the_run_and_records_nothing() {
+    let harness = start(
+        FakeRunner {
+            block: true,
+            ..FakeRunner::default()
+        },
+        Scope::Any,
+        None,
+    );
+    let id = harness.create(new_item(telegram(), Kind::Prompt, "p"));
+    wait_for(STEP, || !harness.runner.calls.lock().unwrap().is_empty()).await;
+    let store = Arc::clone(&harness.store);
+    harness.stop().await;
+    let row = store.list(&telegram(), Utc::now()).unwrap().remove(0);
+    assert_eq!((row.id, row.state, row.attempts), (id, State::Waiting, 0));
+    assert!(
+        row.claimed_until > Utc::now(),
+        "the lease stays until it expires"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_is_cancelled_after_ten_minutes_and_recorded_as_failed() {
+    let harness = start(
+        FakeRunner {
+            block: true,
+            ..FakeRunner::default()
+        },
+        Scope::Any,
+        None,
+    );
+    let id = harness.create(new_item(telegram(), Kind::Prompt, "p"));
+    wait_for(Duration::from_secs(1), || {
+        harness.item(&telegram(), id).state == State::Done
+    })
+    .await;
+    assert_eq!(
+        harness.sink.sent(),
+        [format!(
+            "⏰ Scheduled prompt s{id} failed: the run did not finish within 10 min"
+        )]
+    );
+    harness.stop().await;
+}

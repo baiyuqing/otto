@@ -323,7 +323,12 @@ func approvalCard(requestID, text, status string) string {
 	if status == "" {
 		buttons := []any{}
 		for _, b := range []struct{ label, action, style string }{{"Approve", "approve", "primary"}, {"Deny", "deny", "danger"}} {
-			buttons = append(buttons, map[string]any{"tag": "button", "text": map[string]any{"tag": "plain_text", "content": b.label}, "type": b.style, "value": map[string]any{"request_id": requestID, "action": b.action}})
+			buttons = append(buttons, map[string]any{
+				"tag":   "button",
+				"text":  map[string]any{"tag": "plain_text", "content": b.label},
+				"type":  b.style,
+				"value": map[string]any{"request_id": requestID, "action": b.action},
+			})
 		}
 		elements = append(elements, map[string]any{"tag": "action", "actions": buttons})
 	} else {

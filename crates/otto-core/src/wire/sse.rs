@@ -47,7 +47,7 @@ pub fn parse_frames(buf: &str) -> ParsedFrames {
 fn parse_frame(block: &str) -> Option<Frame> {
     let mut id = None;
     let mut event = String::new();
-    let mut data: Vec<&str> = Vec::new();
+    let mut data_lines: Vec<&str> = Vec::new();
     for line in block.split('\n') {
         if let Some(rest) = line.strip_prefix("id: ") {
             // `Number("x")` is NaN in the TypeScript reader; Rust has no NaN
@@ -56,7 +56,7 @@ fn parse_frame(block: &str) -> Option<Frame> {
         } else if let Some(rest) = line.strip_prefix("event: ") {
             event = rest.to_string();
         } else if let Some(rest) = line.strip_prefix("data: ") {
-            data.push(rest);
+            data_lines.push(rest);
         }
     }
     if event.is_empty() {
@@ -65,7 +65,7 @@ fn parse_frame(block: &str) -> Option<Frame> {
     Some(Frame {
         id,
         event,
-        data: data.join("\n"),
+        data: data_lines.join("\n"),
     })
 }
 

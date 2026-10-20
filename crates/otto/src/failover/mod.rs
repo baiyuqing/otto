@@ -150,8 +150,8 @@ mod tests {
 
     #[test]
     fn before_reports_a_lost_lease() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lease = lease::Lease::for_test(tmp.path());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lease = lease::Lease::for_test(temp_dir.path());
         lease.mark_lost_for_test("test fence");
         let source: LeaseSource =
             Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
@@ -163,8 +163,8 @@ mod tests {
 
     #[test]
     fn after_syncs_the_workspace_when_a_lease_backs_the_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lease = lease::Lease::for_test(tmp.path());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lease = lease::Lease::for_test(temp_dir.path());
         let source: LeaseSource =
             Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
 
@@ -181,8 +181,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_failure_settles_the_registry_call_as_unknown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lease = lease::Lease::for_test(tmp.path());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lease = lease::Lease::for_test(temp_dir.path());
         let source: LeaseSource =
             Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
         fn failing_sync(_p: &Path) -> std::io::Result<()> {
@@ -218,8 +218,8 @@ mod tests {
 
     #[test]
     fn after_wraps_a_sync_failure_with_operator_facing_text() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lease = lease::Lease::for_test(tmp.path());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lease = lease::Lease::for_test(temp_dir.path());
         let source: LeaseSource =
             Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
         fn failing_sync(_p: &Path) -> std::io::Result<()> {

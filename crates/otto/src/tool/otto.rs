@@ -47,8 +47,14 @@ impl Tool for Help {
     fn definition(&self) -> ToolDefinition {
         definition(
             "otto_help",
-            "Read Otto's installed-version user manual or current session capabilities. Consult this before answering questions about Otto commands, APIs, configuration, or limitations. Empty topic lists section titles; capabilities lists current tools; a section title or uniquely matching title phrase returns that section; an unknown or ambiguous title fails with related section suggestions when available.",
-            json!({"type":"object","additionalProperties":false,"properties":{"topic":{"type":"string","description":"Section title or uniquely matching title phrase, capabilities, or empty to list section titles."}},"required":[]}),
+            "Read Otto's installed-version user manual or current session \
+                capabilities. Consult this before answering questions about Otto \
+                commands, APIs, configuration, or limitations. Empty topic lists \
+                section titles; capabilities lists current tools; a section title or \
+                uniquely matching title phrase returns that section; an unknown or \
+                ambiguous title fails with related section suggestions when available.",
+            json!({"type":"object","additionalProperties":false,"properties":{"topic":{"type":"string","description":"Section title or uniquely matching title phrase, capabilities, or empty \
+                to list section titles."}},"required":[]}),
         )
     }
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
@@ -249,7 +255,10 @@ pub fn approval_definition(revoke: bool) -> ToolDefinition {
     if revoke {
         definition(
             "approval_revoke",
-            "Withdraw an unapproved Bash or persistent read-access request in this session by exact ID. Use when the user asks to cancel a pending approval or when your request is no longer needed. Cannot approve, undo execution, or remove permanent grants.",
+            "Withdraw an unapproved Bash or persistent read-access request in this \
+                session by exact ID. Use when the user asks to cancel a pending \
+                approval or when your request is no longer needed. Cannot approve, undo \
+                execution, or remove permanent grants.",
             json!({"type":"object","additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"]}),
         )
     } else {
@@ -354,7 +363,9 @@ impl Tool for Queue {
     fn definition(&self) -> ToolDefinition {
         definition(
             "approval_queue",
-            "Mark the user's message as an ordinary task to queue until the pending approval is resolved. Use for requests unrelated to explaining, querying, or withdrawing the approval. Does not resolve the approval.",
+            "Mark the user's message as an ordinary task to queue until the pending \
+                approval is resolved. Use for requests unrelated to explaining, \
+                querying, or withdrawing the approval. Does not resolve the approval.",
             json!({"type":"object","additionalProperties":false,"properties":{},"required":[]}),
         )
     }

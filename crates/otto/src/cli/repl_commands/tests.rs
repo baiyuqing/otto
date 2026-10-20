@@ -1,5 +1,5 @@
 use super::*;
-use crate::cli::testutil;
+use crate::cli::fixture_tests;
 use crate::subagent::tasks::{Task, TaskStatus};
 use otto_core::config::memory::MemoryRuntime;
 use std::path::Path;
@@ -77,7 +77,7 @@ async fn controller_with_memory(
     sessions: &Path,
     store_path: &Path,
 ) -> Controller {
-    let mut builder = testutil::builder(workspace, sessions);
+    let mut builder = fixture_tests::builder(workspace, sessions);
     let runtime = MemoryRuntime {
         enabled: true,
         backend: "files".into(),
@@ -102,7 +102,7 @@ async fn controller_with_memory(
     builder.workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
             .expect("workspace scope");
-    let runtime = testutil::initial_runtime(&builder);
+    let runtime = fixture_tests::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder
         .build_runner(&session, &runtime)
@@ -173,7 +173,7 @@ fn search_results_render_as_plain_text() {
 async fn the_help_text_lists_the_memory_and_task_commands() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = testutil::controller(workspace.path(), sessions.path()).await;
+    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
 
     let (stdout, _) = session("/help\n/exit\n", &controller).await;
 
@@ -186,7 +186,7 @@ async fn the_help_text_lists_the_memory_and_task_commands() {
 async fn memory_commands_without_a_service_are_command_errors() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = testutil::controller(workspace.path(), sessions.path()).await;
+    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
 
     for (input, command) in [
         ("/memory search vim\n", "/memory"),

@@ -279,7 +279,7 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::testutil::{builder, initial_runtime};
+    use crate::cli::fixture_tests::{builder, initial_runtime};
     use crate::runtime::builder::Runner;
     use otto_core::model::{Block, BlockType, FinishReason, Message, Role};
     use otto_core::operation::OperationControl;

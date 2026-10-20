@@ -91,7 +91,7 @@ async fn with_lease_guard_refuses_a_tool_call_once_the_session_lease_is_lost() {
     store.set_lease_check(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>);
     let session = SharedSession::new(Arc::new(store));
 
-    let stub = crate::subagent::testsupport::StubTool::new(
+    let stub = crate::subagent::doubles_tests::StubTool::new(
         "write",
         otto_core::tool::ToolResult {
             content: "wrote".to_string(),

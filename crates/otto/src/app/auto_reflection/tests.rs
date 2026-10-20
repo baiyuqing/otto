@@ -217,7 +217,7 @@ use otto_core::provider::{Provider, ProviderSettlement, Request, Response, Strea
 use otto_core::session::Session;
 use otto_core::tool::ToolResult;
 
-use crate::cli::testutil::{builder, initial_runtime};
+use crate::cli::fixture_tests::{builder, initial_runtime};
 use crate::runtime::builder::Runner;
 use crate::subagent::tasks::Tasks;
 

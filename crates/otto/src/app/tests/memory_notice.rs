@@ -7,7 +7,7 @@ async fn each_session_open_queues_one_pending_memory_notice() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let store = tempfile::tempdir().expect("store");
-    let controller = crate::cli::testutil::controller_with_memory(
+    let controller = crate::cli::fixture_tests::controller_with_memory(
         workspace.path(),
         sessions.path(),
         &store.path().join("memory"),
@@ -45,7 +45,7 @@ async fn each_session_open_queues_one_pending_memory_notice() {
     );
 
     controller.close().expect("close");
-    let reopened = crate::cli::testutil::controller_with_memory(
+    let reopened = crate::cli::fixture_tests::controller_with_memory(
         workspace.path(),
         sessions.path(),
         &store.path().join("memory"),
@@ -60,9 +60,9 @@ async fn session_open_queues_the_over_budget_standing_notice() {
     let sessions = tempfile::tempdir().expect("sessions");
     let store = tempfile::tempdir().expect("store");
     let path = store.path().join("memory");
-    crate::cli::testutil::seed_over_budget_standing(&path);
+    crate::cli::fixture_tests::seed_over_budget_standing(&path);
     let controller =
-        crate::cli::testutil::controller_with_memory(workspace.path(), sessions.path(), &path)
+        crate::cli::fixture_tests::controller_with_memory(workspace.path(), sessions.path(), &path)
             .await;
     assert_eq!(
         controller.take_notices(),

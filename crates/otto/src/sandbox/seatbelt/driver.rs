@@ -493,7 +493,7 @@ pub(crate) fn unavailable_reason() -> Option<String> {
 /// `sandbox-exec`, so the suite stays green off macOS and inside a nested
 /// sandbox.
 #[cfg(test)]
-mod contract;
+mod contract_tests;
 
 #[cfg(test)]
 mod tests;

@@ -4,8 +4,8 @@ use super::*;
 async fn authorization_admission_preserves_each_original_and_legacy_new_task_can_review() {
     let directory = tempfile::tempdir().unwrap();
     let builder =
-        crate::cli::testutil::builder(directory.path(), &directory.path().join("sessions"));
-    let runtime = crate::cli::testutil::initial_runtime(&builder);
+        crate::cli::fixture_tests::builder(directory.path(), &directory.path().join("sessions"));
+    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
     let session = builder.create_session(&runtime).unwrap();
     // An old transcript's user role alone cannot establish provenance.
     session
@@ -103,7 +103,7 @@ async fn authorization_admission_preserves_each_original_and_legacy_new_task_can
 async fn review_freezes_accepted_standing_constraints_and_excludes_generated_recall() {
     let directory = tempfile::tempdir().unwrap();
     let mut builder =
-        crate::cli::testutil::builder(directory.path(), &directory.path().join("sessions"));
+        crate::cli::fixture_tests::builder(directory.path(), &directory.path().join("sessions"));
     let memory_runtime = otto_core::config::MemoryRuntime {
         enabled: true,
         backend: "turso".into(),
@@ -131,7 +131,7 @@ async fn review_freezes_accepted_standing_constraints_and_excludes_generated_rec
     builder.workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&memory_runtime, &builder.workspace_path)
             .unwrap();
-    let runtime = crate::cli::testutil::initial_runtime(&builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
     let session = builder.create_session(&runtime).unwrap();
     session
         .append(Message {

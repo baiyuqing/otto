@@ -280,7 +280,7 @@ async fn deleting_a_workspace_with_an_open_session_answers_409() {
     let other_sessions = tempfile::tempdir().expect("other sessions");
     // Canonical, as a real session's workspace is (`/var` → `/private/var`).
     let other_root = std::fs::canonicalize(other_workspace.path()).expect("canonical");
-    let other_builder = Arc::new(testutil::builder(&other_root, other_sessions.path()));
+    let other_builder = Arc::new(fixture_tests::builder(&other_root, other_sessions.path()));
     let other_path = other_builder.workspace_path.clone();
 
     let harness = Harness::with(HarnessOptions {

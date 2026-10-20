@@ -58,6 +58,10 @@ pub struct Notification {
     pub kind: Option<NotificationKind>,
     pub text: String,
     pub usage: Option<Usage>,
+    /// True only when every provider report behind `usage` included the
+    /// cached-input-token breakdown. Meaningless without `usage`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached_input_tokens_present: bool,
     /// The stable input id the delivered message carries (see
     /// [`crate::model::Message::input_id`]). Empty for an in-memory
     /// notification without one; a durable mailbox assigns one on enqueue.

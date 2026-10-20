@@ -9,6 +9,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- The TUI footer's token totals and cached share now count sub-agent tasks. A
+  finished task's tokens travel in its completion notification, which the
+  session history stores in an Otto record detail, so the totals also survive
+  resume, `--attach`, forks and `GET /v1/session`; older sessions still decode
+  unchanged. The cached share stays hidden while any report, including a
+  sub-agent's, lacked the cache breakdown. Rebuild and restart; no configuration
+  or history migration is needed.
+
 - Compact TUI tool records show live/final locally observed execution time and
   distinguish cancellation, while preserving expandable raw details and full
   operation/provider IDs. Thinking and total-turn durations are no longer shown.

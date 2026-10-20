@@ -131,6 +131,11 @@ pub struct Task {
     pub last_text: String,
     pub usage: Usage,
     pub usage_present: bool,
+    /// True only when every provider report behind `usage` carried the
+    /// cached-input-token breakdown. False while no report exists, and false
+    /// for a task read back from `tasks.db`, which does not store it: a reader
+    /// then treats the cached count as unknown rather than as a real zero.
+    pub cached_input_tokens_present: bool,
     pub result: String,
     pub error: String,
     /// The child transcript file, empty when the child runs in memory.
@@ -451,7 +456,18 @@ impl Tasks {
 
     /// Records one completed provider round trip. It only applies while the
     /// task is running; invalid or unknown updates are no-ops.
-    pub fn record_provider_step(&self, id: &str, usage: Usage, text: &str, usage_present: bool) {
+    ///
+    /// `cached_input_tokens_present` reports whether this round trip carried
+    /// the cached-input-token breakdown. The task keeps the breakdown only
+    /// when every report that carried usage carried it too.
+    pub fn record_provider_step(
+        &self,
+        id: &str,
+        usage: Usage,
+        text: &str,
+        usage_present: bool,
+        cached_input_tokens_present: bool,
+    ) {
         if usage.validate().is_err() {
             return;
         }
@@ -461,7 +477,13 @@ impl Tasks {
                 Some(entry) if entry.task.status == TaskStatus::Running => {
                     entry.task.steps += 1;
                     if usage_present {
+                        let first_report = !entry.task.usage_present;
                         entry.task.usage_present = true;
+                        entry.task.cached_input_tokens_present = if first_report {
+                            cached_input_tokens_present
+                        } else {
+                            entry.task.cached_input_tokens_present && cached_input_tokens_present
+                        };
                         entry.task.usage.input_tokens += usage.input_tokens;
                         entry.task.usage.output_tokens += usage.output_tokens;
                         entry.task.usage.cached_input_tokens += usage.cached_input_tokens;
@@ -1003,8 +1025,8 @@ mod tests {
         assert_eq!(stored[0].text(), "child prompt");
 
         tasks.mark_running("t1", at(1));
-        tasks.record_provider_step("t1", Usage::default(), "", false);
-        tasks.record_provider_step("t1", Usage::default(), "", true);
+        tasks.record_provider_step("t1", Usage::default(), "", false, false);
+        tasks.record_provider_step("t1", Usage::default(), "", true, false);
 
         let waiter = {
             let tasks = Arc::clone(&tasks);
@@ -1246,6 +1268,7 @@ mod tests {
             },
             "found it",
             true,
+            true,
         );
 
         let started = tasks.get("t1").expect("t1 exists");
@@ -1271,6 +1294,7 @@ mod tests {
             },
             "late",
             true,
+            true,
         );
         let finished = tasks.get("t1").expect("t1 exists");
         assert_eq!(finished.status, TaskStatus::Succeeded);
@@ -1278,6 +1302,42 @@ mod tests {
         assert_eq!(finished.error, "");
         assert_eq!(finished.finished_at, Some(at(20)));
         assert_eq!(finished.tool_calls, 1, "updates after finish are no-ops");
+    }
+
+    #[tokio::test]
+    async fn a_task_keeps_its_cache_breakdown_only_while_every_report_has_one() {
+        let tasks = Arc::new(Tasks::new());
+        let task = tasks
+            .add(
+                Task {
+                    prompt: "inspect".into(),
+                    ..Task::default()
+                },
+                None,
+                None,
+            )
+            .expect("the task is admitted");
+        tasks.mark_running(&task.id, at(1));
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cached_input_tokens: 4,
+        };
+
+        tasks.record_provider_step(&task.id, usage, "", true, true);
+        let reported = tasks.get(&task.id).expect("t1 exists");
+        assert!(
+            reported.cached_input_tokens_present,
+            "a report that carried the breakdown makes the cached count measured"
+        );
+
+        tasks.record_provider_step(&task.id, usage, "", true, false);
+        let mixed = tasks.get(&task.id).expect("t1 exists");
+        assert!(
+            !mixed.cached_input_tokens_present,
+            "one report without the breakdown leaves the cached total unmeasured"
+        );
+        assert_eq!(mixed.usage.cached_input_tokens, 8);
     }
 
     #[tokio::test]

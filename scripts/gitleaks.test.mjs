@@ -28,6 +28,7 @@ test('hook blocks staged secrets and history scan detects secrets deleted later'
     ok('git', ['config', 'commit.gpgsign', 'false']);
     mkdirSync(join(dir, 'scripts'));
     writeFileSync(join(dir, 'scripts/pre-commit'), readFileSync(join(root, 'scripts/pre-commit')));
+    writeFileSync(join(dir, 'scripts/code-limits.mjs'), readFileSync(join(root, 'scripts/code-limits.mjs')));
     const setup = ['-f', join(root, 'Makefile'), 'setup-git-hooks'];
     ok('make', setup);
     ok('make', setup); // Installation is idempotent.

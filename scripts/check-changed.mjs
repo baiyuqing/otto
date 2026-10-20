@@ -74,7 +74,7 @@ function main() {
   console.log(`check-fast: ${files.length} changed paths since ${short}`);
   for (const s of steps) console.log(`  run: ${s}`);
   if (unchecked.length) console.log(`check-fast: not checked here (make check runs the full gate): ${unchecked.join(' ')}`);
-  for (const s of [...steps, `git diff --check ${base}`]) {
+  for (const s of [...steps, 'node scripts/code-limits.mjs', `git diff --check ${base}`]) {
     const r = spawnSync(s, { cwd: root, shell: true, stdio: 'inherit' });
     if (r.status !== 0) {
       console.error(`check-fast: failed: ${s}`);

@@ -213,3 +213,45 @@ pub(crate) async fn advertised_unix_socket_deny(case: &dyn Contract) {
     );
     executor.close().expect("close");
 }
+
+/// A confined command cannot read another process's environment, which is
+/// where package credential bindings are delivered. Only confining drivers
+/// run this check; an unconfined child of the same user can read it.
+pub(crate) async fn sibling_process_environment_is_unreadable(case: &dyn Contract) {
+    let (fixture, _) = setup(case).await;
+    let marker = "sibling-environment-marker";
+    // Platform binaries never expose their environment; package commands are
+    // not platform binaries, so the sibling is an ad hoc signed copy.
+    let sleeper = fixture.base.join("sibling-sleep");
+    std::fs::copy("/bin/sleep", &sleeper).expect("sibling binary");
+    let signed = std::process::Command::new("/usr/bin/codesign")
+        .args(["-s", "-", "-f"])
+        .arg(&sleeper)
+        .output()
+        .expect("codesign");
+    assert!(signed.status.success(), "ad hoc signing failed");
+    let mut sibling = std::process::Command::new(&sleeper)
+        .arg("30")
+        .env("SANDBOX_CONFORMANCE_SIBLING", marker)
+        .spawn()
+        .expect("sibling process");
+    let probe = format!("/bin/ps -E -ww -o command= -p {}", sibling.id());
+    let host = std::process::Command::new("/bin/sh")
+        .args(["-c", &probe])
+        .output()
+        .expect("host probe");
+    let (_driver, executor) = open(case, &fixture).await;
+    let (_, result, stdout) = run(&executor, shell_request(case, &fixture, &probe)).await;
+    let _ = sibling.kill();
+    let _ = sibling.wait();
+    result.expect("sibling probe Execute");
+    assert!(
+        String::from_utf8_lossy(&host.stdout).contains(marker),
+        "host probe cannot read the sibling environment; the check proves nothing here"
+    );
+    assert!(
+        !stdout.contains(marker),
+        "confined command read the sibling environment: {stdout}"
+    );
+    executor.close().expect("close");
+}

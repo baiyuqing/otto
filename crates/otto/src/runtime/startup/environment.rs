@@ -202,7 +202,6 @@ pub(crate) fn config_environment(
     let credential_variables = file.plugins.credential_variables();
     keys.extend(credential_variables.iter().map(String::as_str));
     keys.extend(file.storage.credential_variables());
-    keys.extend(file.memory.credential_variable());
     keys.extend(["PATH", "TMPDIR", "LANG", "TERM"]);
     keys.into_iter()
         .map(|key| {

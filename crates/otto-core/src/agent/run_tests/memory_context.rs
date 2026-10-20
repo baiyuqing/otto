@@ -14,7 +14,6 @@ pub(super) fn one_record() -> Vec<Record> {
         kind: "preference".into(),
         key: "editor".into(),
         text: "prefers vim".into(),
-        remote: None,
         standing: false,
     }]
 }

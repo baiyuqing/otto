@@ -675,7 +675,6 @@ impl core_memory::MemoryRecall for Binding {
 
 fn core_record(record: Record, standing: bool) -> core_memory::Record {
     core_memory::Record {
-        remote: None,
         id: record.id,
         scope: core_memory::Scope {
             namespace: record.scope.namespace,

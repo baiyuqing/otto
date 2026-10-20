@@ -97,7 +97,6 @@ async fn controller_with_memory(
         recall_limit: 8,
         recall_token_budget: 1000,
         advice_audit: None,
-        turns: None,
     };
     builder.workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())

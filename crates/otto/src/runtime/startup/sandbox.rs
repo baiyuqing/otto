@@ -17,7 +17,6 @@ pub(crate) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
     }
     names.extend(file.plugins.credential_variables());
     names.extend(file.storage.credential_variables().map(str::to_owned));
-    names.extend(file.memory.credential_variable().map(str::to_owned));
     names.into_iter().collect()
 }
 

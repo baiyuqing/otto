@@ -5,7 +5,7 @@ use super::*;
 impl SharedSession {
     pub fn new(handle: Arc<dyn SessionHandle>) -> Self {
         crate::failover::ownership::register_writer_session(&handle);
-        Self(handle, Arc::default(), Arc::default(), Arc::default())
+        Self(handle, Arc::default(), Arc::default())
     }
 
     /// A `--no-session` transcript.
@@ -14,28 +14,7 @@ impl SharedSession {
             Arc::new(MemoryHandle::new(header)),
             Arc::default(),
             Arc::default(),
-            Arc::default(),
         )
-    }
-
-    /// Starts collecting appended conversation messages for a turn upload.
-    pub fn start_recording(&self) {
-        *self.2.lock().unwrap_or_else(|p| p.into_inner()) = Some(Vec::new());
-    }
-
-    /// Stops recording and returns what was collected.
-    pub fn finish_recording(&self) -> Vec<Message> {
-        self.2
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-            .unwrap_or_default()
-    }
-
-    pub(super) fn record(&self, message: &Message) {
-        if let Some(recorded) = self.2.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
-            recorded.push(message.clone());
-        }
     }
 
     pub fn handle(&self) -> &Arc<dyn SessionHandle> {
@@ -74,14 +53,13 @@ impl SharedSession {
             Arc::downgrade(&self.0),
             Arc::downgrade(&self.1),
             Arc::downgrade(&self.2),
-            Arc::downgrade(&self.3),
         )
     }
     pub(crate) fn replace_workflow_binding(
         &self,
         binding: Arc<super::super::workflow_notifications::Binding>,
     ) {
-        let mut current = self.3.lock().unwrap_or_else(|p| p.into_inner());
+        let mut current = self.2.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(old) = current.replace(binding) {
             old.stop();
             tokio::spawn(async move {
@@ -90,7 +68,7 @@ impl SharedSession {
         }
     }
     pub fn close(&self) -> Result<(), String> {
-        if let Some(binding) = self.3.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        if let Some(binding) = self.2.lock().unwrap_or_else(|p| p.into_inner()).take() {
             binding.stop();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
@@ -138,9 +116,7 @@ impl Session for SharedSession {
     }
 
     async fn append(&self, message: Message) -> Result<(), SessionError> {
-        self.0.append(message.clone()).await?;
-        self.record(&message);
-        Ok(())
+        self.0.append(message).await
     }
 
     fn latest_compaction(&self) -> Option<CompactionMetadata> {
@@ -201,14 +177,7 @@ impl Session for SharedSession {
         input_id: &str,
         message: otto_core::model::Message,
     ) -> Result<otto_core::session::AppendOutcome, SessionError> {
-        let outcome = self
-            .0
-            .append_input_if_absent(input_id, message.clone())
-            .await?;
-        if matches!(outcome, otto_core::session::AppendOutcome::Appended) {
-            self.record(&message);
-        }
-        Ok(outcome)
+        self.0.append_input_if_absent(input_id, message).await
     }
 
     fn has_input(&self, input_id: &str) -> bool {

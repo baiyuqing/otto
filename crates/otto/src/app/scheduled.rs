@@ -267,7 +267,7 @@ mod tests {
     async fn scheduled_lineage_uses_frozen_human_evidence_and_rejects_changed_task() {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
-        let source = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+        let source = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
         let runner = source.runner().unwrap();
         runner
             .record_user_authorization("Check the approved build later; do not publish it.")
@@ -343,7 +343,8 @@ mod tests {
     async fn a_scheduled_delivery_is_a_notice_and_rings_the_bell_once() {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
-        let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+        let controller =
+            crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
         assert!(!controller.take_bell());
         controller.push_scheduled("[scheduled] drink water");
         assert!(controller.take_bell());

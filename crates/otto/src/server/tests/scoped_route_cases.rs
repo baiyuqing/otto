@@ -543,7 +543,7 @@ async fn the_v1_tasks_detail_route_reads_the_child_transcript_and_reports_a_miss
     )
     .expect("create child session");
     child_store
-        .append_message(&testutil::user("hello from the child"))
+        .append_message(&fixture_tests::user("hello from the child"))
         .expect("append");
     let child_path = child_store.path();
     let mut context = agents_context("s1");

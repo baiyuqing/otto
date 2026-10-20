@@ -122,7 +122,7 @@ fn browse_roots_are_the_home_directory_then_the_configured_roots() {
     let sessions = tempfile::tempdir().expect("sessions");
     let root = tempfile::tempdir().expect("root");
     let root_path = canonical_directory(root.path()).expect("canonical");
-    // `testutil::builder` uses the workspace directory as home.
+    // `fixture_tests::builder` uses the workspace directory as home.
     let factory = factory_with(
         &startup_path,
         sessions.path(),
@@ -163,7 +163,7 @@ async fn load_builds_the_workspace_once_under_concurrent_callers() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let canonical = canonical_directory(workspace.path()).expect("canonical");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(shared_root.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(shared_root.path());
     let runtime = crate::runtime::builder::resolve_initial_runtime(
         &shared.config,
         &shared.environment,
@@ -218,7 +218,7 @@ async fn a_failed_load_leaves_the_registry_unchanged() {
     let shared_root = tempfile::tempdir().expect("shared root");
     let sessions = tempfile::tempdir().expect("sessions");
     let missing = shared_root.path().join("does-not-exist");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(shared_root.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(shared_root.path());
     let runtime = crate::runtime::builder::resolve_initial_runtime(
         &shared.config,
         &shared.environment,
@@ -268,7 +268,7 @@ async fn create_in_a_named_workspace_uses_that_workspaces_builder() {
     let other = tempfile::tempdir().expect("other workspace");
     let other_path = canonical_directory(other.path()).expect("canonical");
     let other_sessions = tempfile::tempdir().expect("other sessions");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(other_sessions.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(other_sessions.path());
     std::fs::write(&shared.config_path, "[sandbox]\ndriver='off'\n").expect("config");
     let (mut builder, sandbox) = load_workspace(
         shared,
@@ -307,7 +307,7 @@ async fn create_in_a_named_workspace_uses_that_workspaces_builder() {
         other_path.to_string_lossy().into_owned(),
         Arc::clone(&other_host),
     );
-    let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&startup_host.builder);
     let factory = ServeFactory {
         workspaces: Arc::new(Workspaces {
             startup: startup_path.to_string_lossy().into_owned(),
@@ -355,12 +355,12 @@ async fn opening_by_id_finds_a_session_outside_the_newest_listing_window() {
     let (factory, host) = factory_over(&workspace_path, sessions.path());
 
     use otto_core::session::Session;
-    let runtime = crate::cli::testutil::initial_runtime(&host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&host.builder);
     let mut oldest = String::new();
     for index in 0..=MAX_LIST_SESSIONS {
         let session = host.builder.create_session(&runtime).expect("session");
         session
-            .append(crate::cli::testutil::user("hello"))
+            .append(crate::cli::fixture_tests::user("hello"))
             .await
             .expect("persist the first message");
         let path = PathBuf::from(session.path());

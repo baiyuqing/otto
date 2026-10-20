@@ -115,6 +115,11 @@ commit ledger; Git and release tags retain the full history. See the
   `make check-fast` and the pre-commit hook enforce the limits. To update an
   installed hook, delete `$(git rev-parse --git-path hooks)/pre-commit` and
   run `make setup-git-hooks`. See [code limits](docs/development/workflow.md#code-limits).
+- A Rust source file is compiled only under `cfg(test)` exactly when its path
+  has a directory or file named `tests` or `<domain>_tests`; the code limits
+  check both directions. Nine test-only files were renamed:
+  `cli::fixture_tests`, `subagent::doubles_tests`, `sandbox::conformance_tests`
+  (with its five child files) and `seatbelt::driver::contract_tests`.
 - `cargo test --workspace` no longer aborts with a stack overflow. In a debug
   build, the `embed` tests that run a turn needed up to 2.2 MB of thread stack,
   more than the 2 MiB default of a test thread or Tokio worker thread; they now

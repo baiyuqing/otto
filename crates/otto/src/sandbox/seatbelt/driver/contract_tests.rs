@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use super::{Options, SeatbeltDriver, unavailable_reason};
-use crate::sandbox::conformance::{Contract, Fixture};
+use crate::sandbox::conformance_tests::{Contract, Fixture};
 use crate::sandbox::{Driver, NetworkMode, Request};
 
 /// Creates `name` under the fixture base at mode 0700 and canonicalizes it.
@@ -101,7 +101,7 @@ mod network_allow {
     use super::SeatbeltContract;
     use crate::sandbox::NetworkMode;
 
-    crate::sandbox::conformance::driver_contract!(SeatbeltContract {
+    crate::sandbox::conformance_tests::driver_contract!(SeatbeltContract {
         network: NetworkMode::Allow
     });
 }
@@ -110,7 +110,7 @@ mod network_deny {
     use super::SeatbeltContract;
     use crate::sandbox::NetworkMode;
 
-    crate::sandbox::conformance::driver_contract!(SeatbeltContract {
+    crate::sandbox::conformance_tests::driver_contract!(SeatbeltContract {
         network: NetworkMode::Deny
     });
 }

@@ -430,6 +430,31 @@ mod tests {
     }
 
     #[test]
+    fn package_binding_references_are_collected() {
+        let mut config = File::default();
+        config.plugins.bindings.insert(
+            "otto-mem".into(),
+            otto_core::config::PluginBindings {
+                env: Some([("T".to_string(), "${PACKAGE_BOUND_VAR}".to_string())].into()),
+                ..Default::default()
+            },
+        );
+        let environment = environment(&[("PACKAGE_BOUND_VAR", "test-bound-value")]);
+        let inputs = BoundaryInputs {
+            sandbox_secrets: &[],
+            sandbox_secrets_complete: true,
+            config: &config,
+            environment: &environment,
+            overrides_base_url: "",
+        };
+        let (values, _) = boundary_secret_values(&inputs, None);
+        assert!(
+            values.iter().any(|value| value == "test-bound-value"),
+            "{values:?}"
+        );
+    }
+
+    #[test]
     fn the_resolved_runtime_key_is_folded_in() {
         let config = File::default();
         let environment = environment(&[]);

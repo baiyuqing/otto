@@ -12,6 +12,10 @@
 //!
 //! Errors: a failed recall is a warning, not a turn failure. The agent emits
 //! [`crate::agent::Event::MemoryWarning`] and continues without records.
+//!
+//! Turn observation: a binding that returns true from
+//! [`MemoryRecall::observes_turns`] receives each finished turn through
+//! [`MemoryRecall::observe_turn`]. A failed observation is also a warning.
 
 use tokio_util::sync::CancellationToken;
 
@@ -82,6 +86,26 @@ pub trait MemoryRecall {
         request: &RecallRequest,
         cancel: &CancellationToken,
     ) -> Result<RecallResult, MemoryError>;
+
+    /// Whether [`MemoryRecall::observe_turn`] sends anything. The agent records
+    /// the messages of a turn only when hooks or this returns true.
+    fn observes_turns(&self) -> bool {
+        false
+    }
+
+    /// Passes the finished turn to the store. `turn_id` is the id the
+    /// `turn_end` hook receives; `turn` is the `turn_end` hook `turn` value,
+    /// `{"messages":[{"role":..,"blocks":[..]}]}`. Called after `turn_end`,
+    /// before the run returns, only for turns with at least one message. An
+    /// error is reported as a warning and does not change the turn result.
+    async fn observe_turn(
+        &self,
+        _turn_id: &str,
+        _turn: &serde_json::Value,
+        _cancel: &CancellationToken,
+    ) -> Result<(), MemoryError> {
+        Ok(())
+    }
 
     /// Releases the binding. Called by `Agent::close`.
     fn close(&self) -> Result<(), MemoryError> {

@@ -147,8 +147,14 @@ impl Builder {
                 .client
                 .clone()
                 .ok_or("memory service unavailable")?;
+            let observes = client.mode() == otto_core::memory::AuthorizationMode::DelegatedLearning
+                && client
+                    .describe()
+                    .capability(otto_core::memory::Operation::Observe)
+                    .is_ok_and(|capability| capability.supports_delegated_learning);
             Ok(Arc::new(ServiceBinding {
                 client,
+                observes,
                 context: self.memory_context(otto_core::memory::Origin::Model, Some(session_id)),
                 closed: AtomicBool::new(false),
             }))

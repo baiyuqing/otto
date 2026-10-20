@@ -134,7 +134,7 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
     assert_eq!(same.status, RunStatus::Waiting);
     assert_eq!(
         store.origin_runs("/w", "source").unwrap(),
-        [first.id.clone()]
+        std::slice::from_ref(&first.id)
     );
     assert!(
         owner

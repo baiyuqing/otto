@@ -41,12 +41,14 @@ fn sources(path: &Path) -> Vec<PathBuf> {
     for entry in std::fs::read_dir(path).expect("read source directory") {
         let path = entry.expect("read source entry").path();
         let name = path.file_name().unwrap().to_string_lossy();
+        // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
+        let stem = name.trim_end_matches(".rs");
+        if stem == "tests" || stem.ends_with("_tests") {
+            continue;
+        }
         if path.is_dir() {
-            if name != "tests" {
-                found.extend(sources(&path));
-            }
-        } else if path.extension().is_some_and(|extension| extension == "rs") && name != "tests.rs"
-        {
+            found.extend(sources(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
             found.push(path);
         }
     }
@@ -655,11 +657,15 @@ fn fixtures_prove_forbidden_edges_are_detected() {
         .is_empty()
     );
     let legacy_session = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/session/legacy.rs");
-    let allowed_constructor = "use crate::storage::backends::posix::session::Store;\nuse crate::storage::drivers::posix::PosixDriver;\nimpl Store { fn create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }";
+    let allowed_constructor = "use crate::storage::backends::posix::session::Store;\nuse \
+        crate::storage::drivers::posix::PosixDriver;\nimpl Store { fn \
+        create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }";
     assert!(domain_violations(&legacy_session, allowed_constructor).is_empty());
     let service_call = "use crate::storage::backends::posix::session::Store;\nimpl Store { fn create_lazy() { Store::recover(\"scope\"); } }";
     assert!(!domain_violations(&legacy_session, service_call).is_empty());
-    let mutating_constructor = "use crate::storage::backends::posix::session::Store;\nimpl Store { fn create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }\nconst SQL: &str = \"UPDATE sessions SET status='closed'\";";
+    let mutating_constructor = "use crate::storage::backends::posix::session::Store;\nimpl Store { fn \
+        create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }\nconst \
+        SQL: &str = \"UPDATE sessions SET status='closed'\";";
     assert!(!domain_violations(&legacy_session, mutating_constructor).is_empty());
     let test_only_sql = "#[cfg(test)]\nmod tests { const SQL: &str = \"SELECT * FROM runs\"; }";
     assert!(domain_violations(service, test_only_sql).is_empty());

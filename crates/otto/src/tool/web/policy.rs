@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn fake_ip_route_requires_both_addresses_in_range_and_differing() {
-        let v4 = |text: &str| -> Ipv4Addr { text.parse().unwrap() };
+        let parse_ipv4 = |text: &str| -> Ipv4Addr { text.parse().unwrap() };
         for (answer, local, expected) in [
             ("198.18.0.141", "198.18.0.1", true),
             ("198.19.255.1", "198.18.0.1", true),
@@ -337,7 +337,7 @@ mod tests {
             ("10.0.0.1", "198.18.0.1", false),
         ] {
             assert_eq!(
-                fake_ip_route(v4(answer), v4(local)),
+                fake_ip_route(parse_ipv4(answer), parse_ipv4(local)),
                 expected,
                 "{answer} via {local}"
             );

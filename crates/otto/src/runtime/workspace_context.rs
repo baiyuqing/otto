@@ -334,19 +334,20 @@ fn read_workspace_doc_file(workspace: &Workspace, name: &str) -> Option<String> 
     if !metadata.is_file() {
         return None;
     }
-    let mut data = Vec::with_capacity(MAX_WORKSPACE_CONTEXT_FILE_BYTES + 1);
+    let mut context_bytes = Vec::with_capacity(MAX_WORKSPACE_CONTEXT_FILE_BYTES + 1);
     file.by_ref()
         .take(MAX_WORKSPACE_CONTEXT_FILE_BYTES as u64 + 1)
-        .read_to_end(&mut data)
+        .read_to_end(&mut context_bytes)
         .ok()?;
-    if data.len() > MAX_WORKSPACE_CONTEXT_FILE_BYTES {
-        let total = metadata.len().max(data.len() as u64);
-        let head = String::from_utf8_lossy(&data[..MAX_WORKSPACE_CONTEXT_FILE_BYTES]).into_owned();
+    if context_bytes.len() > MAX_WORKSPACE_CONTEXT_FILE_BYTES {
+        let total = metadata.len().max(context_bytes.len() as u64);
+        let head = String::from_utf8_lossy(&context_bytes[..MAX_WORKSPACE_CONTEXT_FILE_BYTES])
+            .into_owned();
         return Some(format!(
             "{head}\n[truncated: {total} bytes, showing first {MAX_WORKSPACE_CONTEXT_FILE_BYTES}]"
         ));
     }
-    Some(String::from_utf8_lossy(&data).into_owned())
+    Some(String::from_utf8_lossy(&context_bytes).into_owned())
 }
 
 #[cfg(test)]

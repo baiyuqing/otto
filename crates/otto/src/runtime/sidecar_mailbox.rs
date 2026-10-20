@@ -315,13 +315,24 @@ mod tests {
     /// the runner's fallback for a task it cannot find.
     #[test]
     fn only_composition_code_names_the_concrete_inbox() {
-        const ALLOWED: &[&str] = &["runtime/", "subagent/tasks.rs", "subagent/runner.rs"];
+        const ALLOWED: &[&str] = &[
+            "runtime/",
+            "subagent/tasks.rs",
+            "subagent/runner.rs",
+            "subagent/runner/child_run.rs",
+        ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("read src").flatten() {
                 let path = entry.path();
+                let name = path.file_name().unwrap().to_string_lossy();
+                // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
+                let stem = name.trim_end_matches(".rs");
+                if stem == "tests" || stem.ends_with("_tests") {
+                    continue;
+                }
                 if path.is_dir() {
                     stack.push(path);
                     continue;

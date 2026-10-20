@@ -230,7 +230,9 @@ fn describe(request: &ProposeRequest, standing: &[Record]) -> String {
         _ => "create",
     };
     let mut state = format!(
-        "Candidate memory proposed for human review\naction: {action}\nkind: {}\nkey: {}\nscope: {scope}\ntext: {}\nreason (evidence quote): {}\n\nStanding records of the user scope (apply in every workspace):",
+        "Candidate memory proposed for human review\naction: {action}\nkind: \
+            {}\nkey: {}\nscope: {scope}\ntext: {}\nreason (evidence quote): \
+            {}\n\nStanding records of the user scope (apply in every workspace):",
         request.kind, request.key, request.text, request.reason
     );
     if standing.is_empty() {

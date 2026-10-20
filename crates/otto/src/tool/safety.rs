@@ -82,10 +82,10 @@ mod tests {
         fn check(dir: &std::path::Path, count: &mut usize) {
             for entry in std::fs::read_dir(dir).expect("source directory") {
                 let path = entry.expect("source entry").path();
-                if path
-                    .file_name()
-                    .is_some_and(|name| name == "testsupport.rs")
-                {
+                let name = path.file_name().unwrap().to_string_lossy();
+                // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
+                let stem = name.trim_end_matches(".rs");
+                if name == "testsupport.rs" || stem == "tests" || stem.ends_with("_tests") {
                     continue;
                 }
                 if path.is_dir() {

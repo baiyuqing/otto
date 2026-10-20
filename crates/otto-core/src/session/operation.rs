@@ -446,7 +446,11 @@ mod tests {
         let terminal = OperationFact::terminal(id("op_1"), 1, "call-1", "read", success());
         assert_eq!(
             encode_operation_fact(&terminal).expect("encode"),
-            r#"{"event":"terminal","schemaVersion":1,"operationId":"op_1","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read","disposition":"succeeded","effectCertainty":"completed"}"#
+            concat!(
+                r#"{"event":"terminal","schemaVersion":1,"operationId":"op_1","attempt":1,"#,
+                r#""kind":"tool_call","toolCallId":"call-1","toolName":"read","#,
+                r#""disposition":"succeeded","effectCertainty":"completed"}"#,
+            )
         );
     }
 

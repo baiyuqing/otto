@@ -539,7 +539,22 @@ mod tests {
     /// A trimmed copy of a real Bing results page: stylesheet `<link>` tags
     /// inside the item, a `ck/a` redirect link carrying the target as
     /// base64url, a dated snippet, and a result with a direct link.
-    const BING_PAGE: &str = r#"<ol id="b_results"><li class="b_algo" data-id iid=SERP.5328><link rel="stylesheet" href="/rp/a.css" type="text/css"/><div class="b_tpcn"><a class="tilk" href="https://rust-lang.github.io/"><div class="tptxt">rust-lang.github.io</div></a></div><h2><a target="_blank" href="https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;ptn=3&amp;u=a1aHR0cHM6Ly9ydXN0LWxhbmcuZ2l0aHViLmlvL2FzeW5jLWJvb2svMDhfZWNvc3lzdGVtLzAwX2NoYXB0ZXIuaHRtbA&amp;ntb=1" h="ID=SERP,5114.2">The <strong>Async</strong> Ecosystem - Asynchronous Programming in Rust</a></h2><div class="b_caption"><p class="b_lineclamp2">The Async Ecosystem Rust currently provides only the bare essentials for writing async code. Importantly, executors, tasks, …</p></div></li><li class="b_algo" data-id iid=SERP.5330><h2><a href="https://tokio.rs/tokio/tutorial/async">Async in depth | Tokio</a></h2><div class="b_caption"><p><span class="news_dt">Feb 21, 2024</span>&nbsp;&#0183;&#32;Tokio is a runtime &amp; more …</p></div></li><li class="b_ans">not a result</li></ol>"#;
+    const BING_PAGE: &str = concat!(
+        r#"<ol id="b_results">"#,
+        r#"<li class="b_algo" data-id iid=SERP.5328>"#,
+        r#"<link rel="stylesheet" href="/rp/a.css" type="text/css"/>"#,
+        r#"<div class="b_tpcn"><a class="tilk" href="https://rust-lang.github.io/"><div class="tptxt">rust-lang.github.io</div></a></div>"#,
+        r#"<h2><a target="_blank" href="https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;ptn=3&amp;"#,
+        r#"u=a1aHR0cHM6Ly9ydXN0LWxhbmcuZ2l0aHViLmlvL2FzeW5jLWJvb2svMDhfZWNvc3lzdGVtLzAwX2NoYXB0ZXIuaHRtbA"#,
+        r#"&amp;ntb=1" h="ID=SERP,5114.2">"#,
+        r#"The <strong>Async</strong> Ecosystem - Asynchronous Programming in Rust</a></h2>"#,
+        r#"<div class="b_caption"><p class="b_lineclamp2">"#,
+        r#"The Async Ecosystem Rust currently provides only the bare essentials for writing async code. Importantly, executors, tasks, …</p></div></li>"#,
+        r#"<li class="b_algo" data-id iid=SERP.5330>"#,
+        r#"<h2><a href="https://tokio.rs/tokio/tutorial/async">Async in depth | Tokio</a></h2>"#,
+        r#"<div class="b_caption"><p><span class="news_dt">Feb 21, 2024</span>&nbsp;&#0183;&#32;Tokio is a runtime &amp; more …</p></div></li>"#,
+        r#"<li class="b_ans">not a result</li></ol>"#,
+    );
 
     #[test]
     fn bing_extracts_results_and_decodes_redirect_targets() {

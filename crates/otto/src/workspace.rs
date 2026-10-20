@@ -130,7 +130,7 @@ fn publish(
     if bytes.len() as u64 > MAX_BYTES {
         return Err(invalid());
     }
-    let temp = format!(
+    let temp_name = format!(
         ".workspace-{}",
         crate::auth::random_hex::<8>().map_err(io_error)?
     );
@@ -138,7 +138,7 @@ fn publish(
         dir,
         &fsops::Publish {
             name: NAME,
-            temp: &temp,
+            temp: &temp_name,
             permissions: 0o600,
             mode: fsops::PublishMode::Replace,
         },

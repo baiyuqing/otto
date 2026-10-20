@@ -107,7 +107,7 @@ pub(crate) async fn inherit_authority(
     let builder = controller.builder();
     let repository = builder.storage.sessions()?;
     let root = builder.storage.session_root(&builder.session_root)?;
-    let data = repository
+    let authority_json = repository
         .custom_data_for(
             &root,
             &item.workspace,
@@ -115,14 +115,20 @@ pub(crate) async fn inherit_authority(
             &format!("otto.schedule.{}", item.label()),
         )
         .ok_or_else(|| "Scheduled creation authorization is unavailable.".to_string())?;
-    let mut authority: crate::schedule::tools::ScheduledAuthority = serde_json::from_str(&data)
-        .map_err(|_| "Scheduled creation authorization is invalid.".to_string())?;
+    let mut authority: crate::schedule::tools::ScheduledAuthority =
+        serde_json::from_str(&authority_json)
+            .map_err(|_| "Scheduled creation authorization is invalid.".to_string())?;
     if authority.body_digest != crate::approval::digest(&item.body)
         || authority.source_session != item.session_id
     {
         return Err("Scheduled task changed since it was authorized.".into());
     }
-    authority.context.instructions.push(format!("This unattended task is limited to the approved scheduled prompt: {}. Original user messages cannot authorize effects beyond this scheduled scope.", item.body));
+    authority.context.instructions.push(format!(
+        "This unattended task is limited to the approved scheduled prompt: {}. \
+        Original user messages cannot authorize effects beyond this scheduled \
+        scope.",
+        item.body
+    ));
     let source_scope = otto_core::approval::Scope {
         workspace: item.workspace.clone(),
         session_id: item.session_id.clone(),

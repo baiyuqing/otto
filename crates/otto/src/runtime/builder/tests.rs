@@ -1,0 +1,226 @@
+use super::runner::{log_runtime_event, turn_limit};
+use super::*;
+use crate::sandbox::direct::DirectDriver;
+use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
+use otto_core::config::Profile;
+use otto_core::model::{EffectCertainty, OperationDisposition};
+use otto_core::operation::OperationControl;
+use otto_core::provider::ProviderSettlement;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
+
+mod authorization;
+mod provider_turns;
+mod runtime_info;
+mod session_shutdown;
+mod tool_sets;
+mod turn_limits;
+mod workflows;
+
+#[tokio::test]
+async fn recording_captures_appended_messages_until_finished() {
+    let session = SharedSession::memory(Header::default());
+    let message = |text: &str| Message {
+        id: text.into(),
+        role: otto_core::model::Role::User,
+        blocks: vec![Block::text(text)],
+        ..Message::default()
+    };
+    session.append(message("before")).await.unwrap();
+    assert!(session.finish_recording().is_empty());
+
+    session.start_recording();
+    session.clone().append(message("during")).await.unwrap();
+    let recorded = session.finish_recording();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].text(), "during");
+
+    session.append(message("after")).await.unwrap();
+    assert!(session.finish_recording().is_empty());
+}
+
+fn shared(root: &Path) -> Arc<Shared> {
+    Arc::new(Shared {
+        storage: Arc::new(Default::default()),
+        approvals: Arc::new(crate::approval::Service::in_memory().expect("approval store")),
+        config_path: root.join("config.toml"),
+        config: File::default(),
+        environment: HashMap::new(),
+        home: root.to_string_lossy().into_owned(),
+        session_root: root.join("sessions"),
+        shell: "/bin/sh".to_string(),
+        no_session: true,
+        headless: false,
+        host_entries: Vec::new(),
+        overrides: Overrides::default(),
+        sandbox_secrets_baseline: Vec::new(),
+        sandbox_secrets_baseline_complete: true,
+        sandbox_driver_override: None,
+        explicit_config: false,
+        auth_path: String::new(),
+        auth_credentials: crate::auth::Credentials::default(),
+        auth_credentials_loaded: false,
+        usage: None,
+        task_recorder: None,
+        schedule: None,
+        skill_checker: None,
+        memory: Default::default(),
+        reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
+        logger: Arc::new(crate::log::Logger::discard()),
+        parent_tool_factory: ParentToolSlot::default(),
+    })
+}
+
+fn builder_for(shared: Arc<Shared>, root: &Path) -> Builder {
+    let workspace = leaked_workspace(root).expect("workspace");
+    let workspace_path = workspace.root().to_string_lossy().into_owned();
+    let mut builder = Builder::for_workspace(
+        shared,
+        workspace,
+        workspace_path,
+        McpRuntime {
+            enabled: false,
+            call_timeout_secs: 60,
+            connect_timeout_secs: 20,
+            servers: Vec::new(),
+        },
+    );
+    builder.sandbox_info = SandboxInfo::unavailable(SandboxReason::SeatbeltMissing);
+    builder
+}
+
+fn builder(root: &Path) -> Builder {
+    builder_for(shared(root), root)
+}
+
+/// Two `Builder`s built from one `Shared` (`Builder::for_workspace`) stay
+/// independent: each keeps its own workspace path, its own file-tool
+/// root, and its own sandbox executor, none of which leak from one
+/// `Builder` into the other.
+#[test]
+fn two_builders_from_one_shared_stay_independent_per_workspace() {
+    let shared_root = tempfile::tempdir().expect("shared root");
+    let workspace_a = tempfile::tempdir().expect("workspace a");
+    let workspace_b = tempfile::tempdir().expect("workspace b");
+    let shared = shared(shared_root.path());
+
+    let mut a = builder_for(Arc::clone(&shared), workspace_a.path());
+    let b = builder_for(Arc::clone(&shared), workspace_b.path());
+
+    assert_ne!(a.workspace_path, b.workspace_path);
+    assert_ne!(a.workspace.root(), b.workspace.root());
+    assert_eq!(a.workspace_path, a.workspace.root().to_string_lossy());
+    assert_eq!(b.workspace_path, b.workspace.root().to_string_lossy());
+
+    with_bash(&mut a, workspace_a.path());
+    assert!(a.command_executor.is_some());
+    assert!(b.command_executor.is_none());
+
+    // Both still share the one process-wide `Shared`.
+    assert!(Arc::ptr_eq(&a.shared, &b.shared));
+}
+
+/// Loading a second workspace must not open a second memory service: the
+/// service lives on `Shared`, so every `Builder` built from one `Shared`
+/// sees the identical `Arc`.
+#[test]
+fn two_builders_from_one_shared_use_the_same_memory_service() {
+    let shared_root = tempfile::tempdir().expect("shared root");
+    let workspace_a = tempfile::tempdir().expect("workspace a");
+    let workspace_b = tempfile::tempdir().expect("workspace b");
+    let shared = shared(shared_root.path());
+
+    let a = builder_for(Arc::clone(&shared), workspace_a.path());
+    let b = builder_for(Arc::clone(&shared), workspace_b.path());
+
+    assert!(Arc::ptr_eq(&a.memory.service, &b.memory.service));
+}
+
+fn with_bash(builder: &mut Builder, root: &Path) {
+    let executor = Executor::new(
+        Arc::new(DirectDriver::new()),
+        Policy {
+            filesystem: FilesystemMode::Unconfined,
+            network: NetworkMode::Allow,
+        },
+        root,
+    )
+    .expect("executor");
+    builder.command_executor = Some(Arc::new(executor));
+    builder.sandbox_environment = Some(vec!["PATH=/usr/bin:/bin".to_string()]);
+    builder.sandbox_info = SandboxInfo {
+        mode: SandboxMode::Off,
+        network: SandboxNetwork::Unconfined,
+        bash_available: true,
+        reason: SandboxReason::None,
+    };
+}
+
+fn user_message(text: &str) -> Message {
+    Message {
+        role: otto_core::model::Role::User,
+        blocks: vec![Block::text(text)],
+        created_at: Utc::now(),
+        ..Message::default()
+    }
+}
+
+fn runtime() -> Runtime {
+    Runtime {
+        profile: "default".to_string(),
+        provider: "openai-compatible".to_string(),
+        base_url: "https://gw.example.com/v1".to_string(),
+        model: "gpt-test".to_string(),
+        api_key: "sk-secret-value".to_string(),
+        api_key_env: "OTTO_API_KEY".to_string(),
+        shell_timeout: Duration::from_secs(30),
+        max_output_bytes: 65536,
+        ..Runtime::default()
+    }
+}
+
+fn tool_names(runner: &Runner) -> Vec<String> {
+    runner
+        .definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect()
+}
+
+struct CountingParentToolFactory {
+    calls: Arc<AtomicUsize>,
+    contexts: Mutex<Vec<ParentToolContext>>,
+}
+
+impl ParentToolFactory for CountingParentToolFactory {
+    fn tools(
+        &self,
+        context: &ParentToolContext,
+    ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.contexts.lock().unwrap().push(context.clone());
+        Ok(vec![
+            crate::subagent::testsupport::StubTool::new(
+                "parent_factory_tool",
+                otto_core::tool::ToolResult::default(),
+            )
+            .boxed(),
+        ])
+    }
+}
+
+/// A provider `Runner::scripted` needs a value for but this test never
+/// calls: `close_mcp`/`close` never send a turn.
+struct UnusedProvider;
+
+#[async_trait::async_trait]
+impl Provider for UnusedProvider {
+    async fn complete(
+        &self,
+        _request: &Request,
+        _emit: StreamSink<'_>,
+        _control: &dyn OperationControl,
+    ) -> ProviderSettlement {
+        unreachable!("close-ordering test never sends a turn")
+    }
+}

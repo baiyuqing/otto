@@ -1,0 +1,7624 @@
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use super::*;
+use crate::cli::testutil;
+use crate::runtime::builder::{Builder, Runner, RuntimeInfo, SharedSession};
+use axum::body::Body;
+use axum::http::Request;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use futures_util::StreamExt;
+use otto_core::model::{Block, BlockType, Message, Role, Usage};
+use otto_core::provider::{
+    Provider, ProviderError, Request as ProviderRequest, Response as ProviderResponse, StreamEvent,
+    StreamSink,
+};
+use otto_core::session::{CURRENT_VERSION, Header, ListResult, Session, SessionInfo};
+use otto_core::wire::sse::{Frame, parse_frames};
+use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tempfile::TempDir;
+use tokio::sync::watch;
+use tower::ServiceExt;
+
+// ---- the provider double ----
+
+/// What one turn does. `Runner` is a concrete struct here, so the script
+/// sits one layer down, at the provider.
+#[derive(Default)]
+struct Script {
+    /// Streamed as text deltas and returned as the assistant text.
+    deltas: Vec<String>,
+    /// The assistant message's usage.
+    usage: Option<Usage>,
+    /// Fails the call with this message instead of answering.
+    error: Option<String>,
+    /// Streams back the last user message instead of `deltas`.
+    echo: bool,
+    /// Held after the deltas until cancelled, so the turn stays running.
+    /// Cancelling the turn wins the race and yields `Cancelled`.
+    gate: Option<CancellationToken>,
+    /// Runs at the top of every call with the 1-based call index. The wake
+    /// tests push a notification from it.
+    on_call: Option<Box<dyn Fn(usize) + Send + Sync>>,
+    /// Answers every call whose last request message is not a tool
+    /// result with a `bash` tool call for this command; the call after a
+    /// tool result answers with `deltas`. Needs [`HarnessOptions::elevate`]
+    /// to register the `bash` tool.
+    tool_command: Option<String>,
+    /// Like `tool_command`, for an `update_plan` call with these
+    /// arguments; the harness registers the real tool.
+    plan_call: Option<String>,
+}
+
+struct ScriptedProvider {
+    script: Script,
+    started: watch::Sender<usize>,
+    /// The role of each call's last request message, in call order. A
+    /// prompt turn ends in [`Role::User`]; a wake turn ends in the
+    /// delivered notification's [`Role::Context`].
+    roles: Mutex<Vec<Role>>,
+    /// The last user message of each call, in call order.
+    texts: Mutex<Vec<String>>,
+    /// System prompt of each call, in call order.
+    system_prompts: Mutex<Vec<String>>,
+}
+
+impl ScriptedProvider {
+    fn new(script: Script) -> Arc<Self> {
+        Arc::new(Self {
+            script,
+            started: watch::channel(0).0,
+            roles: Mutex::new(Vec::new()),
+            texts: Mutex::new(Vec::new()),
+            system_prompts: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn texts(&self) -> Vec<String> {
+        self.texts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    fn roles(&self) -> Vec<Role> {
+        self.roles
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    fn system_prompts(&self) -> Vec<String> {
+        self.system_prompts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// Resolves once `count` calls have reached the gate.
+    async fn wait_started(&self, count: usize) {
+        let mut rx = self.started.subscribe();
+        rx.wait_for(|seen| *seen >= count).await.expect("sender");
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for ScriptedProvider {
+    async fn complete(
+        &self,
+        request: &ProviderRequest,
+        emit: StreamSink<'_>,
+        control: &dyn otto_core::operation::OperationControl,
+    ) -> otto_core::provider::ProviderSettlement {
+        let cancel = control.cancellation_token();
+        let call = {
+            let mut roles = self
+                .roles
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            roles.push(
+                request
+                    .messages
+                    .last()
+                    .map_or(Role::User, |last| last.role.clone()),
+            );
+            roles.len()
+        };
+        self.texts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(
+                request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::User)
+                    .map(Message::text)
+                    .unwrap_or_default(),
+            );
+        self.system_prompts
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(request.system_prompt.clone());
+        let after_tool_result = request
+            .messages
+            .last()
+            .is_some_and(|last| last.role == Role::Tool);
+        if let Some(hook) = &self.script.on_call {
+            hook(call);
+        }
+        let deltas: Vec<String> = if self.script.echo {
+            vec![
+                request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::User)
+                    .map(Message::text)
+                    .unwrap_or_default(),
+            ]
+        } else {
+            self.script.deltas.clone()
+        };
+        for delta in &deltas {
+            emit(StreamEvent::TextDelta {
+                text: delta.clone(),
+            });
+        }
+        self.started.send_modify(|seen| *seen += 1);
+
+        if let Some(gate) = &self.script.gate {
+            tokio::select! {
+                () = gate.cancelled() => {}
+                () = cancel.cancelled() => {
+                    let reason = control.stop_reason().unwrap_or(
+                        otto_core::model::OperationStopReason::UserCancellation,
+                    );
+                    return otto_core::provider::ProviderSettlement::stopped(
+                        if reason == otto_core::model::OperationStopReason::Deadline {
+                            ProviderError::DeadlineExceeded
+                        } else {
+                            ProviderError::Cancelled
+                        },
+                        0,
+                        otto_core::model::EffectCertainty::NotStarted,
+                        reason,
+                    );
+                },
+            }
+        }
+        if let Some(message) = &self.script.error {
+            return otto_core::provider::ProviderSettlement::failed(
+                ProviderError::Other(message.clone()),
+                0,
+                otto_core::model::EffectCertainty::Completed,
+            );
+        }
+        let (blocks, finish_reason) = match &self.script.tool_command {
+            _ if self.script.plan_call.is_some() && !after_tool_result => (
+                vec![Block {
+                    block_type: BlockType::ToolCall,
+                    tool_call_id: format!("call-{call}"),
+                    tool_name: "update_plan".to_string(),
+                    arguments: Some(
+                        serde_json::value::RawValue::from_string(
+                            self.script.plan_call.clone().unwrap_or_default(),
+                        )
+                        .expect("arguments"),
+                    ),
+                    ..Block::default()
+                }],
+                Some(otto_core::model::FinishReason::ToolCalls),
+            ),
+            Some(command) if !after_tool_result => (
+                vec![Block {
+                    block_type: BlockType::ToolCall,
+                    tool_call_id: format!("call-{call}"),
+                    tool_name: "bash".to_string(),
+                    arguments: Some(
+                        serde_json::value::RawValue::from_string(
+                            serde_json::json!({ "command": command }).to_string(),
+                        )
+                        .expect("arguments"),
+                    ),
+                    ..Block::default()
+                }],
+                Some(otto_core::model::FinishReason::ToolCalls),
+            ),
+            _ => (
+                vec![Block {
+                    block_type: BlockType::Text,
+                    text: deltas.concat(),
+                    ..Block::default()
+                }],
+                Some(otto_core::model::FinishReason::Stop),
+            ),
+        };
+        let cached_input_tokens_present = self.script.usage.is_some();
+        otto_core::provider::ProviderSettlement::succeeded(
+            ProviderResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    blocks,
+                    usage: self.script.usage,
+                    finish_reason,
+                    ..Message::default()
+                },
+                cached_input_tokens_present,
+                remote_compaction: None,
+            },
+            0,
+        )
+    }
+}
+
+/// A `bash` tool that asks for approval until the command is granted,
+/// then answers `elevated ok`. The request text matches the real tool's,
+/// so `parse_approval_request` reads it.
+struct ElevatedBash {
+    approvals: Arc<crate::tool::bash::BashApprovals>,
+    session_id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for ElevatedBash {
+    fn definition(&self) -> otto_core::model::ToolDefinition {
+        crate::tool::definition("bash", "test double", serde_json::json!({"type": "object"}))
+    }
+
+    async fn execute(
+        &self,
+        arguments: &serde_json::value::RawValue,
+        _cancel: &CancellationToken,
+    ) -> otto_core::tool::ToolResult {
+        let command = serde_json::from_str::<Value>(arguments.get())
+            .ok()
+            .and_then(|value| value["command"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        if self.approvals.take(&self.session_id, &command) {
+            return otto_core::tool::ToolResult {
+                content: "elevated ok".to_string(),
+                ..Default::default()
+            };
+        }
+        let id = self.approvals.request(&self.session_id, &command);
+        otto_core::tool::ToolResult::error(format!(
+            "approval required\nApprove in Otto: /approve {id}\nCommand: {}\nJustification: \"needed\"",
+            serde_json::to_string(&command).expect("command")
+        ))
+    }
+}
+
+// ---- the workspace registry double ----
+
+/// A fake, in-memory workspace registry for `/v1/workspaces` tests. Real
+/// admission and the real load-once registry mutex live in
+/// `cli::serve::Workspaces` and its own tests; this only exercises the
+/// `Factory`/route wiring, so admission here is a plain allowlist rather
+/// than a filesystem check.
+struct FakeWorkspaces {
+    startup: String,
+    /// Paths besides `startup` this fake admits.
+    admitted: Vec<String>,
+    /// A path that fails to load, with the message to fail it with.
+    /// Checked before the path is registered, so a repeat call for the
+    /// same path after this fires once can still succeed.
+    error: Option<(String, String)>,
+    /// Held before a load registers its path, so a test can pile up
+    /// concurrent loads of one path.
+    gate: Option<CancellationToken>,
+    loaded: tokio::sync::Mutex<BTreeMap<String, bool>>,
+    /// A loaded path with a simulated active workflow run, so
+    /// `remove_workspace` answers `WorkspaceRemoveError::InUse` for it.
+    in_use: Option<String>,
+    /// Paths `trust_workspace` recorded; admitted like `admitted`.
+    trusted: Mutex<Vec<String>>,
+    /// `Factory::browse_roots`'s answer.
+    browse_roots: Vec<std::path::PathBuf>,
+}
+
+impl Default for FakeWorkspaces {
+    fn default() -> Self {
+        Self {
+            startup: String::new(),
+            admitted: Vec::new(),
+            error: None,
+            gate: None,
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+            in_use: None,
+            trusted: Mutex::new(Vec::new()),
+            browse_roots: Vec::new(),
+        }
+    }
+}
+
+// ---- the factory double ----
+
+struct TestFactory {
+    builder: Arc<Builder>,
+    provider: Arc<ScriptedProvider>,
+    /// Gives every controller this id; otherwise each gets a random one.
+    fixed_id: Option<String>,
+    create_error: Option<String>,
+    open_error: Option<String>,
+    /// Held before `open` returns, so a test can pile up concurrent
+    /// resumes of one id.
+    open_gate: Option<CancellationToken>,
+    /// Every controller shares this registry. `None` gives each its own.
+    tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
+    list: Option<ListResult>,
+    /// Backs `Factory::tasks_list`/`tasks_get`. `None` keeps the trait's
+    /// empty defaults, matching a process with no recorder wired.
+    task_recorder: Option<Arc<crate::subagent::record::Store>>,
+    workspaces: FakeWorkspaces,
+    /// Canned `Factory::list` answer for a named workspace (`?workspace=`).
+    /// An absent key falls back to `list`.
+    list_by_workspace: HashMap<String, ListResult>,
+    /// Workflow controllers keyed by workspace path. The entry at the
+    /// harness's own workspace path is the startup controller.
+    workflows: HashMap<String, Arc<crate::workflow::Controller>>,
+    /// Canned `Factory::reload_sandbox` answer. `None` matches the
+    /// trait's default (`sandbox_reload_available` false, `POST
+    /// /v1/sandbox/reload` answers 501).
+    sandbox_reload: Option<Result<SandboxInfo, String>>,
+    /// Canned `Factory::reload_other_sandboxes` answer, one entry per
+    /// non-startup workspace with its own reloader.
+    sandbox_reload_others: Vec<(String, Result<SandboxInfo, String>)>,
+    /// Canned `Factory::diff_runner` answer for the startup workspace.
+    /// `None` matches a workspace with no usable sandbox (`GET
+    /// /v1/workspaces/diff` answers 501).
+    diff_runner: Option<(Arc<dyn crate::sandbox::CommandExecutor>, Vec<String>)>,
+    persistent: bool,
+    create_calls: AtomicUsize,
+    open_calls: AtomicUsize,
+}
+
+impl TestFactory {
+    /// `workspace` overrides the session header's workspace, matching a
+    /// real `Factory::create`/`open` given a non-startup workspace; every
+    /// other test-double detail (provider, tasks) stays on the one shared
+    /// builder.
+    fn controller_for(&self, id: &str, workspace: Option<&str>) -> Controller {
+        let header = Header {
+            version: CURRENT_VERSION,
+            id: id.to_string(),
+            workspace: workspace
+                .unwrap_or(&self.builder.workspace_path)
+                .to_string(),
+            provider: "openai-compatible".to_string(),
+            profile: "alpha".to_string(),
+            model: "test-model".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let session = if self.persistent {
+            // A session file per id under the builder's session root:
+            // an existing one (a fork) is opened, a new one created.
+            let root = std::path::Path::new(&self.builder.session_root);
+            let path = crate::session::session_directory(root, &header.workspace)
+                .expect("session directory")
+                .join(format!("{id}.jsonl"));
+            let store = if path.exists() {
+                crate::session::Store::open(&path).expect("open session").0
+            } else {
+                crate::session::Store::create(root, header).expect("create session")
+            };
+            SharedSession::new(Arc::new(store))
+        } else {
+            SharedSession::memory(header)
+        };
+        let mut tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> =
+            match &self.builder.bash_approvals {
+                Some(approvals) => vec![Box::new(ElevatedBash {
+                    approvals: Arc::clone(approvals),
+                    session_id: id.to_string(),
+                })],
+                None => Vec::new(),
+            };
+        if self.provider.script.plan_call.is_some() {
+            tools.push(Box::new(crate::tool::plan::UpdatePlan::new(
+                Arc::new(session.clone()),
+                &[],
+            )));
+        }
+        let mut runner = Runner::scripted_with_tools(
+            session.clone(),
+            Arc::clone(&self.provider) as Arc<dyn Provider + Send + Sync>,
+            self.tasks
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::subagent::tasks::Tasks::new())),
+            tools,
+        );
+        if self.builder.config.skills.paths.is_some() {
+            let catalogs = self
+                .builder
+                .build_catalogs(&mut Vec::new(), 4096, &mut Vec::new())
+                .expect("skill catalogs");
+            runner.skills = catalogs.skills;
+            runner.discovered_skills = catalogs.discovered_skills;
+        }
+        if self.persistent
+            && let Some(journal) =
+                self.builder
+                    .session_journal(&session, "turns.json", &mut std::io::sink())
+        {
+            runner.task_control().set_turn_queue_journal(journal);
+        }
+        Controller::with_builder(
+            Arc::clone(&self.builder),
+            true,
+            session,
+            runner,
+            RuntimeInfo {
+                provider: "openai-compatible".to_string(),
+                profile: "alpha".to_string(),
+                model: "test-model".to_string(),
+                thinking: "high".to_string(),
+                context_window: 128_000,
+                sandbox: self.builder.sandbox_info,
+            },
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl Factory for TestFactory {
+    fn approval_service(&self) -> Option<Arc<crate::approval::Service>> {
+        Some(self.builder.approvals.clone())
+    }
+    async fn create(&self, workspace: Option<&str>) -> Result<Controller, String> {
+        self.create_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = &self.create_error {
+            return Err(error.clone());
+        }
+        let id = self
+            .fixed_id
+            .clone()
+            .unwrap_or_else(|| new_id().expect("id"));
+        Ok(self.controller_for(&id, workspace))
+    }
+
+    async fn create_with_receipt(
+        &self,
+        workspace: Option<&str>,
+        id: String,
+        request_id: &str,
+    ) -> Result<Controller, String> {
+        self.create_calls.fetch_add(1, Ordering::SeqCst);
+        let ctrl = self.controller_for(&id, workspace);
+        ctrl.write_session_command_receipt(request_id).await?;
+        Ok(ctrl)
+    }
+
+    async fn open(&self, id: &str, workspace: Option<&str>) -> Result<Controller, String> {
+        self.open_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.open_gate {
+            gate.cancelled().await;
+        }
+        if let Some(error) = &self.open_error {
+            return Err(error.clone());
+        }
+        if self.persistent {
+            let path = crate::session::session_directory(
+                std::path::Path::new(&self.builder.session_root),
+                workspace.unwrap_or(&self.builder.workspace_path),
+            )
+            .map_err(|error| error.to_string())?
+            .join(format!("{id}.jsonl"));
+            if !path.is_file() {
+                return Err(SESSION_NOT_FOUND.into());
+            }
+        }
+        Ok(self.controller_for(id, workspace))
+    }
+
+    async fn list(&self, workspace: Option<&str>) -> Option<Result<ListResult, String>> {
+        match workspace {
+            Some(path) => self
+                .list_by_workspace
+                .get(path)
+                .cloned()
+                .map(Ok)
+                .or_else(|| self.list.clone().map(Ok)),
+            None => self.list.clone().map(Ok),
+        }
+    }
+
+    fn tasks_list(
+        &self,
+        query: &crate::subagent::record::ListQuery,
+    ) -> Result<crate::subagent::record::ListResult, String> {
+        match &self.task_recorder {
+            Some(store) => store.list(query).map_err(|error| error.to_string()),
+            None => Ok(crate::subagent::record::ListResult::default()),
+        }
+    }
+
+    fn tasks_get(
+        &self,
+        parent_session: &str,
+        task_id: &str,
+    ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
+        match &self.task_recorder {
+            Some(store) => store
+                .get(parent_session, task_id)
+                .map_err(|error| error.to_string()),
+            None => Ok(None),
+        }
+    }
+
+    async fn workspaces(&self) -> WorkspaceList {
+        let loaded = self.workspaces.loaded.lock().await;
+        let mut rest: Vec<WorkspaceInfo> = loaded
+            .iter()
+            .filter(|(path, _)| **path != self.workspaces.startup)
+            .map(|(path, workflows)| WorkspaceInfo {
+                path: path.clone(),
+                workflows: *workflows,
+            })
+            .collect();
+        rest.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut all = vec![WorkspaceInfo {
+            path: self.workspaces.startup.clone(),
+            workflows: *loaded.get(&self.workspaces.startup).unwrap_or(&false),
+        }];
+        all.extend(rest);
+        WorkspaceList {
+            startup: self.workspaces.startup.clone(),
+            roots: self.workspaces.admitted.clone(),
+            loaded: all,
+        }
+    }
+
+    async fn load_workspace(
+        &self,
+        path: &str,
+    ) -> Result<(WorkspaceInfo, bool), WorkspaceLoadError> {
+        if !path.starts_with('/') {
+            return Err(WorkspaceLoadError::Invalid(format!(
+                "{path}: not an existing directory"
+            )));
+        }
+        if path != self.workspaces.startup
+            && !self.workspaces.admitted.contains(&path.to_string())
+            && !self
+                .workspaces
+                .trusted
+                .lock()
+                .expect("trusted")
+                .contains(&path.to_string())
+        {
+            return Err(WorkspaceLoadError::NotAdmitted(format!(
+                "{path}: outside the startup workspace and configured roots"
+            )));
+        }
+        let mut loaded = self.workspaces.loaded.lock().await;
+        if let Some(workflows) = loaded.get(path) {
+            return Ok((
+                WorkspaceInfo {
+                    path: path.to_string(),
+                    workflows: *workflows,
+                },
+                false,
+            ));
+        }
+        if let Some((error_path, message)) = &self.workspaces.error
+            && error_path == path
+        {
+            return Err(WorkspaceLoadError::Failed(message.clone()));
+        }
+        if let Some(gate) = &self.workspaces.gate {
+            gate.cancelled().await;
+        }
+        loaded.insert(path.to_string(), true);
+        Ok((
+            WorkspaceInfo {
+                path: path.to_string(),
+                workflows: true,
+            },
+            true,
+        ))
+    }
+
+    async fn trust_workspace(&self, path: &str) -> Result<(), WorkspaceLoadError> {
+        if !path.starts_with('/') {
+            return Err(WorkspaceLoadError::Invalid(format!(
+                "{path}: not an existing directory"
+            )));
+        }
+        self.workspaces
+            .trusted
+            .lock()
+            .expect("trusted")
+            .push(path.to_string());
+        Ok(())
+    }
+
+    fn browse_roots(&self) -> Vec<std::path::PathBuf> {
+        self.workspaces.browse_roots.clone()
+    }
+
+    async fn remove_workspace(&self, path: &str) -> Result<(), WorkspaceRemoveError> {
+        if path == self.workspaces.startup {
+            return Err(WorkspaceRemoveError::IsStartup);
+        }
+        if self.workspaces.in_use.as_deref() == Some(path) {
+            return Err(WorkspaceRemoveError::InUse(
+                "an active workflow run".to_string(),
+            ));
+        }
+        let mut loaded = self.workspaces.loaded.lock().await;
+        if loaded.remove(path).is_none() {
+            return Err(WorkspaceRemoveError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn workflow_controller(
+        &self,
+        workspace: Option<&str>,
+    ) -> Option<Arc<crate::workflow::Controller>> {
+        let path = workspace.unwrap_or(&self.builder.workspace_path);
+        self.workflows.get(path).cloned()
+    }
+
+    async fn workflow_controllers(&self) -> Vec<Arc<crate::workflow::Controller>> {
+        let startup = &self.builder.workspace_path;
+        let mut rest: Vec<(&String, &Arc<crate::workflow::Controller>)> = self
+            .workflows
+            .iter()
+            .filter(|(path, _)| *path != startup)
+            .collect();
+        rest.sort_by(|a, b| a.0.cmp(b.0));
+        let mut all = Vec::with_capacity(self.workflows.len());
+        if let Some(controller) = self.workflows.get(startup) {
+            all.push(Arc::clone(controller));
+        }
+        all.extend(
+            rest.into_iter()
+                .map(|(_, controller)| Arc::clone(controller)),
+        );
+        all
+    }
+
+    fn sandbox_reload_available(&self) -> bool {
+        self.sandbox_reload.is_some()
+    }
+
+    async fn reload_sandbox(&self) -> Option<Result<SandboxInfo, String>> {
+        self.sandbox_reload.clone()
+    }
+
+    async fn reload_other_sandboxes(&self) -> Vec<(String, Result<SandboxInfo, String>)> {
+        self.sandbox_reload_others.clone()
+    }
+
+    async fn diff_runner(
+        &self,
+        workspace: &str,
+    ) -> Option<(Arc<dyn crate::sandbox::CommandExecutor>, Vec<String>)> {
+        if workspace == self.workspaces.startup {
+            self.diff_runner.clone()
+        } else {
+            None
+        }
+    }
+}
+
+// ---- the harness ----
+
+/// A `Vec<u8>` the test reads back after the logger wrote to it.
+struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct HarnessOptions {
+    script: Script,
+    fixed_id: Option<String>,
+    create_error: Option<String>,
+    open_error: Option<String>,
+    open_gate: Option<CancellationToken>,
+    list: Option<ListResult>,
+    list_by_workspace: HashMap<String, ListResult>,
+    tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
+    task_recorder: Option<Arc<crate::subagent::record::Store>>,
+    workflows: Option<Arc<crate::workflow::Controller>>,
+    /// Extra workflow controllers keyed by workspace path, for a second
+    /// (non-startup) workspace's workflow routes.
+    workflow_workspaces: HashMap<String, Arc<crate::workflow::Controller>>,
+    /// `startup` is always overwritten with the harness's own workspace;
+    /// set `admitted`/`error`/`gate` for `/v1/workspaces` tests.
+    workspaces: FakeWorkspaces,
+    sandbox_reload: Option<Result<SandboxInfo, String>>,
+    sandbox_reload_others: Vec<(String, Result<SandboxInfo, String>)>,
+    /// Canned `Factory::diff_runner` answer for the startup workspace.
+    diff_runner: Option<(Arc<dyn crate::sandbox::CommandExecutor>, Vec<String>)>,
+    /// The startup workspace directory. Defaults to a fresh, empty temp
+    /// directory; a test that runs real git commands (through a real
+    /// `CommandExecutor`) sets this to the directory it initialized a
+    /// repository in.
+    workspace: Option<TempDir>,
+    token: String,
+    info: Info,
+    /// Initial config.toml bytes for config-management route tests.
+    config_text: Option<String>,
+    disabled_skills: Vec<String>,
+    skills_enabled: Option<bool>,
+    /// Registers the approval store and the `bash` double that
+    /// [`Script::tool_command`] calls.
+    elevate: bool,
+    /// Gives the builder a reflector backed by this store, with the
+    /// directory as its home, so `~/.otto/skills` is `<home>/.otto/skills`.
+    reflection: Option<(Arc<crate::reflection::Store>, std::path::PathBuf)>,
+    /// The scheduled-delivery store behind `/v1/schedule/*`.
+    schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
+    /// Backs every session with a real session file instead of memory.
+    persistent: bool,
+    /// `[server].session_idle_timeout` for the harness's server, as the
+    /// resolved runtime holds it. `None` (the default) never closes a
+    /// session for being idle.
+    session_idle_timeout: Option<Duration>,
+    /// `[server].max_open_sessions` for the harness's server. `None` (the
+    /// default) keeps every open session.
+    max_open_sessions: Option<usize>,
+}
+
+struct Harness {
+    _workspace: TempDir,
+    _sessions: TempDir,
+    server: Arc<Server>,
+    router: Router,
+    factory: Arc<TestFactory>,
+    provider: Arc<ScriptedProvider>,
+    log: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        Self::with(HarnessOptions::default())
+    }
+
+    async fn restart(&mut self) {
+        self.server.close().await.expect("close server");
+        let server = Server::new(Options {
+            factory: Arc::clone(&self.factory) as Arc<dyn Factory>,
+            info: Info {
+                workspace: self.factory.builder.workspace_path.clone(),
+                ..Info::default()
+            },
+            config_path: self.factory.builder.shared.config_path.clone(),
+            token: String::new(),
+            logger: Some(Arc::new(Logger::discard())),
+            workflows: None,
+            schedule: None,
+            session_idle_timeout: None,
+            max_open_sessions: None,
+        });
+        self.router = server.router();
+        self.server = server;
+    }
+
+    fn with(options: HarnessOptions) -> Self {
+        let workspace = options
+            .workspace
+            .unwrap_or_else(|| tempfile::tempdir().expect("workspace"));
+        let sessions = tempfile::tempdir().expect("sessions");
+        // Canonicalized so a real `sandbox::Executor` bound to the same
+        // directory (a test's `diff_runner` against a real git
+        // repository) accepts it: `Executor::valid_directory` requires
+        // an already-canonical path, and macOS's `$TMPDIR` is a symlink.
+        let canonical_workspace = std::fs::canonicalize(workspace.path())
+            .unwrap_or_else(|_| workspace.path().to_path_buf());
+        let mut builder = testutil::builder(&canonical_workspace, sessions.path());
+        if let Some((store, home)) = &options.reflection {
+            let skills_root = home.join(".otto/skills");
+            builder.shared_mut().home = home.to_string_lossy().into_owned();
+            builder.shared_mut().config.skills.paths =
+                Some(vec![skills_root.to_string_lossy().into_owned()]);
+            builder.shared_mut().reflector = Arc::new(
+                crate::reflection::Reflector::new(
+                    otto_core::config::ReflectionRuntime::default(),
+                    Some(Arc::clone(store)),
+                )
+                .with_log_dir(home.join(".otto/reflection/runs")),
+            );
+        }
+        builder
+            .shared_mut()
+            .config
+            .skills
+            .disabled
+            .extend(options.disabled_skills);
+        if options.elevate {
+            let executor = crate::sandbox::Executor::new(
+                Arc::new(crate::sandbox::direct::DirectDriver::new()),
+                crate::sandbox::Policy {
+                    filesystem: crate::sandbox::FilesystemMode::Unconfined,
+                    network: crate::sandbox::NetworkMode::Allow,
+                },
+                &canonical_workspace,
+            )
+            .expect("executor");
+            builder.bash_approvals = Some(Arc::new(crate::tool::bash::BashApprovals::new(
+                Arc::new(executor),
+                Vec::new(),
+            )));
+        }
+        builder.shared_mut().config.skills.enabled = options.skills_enabled;
+        if let Some(config_text) = &options.config_text {
+            std::fs::write(&builder.shared.config_path, config_text).expect("write config fixture");
+        }
+        builder.shared_mut().schedule = options.schedule.clone();
+        let builder = Arc::new(builder);
+        let provider = ScriptedProvider::new(options.script);
+        // Production always sets `Options.info.workspace` from the same
+        // path as the startup workspace (`cli/serve.rs`); match that here
+        // unless a test explicitly overrides `info` to check the field
+        // itself (e.g. `the_info_endpoint_echoes_the_configured_info`).
+        let mut info = options.info;
+        if info.workspace.is_empty() {
+            info.workspace = builder.workspace_path.clone();
+        }
+        let mut workspaces = options.workspaces;
+        workspaces.startup = builder.workspace_path.clone();
+        let mut workflows = options.workflow_workspaces;
+        if let Some(controller) = &options.workflows {
+            workflows.insert(builder.workspace_path.clone(), Arc::clone(controller));
+        }
+        let factory = Arc::new(TestFactory {
+            builder,
+            provider: Arc::clone(&provider),
+            fixed_id: options.fixed_id,
+            create_error: options.create_error,
+            open_error: options.open_error,
+            open_gate: options.open_gate,
+            list: options.list,
+            list_by_workspace: options.list_by_workspace,
+            tasks: options.tasks,
+            task_recorder: options.task_recorder,
+            workspaces,
+            workflows,
+            sandbox_reload: options.sandbox_reload,
+            sandbox_reload_others: options.sandbox_reload_others,
+            diff_runner: options.diff_runner,
+            persistent: options.persistent,
+            create_calls: AtomicUsize::new(0),
+            open_calls: AtomicUsize::new(0),
+        });
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let server = Server::new(Options {
+            factory: Arc::clone(&factory) as Arc<dyn Factory>,
+            info,
+            config_path: factory.builder.shared.config_path.clone(),
+            token: options.token,
+            logger: Some(Arc::new(Logger::new(Box::new(SharedSink(Arc::clone(
+                &log,
+            )))))),
+            workflows: options.workflows,
+            schedule: options.schedule,
+            session_idle_timeout: options.session_idle_timeout,
+            max_open_sessions: options.max_open_sessions,
+        });
+        let router = server.router();
+        Self {
+            _workspace: workspace,
+            _sessions: sessions,
+            server,
+            router,
+            factory,
+            provider,
+            log,
+        }
+    }
+
+    /// One request through the real router. `tower`'s `oneshot` needs no
+    /// socket, so these tests run with no network access at all.
+    async fn raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        headers: &[(&str, &[u8])],
+    ) -> Response {
+        let mut request = Request::builder().method(method).uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let request = request
+            .body(body.map_or_else(Body::empty, |text| Body::from(text.to_string())))
+            .expect("request");
+        self.router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("infallible")
+    }
+
+    async fn send(&self, method: &str, path: &str, body: Option<&str>) -> Reply {
+        self.send_with(method, path, body, &[]).await
+    }
+
+    async fn send_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        headers: &[(&str, &[u8])],
+    ) -> Reply {
+        let response = self.raw(method, path, body, headers).await;
+        let status = response.status();
+        let head = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        Reply {
+            status,
+            headers: head,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        }
+    }
+
+    async fn create(&self) -> String {
+        let reply = self.send("POST", "/v1/sessions", None).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        reply.json()["id"].as_str().expect("id").to_string()
+    }
+
+    fn logged(&self) -> String {
+        String::from_utf8_lossy(&self.log.lock().unwrap_or_else(|poison| poison.into_inner()))
+            .into_owned()
+    }
+
+    async fn metrics_body(&self) -> String {
+        self.send("GET", "/metrics", None).await.body
+    }
+
+    /// Polls the turn until it leaves `running`.
+    async fn wait_turn_done(&self, session: &str, turn_id: &str) -> Value {
+        for _ in 0..600 {
+            let body = self
+                .send(
+                    "GET",
+                    &format!("/v1/sessions/{session}/turns/{turn_id}"),
+                    None,
+                )
+                .await
+                .json();
+            if body["status"] != turn::TURN_RUNNING && body["status"] != turn::TURN_QUEUED {
+                return body;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("turn {turn_id} did not finish in time");
+    }
+
+    /// Waits for the turn object itself, for the paths that have no HTTP
+    /// route left (a deleted session, a closed server).
+    async fn wait_done(turn: &Arc<Turn>) {
+        for _ in 0..600 {
+            if turn.is_done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("turn did not finish in time");
+    }
+
+    fn active_turn(&self, id: &str) -> Arc<Turn> {
+        self.server
+            .lookup(id)
+            .and_then(|session| session.current_turn())
+            .expect("an active turn")
+    }
+}
+
+struct Reply {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: String,
+}
+
+impl Reply {
+    fn json(&self) -> Value {
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|error| panic!("decode {:?}: {error}", self.body))
+    }
+
+    fn header(&self, name: &str) -> &str {
+        self.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+    }
+}
+
+// ---- the SSE reader ----
+
+/// Reads frames off a streaming body with the same splitter the browser
+/// client uses ([`parse_frames`]), so a framing change fails here too.
+struct SseReader {
+    stream: axum::body::BodyDataStream,
+    rest: String,
+    pending: std::collections::VecDeque<Frame>,
+}
+
+impl SseReader {
+    fn new(response: Response) -> Self {
+        Self {
+            stream: response.into_body().into_data_stream(),
+            rest: String::new(),
+            pending: std::collections::VecDeque::new(),
+        }
+    }
+
+    async fn next(&mut self) -> Option<Frame> {
+        loop {
+            if let Some(frame) = self.pending.pop_front() {
+                return Some(frame);
+            }
+            let chunk = self.stream.next().await?.expect("chunk");
+            self.rest.push_str(&String::from_utf8_lossy(&chunk));
+            let parsed = parse_frames(&self.rest);
+            self.rest = parsed.rest;
+            self.pending.extend(parsed.frames);
+        }
+    }
+
+    async fn all(mut self) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        while let Some(frame) = self.next().await {
+            frames.push(frame);
+        }
+        frames
+    }
+}
+
+/// Starts a streaming turn and returns its reader plus the turn id, read
+/// out of the `agent_started` frame that follows the leading `user_message` frame.
+async fn start_stream(harness: &Harness, session: &str) -> (SseReader, String) {
+    let response = harness
+        .raw(
+            "POST",
+            &format!("/v1/sessions/{session}/turns"),
+            Some(r#"{"text":"hi"}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let header_id = response
+        .headers()
+        .get("otto-turn-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("Otto-Turn-Id header")
+        .to_string();
+    let mut reader = SseReader::new(response);
+    let user = reader.next().await.expect("user_message frame");
+    assert_eq!(user.event, "user_message");
+    assert_eq!(user.id, Some(0));
+    let first = reader.next().await.expect("agent_started frame");
+    assert_eq!(first.event, "agent_started");
+    assert_eq!(first.id, Some(1));
+    let data: Value = serde_json::from_str(&first.data).expect("frame data");
+    let turn_id = data["turn_id"].as_str().expect("turn_id").to_string();
+    assert_eq!(turn_id, header_id);
+    (reader, turn_id)
+}
+
+fn gated() -> (CancellationToken, HarnessOptions) {
+    let gate = CancellationToken::new();
+    (
+        gate.clone(),
+        HarnessOptions {
+            script: Script {
+                // One delta so the buffer holds a sequence 1 while the
+                // gate is shut; several tests resume from it.
+                deltas: vec!["...".to_string()],
+                gate: Some(gate),
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        },
+    )
+}
+
+// ---- sessions ----
+
+#[tokio::test]
+async fn renaming_a_session_updates_the_session_and_the_list() {
+    let harness = Harness::with(HarnessOptions {
+        list: Some(ListResult::default()),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+
+    let reply = harness
+        .send(
+            "PATCH",
+            &format!("/v1/sessions/{id}"),
+            Some(r#"{"name":"dev"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["name"], "dev");
+
+    let list = harness.send("GET", "/v1/sessions", None).await.json();
+    assert_eq!(list["sessions"].as_array().expect("rows").len(), 1);
+    assert_eq!(list["sessions"][0]["name"], "dev");
+}
+
+#[tokio::test]
+async fn renaming_rejects_an_unknown_session_and_a_blank_name() {
+    let harness = Harness::new();
+    let reply = harness
+        .send("PATCH", "/v1/sessions/missing", Some(r#"{"name":"dev"}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+    let id = harness.create().await;
+    let reply = harness
+        .send(
+            "PATCH",
+            &format!("/v1/sessions/{id}"),
+            Some(r#"{"name":" \t"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.json()["error"]["code"], "bad_request");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_turns_survive_a_shutdown_and_run_once_in_order_after_reopen() {
+    let (gate, options) = gated();
+    let harness = Harness::with(HarnessOptions {
+        persistent: true,
+        ..options
+    });
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/turns");
+    // The first turn holds the session at the gate; two more queue.
+    let first = post_turn(&harness, &id, "running", false).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+        .await
+        .expect("first turn started");
+    let mut queued = Vec::new();
+    for body in [
+        r#"{"text":"second","queue":true,"input_id":"req-2"}"#,
+        r#"{"text":"third","queue":true}"#,
+    ] {
+        let reply = harness.raw("POST", &path, Some(body), &[]).await;
+        assert_eq!(reply.status(), StatusCode::OK);
+        let turn_id = reply
+            .headers()
+            .get("otto-turn-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("turn id")
+            .to_string();
+        let summary = harness
+            .send("GET", &format!("{path}/{turn_id}"), None)
+            .await
+            .json();
+        assert_eq!(summary["status"], turn::TURN_QUEUED, "{summary}");
+        queued.push(turn_id);
+    }
+
+    // A shutdown cancels the running turn and ends the queued ones
+    // `canceled` in memory, but keeps their saved copies.
+    let session = harness.server.lookup(&id).expect("session");
+    session.cancel_work();
+    let removed = harness.server.remove(&id).expect("registered");
+    let ctrl = Arc::clone(&removed.ctrl);
+    tokio::task::spawn_blocking(move || ctrl.close())
+        .await
+        .unwrap()
+        .expect("close");
+    gate.cancel();
+    let calls_before = harness.provider.texts().len();
+
+    // Reopening the session restores and runs them, keeping their ids.
+    let reopened = harness
+        .send(
+            "POST",
+            "/v1/sessions",
+            Some(&serde_json::json!({ "resume": id }).to_string()),
+        )
+        .await;
+    assert_eq!(reopened.status, StatusCode::OK, "{}", reopened.body);
+    // Only the newest turn is retained, so wait on the last one; the
+    // provider calls show both ran, in order.
+    let done = harness.wait_turn_done(&id, &queued[1]).await;
+    assert_eq!(done["status"], turn::TURN_OK, "{done}");
+    let texts = harness.provider.texts();
+    assert_eq!(texts[calls_before..], ["second", "third"], "{texts:?}");
+
+    // The first restored turn delivered the restore notice first.
+    let history = harness
+        .send("GET", &format!("/v1/sessions/{id}/history"), None)
+        .await
+        .json();
+    let history: Vec<String> = history
+        .as_array()
+        .expect("history")
+        .iter()
+        .map(|message| {
+            message["blocks"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    let notice = history
+        .iter()
+        .position(|text| text.contains("Otto stopped before 2 queued prompts"))
+        .expect("restore notice");
+    let second = history
+        .iter()
+        .position(|text| text == "second")
+        .expect("second");
+    assert!(notice < second, "{history:?}");
+
+    // A retry returns the restored turn, and nothing waits any more.
+    let retry = harness
+        .raw(
+            "POST",
+            &path,
+            Some(r#"{"text":"second","queue":true,"input_id":"req-2"}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        retry
+            .headers()
+            .get("otto-turn-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(queued[0].as_str()),
+        "the retry returns the restored turn"
+    );
+    assert_eq!(
+        harness.provider.texts().len(),
+        calls_before + 2,
+        "and runs nothing"
+    );
+    let session = harness.server.lookup(&id).expect("session");
+    assert!(
+        session
+            .ctrl
+            .turn_queue()
+            .expect("journal")
+            .pending()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_or_deleted_queued_turn_is_not_restored() {
+    let (gate, options) = gated();
+    let harness = Harness::with(HarnessOptions {
+        persistent: true,
+        ..options
+    });
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/turns");
+    let _running = post_turn(&harness, &id, "running", false).await;
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+        .await
+        .expect("first turn started");
+    let queued = post_turn(&harness, &id, "cancel me", true).await;
+    let queued_id = queued
+        .headers()
+        .get("otto-turn-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("turn id")
+        .to_string();
+    let kept = post_turn(&harness, &id, "delete me", true).await;
+    assert_eq!(kept.status(), StatusCode::OK);
+    let session = harness.server.lookup(&id).expect("session");
+    let journal = session.ctrl.turn_queue().expect("journal");
+    assert_eq!(journal.pending().len(), 2);
+
+    let cancel = harness
+        .send("POST", &format!("{path}/{queued_id}/cancel"), None)
+        .await;
+    assert_eq!(cancel.status, StatusCode::ACCEPTED);
+    assert_eq!(
+        journal
+            .pending()
+            .iter()
+            .map(|prompt| prompt.text.as_str())
+            .collect::<Vec<_>>(),
+        ["delete me"]
+    );
+
+    let deleted = harness
+        .send("DELETE", &format!("/v1/sessions/{id}"), None)
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    gate.cancel();
+    assert!(journal.pending().is_empty());
+}
+
+/// Runs one turn on `session` to completion.
+async fn complete_turn(harness: &Harness, session: &str, text: &str) {
+    let response = post_turn(harness, session, text, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let turn_id = response
+        .headers()
+        .get("otto-turn-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("Otto-Turn-Id header")
+        .to_string();
+    SseReader::new(response).all().await;
+    let summary = harness.wait_turn_done(session, &turn_id).await;
+    assert_eq!(summary["status"], turn::TURN_OK, "{summary}");
+}
+
+// ---- idle eviction ----
+
+#[test]
+fn a_session_route_names_a_session_id_and_nothing_else() {
+    let id = "0123456789abcdef0123456789abcdef";
+    assert_eq!(session_id_in_path(&format!("/v1/sessions/{id}")), Some(id));
+    assert_eq!(
+        session_id_in_path(&format!("/v1/sessions/{id}/turns/{id}/events")),
+        Some(id)
+    );
+    for path in [
+        "/v1/sessions",
+        "/v1/sessions/",
+        "/v1/sessions/missing",
+        "/v1/sessions/missing/history",
+        // Uppercase and non-hex ids are not session ids.
+        "/v1/sessions/0123456789ABCDEF0123456789ABCDEF/history",
+        "/v1/tasks/s1/with-transcript",
+        "/v1/approvals/changes?session_id=1",
+        "/healthz",
+    ] {
+        assert_eq!(session_id_in_path(path), None, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn an_idle_session_is_evicted_and_its_next_request_opens_it_again() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["answer".to_string()],
+            ..Script::default()
+        },
+        persistent: true,
+        session_idle_timeout: Some(Duration::ZERO),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    complete_turn(&harness, &id, "first").await;
+    let history = harness
+        .send("GET", &format!("/v1/sessions/{id}/history"), None)
+        .await
+        .json();
+
+    // Idle for any length of time: the session closes and leaves the
+    // registry, which is what keeps a long-lived server bounded.
+    let evicted = harness.server.sweep_idle_sessions().await;
+    assert_eq!(evicted, vec![id.clone()]);
+    assert!(harness.server.lookup(&id).is_none());
+    let metrics = harness.metrics_body().await;
+    assert!(metrics.contains("otto_sessions_open 0"), "{metrics}");
+    assert!(
+        metrics.contains("otto_sessions_evicted_total 1"),
+        "{metrics}"
+    );
+
+    // The client still holds the id: the next request re-opens the session
+    // from disk and answers exactly as it did before the eviction.
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/history"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json(), history);
+    assert!(harness.server.lookup(&id).is_some());
+    let metrics = harness.metrics_body().await;
+    assert!(metrics.contains("otto_sessions_open 1"), "{metrics}");
+}
+
+#[tokio::test]
+async fn an_evicted_session_keeps_accepting_turns_over_its_own_routes() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["answer".to_string()],
+            ..Script::default()
+        },
+        persistent: true,
+        session_idle_timeout: Some(Duration::ZERO),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    complete_turn(&harness, &id, "first").await;
+    assert_eq!(harness.server.sweep_idle_sessions().await, vec![id.clone()]);
+
+    complete_turn(&harness, &id, "second").await;
+    let history = harness
+        .send("GET", &format!("/v1/sessions/{id}/history"), None)
+        .await
+        .json();
+    let texts: Vec<&str> = history
+        .as_array()
+        .expect("history")
+        .iter()
+        .filter_map(|message| message["blocks"][0]["text"].as_str())
+        .collect();
+    assert_eq!(texts, ["first", "answer", "second", "answer"], "{history}");
+}
+
+#[tokio::test]
+async fn a_closed_session_is_not_re_opened_by_a_later_request() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let deleted = harness
+        .send("DELETE", &format!("/v1/sessions/{id}"), None)
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+
+    // The client closed this one itself: closing it must keep winning, so
+    // eviction stays the only state a request re-opens.
+    for path in [
+        format!("/v1/sessions/{id}"),
+        format!("/v1/sessions/{id}/history"),
+    ] {
+        let reply = harness.send("GET", &path, None).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert!(harness.server.lookup(&id).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_with_a_running_turn_is_never_evicted() {
+    let (gate, mut options) = gated();
+    options.session_idle_timeout = Some(Duration::ZERO);
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    assert!(harness.server.sweep_idle_sessions().await.is_empty());
+    assert!(harness.server.lookup(&id).is_some());
+    gate.cancel();
+}
+
+#[tokio::test]
+async fn a_pinned_session_is_never_evicted_until_the_holder_releases_it() {
+    let harness = Harness::with(HarnessOptions {
+        session_idle_timeout: Some(Duration::ZERO),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    assert!(harness.server.pin_session(&id));
+    assert!(harness.server.sweep_idle_sessions().await.is_empty());
+
+    harness.server.unpin_session(&id);
+    assert_eq!(harness.server.sweep_idle_sessions().await, vec![id.clone()]);
+}
+
+#[tokio::test]
+async fn the_sweep_closes_the_least_recently_active_sessions_over_the_cap() {
+    const CAP: usize = 3;
+    let harness = Harness::with(HarnessOptions {
+        // Nothing is old enough to be idle, so only the cap applies.
+        session_idle_timeout: Some(Duration::from_secs(3600)),
+        max_open_sessions: Some(CAP),
+        ..HarnessOptions::default()
+    });
+    let mut ids = Vec::new();
+    for _ in 0..(CAP + 2) {
+        ids.push(harness.create().await);
+    }
+    // A request on the first session makes it the most recently active one,
+    // which the cap must leave open. The sleep separates its stamp from the
+    // creation stamps.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let touched = harness
+        .send("GET", &format!("/v1/sessions/{}", ids[0]), None)
+        .await;
+    assert_eq!(touched.status, StatusCode::OK);
+
+    let evicted = harness.server.sweep_idle_sessions().await;
+    assert_eq!(evicted.len(), 2, "{evicted:?}");
+    assert!(!evicted.contains(&ids[0]), "{evicted:?}");
+    assert_eq!(harness.server.all_sessions().len(), CAP);
+    assert_eq!(
+        harness.server.sweep_idle_sessions().await,
+        Vec::<String>::new()
+    );
+}
+
+#[tokio::test]
+async fn a_sweep_with_no_limits_closes_nothing() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    assert!(harness.server.sweep_idle_sessions().await.is_empty());
+    assert!(harness.server.lookup(&id).is_some());
+
+    // An idle window with no cap still closes an aged session.
+    let timed = Harness::with(HarnessOptions {
+        session_idle_timeout: Some(Duration::ZERO),
+        ..HarnessOptions::default()
+    });
+    let id = timed.create().await;
+    assert_eq!(timed.server.sweep_idle_sessions().await, vec![id]);
+}
+
+#[tokio::test]
+async fn forking_a_session_opens_a_copy_before_the_chosen_prompt() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["answer".to_string()],
+            ..Script::default()
+        },
+        persistent: true,
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    complete_turn(&harness, &id, "first").await;
+    complete_turn(&harness, &id, "second").await;
+
+    let points = harness
+        .send("GET", &format!("/v1/sessions/{id}/fork-points"), None)
+        .await;
+    assert_eq!(points.status, StatusCode::OK, "{}", points.body);
+    let points = points.json()["fork_points"].clone();
+    assert_eq!(points[0]["prompt"], "first");
+    assert_eq!(points[1]["prompt"], "second");
+    let second = points[1]["entry_id"]
+        .as_str()
+        .expect("entry id")
+        .to_string();
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/fork"),
+            Some(&serde_json::json!({ "before": second }).to_string()),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let fork = reply.json();
+    let fork_id = fork["id"].as_str().expect("fork id").to_string();
+    assert_ne!(fork_id, id);
+    assert_eq!(fork["prompt"], "second");
+    assert_eq!(fork["forked_from"]["session_id"], id.as_str());
+    assert_eq!(fork["forked_from"]["entry_id"], second.as_str());
+
+    let history = harness
+        .send("GET", &format!("/v1/sessions/{fork_id}/history"), None)
+        .await
+        .json();
+    let texts: Vec<&str> = history
+        .as_array()
+        .expect("history")
+        .iter()
+        .filter_map(|message| message["blocks"][0]["text"].as_str())
+        .collect();
+    assert_eq!(texts, ["first", "answer"]);
+    let source = harness
+        .send("GET", &format!("/v1/sessions/{id}"), None)
+        .await
+        .json();
+    assert!(source.get("forked_from").is_none(), "{source}");
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/fork"),
+            Some(r#"{"before":"ffffffff"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "invalid_fork_point");
+}
+
+#[tokio::test]
+async fn session_create_retry_returns_the_original_after_restart() {
+    let mut harness = Harness::with(HarnessOptions {
+        persistent: true,
+        ..HarnessOptions::default()
+    });
+    let body = r#"{"request_id":"create-1"}"#;
+    let first = harness.send("POST", "/v1/sessions", Some(body)).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    let id = first.json()["id"].as_str().unwrap().to_string();
+    let file = crate::session::session_directory(
+        std::path::Path::new(&harness.factory.builder.session_root),
+        &harness.factory.builder.workspace_path,
+    )
+    .unwrap()
+    .join(format!("{id}.jsonl"));
+    assert!(
+        file.is_file(),
+        "the acknowledgement requires a durable receipt"
+    );
+    let retry = harness.send("POST", "/v1/sessions", Some(body)).await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(retry.json()["id"], id);
+    assert_eq!(harness.factory.create_calls.load(Ordering::SeqCst), 1);
+
+    harness.restart().await;
+    let retry = harness.send("POST", "/v1/sessions", Some(body)).await;
+    assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+    assert_eq!(retry.json()["id"], id);
+    assert_eq!(harness.factory.create_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn concurrent_session_create_retries_create_once() {
+    let harness = Harness::with(HarnessOptions {
+        persistent: true,
+        ..HarnessOptions::default()
+    });
+    let body = r#"{"request_id":"create-concurrent"}"#;
+    let (a, b) = tokio::join!(
+        harness.send("POST", "/v1/sessions", Some(body)),
+        harness.send("POST", "/v1/sessions", Some(body)),
+    );
+    assert_eq!(
+        [a.status, b.status]
+            .into_iter()
+            .filter(|status| *status == StatusCode::CREATED)
+            .count(),
+        1
+    );
+    assert_eq!(a.json()["id"], b.json()["id"]);
+    assert_eq!(harness.factory.create_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn create_retry_repairs_a_header_written_before_its_receipt() {
+    let harness = Harness::with(HarnessOptions {
+        persistent: true,
+        ..HarnessOptions::default()
+    });
+    let id = command_session_id(
+        "create",
+        &harness.factory.builder.workspace_path,
+        "partial-1",
+    );
+    let header = Header {
+        version: CURRENT_VERSION,
+        id: id.clone(),
+        workspace: harness.factory.builder.workspace_path.clone(),
+        provider: "openai-compatible".into(),
+        profile: "alpha".into(),
+        model: "test-model".into(),
+        created_at: chrono::Utc::now(),
+    };
+    crate::session::Store::create(&harness.factory.builder.session_root, header)
+        .expect("header written")
+        .close()
+        .expect("close partial file");
+    let response = harness
+        .send(
+            "POST",
+            "/v1/sessions",
+            Some(r#"{"request_id":"partial-1"}"#),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.json()["id"], id);
+    assert!(
+        harness
+            .server
+            .lookup(&id)
+            .unwrap()
+            .ctrl
+            .session_custom_data("otto.session_command")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_fork_retries_publish_one_copy() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["answer".into()],
+            ..Script::default()
+        },
+        persistent: true,
+        ..HarnessOptions::default()
+    });
+    let source = harness.create().await;
+    complete_turn(&harness, &source, "first").await;
+    let path = format!("/v1/sessions/{source}/fork");
+    let body = r#"{"request_id":"fork-concurrent"}"#;
+    let (a, b) = tokio::join!(
+        harness.send("POST", &path, Some(body)),
+        harness.send("POST", &path, Some(body)),
+    );
+    assert_eq!(
+        [a.status, b.status]
+            .into_iter()
+            .filter(|status| *status == StatusCode::CREATED)
+            .count(),
+        1
+    );
+    assert_eq!(a.json()["id"], b.json()["id"]);
+}
+
+#[tokio::test]
+async fn fork_retry_returns_one_copy_and_rejects_changed_arguments() {
+    let mut harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["answer".into()],
+            ..Script::default()
+        },
+        persistent: true,
+        ..HarnessOptions::default()
+    });
+    let source = harness.create().await;
+    complete_turn(&harness, &source, "first").await;
+    complete_turn(&harness, &source, "second").await;
+    let points = harness
+        .send("GET", &format!("/v1/sessions/{source}/fork-points"), None)
+        .await
+        .json();
+    let before = points["fork_points"][1]["entry_id"].as_str().unwrap();
+    let body = serde_json::json!({"before":before,"request_id":"fork-1"}).to_string();
+    let path = format!("/v1/sessions/{source}/fork");
+    let first = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    let fork_id = first.json()["id"].as_str().unwrap().to_string();
+    let retry = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+    assert_eq!(retry.json()["id"], fork_id);
+    assert_eq!(retry.json()["prompt"], "second");
+    complete_turn(&harness, &source, "third").await;
+    let retry_after_source_changed = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(retry_after_source_changed.status, StatusCode::OK);
+    assert_eq!(retry_after_source_changed.json()["id"], fork_id);
+    let changed = serde_json::json!({"request_id":"fork-1"}).to_string();
+    let conflict = harness.send("POST", &path, Some(&changed)).await;
+    assert_eq!(conflict.status, StatusCode::CONFLICT);
+    assert_eq!(conflict.json()["error"]["code"], "request_id_conflict");
+    let other_source = harness.create().await;
+    complete_turn(&harness, &other_source, "other").await;
+    let wrong_source = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{other_source}/fork"),
+            Some(&changed),
+        )
+        .await;
+    assert_eq!(wrong_source.status, StatusCode::CONFLICT);
+    assert_eq!(wrong_source.json()["error"]["code"], "request_id_conflict");
+
+    harness.restart().await;
+    let retry = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+    assert_eq!(retry.json()["id"], fork_id);
+}
+
+#[tokio::test]
+async fn forking_an_unknown_or_unwritten_session_is_refused() {
+    let harness = Harness::new();
+    let reply = harness
+        .send("POST", "/v1/sessions/missing/fork", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+    // A session with no file has nothing to fork.
+    let id = harness.create().await;
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/fork"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "invalid_fork_point");
+    let points = harness
+        .send("GET", &format!("/v1/sessions/{id}/fork-points"), None)
+        .await;
+    assert_eq!(points.status, StatusCode::OK);
+    assert_eq!(points.json()["fork_points"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn an_update_plan_call_streams_plan_updated_and_sets_the_session_plan() {
+    let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["done".to_string()],
+                plan_call: Some(
+                    r#"{"steps":[{"text":"read","status":"completed"},{"text":"write","status":"in_progress"}]}"#
+                        .to_string(),
+                ),
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+    let id = harness.create().await;
+    let created = harness
+        .send("GET", &format!("/v1/sessions/{id}"), None)
+        .await
+        .json();
+    assert!(created.get("plan").is_none(), "{created}");
+
+    let response = post_turn(&harness, &id, "plan it", false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let frames = SseReader::new(response).all().await;
+    let plan = frames
+        .iter()
+        .find(|frame| frame.event == "plan_updated")
+        .expect("plan_updated frame");
+    let data: Value = serde_json::from_str(&plan.data).expect("frame data");
+    let steps = serde_json::json!([
+        {"text": "read", "status": "completed"},
+        {"text": "write", "status": "in_progress"}
+    ]);
+    assert_eq!(data["steps"], steps);
+
+    let session = harness
+        .send("GET", &format!("/v1/sessions/{id}"), None)
+        .await
+        .json();
+    assert_eq!(session["plan"], steps, "{session}");
+}
+
+#[tokio::test]
+async fn creating_a_session_answers_201_and_counts_one_open_session() {
+    let harness = Harness::new();
+    let reply = harness.send("POST", "/v1/sessions", None).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.header("content-type"), "application/json");
+
+    let body = reply.json();
+    assert!(!body["id"].as_str().expect("id").is_empty());
+    assert_eq!(body["provider"], "openai-compatible");
+    assert_eq!(body["model"], "test-model");
+    assert_eq!(body["context_window"], 128_000);
+    assert!(body["sandbox"]["summary"].as_str().is_some());
+
+    assert!(
+        harness
+            .metrics_body()
+            .await
+            .contains("otto_sessions_open 1")
+    );
+    let health = harness.send("GET", "/healthz", None).await.json();
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["sessions_open"], 1);
+    assert_eq!(harness.factory.create_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn metrics_expose_each_open_session_context() {
+    let harness = Harness::with(HarnessOptions {
+        fixed_id: Some("ctx-session".to_string()),
+        ..HarnessOptions::default()
+    });
+    harness.create().await;
+
+    let body = harness.metrics_body().await;
+    let labels = r#"{session_id="ctx-session",provider="openai-compatible",model="test-model"}"#;
+    for want in [
+        format!("otto_session_context_window_tokens{labels} 128000"),
+        format!("otto_session_context_input_tokens_pending{labels} 0"),
+    ] {
+        assert!(body.contains(&want), "missing {want}:\n{body}");
+    }
+    // A session that has never counted its context reports no input
+    // gauge at all; the metric is documented "when available".
+    assert!(!body.contains(&format!("otto_session_context_input_tokens{labels}")));
+}
+
+#[tokio::test]
+async fn resuming_an_unknown_session_is_404_not_found() {
+    let harness = Harness::with(HarnessOptions {
+        open_error: Some(SESSION_NOT_FOUND.to_string()),
+        ..HarnessOptions::default()
+    });
+    let reply = harness
+        .send("POST", "/v1/sessions", Some(r#"{"resume":"nope"}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(reply.json()["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn resuming_an_open_session_does_not_call_open_again() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+
+    let reply = harness
+        .send(
+            "POST",
+            "/v1/sessions",
+            Some(&format!(r#"{{"resume":"{id}"}}"#)),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["id"], id.as_str());
+    assert_eq!(harness.factory.open_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn resuming_an_open_session_in_a_different_workspace_is_not_found() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let reply = harness
+        .send(
+            "POST",
+            "/v1/sessions",
+            Some(&format!(r#"{{"resume":"{id}","workspace":"/other"}}"#)),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+    assert_eq!(harness.factory.open_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_resumes_of_one_id_call_open_once() {
+    let gate = CancellationToken::new();
+    let harness = Arc::new(Harness::with(HarnessOptions {
+        fixed_id: Some("shared".to_string()),
+        open_gate: Some(gate.clone()),
+        ..HarnessOptions::default()
+    }));
+
+    let resumes: Vec<_> = (0..8)
+        .map(|_| {
+            let harness = Arc::clone(&harness);
+            tokio::spawn(async move {
+                harness
+                    .send("POST", "/v1/sessions", Some(r#"{"resume":"shared"}"#))
+                    .await
+                    .status
+            })
+        })
+        .collect();
+
+    // Let the first resume reach `open` before any of them may return.
+    while harness.factory.open_calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    gate.cancel();
+
+    for resume in resumes {
+        assert_eq!(resume.await.expect("resume"), StatusCode::OK);
+    }
+    assert_eq!(harness.factory.open_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_session_is_gone_after_delete() {
+    let harness = Harness::new();
+    assert_eq!(
+        harness
+            .send("GET", "/v1/sessions/does-not-exist", None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    let id = harness.create().await;
+    assert_eq!(
+        harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let deleted = harness
+        .send("DELETE", &format!("/v1/sessions/{id}"), None)
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    assert_eq!(deleted.body, "");
+    assert_eq!(
+        harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        harness
+            .metrics_body()
+            .await
+            .contains("otto_sessions_open 0")
+    );
+}
+
+#[tokio::test]
+async fn an_empty_history_is_an_empty_array() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/history"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body, "[]");
+    assert_eq!(
+        harness
+            .send("GET", "/v1/sessions/missing/history", None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn the_context_report_is_served_per_open_session() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/context"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // The harness runner has no prompt and no tools; the section contents
+    // are covered by the otto-core and runtime-builder tests.
+    let report = reply.json();
+    assert_eq!(report["model"], "test-model");
+    assert!(report["sections"].is_array(), "{}", reply.body);
+    assert!(report["reported_input_tokens"].is_null());
+    assert_eq!(
+        harness
+            .send("GET", "/v1/sessions/missing/context", None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn the_trace_is_served_without_message_text_and_spans_carry_the_content() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            tool_command: Some("echo hi".to_string()),
+            deltas: vec!["done".to_string()],
+            ..Script::default()
+        },
+        elevate: true,
+        persistent: true,
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let response = post_turn(&harness, &id, "run the secret prompt", false).await;
+    let turn_id = turn_header(&response);
+    let mut reader = SseReader::new(response);
+    let requested = frame_named(&mut reader, "approval_requested").await;
+    let approval = requested["approval_id"].as_str().expect("id").to_string();
+    decide(&harness, &id, &approval, "allow").await;
+    ends_of(reader).await;
+    harness.wait_turn_done(&id, &turn_id).await;
+
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/trace"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(!reply.body.contains("elevated ok"), "{}", reply.body);
+    assert!(!reply.body.contains("secret prompt"), "{}", reply.body);
+    let trace = reply.json();
+    let turns = trace["turns"].as_array().expect("turns");
+    // The elevated command is approved on a retry turn, so the last
+    // turn holds the completed tool call.
+    let children = turns.last().expect("a turn")["children"]
+        .as_array()
+        .expect("children");
+    let kinds: Vec<&str> = children
+        .iter()
+        .map(|span| span["kind"].as_str().expect("kind"))
+        .collect();
+    assert!(kinds.contains(&"provider"), "{kinds:?}");
+    let tool = children
+        .iter()
+        .find(|span| span["kind"] == "tool" && span["status"] == "ok")
+        .unwrap_or_else(|| panic!("no tool span: {}", reply.body));
+
+    let span_id = tool["id"].as_str().expect("span id");
+    let content = harness
+        .send("GET", &format!("/v1/sessions/{id}/trace/{span_id}"), None)
+        .await;
+    assert_eq!(content.status, StatusCode::OK, "{}", content.body);
+    let titles: Vec<String> = content.json()["sections"]
+        .as_array()
+        .expect("sections")
+        .iter()
+        .map(|section| section["title"].as_str().expect("title").to_string())
+        .collect();
+    assert_eq!(titles, ["arguments", "result"]);
+    assert!(content.body.contains("elevated ok"), "{}", content.body);
+
+    assert_eq!(
+        harness
+            .send(
+                "GET",
+                &format!("/v1/sessions/{id}/trace/no-such-span"),
+                None
+            )
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        harness
+            .send("GET", "/v1/sessions/missing/trace", None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        harness
+            .send("GET", "/v1/sessions/missing/trace/x", None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn listing_merges_open_sessions_over_the_disk_list() {
+    let harness = Harness::with(HarnessOptions {
+        list: Some(ListResult::default()),
+        ..HarnessOptions::default()
+    });
+    let empty = harness.send("GET", "/v1/sessions", None).await.json();
+    assert_eq!(empty["sessions"].as_array().expect("rows").len(), 0);
+
+    let id = harness.create().await;
+    let body = harness.send("GET", "/v1/sessions", None).await.json();
+    let rows = body["sessions"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id.as_str());
+    assert_eq!(rows[0]["open"], true);
+    assert!(
+        rows[0].get("path").is_none(),
+        "an open-only row has no path"
+    );
+}
+
+// ---- sessions across workspaces ----
+
+#[tokio::test]
+async fn creating_a_session_in_an_unadmitted_workspace_answers_403() {
+    let harness = Harness::new();
+    let reply = harness
+        .send(
+            "POST",
+            "/v1/sessions",
+            Some(r#"{"workspace":"/elsewhere"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_ADMITTED");
+}
+
+#[tokio::test]
+async fn creating_a_session_in_an_invalid_workspace_answers_400() {
+    let harness = Harness::new();
+    let reply = harness
+        .send("POST", "/v1/sessions", Some(r#"{"workspace":"relative"}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "INVALID_WORKSPACE");
+}
+
+#[tokio::test]
+async fn creating_a_session_in_an_admitted_workspace_succeeds() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let reply = harness
+        .send("POST", "/v1/sessions", Some(r#"{"workspace":"/other"}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn resuming_by_id_finds_the_session_with_or_without_a_workspace_field() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let created = harness
+        .send("POST", "/v1/sessions", Some(r#"{"workspace":"/other"}"#))
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let without = harness
+        .send(
+            "POST",
+            "/v1/sessions",
+            Some(&format!(r#"{{"resume":"{id}"}}"#)),
+        )
+        .await;
+    assert_eq!(without.status, StatusCode::OK, "{}", without.body);
+    assert_eq!(without.json()["id"], id.as_str());
+
+    // An already-open session still requires the matching workspace.
+    let with = harness
+        .send(
+            "POST",
+            "/v1/sessions",
+            Some(&format!(r#"{{"resume":"{id}","workspace":"/other"}}"#)),
+        )
+        .await;
+    assert_eq!(with.status, StatusCode::OK, "{}", with.body);
+    assert_eq!(with.json()["id"], id.as_str());
+}
+
+#[tokio::test]
+async fn listing_sessions_returns_every_workspace_tagged_by_default() {
+    let harness = Harness::with(HarnessOptions {
+        list: Some(ListResult {
+            sessions: vec![
+                SessionInfo {
+                    id: "a1".to_string(),
+                    cwd: "/workspace-a".to_string(),
+                    ..SessionInfo::default()
+                },
+                SessionInfo {
+                    id: "b1".to_string(),
+                    cwd: "/workspace-b".to_string(),
+                    ..SessionInfo::default()
+                },
+            ],
+            skipped: 0,
+        }),
+        ..HarnessOptions::default()
+    });
+    let body = harness.send("GET", "/v1/sessions", None).await.json();
+    let rows = body["sessions"].as_array().expect("rows");
+    assert_eq!(rows.len(), 2);
+    let row = |id: &str| rows.iter().find(|row| row["id"] == id).expect("row");
+    assert_eq!(row("a1")["workspace"], "/workspace-a");
+    assert_eq!(row("b1")["workspace"], "/workspace-b");
+}
+
+#[tokio::test]
+async fn listing_sessions_with_a_workspace_query_filters_to_that_workspace() {
+    let mut list_by_workspace = HashMap::new();
+    list_by_workspace.insert(
+        "/other".to_string(),
+        ListResult {
+            sessions: vec![SessionInfo {
+                id: "b1".to_string(),
+                cwd: "/other".to_string(),
+                ..SessionInfo::default()
+            }],
+            skipped: 0,
+        },
+    );
+    let harness = Harness::with(HarnessOptions {
+        list: Some(ListResult {
+            sessions: vec![SessionInfo {
+                id: "a1".to_string(),
+                cwd: "/workspace-a".to_string(),
+                ..SessionInfo::default()
+            }],
+            skipped: 0,
+        }),
+        list_by_workspace,
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let body = harness
+        .send("GET", "/v1/sessions?workspace=/other", None)
+        .await
+        .json();
+    let rows = body["sessions"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "b1");
+    assert_eq!(rows[0]["workspace"], "/other");
+}
+
+#[tokio::test]
+async fn listing_sessions_with_an_unadmitted_workspace_answers_403() {
+    let harness = Harness::new();
+    let reply = harness
+        .send("GET", "/v1/sessions?workspace=/elsewhere", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_ADMITTED");
+}
+
+// ---- turns ----
+
+#[tokio::test]
+async fn posting_a_turn_streams_server_sent_events() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["hel".to_string(), "lo".to_string()],
+            usage: Some(Usage {
+                input_tokens: 5,
+                output_tokens: 7,
+                cached_input_tokens: 0,
+            }),
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let (reader, turn_id) = start_stream(&harness, &id).await;
+
+    let frames = reader.all().await;
+    let events: Vec<&str> = frames.iter().map(|frame| frame.event.as_str()).collect();
+    assert!(events.contains(&"text_delta"), "frames = {events:?}");
+    assert_eq!(events.last(), Some(&"turn_end"), "frames = {events:?}");
+    assert_eq!(events[events.len() - 2], "agent_finished");
+    let last: Value = serde_json::from_str(&frames.last().expect("frame").data).expect("json");
+    assert_eq!(last["status"], turn::TURN_OK);
+
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["text"], "hello");
+    assert_eq!(summary["status"], turn::TURN_OK);
+    assert_eq!(summary["usage"]["input_tokens"], 5);
+    assert_eq!(summary["usage"]["output_tokens"], 7);
+    assert_eq!(summary["usage_present"], true);
+
+    let body = harness.metrics_body().await;
+    for want in [
+        r#"otto_turns_total{status="ok"} 1"#,
+        r#"otto_provider_tokens_total{kind="input"} 5"#,
+        r#"otto_provider_tokens_total{kind="output"} 7"#,
+    ] {
+        assert!(body.contains(want), "missing {want}:\n{body}");
+    }
+}
+
+#[tokio::test]
+async fn posting_a_turn_with_stream_false_answers_the_summary() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"hi","stream":false}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.header("content-type"), "application/json");
+    let summary = reply.json();
+    assert_eq!(summary["status"], turn::TURN_OK);
+    assert_eq!(summary["text"], "ok");
+    assert!(summary["finished_at"].is_string());
+}
+
+#[tokio::test]
+async fn posting_an_image_persists_it_with_the_user_prompt() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(
+                    r#"{"text":"read it","image":{"data":"iVBORw0KGgo=","mime_type":"image/png"},"stream":false}"#,
+                ),
+            )
+            .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    let history = harness
+        .send("GET", &format!("/v1/sessions/{id}/history"), None)
+        .await
+        .json();
+    assert_eq!(history[0]["blocks"][1]["type"], "image");
+    assert_eq!(history[0]["blocks"][1]["mime_type"], "image/png");
+    assert_eq!(history[0]["blocks"][1]["data"], "iVBORw0KGgo=");
+}
+
+#[tokio::test]
+async fn posting_an_image_without_text_starts_a_turn() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(
+                    r#"{"text":"","image":{"data":"iVBORw0KGgo=","mime_type":"image/png"},"stream":false}"#,
+                ),
+            )
+            .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    let history = harness
+        .send("GET", &format!("/v1/sessions/{id}/history"), None)
+        .await
+        .json();
+    assert_eq!(history[0]["blocks"].as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["blocks"][0]["type"], "image");
+}
+
+#[tokio::test]
+async fn image_turns_override_the_small_default_body_limit() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let mut bytes = vec![0; 1 << 20];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let body = serde_json::json!({
+        "text": "read it",
+        "image": { "data": BASE64.encode(bytes), "mime_type": "image/png" },
+        "stream": false
+    })
+    .to_string();
+
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/turns"), Some(&body))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn posting_a_malformed_image_is_a_bad_request() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(
+                    r#"{"text":"read it","image":{"data":"/9j/","mime_type":"image/png"},"stream":false}"#,
+                ),
+            )
+            .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.json()["error"]["message"], "image is invalid");
+}
+
+#[tokio::test]
+async fn a_started_turn_carries_the_user_trigger_everywhere() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let summary = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"hi","stream":false}"#),
+        )
+        .await
+        .json();
+    assert_eq!(summary["trigger"], turn::TRIGGER_USER);
+    let turn_id = summary["id"].as_str().expect("turn id");
+
+    let got = harness
+        .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
+        .await
+        .json();
+    assert_eq!(got["trigger"], turn::TRIGGER_USER);
+
+    let session = harness
+        .send("GET", &format!("/v1/sessions/{id}"), None)
+        .await
+        .json();
+    assert_eq!(session["turn"]["trigger"], turn::TRIGGER_USER);
+    assert_eq!(session["turn"]["id"], turn_id);
+}
+
+#[tokio::test]
+async fn an_unknown_turn_is_404_on_every_turn_route() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    for (method, path) in [
+        ("GET", format!("/v1/sessions/{id}/turns/nope")),
+        ("GET", format!("/v1/sessions/{id}/turns/nope/events")),
+        ("POST", format!("/v1/sessions/{id}/turns/nope/cancel")),
+        ("GET", "/v1/sessions/missing/turns/nope".to_string()),
+    ] {
+        let reply = harness.send(method, &path, None).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turn_events_resume_from_after_and_from_last_event_id() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_primary, turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    // after=0 replays from sequence 1, skipping the user_message frame.
+    let response = harness
+        .raw(
+            "GET",
+            &format!("/v1/sessions/{id}/turns/{turn_id}/events?after=0"),
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut resumed = SseReader::new(response);
+    assert_eq!(resumed.next().await.expect("a frame").id, Some(1));
+
+    // Last-Event-ID: 0 means the same thing.
+    let response = harness
+        .raw(
+            "GET",
+            &format!("/v1/sessions/{id}/turns/{turn_id}/events"),
+            None,
+            &[("last-event-id", b"0")],
+        )
+        .await;
+    let mut replayed = SseReader::new(response);
+    assert_eq!(replayed.next().await.expect("a frame").id, Some(1));
+
+    gate.cancel();
+    let tail = resumed.all().await;
+    assert_eq!(
+        tail.last().map(|frame| frame.event.as_str()),
+        Some("turn_end")
+    );
+
+    let reply = harness
+        .send(
+            "GET",
+            &format!("/v1/sessions/{id}/turns/{turn_id}/events?after=x"),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.json()["error"]["code"], "bad_request");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn starting_a_turn_validates_the_body_and_refuses_a_second_turn() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+
+    for body in [
+        None,
+        Some("{}"),
+        Some(r#"{"text":""}"#),
+        Some(r#"{"text":"   "}"#),
+        Some(r#"{"text":"hi","channel":"slack"}"#),
+    ] {
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/turns"), body)
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "body {body:?}");
+        assert_eq!(reply.json()["error"]["code"], "bad_request");
+    }
+    assert_eq!(
+        harness
+            .send(
+                "POST",
+                "/v1/sessions/missing/turns",
+                Some(r#"{"text":"hi"}"#)
+            )
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    let (_primary, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"again"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.json()["error"]["code"], "turn_active");
+    gate.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn channel_context_is_transient_and_queued_turns_keep_their_own_channel() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let first = post_turn_with_channel(&harness, &id, "first", Some("telegram"), false).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    harness.provider.wait_started(1).await;
+    let second = post_turn_with_channel(&harness, &id, "second", Some("feishu"), true).await;
+    let third = post_turn_with_channel(&harness, &id, "third", None, true).await;
+    gate.cancel();
+    for response in [first, second, third] {
+        assert_eq!(ends_of(SseReader::new(response)).await.2, "ok");
+    }
+
+    assert_eq!(harness.provider.texts(), ["first", "second", "third"]);
+    let prompts = harness.provider.system_prompts();
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[0].contains("Telegram"));
+    assert!(prompts[1].contains("Feishu (Lark)"));
+    assert!(!prompts[2].contains("Telegram"));
+    assert!(!prompts[2].contains("Feishu (Lark)"));
+    assert!(prompts[0].contains("does not grant additional tools"));
+    assert!(prompts[1].contains("does not grant additional tools"));
+}
+
+async fn post_turn_with_origin(harness: &Harness, session: &str, extra: Value) -> Reply {
+    let mut body = serde_json::json!({"text": "hi", "stream": false});
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{session}/turns"),
+            Some(&body.to_string()),
+        )
+        .await
+}
+
+/// Records a confirmed web or terminal delivery for `session`, which the
+/// next user turn of that session appends when its origin matches.
+fn confirmed_delivery(
+    store: &crate::schedule::Store,
+    origin: crate::schedule::Origin,
+    session: &str,
+) {
+    let now = chrono::Utc::now();
+    let item = store
+        .create(
+            crate::schedule::NewItem {
+                origin,
+                session_id: session.into(),
+                workspace: "/w".into(),
+                kind: crate::schedule::Kind::Text,
+                body: "stretch".into(),
+                repeat: None,
+                local_time: None,
+                due_at: now - chrono::TimeDelta::seconds(1),
+            },
+            now,
+        )
+        .expect("create");
+    store
+        .claim_deliveries(
+            &crate::schedule::Scope::Any,
+            Duration::from_secs(60),
+            10,
+            now,
+        )
+        .expect("claim");
+    assert!(
+        store
+            .delivered(item.id, item.due_at, now)
+            .expect("delivered")
+    );
+}
+
+fn pending(
+    store: &crate::schedule::Store,
+    origin: &crate::schedule::Origin,
+    session: &str,
+) -> usize {
+    store
+        .pending_writebacks(origin, session, 10)
+        .expect("pending")
+        .len()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_origin_defaults_to_web_and_is_validated() {
+    let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+    let harness = Harness::with(HarnessOptions {
+        schedule: Some(store.clone()),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let web = crate::schedule::Origin::web();
+    confirmed_delivery(&store, web.clone(), &id);
+
+    let bad = post_turn_with_origin(&harness, &id, serde_json::json!({"origin": "mars"})).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    assert!(
+        bad.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("origin")
+    );
+    let mismatch = post_turn_with_origin(
+        &harness,
+        &id,
+        serde_json::json!({"origin": "chat:feishu:c1", "channel": "telegram"}),
+    )
+    .await;
+    assert_eq!(mismatch.status, StatusCode::BAD_REQUEST);
+    assert!(harness.provider.texts().is_empty());
+    assert_eq!(pending(&store, &web, &id), 1);
+
+    // A chat turn does not take a web delivery; a turn without an origin
+    // is a web turn and does. A turn with no origin at all takes nothing.
+    let chat = post_turn_with_origin(
+        &harness,
+        &id,
+        serde_json::json!({"origin": "chat:telegram:42", "channel": "telegram"}),
+    )
+    .await;
+    assert_eq!(chat.status, StatusCode::OK, "{}", chat.body);
+    assert_eq!(pending(&store, &web, &id), 1);
+    let absent = post_turn_with_origin(&harness, &id, serde_json::json!({})).await;
+    assert_eq!(absent.status, StatusCode::OK, "{}", absent.body);
+    assert_eq!(pending(&store, &web, &id), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_turn_keeps_its_own_origin() {
+    let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+    let (gate, mut options) = gated();
+    options.schedule = Some(store.clone());
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let chat = crate::schedule::Origin::parse("chat:feishu:c1").expect("origin");
+    confirmed_delivery(&store, chat.clone(), &id);
+
+    let first = post_turn_with_channel(&harness, &id, "first", None, false).await;
+    harness.provider.wait_started(1).await;
+    let body = r#"{"text":"second","queue":true,"origin":"chat:feishu:c1","channel":"feishu"}"#;
+    let second = harness
+        .raw("POST", &format!("/v1/sessions/{id}/turns"), Some(body), &[])
+        .await;
+    gate.cancel();
+    for response in [first, second] {
+        assert_eq!(ends_of(SseReader::new(response)).await.2, "ok");
+    }
+    assert_eq!(pending(&store, &chat, &id), 0);
+}
+
+fn schedule_harness() -> (Harness, Arc<crate::schedule::Store>) {
+    let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+    let harness = Harness::with(HarnessOptions {
+        schedule: Some(store.clone()),
+        ..HarnessOptions::default()
+    });
+    (harness, store)
+}
+
+fn due_text_item(
+    store: &crate::schedule::Store,
+    origin: crate::schedule::Origin,
+    body: &str,
+) -> crate::schedule::Item {
+    let now = chrono::Utc::now();
+    store
+        .create(
+            crate::schedule::NewItem {
+                origin,
+                session_id: "sess".into(),
+                workspace: "/w".into(),
+                kind: crate::schedule::Kind::Text,
+                body: body.into(),
+                repeat: None,
+                local_time: None,
+                due_at: now - chrono::TimeDelta::seconds(1),
+            },
+            now,
+        )
+        .expect("create")
+}
+
+#[tokio::test]
+async fn claim_returns_due_web_items_once_and_delivered_confirms_them() {
+    let (harness, store) = schedule_harness();
+    let web = due_text_item(&store, crate::schedule::Origin::web(), "stretch");
+    due_text_item(&store, crate::schedule::Origin::terminal(), "terminal only");
+
+    let claim = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+    assert_eq!(claim.status, StatusCode::OK, "{}", claim.body);
+    let items = claim.json()["items"].as_array().expect("items").clone();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], format!("s{}", web.id));
+    assert_eq!(items[0]["text"], "⏰ stretch");
+    let due_at = items[0]["due_at"].as_i64().expect("due_at");
+    assert_eq!(due_at, web.due_at.timestamp_millis());
+
+    let again = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+    assert_eq!(again.json()["items"].as_array().unwrap().len(), 0);
+
+    let path = format!("/v1/schedule/s{}/delivered", web.id);
+    let body = serde_json::json!({"due_at": due_at}).to_string();
+    let done = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    assert_eq!(done.json(), serde_json::json!({}));
+    let writebacks = store
+        .pending_writebacks(&crate::schedule::Origin::web(), "sess", 10)
+        .expect("writebacks");
+    assert_eq!(writebacks.len(), 1);
+    assert_eq!(writebacks[0].item_id, web.id);
+    // A repeated confirmation is still 200.
+    let repeat = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(repeat.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn delivered_rejects_a_bad_id_or_body() {
+    let (harness, _store) = schedule_harness();
+    let bad_id = harness
+        .send("POST", "/v1/schedule/x7/delivered", Some(r#"{"due_at":1}"#))
+        .await;
+    assert_eq!(bad_id.status, StatusCode::NOT_FOUND);
+    let no_due = harness
+        .send("POST", "/v1/schedule/s1/delivered", Some("{}"))
+        .await;
+    assert_eq!(no_due.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn schedule_routes_answer_503_without_a_store() {
+    let harness = Harness::new();
+    let claim = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+    assert_eq!(claim.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(claim.json()["error"]["code"], "schedule_unavailable");
+    let delivered = harness
+        .send("POST", "/v1/schedule/s1/delivered", Some(r#"{"due_at":1}"#))
+        .await;
+    assert_eq!(delivered.status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn the_factory_runner_maps_load_and_create_errors_to_outcomes() {
+    use crate::schedule::RunOutcome;
+    use crate::schedule::worker::PromptRunner;
+    let cancel = CancellationToken::new();
+
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            error: Some(("/other".to_string(), "mcp config broken".to_string())),
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+    assert_eq!(
+        runner.run("/other", "go", &cancel).await,
+        RunOutcome::Failed("mcp config broken".into())
+    );
+
+    let harness = Harness::with(HarnessOptions {
+        create_error: Some("no session".to_string()),
+        ..HarnessOptions::default()
+    });
+    let startup = harness.factory.builder.workspace_path.clone();
+    let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+    assert_eq!(
+        runner.run(&startup, "go", &cancel).await,
+        RunOutcome::FailedBeforeTools("no session".into())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_factory_runner_runs_the_prompt_and_returns_the_reply() {
+    use crate::schedule::RunOutcome;
+    use crate::schedule::worker::PromptRunner;
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["it is sunny".to_string()],
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let startup = harness.factory.builder.workspace_path.clone();
+    let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+    let outcome = runner
+        .run(&startup, "weather?", &CancellationToken::new())
+        .await;
+    assert_eq!(outcome, RunOutcome::Reply("it is sunny".into()));
+    assert_eq!(harness.provider.texts(), ["weather?"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_turn_finishes_it_as_canceled() {
+    let (_gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns/{turn_id}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::ACCEPTED);
+    assert_eq!(reply.body, "");
+
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["status"], turn::TURN_CANCELED);
+    assert!(
+        harness
+            .metrics_body()
+            .await
+            .contains(r#"otto_turns_total{status="canceled"} 1"#)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_session_cancels_its_active_turn() {
+    let (_gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+    let active = harness.active_turn(&id);
+
+    let started = Instant::now();
+    let reply = harness
+        .send("DELETE", &format!("/v1/sessions/{id}"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    assert!(started.elapsed() < Duration::from_secs(5), "delete blocked");
+
+    Harness::wait_done(&active).await;
+    assert_eq!(active.summary().status, turn::TURN_CANCELED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_sessions_run_their_turns_at_the_same_time() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let first = harness.create().await;
+    let second = harness.create().await;
+
+    let (_a, _) = start_stream(&harness, &first).await;
+    harness.provider.wait_started(1).await;
+    let (_b, _) = start_stream(&harness, &second).await;
+    // The second turn reaching the provider while the first still holds
+    // the gate is the assertion; a per-process lock would hang here.
+    harness.provider.wait_started(2).await;
+    gate.cancel();
+}
+
+#[tokio::test]
+async fn a_failing_turn_finishes_with_the_error_status() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            error: Some("provider exploded".to_string()),
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let summary = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"hi","stream":false}"#),
+        )
+        .await
+        .json();
+    assert_eq!(summary["status"], turn::TURN_ERROR);
+    assert!(!summary["error"].as_str().expect("error").is_empty());
+    assert!(
+        harness
+            .metrics_body()
+            .await
+            .contains(r#"otto_turns_total{status="error"} 1"#)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_the_event_stream_does_not_cancel_the_turn() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (stream, turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    drop(stream); // the browser disconnects mid-turn
+    gate.cancel();
+
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["status"], turn::TURN_OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_the_server_cancels_the_active_turn() {
+    let (_gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+    let active = harness.active_turn(&id);
+
+    let started = Instant::now();
+    harness.server.close().await.expect("close");
+    assert!(started.elapsed() < Duration::from_secs(5), "close blocked");
+
+    Harness::wait_done(&active).await;
+    assert_eq!(active.summary().status, turn::TURN_CANCELED);
+    assert!(
+        harness
+            .metrics_body()
+            .await
+            .contains("otto_sessions_open 0")
+    );
+}
+
+// ---- SIGTERM migration ----
+
+/// A child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`,
+/// matching the file `subagent::runner::spawn` creates. Duplicated from
+/// [`crate::app::tests::child_store`] and
+/// [`crate::runtime::builder::tests::child_store`]: each is
+/// `#[cfg(test)]`-private to its own module, and the fixture is 12
+/// lines.
+fn child_store(
+    parent: &std::path::Path,
+    task_id: &str,
+) -> (crate::subagent::runner::Transcript, String) {
+    let name = format!("{task_id}-child");
+    let store = crate::session::Store::create_child_lazy(
+        parent,
+        &name,
+        otto_core::session::Header {
+            id: "child".into(),
+            workspace: parent.parent().expect("dir").to_string_lossy().into_owned(),
+            provider: "openai-compatible".into(),
+            model: "test-model".into(),
+            created_at: chrono::Utc::now(),
+            ..otto_core::session::Header::default()
+        },
+    )
+    .expect("child store");
+    let path = crate::session::Store::child_path(parent, &name);
+    (Arc::new(store), path.to_string_lossy().into_owned())
+}
+
+/// Reads a lease's fixed-size heartbeat file and reports whether its
+/// `released` field is `true`. Duplicated from
+/// [`crate::app::tests::heartbeat_released`] for the same reason as
+/// `child_store` above.
+fn heartbeat_released(session_path: &str) -> bool {
+    let heartbeat = std::path::Path::new(session_path)
+        .with_extension("lease")
+        .join("heartbeat");
+    let bytes = std::fs::read(&heartbeat).expect("read heartbeat");
+    String::from_utf8_lossy(&bytes).contains("\"released\":true")
+}
+
+/// S9(b): a `SIGTERM` decided as [`crate::cli::terminate::Action::Migrate`]
+/// drives `Server::migrate`, which cancels every open session's work and
+/// runs `Controller::migrate` on it. Asserts the running child task's
+/// transcript ends `interrupted` and the session's lease heartbeat is
+/// released, the same outcome `cli::serve::run` produces by calling
+/// `Server::migrate` after cancelling its token.
+#[tokio::test]
+async fn migrate_cancels_a_running_child_task_and_releases_the_lease() {
+    use crate::cli::terminate::{Action, Terminate};
+    use crate::subagent::runner::StartRequest;
+    use crate::subagent::tasks::{TaskStatus, Tasks};
+    use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any, wait_status};
+
+    let terminate = Terminate::new();
+    assert_eq!(terminate.on_signal(true), Action::Migrate);
+
+    let harness = Harness::new();
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let mut builder = testutil::builder(workspace.path(), sessions.path());
+    builder.shared_mut().config.failover = otto_core::config::Failover {
+        enabled: true,
+        lease_seconds: 12,
+    };
+    let runtime = testutil::initial_runtime(&builder);
+    let session = builder.create_session(&runtime).expect("create session");
+    session
+        .append(testutil::user("go"))
+        .await
+        .expect("first append");
+    let session_path = session.path();
+
+    let tasks = Arc::new(Tasks::new());
+    let child_provider = FakeProvider::new();
+    child_provider.set_hook(Arc::new(|cancel, _request| {
+        Box::pin(async move { cancel.cancelled().await })
+    }));
+    child_provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+
+    let mut child_config =
+        crate::subagent::testsupport::test_config(&child_provider, &tasks, Vec::new());
+    child_config.max_parallel = 1;
+    let parent_path = PathBuf::from(&session_path);
+    child_config.child_session = Some(Arc::new(move |task_id: &str| {
+        Ok(Some(child_store(&parent_path, task_id)))
+    }));
+    let (subagents, _) = crate::subagent::runner::Runner::new(child_config).expect("valid config");
+    let subagents = Arc::new(subagents);
+
+    subagents
+        .start(StartRequest {
+            prompt: "first".into(),
+            ..StartRequest::default()
+        })
+        .await
+        .expect("start succeeds");
+    wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+    let mut runner = Runner::scripted(
+        session.clone(),
+        FakeProvider::new() as Arc<dyn Provider + Send + Sync>,
+        Arc::clone(&tasks),
+    );
+    runner.subagents = Some(subagents);
+    let info = builder.runtime_info(&runtime);
+    let ctrl = Controller::new(builder, true, session.clone(), runner, info);
+    harness.server.register(ctrl);
+
+    let warnings = harness.server.migrate().await;
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    assert_eq!(
+        tasks.get("t1").expect("t1 exists").status,
+        TaskStatus::Canceled
+    );
+    let children_dir = std::path::Path::new(&session_path).with_extension("");
+    let records = crate::subagent::interrupted::scan(&children_dir);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(
+        records[0].final_status.as_deref(),
+        Some(crate::subagent::interrupted::INTERRUPTED_STATUS)
+    );
+    assert!(
+        heartbeat_released(&session_path),
+        "migrate must release the lease"
+    );
+}
+
+// ---- errors, logging, and the fixed endpoints ----
+
+#[tokio::test]
+async fn a_create_failure_answers_a_fixed_internal_error_and_logs_the_real_one() {
+    let harness = Harness::with(HarnessOptions {
+        create_error: Some("disk full".to_string()),
+        ..HarnessOptions::default()
+    });
+    let reply = harness.send("POST", "/v1/sessions", None).await;
+    assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        reply.body,
+        r#"{"error":{"code":"internal","message":"internal error"}}"#
+    );
+    assert!(
+        harness.logged().contains("disk full"),
+        "the real error is logged:\n{}",
+        harness.logged()
+    );
+}
+
+#[tokio::test]
+async fn neither_the_log_nor_the_metrics_carry_prompt_text() {
+    const SECRET: &str = "quick-brown-fox-prompt-marker";
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            echo: true,
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let summary = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(&format!(r#"{{"text":"{SECRET}","stream":false}}"#)),
+        )
+        .await
+        .json();
+    assert_eq!(summary["text"], SECRET, "the turn must actually have run");
+
+    assert!(
+        !harness.logged().contains(SECRET),
+        "log: {}",
+        harness.logged()
+    );
+    assert!(!harness.metrics_body().await.contains(SECRET));
+}
+
+#[tokio::test]
+async fn the_request_id_is_truncated_to_64_bytes_and_filtered_to_ascii() {
+    let harness = Harness::new();
+    // 0x85 is valid obs-text but not printable ASCII. It sits inside the
+    // first 64 bytes, so truncation keeps it and the filter drops it.
+    let mut raw = vec![b'a'; 30];
+    raw.push(0x85);
+    raw.extend(std::iter::repeat_n(b'a', 40));
+    let reply = harness
+        .send_with("GET", "/healthz", None, &[("x-request-id", &raw)])
+        .await;
+    assert_eq!(reply.header("x-request-id"), "a".repeat(63));
+
+    let generated = harness.send("GET", "/healthz", None).await;
+    assert_eq!(
+        generated.header("x-request-id").len(),
+        32,
+        "an absent header gets a generated id"
+    );
+}
+
+#[tokio::test]
+async fn the_info_endpoint_echoes_the_configured_info() {
+    let info = Info {
+        workspace: "/ws".to_string(),
+        provider: "openai-compatible".to_string(),
+        profile: "alpha".to_string(),
+        model: "test-model".to_string(),
+        thinking: "high".to_string(),
+        sandbox: "off".to_string(),
+        profiles: vec!["alpha".to_string(), "beta".to_string()],
+    };
+    let harness = Harness::with(HarnessOptions {
+        info: info.clone(),
+        ..HarnessOptions::default()
+    });
+    let reply = harness.send("GET", "/v1/info", None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json(), serde_json::to_value(&info).expect("info"));
+}
+
+#[tokio::test]
+async fn the_usage_endpoint_returns_persisted_aggregates() {
+    let harness = Harness::new();
+    let reply = harness.send("GET", "/v1/usage", None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({
+            "usage_events": 0,
+            "reported_usage_events": 0,
+            "logical_operations": 0,
+            "actual_attempts": 0,
+            "succeeded_operations": 0,
+            "failed_operations": 0,
+            "canceled_operations": 0,
+            "deadline_exceeded_operations": 0,
+            "interrupted_operations": 0,
+            "not_started_operations": 0,
+            "known_no_effect_operations": 0,
+            "completed_effect_operations": 0,
+            "unknown_effect_operations": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_input_tokens": null,
+            "cache_hit_rate": null
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_daily_usage_endpoint_validates_its_range() {
+    let harness = Harness::new();
+    let reply = harness.send("GET", "/v1/usage/daily?days=0", None).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.json()["error"]["code"], "invalid_usage_range");
+
+    let reply = harness.send("GET", "/v1/usage/daily?days=7", None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["summary"]["usage_events"], 0);
+    assert_eq!(reply.json()["summary"]["logical_operations"], 0);
+    assert_eq!(reply.json()["daily"].as_array().expect("daily").len(), 7);
+}
+
+#[tokio::test]
+async fn the_openapi_endpoint_serves_the_embedded_document() {
+    let harness = Harness::new();
+    let reply = harness.send("GET", "/v1/openapi.yaml", None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.header("content-type"), "application/yaml");
+    assert!(reply.body.starts_with("openapi:"), "{}", &reply.body[..40]);
+}
+
+struct TestWorkflowExecutor;
+
+#[async_trait::async_trait]
+impl crate::workflow::Executor for TestWorkflowExecutor {
+    async fn execute(
+        &self,
+        attempt: crate::workflow::Attempt,
+        _control: &crate::deadline::Control,
+    ) -> Result<String, String> {
+        Ok(format!("{} done", attempt.step_id))
+    }
+}
+
+/// A real, workspace-scoped workflow controller backed by an in-memory
+/// store, for exercising the HTTP routes end to end.
+fn workflow_test_controller(workspace: &str) -> Arc<crate::workflow::Controller> {
+    let store = Arc::new(crate::workflow::Store::open_in_memory());
+    let transcripts = tempfile::tempdir().expect("transcripts").keep();
+    crate::workflow::Controller::new(
+        store,
+        crate::workflow::Catalog::from_definitions(vec![crate::workflow::Definition {
+            source: String::new(),
+            name: "review".to_string(),
+            description: String::new(),
+            hash: "0".repeat(64),
+            agents: vec![crate::workflow::AgentSnapshot {
+                name: "worker".to_string(),
+                ..crate::workflow::AgentSnapshot::default()
+            }],
+            steps: vec![crate::workflow::Step {
+                id: "work".to_string(),
+                kind: crate::workflow::StepKind::Agent,
+                agent: "worker".to_string(),
+                prompt: "work".to_string(),
+                needs: Vec::new(),
+            }],
+        }]),
+        Arc::new(TestWorkflowExecutor),
+        workspace.to_string(),
+        transcripts,
+        crate::workflow::RuntimeIdentity::default(),
+        1,
+    )
+}
+
+#[tokio::test]
+async fn workflow_routes_start_and_report_a_durable_run() {
+    let controller = workflow_test_controller("/workspace");
+    let harness = Harness::with(HarnessOptions {
+        workflows: Some(controller),
+        ..HarnessOptions::default()
+    });
+
+    let reply = harness
+        .send_with(
+            "POST",
+            "/v1/workflows",
+            Some(r#"{"name":"review","input":"request"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let id = reply.json()["run"]["id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    let mut status = String::new();
+    for _ in 0..20 {
+        let reply = harness
+            .send("GET", &format!("/v1/workflows/{id}"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        status = reply.json()["run"]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if status == "succeeded" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status, "succeeded");
+    let events = harness
+        .send("GET", &format!("/v1/workflows/{id}/events?after=0"), None)
+        .await;
+    assert_eq!(events.status, StatusCode::OK);
+    assert_eq!(events.header("content-type"), "text/event-stream");
+    assert!(events.body.contains("step_succeeded"), "{}", events.body);
+
+    let fork = harness
+        .send_with(
+            "POST",
+            &format!("/v1/workflows/{id}/fork"),
+            Some(r#"{"after_step":"work"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(fork.status, StatusCode::CREATED, "{}", fork.body);
+    assert_eq!(
+        fork.json()["run"]["forked_from_run_id"].as_str(),
+        Some(id.as_str())
+    );
+    assert_eq!(
+        fork.json()["run"]["forked_from_step_id"].as_str(),
+        Some("work")
+    );
+}
+
+#[tokio::test]
+async fn workflow_routes_map_error_kinds_and_bound_the_run_page() {
+    let harness = Harness::with(HarnessOptions {
+        workflows: Some(workflow_test_controller("/workspace")),
+        ..HarnessOptions::default()
+    });
+
+    // An unknown run is a missing resource, not a conflict.
+    let missing = harness.send("GET", "/v1/workflows/missing", None).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+    assert_eq!(missing.json()["error"]["code"], "workflow_not_found");
+
+    // An unknown definition name is also a missing resource.
+    let unknown = harness
+        .send_with(
+            "POST",
+            "/v1/workflows",
+            Some(r#"{"name":"missing"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+    assert_eq!(unknown.json()["error"]["code"], "workflow_not_found");
+
+    // A page size of zero is a caller mistake.
+    let invalid = harness.send("GET", "/v1/workflows?limit=0", None).await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST, "{}", invalid.body);
+    assert_eq!(invalid.json()["error"]["code"], "invalid_workflow_limit");
+
+    // A bounded page reports its cursor even when the page is not full.
+    let page = harness.send("GET", "/v1/workflows?limit=1", None).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.json().get("next_before").is_some(), "{}", page.body);
+    assert!(page.json()["runs"].as_array().is_some(), "{}", page.body);
+}
+
+#[tokio::test]
+async fn workflow_routes_scope_runs_and_lists_by_workspace_query() {
+    let harness = Harness::with(HarnessOptions {
+        workflows: Some(workflow_test_controller("/a")),
+        workflow_workspaces: HashMap::from([(
+            "/other".to_string(),
+            workflow_test_controller("/other"),
+        )]),
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let start = harness
+        .send_with(
+            "POST",
+            "/v1/workflows?workspace=/other",
+            Some(r#"{"name":"review","input":"request"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(start.status, StatusCode::CREATED, "{}", start.body);
+    let id = start.json()["run"]["id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+
+    let list_startup = harness.send("GET", "/v1/workflows", None).await;
+    assert_eq!(list_startup.status, StatusCode::OK, "{}", list_startup.body);
+    assert!(
+        list_startup.json()["runs"]
+            .as_array()
+            .expect("runs")
+            .is_empty()
+    );
+
+    let list_other = harness
+        .send("GET", "/v1/workflows?workspace=/other", None)
+        .await;
+    assert_eq!(list_other.status, StatusCode::OK, "{}", list_other.body);
+    let runs = list_other.json()["runs"].as_array().expect("runs").clone();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["id"].as_str(), Some(id.as_str()));
+
+    // Run-scoped routes find the run without a `?workspace=` hint.
+    let mut status = String::new();
+    for _ in 0..20 {
+        let reply = harness
+            .send("GET", &format!("/v1/workflows/{id}"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        status = reply.json()["run"]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if status == "succeeded" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status, "succeeded");
+
+    let cancel = harness
+        .send("POST", &format!("/v1/workflows/{id}/cancel"), None)
+        .await;
+    assert_eq!(cancel.status, StatusCode::CONFLICT, "{}", cancel.body);
+    assert_eq!(
+        cancel.json()["error"]["message"],
+        "workflow run already finished"
+    );
+}
+
+#[tokio::test]
+async fn workflow_routes_report_the_disabled_error_for_a_workspace_with_no_controller() {
+    let harness = Harness::with(HarnessOptions {
+        workflows: Some(workflow_test_controller("/a")),
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let list = harness
+        .send("GET", "/v1/workflows?workspace=/other", None)
+        .await;
+    assert_eq!(list.status, StatusCode::NOT_IMPLEMENTED, "{}", list.body);
+    assert_eq!(list.json()["error"]["code"], "workflow_unavailable");
+
+    let start = harness
+        .send_with(
+            "POST",
+            "/v1/workflows?workspace=/other",
+            Some(r#"{"name":"review","input":"request"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(start.status, StatusCode::NOT_IMPLEMENTED, "{}", start.body);
+
+    // The startup workspace, with its own controller, is unaffected.
+    let default_list = harness.send("GET", "/v1/workflows", None).await;
+    assert_eq!(default_list.status, StatusCode::OK, "{}", default_list.body);
+}
+
+#[tokio::test]
+async fn switching_a_session_profile_rebuilds_it_and_writes_no_file() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/profile"),
+            Some(r#"{"profile":"beta"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["profile"], "beta");
+    assert_eq!(reply.json()["model"], "gpt-beta");
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/profile"),
+            Some(r#"{"profile":"nope"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "bad_request");
+    assert!(reply.body.contains("nope"), "{}", reply.body);
+
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/profile"), Some("{}"))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+
+    let reply = harness
+        .send(
+            "POST",
+            "/v1/sessions/missing/profile",
+            Some(r#"{"profile":"beta"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+
+    // A session switch never writes the configuration file: the running
+    // serve keeps its startup profile catalog, and so does the next start.
+    assert!(
+        !harness.factory.builder.shared.config_path.exists(),
+        "the profile switch wrote a configuration file"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn switching_a_profile_while_a_turn_runs_is_409_turn_active() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/profile"),
+            Some(r#"{"profile":"beta"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "turn_active");
+    gate.cancel();
+}
+
+#[tokio::test]
+async fn config_profiles_are_readable_without_environment_values() {
+    let harness = Harness::with(HarnessOptions {
+            config_text: Some(
+                "default_profile = \"work\"\n\n[profiles.work]\nprovider = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\nmodel = \"small\"\napi_key_env = \"WORK_KEY\"\n".into(),
+            ),
+            ..Default::default()
+        });
+    let reply = harness.send("GET", "/v1/config/profiles", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["profiles"][0]["name"], "work");
+    assert_eq!(reply.json()["profiles"][0]["default"], true);
+    assert_eq!(reply.json()["profiles"][0]["api_key_env"], "WORK_KEY");
+    assert!(!reply.body.contains("WORK_KEY_VALUE"));
+}
+
+#[tokio::test]
+async fn config_change_confirmation_is_one_time_and_requires_restart() {
+    let original = "# preserve\ndefault_profile = \"work\"\n\n[profiles.work]\nprovider = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\nmodel = \"old\"\napi_key_env = \"WORK_KEY\"\n";
+    let harness = Harness::with(HarnessOptions {
+        config_text: Some(original.into()),
+        ..Default::default()
+    });
+    let preview = harness
+        .raw(
+            "POST",
+            "/v1/config/changes",
+            Some(r#"{"kind":"set_profile_field","profile":"work","field":"model","value":"new"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    let body = String::from_utf8(
+        axum::body::to_bytes(preview.into_body(), usize::MAX)
+            .await
+            .expect("body")
+            .to_vec(),
+    )
+    .expect("utf8");
+    let value: Value = serde_json::from_str(&body).expect("preview json");
+    let id = value["id"].as_str().expect("id");
+    assert!(
+        !body.contains("new"),
+        "preview must redact field values: {body}"
+    );
+    let confirm = harness
+        .send("POST", &format!("/v1/config/changes/{id}"), None)
+        .await;
+    assert_eq!(confirm.status, StatusCode::OK, "{}", confirm.body);
+    assert_eq!(confirm.json()["status"], "saved_restart_required");
+    let changed =
+        std::fs::read_to_string(&harness.factory.builder.shared.config_path).expect("read config");
+    assert_eq!(
+        changed,
+        original.replace("model = \"old\"", "model = \"new\"")
+    );
+    let repeated = harness
+        .send("POST", &format!("/v1/config/changes/{id}"), None)
+        .await;
+    assert_eq!(repeated.status, StatusCode::NOT_FOUND, "{}", repeated.body);
+}
+
+/// Every API path the router serves.
+///
+/// ponytail: axum exposes no route table, so this list is written out once
+/// and checked against both the router and `openapi.yaml`.
+const ROUTES: &[&str] = &[
+    "/v1/config/profiles",
+    "/v1/config/profiles/{name}",
+    "/v1/config/models",
+    "/v1/config/changes",
+    "/v1/config/changes/{id}",
+    "/v1/sessions",
+    "/v1/sessions/{id}",
+    "/v1/sessions/{id}/history",
+    "/v1/sessions/{id}/context",
+    "/v1/sessions/{id}/trace",
+    "/v1/sessions/{id}/trace/{span_id}",
+    "/v1/sessions/{id}/profile",
+    "/v1/sessions/{id}/approvals/{approval_id}",
+    "/v1/sessions/{id}/inputs",
+    "/v1/sessions/{id}/tasks/steer",
+    "/v1/sessions/{id}/tasks/control",
+    "/v1/sessions/{id}/turns",
+    "/v1/sessions/{id}/turns/{turn_id}",
+    "/v1/sessions/{id}/turns/{turn_id}/events",
+    "/v1/sessions/{id}/turns/{turn_id}/cancel",
+    "/v1/sessions/{id}/compact",
+    "/v1/sessions/{id}/reflect",
+    "/v1/sessions/{id}/reflect/cancel",
+    "/v1/sessions/{id}/notices",
+    "/v1/sessions/{id}/wake-replies",
+    "/v1/sessions/{id}/reflection/skills",
+    "/v1/sessions/{id}/reflection/skills/{name}/revert",
+    "/v1/sessions/{id}/tasks",
+    "/v1/sessions/{id}/tasks/{task_id}",
+    "/v1/sessions/{id}/tasks/{task_id}/cancel",
+    "/v1/sessions/{id}/timers",
+    "/v1/sessions/{id}/timers/{timer_id}/cancel",
+    "/v1/sessions/{id}/mcp",
+    "/v1/sessions/{id}/skill-manager",
+    "/v1/sessions/{id}/skill-manager/{name}",
+    "/v1/sessions/{id}/skills",
+    "/v1/sessions/{id}/skills/{name}",
+    "/v1/sessions/{id}/skills/{name}/enable",
+    "/v1/sessions/{id}/skills/{name}/disable",
+    "/v1/sandbox/reload",
+    "/v1/tasks",
+    "/v1/tasks/{parent_session}/{task_id}",
+    "/v1/workflows",
+    "/v1/workflows/{id}",
+    "/v1/workflows/{id}/events",
+    "/v1/workflows/{id}/resume",
+    "/v1/workflows/{id}/fork",
+    "/v1/workflows/{id}/cancel",
+    "/v1/workflows/requests/{id}/approve",
+    "/v1/workflows/requests/{id}/reject",
+    "/v1/workspaces",
+    "/v1/workspaces/diff",
+    "/v1/info",
+    "/v1/status",
+    "/v1/usage",
+    "/v1/usage/daily",
+    "/v1/openapi.yaml",
+    "/healthz",
+    "/metrics",
+];
+
+#[test]
+fn openapi_documents_every_route() {
+    let document = String::from_utf8_lossy(OPENAPI_YAML);
+    for path in ROUTES {
+        let want = format!("\n  {path}:");
+        assert!(document.contains(&want), "openapi.yaml is missing {path}");
+    }
+    assert!(document.matches("enum: [telegram, feishu]").count() >= 2);
+}
+
+#[tokio::test]
+async fn every_documented_route_is_reachable_on_the_router() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    for path in ROUTES {
+        let probe = path
+            .replace("{id}", &id)
+            .replace("{turn_id}", "nope")
+            .replace("{task_id}", "nope")
+            .replace("{span_id}", "nope")
+            .replace("{timer_id}", "nope")
+            .replace("{approval_id}", "nope")
+            .replace("{name}", "nope");
+        // An unmatched path logs the route label "unmatched"; a matched
+        // one logs its own pattern. That is the reachability check.
+        let before = harness.logged().len();
+        // `raw`, not `send`: `/v1/status`'s body is an infinite SSE
+        // stream, and `send` awaits the full body.
+        harness.raw("GET", &probe, None, &[]).await;
+        assert!(
+            !harness.logged()[before..].contains("route=unmatched"),
+            "GET {probe} matched no route"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_token_gates_the_v1_routes_but_not_healthz_or_metrics() {
+    let harness = Harness::with(HarnessOptions {
+        token: "secret".to_string(),
+        ..HarnessOptions::default()
+    });
+    let reply = harness.send("GET", "/v1/info", None).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(reply.json()["error"]["code"], "unauthorized");
+
+    for path in ["/healthz", "/metrics"] {
+        assert_eq!(
+            harness.send("GET", path, None).await.status,
+            StatusCode::OK,
+            "{path} must not need a token"
+        );
+    }
+
+    let reply = harness
+        .send_with(
+            "GET",
+            "/v1/info",
+            None,
+            &[("authorization", b"Bearer secret")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn task_control_http_routes_validate_and_steer_the_active_task() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+
+    let input_idle = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/inputs"),
+            Some(r#"{"text":"change direction"}"#),
+        )
+        .await;
+    assert_eq!(input_idle.status, StatusCode::OK);
+    assert_eq!(input_idle.json(), serde_json::json!("idle"));
+
+    let idle = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/steer"),
+            Some(r#"{"text":"change direction"}"#),
+        )
+        .await;
+    assert_eq!(idle.status, StatusCode::CONFLICT);
+
+    let control = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/control"),
+            Some(r#"{"text":"what can you do?","channel":"telegram"}"#),
+        )
+        .await;
+    assert_eq!(control.status, StatusCode::OK);
+    assert_eq!(control.body, "null");
+
+    let (_stream, _) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+    let admitted = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/inputs"),
+            Some(r#"{"text":"finish this provider response, then inspect the failure"}"#),
+        )
+        .await;
+    assert_eq!(admitted.status, StatusCode::OK);
+    assert_eq!(admitted.json(), serde_json::json!("steered"));
+
+    let steer = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/steer"),
+            Some(r#"{"text":"do not change the public API"}"#),
+        )
+        .await;
+    assert_eq!(steer.status, StatusCode::OK);
+    let steer = steer.json();
+    assert_eq!(steer["text"], "do not change the public API");
+    assert_eq!(steer["status"], "queued");
+    let message_id = steer["id"].as_u64().expect("steer id");
+
+    let listed = harness
+        .send("GET", &format!("/v1/sessions/{id}/tasks/steer"), None)
+        .await;
+    assert_eq!(listed.status, StatusCode::OK);
+    assert!(
+        listed
+            .json()
+            .as_array()
+            .expect("messages")
+            .iter()
+            .any(|message| { message["id"] == message_id && message["status"] == "queued" })
+    );
+
+    let withdrawn = harness
+        .send(
+            "DELETE",
+            &format!("/v1/sessions/{id}/tasks/steer/{message_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(withdrawn.status, StatusCode::OK);
+    assert_eq!(withdrawn.json()["status"], "withdrawn");
+    let duplicate_withdrawal = harness
+        .send(
+            "DELETE",
+            &format!("/v1/sessions/{id}/tasks/steer/{message_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(duplicate_withdrawal.status, StatusCode::CONFLICT);
+
+    let empty = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/steer"),
+            Some(r#"{"text":"  "}"#),
+        )
+        .await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+
+    let too_long = format!("{{\"text\":\"{}\"}}", "é".repeat(16_001));
+    let oversized = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/control"),
+            Some(&too_long),
+        )
+        .await;
+    assert_eq!(oversized.status, StatusCode::BAD_REQUEST);
+    let unknown_field = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/control"),
+            Some(r#"{"text":"help","system":"override"}"#),
+        )
+        .await;
+    assert_eq!(unknown_field.status, StatusCode::BAD_REQUEST);
+    gate.cancel();
+}
+
+// ---- compaction, sandbox reload, tasks ----
+
+#[tokio::test]
+async fn compacting_an_unknown_session_is_404() {
+    let harness = Harness::new();
+    let reply = harness
+        .send("POST", "/v1/sessions/missing/compact", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compacting_while_a_turn_runs_is_409_turn_active() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/compact"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.json()["error"]["code"], "turn_active");
+    gate.cancel();
+}
+
+// ---- reflection ----
+
+#[tokio::test]
+async fn reflecting_an_unknown_session_is_404_and_a_bad_body_is_400() {
+    let harness = Harness::new();
+    let reply = harness
+        .send("POST", "/v1/sessions/missing/reflect", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    let id = harness.create().await;
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/reflect"), Some("{nope"))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reflecting_while_a_turn_runs_is_409_turn_active() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/reflect"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.json()["error"]["code"], "turn_active");
+    gate.cancel();
+}
+
+#[tokio::test]
+async fn reflecting_a_session_that_cannot_reflect_is_409_unavailable_and_frees_the_slot() {
+    // The test controllers keep their history in memory, so there is no
+    // session file to read.
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/reflect"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "reflection_unavailable");
+    // The compaction slot is released, so a compaction is not refused.
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/compact"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn canceling_reflection_before_it_registers_cancels_that_request_id_only() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let cancel = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect/cancel"),
+            Some(r#"{"request_id":"reflect-1"}"#),
+        )
+        .await;
+    assert_eq!(cancel.status, StatusCode::ACCEPTED, "{}", cancel.body);
+
+    let canceled = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect"),
+            Some(r#"{"request_id":"reflect-1"}"#),
+        )
+        .await;
+    assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+    assert!(canceled.body.is_empty());
+
+    let other = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect"),
+            Some(r#"{"request_id":"reflect-2"}"#),
+        )
+        .await;
+    assert_eq!(other.status, StatusCode::CONFLICT, "{}", other.body);
+    assert_eq!(other.json()["error"]["code"], "reflection_unavailable");
+}
+
+#[tokio::test]
+async fn invalid_reflection_request_ids_are_rejected_without_binding() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let invalid = "a".repeat(65);
+    let cancel = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect/cancel"),
+            Some(&format!(r#"{{"request_id":"{invalid}"}}"#)),
+        )
+        .await;
+    assert_eq!(cancel.status, StatusCode::BAD_REQUEST, "{}", cancel.body);
+
+    let valid = "a".repeat(64);
+    let reflect = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect"),
+            Some(&format!(r#"{{"request_id":"{valid}"}}"#)),
+        )
+        .await;
+    assert_eq!(reflect.status, StatusCode::CONFLICT, "{}", reflect.body);
+    assert_eq!(reflect.json()["error"]["code"], "reflection_unavailable");
+
+    let control = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect"),
+            Some(r#"{"request_id":"bad!"}"#),
+        )
+        .await;
+    assert_eq!(control.status, StatusCode::BAD_REQUEST, "{}", control.body);
+}
+
+#[tokio::test]
+async fn canceling_reflection_matches_only_the_active_request_id() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let active = CancellationToken::new();
+    let other = CancellationToken::new();
+    let session = harness.server.lookup(&id).expect("session");
+    session.lock().reflecting = Some(ActiveReflection {
+        request_id: Some("active".to_string()),
+        cancel: active.clone(),
+    });
+
+    let stale = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect/cancel"),
+            Some(r#"{"request_id":"stale"}"#),
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::ACCEPTED, "{}", stale.body);
+    assert!(!active.is_cancelled());
+
+    session.lock().reflecting = Some(ActiveReflection {
+        request_id: Some("other".to_string()),
+        cancel: other.clone(),
+    });
+    let matching = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect/cancel"),
+            Some(r#"{"request_id":"other"}"#),
+        )
+        .await;
+    assert_eq!(matching.status, StatusCode::ACCEPTED, "{}", matching.body);
+    assert!(other.is_cancelled());
+}
+
+#[tokio::test]
+async fn stale_reflection_cancel_does_not_cancel_later_compaction() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let compaction = CancellationToken::new();
+    let session = harness.server.lookup(&id).expect("session");
+    {
+        let mut state = session.lock();
+        state.remember_reflection_cancel("done");
+        state.compacting = Some(compaction.clone());
+    }
+
+    let stale = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/reflect/cancel"),
+            Some(r#"{"request_id":"done"}"#),
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::ACCEPTED, "{}", stale.body);
+    assert!(!compaction.is_cancelled());
+}
+
+/// A reflection store, a home directory, and the skill roots under it.
+struct ReflectionHome {
+    _home: TempDir,
+    path: std::path::PathBuf,
+    store: Arc<crate::reflection::Store>,
+    roots: crate::reflection::skillwrite::Roots,
+}
+
+fn reflection_home() -> ReflectionHome {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().to_path_buf();
+    let roots = crate::reflection::skill_roots(
+        &path.to_string_lossy(),
+        &[path.join(".otto/skills").to_string_lossy().into_owned()],
+    )
+    .expect("roots");
+    ReflectionHome {
+        _home: home,
+        path,
+        store: Arc::new(crate::reflection::Store::open_in_memory().expect("store")),
+        roots,
+    }
+}
+
+fn write_generated_skill(home: &ReflectionHome, name: &str, body: &str, action_revise: bool) {
+    use crate::reflection::guard::{self, Candidate, Verdict};
+    use crate::reflection::output::SkillAction;
+    let candidate = Candidate {
+        action: if action_revise {
+            SkillAction::Revise
+        } else {
+            SkillAction::Create
+        },
+        name: name.into(),
+        description: "Run the lint gate before committing".into(),
+        body: body.into(),
+        scripts: Default::default(),
+        reason: "the user asked for it and it ran cleanly".into(),
+        cited: Vec::new(),
+    };
+    let entries = HashMap::new();
+    let checked = guard::check(candidate, &entries, &|text: &str| text.to_owned()).expect("check");
+    let vetted = guard::approve(checked, Verdict::NotRequested);
+    crate::reflection::skillwrite::apply(
+        home.store.as_ref(),
+        &home.roots,
+        &vetted,
+        "run-7",
+        "session-9",
+        "2026-10-02T00:00:00Z",
+        30,
+    )
+    .expect("write");
+}
+
+const GENERATED_BODY: &str = "1. Run `cargo fmt --all`.\n2. Run `cargo clippy --workspace -- -D warnings`.\n3. Fix every warning before committing.";
+
+#[tokio::test]
+async fn skill_manager_global_state_tracks_disk_without_changing_session_catalog() {
+    for startup_enabled in [false, true] {
+        let home = reflection_home();
+        write_generated_skill(&home, "lint-gate", GENERATED_BODY, false);
+        let harness = Harness::with(HarnessOptions {
+            reflection: Some((Arc::clone(&home.store), home.path.clone())),
+            config_text: Some(format!("[skills]\nenabled = {startup_enabled}\n")),
+            skills_enabled: Some(startup_enabled),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let base = format!("/v1/sessions/{id}");
+        for global_enabled in [startup_enabled, !startup_enabled, startup_enabled] {
+            std::fs::write(
+                &harness.factory.builder.config_path,
+                format!("[skills]\nenabled = {global_enabled}\n"),
+            )
+            .unwrap();
+            let reply = harness
+                .send("GET", &format!("{base}/skill-manager"), None)
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+            let json = reply.json();
+            assert_eq!(json["global_enabled"], global_enabled);
+            assert_eq!(json["skills"].as_array().unwrap().len(), 1);
+            assert_eq!(json["skills"][0]["skill"]["name"], "lint-gate");
+            assert_eq!(
+                json["skills"][0]["enabled"], true,
+                "per-skill preference is independent"
+            );
+            assert_eq!(
+                json["skills"][0]["loaded"], startup_enabled,
+                "fixed session catalog"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn skill_manager_keeps_disabled_discovered_skills_and_confirms_persistence_over_http() {
+    let home = reflection_home();
+    write_generated_skill(&home, "lint-gate", GENERATED_BODY, false);
+    let harness = Harness::with(HarnessOptions {
+        reflection: Some((Arc::clone(&home.store), home.path.clone())),
+        config_text: Some("[skills]\ndisabled = [\"lint-gate\"]\n".into()),
+        disabled_skills: vec!["lint-gate".into()],
+        ..HarnessOptions::default()
+    });
+    // Match the real startup's resolved configuration; config_text alone is a disk fixture.
+    let catalog = harness
+        .factory
+        .builder
+        .build_catalogs(&mut Vec::new(), 4096, &mut Vec::new())
+        .expect("catalogs");
+    assert!(catalog.skills.lookup("lint-gate").is_none());
+    assert!(catalog.discovered_skills.lookup("lint-gate").is_some());
+    let id = harness.create().await;
+    let base = format!("/v1/sessions/{id}");
+    let reply = harness
+        .send("GET", &format!("{base}/skill-manager"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["skills"][0]["skill"]["name"], "lint-gate");
+    assert_eq!(reply.json()["skills"][0]["enabled"], false);
+    let loaded = reply.json()["skills"][0]["loaded"].clone();
+    assert_eq!(loaded, false, "disabled skill must not load into session");
+    let reply = harness
+        .send("GET", &format!("{base}/skill-manager/lint-gate"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+        reply.json()["body"]
+            .as_str()
+            .unwrap()
+            .contains("cargo fmt --all"),
+        "{}",
+        reply.body
+    );
+    assert!(
+        reply.json()["skill"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("SKILL.md")
+    );
+    let reply = harness
+        .send("POST", &format!("{base}/skills/lint-gate/enable"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["restart_required"], true);
+    let reply = harness
+        .send("GET", &format!("{base}/skill-manager"), None)
+        .await;
+    assert_eq!(reply.json()["skills"][0]["enabled"], true);
+    assert_eq!(
+        reply.json()["skills"][0]["loaded"],
+        loaded,
+        "never hot reload"
+    );
+    let reply = harness
+        .send("POST", &format!("{base}/skills/lint-gate/disable"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let reply = harness
+        .send("GET", &format!("{base}/skill-manager"), None)
+        .await;
+    assert_eq!(reply.json()["skills"][0]["enabled"], false);
+    assert_eq!(reply.json()["skills"].as_array().unwrap().len(), 1);
+    std::fs::write(&harness.factory.builder.config_path, "not valid TOML = [").unwrap();
+    let reply = harness
+        .send("GET", &format!("{base}/skill-manager"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reply.json()["error"]["code"], "skill_config_read_failed");
+    let reply = harness
+        .send("POST", &format!("{base}/skills/lint-gate/enable"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reply.json()["error"]["code"], "skill_config_write_failed");
+    assert_eq!(
+        harness
+            .send("GET", "/v1/sessions/missing/skill-manager", None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn the_generated_skills_list_says_when_reflection_is_off() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/reflection/skills"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["enabled"], false);
+    assert_eq!(reply.json()["skills"], serde_json::json!([]));
+    let reply = harness
+        .send("GET", "/v1/sessions/missing/reflection/skills", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reflection_run_logs_list_and_show_over_http() {
+    let home = reflection_home();
+    let harness = Harness::with(HarnessOptions {
+        reflection: Some((Arc::clone(&home.store), home.path.clone())),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let list = format!("/v1/sessions/{id}/reflection/runs");
+    let reply = harness.send("GET", &list, None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({"enabled": true, "runs": []})
+    );
+
+    let dir = home.path.join(".otto/reflection/runs");
+    crate::reflection::runlog::write(
+            &dir,
+            "2026-10-05T02:03:00Z",
+            "abcd1234-run",
+            "# Reflection run abcd1234-run\n\n- trigger: requested\n- status: ok\n- started: 2026-10-05T02:03:00Z\n\n## Retrospective\n\n> Read the docs first.\n",
+        )
+        .expect("write a log");
+    let reply = harness.send("GET", &list, None).await;
+    let runs = &reply.json()["runs"];
+    assert_eq!(runs.as_array().expect("array").len(), 1, "{runs}");
+    assert_eq!(runs[0]["id"], "abcd1234");
+    assert_eq!(runs[0]["trigger"], "requested");
+    assert_eq!(runs[0]["headline"], "Read the docs first.");
+
+    let reply = harness.send("GET", &format!("{list}/abcd1234"), None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+        reply.json()["content"]
+            .as_str()
+            .expect("content")
+            .contains("> Read the docs first.")
+    );
+    for missing in ["zzzz9999", "..%2Fsessions"] {
+        let reply = harness
+            .send("GET", &format!("{list}/{missing}"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{missing}");
+    }
+}
+
+#[tokio::test]
+async fn generated_skills_list_and_revert_over_http() {
+    let home = reflection_home();
+    write_generated_skill(&home, "lint-gate", GENERATED_BODY, false);
+    write_generated_skill(&home, "fmt-check", GENERATED_BODY, false);
+    let harness = Harness::with(HarnessOptions {
+        reflection: Some((Arc::clone(&home.store), home.path.clone())),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let list = format!("/v1/sessions/{id}/reflection/skills");
+
+    let reply = harness.send("GET", &list, None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let body = reply.json();
+    assert_eq!(body["enabled"], true);
+    let names: Vec<_> = body["skills"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|skill| skill["name"].as_str().expect("name").to_owned())
+        .collect();
+    assert_eq!(names, ["fmt-check", "lint-gate"]);
+    assert_eq!(body["skills"][1]["owned"], true);
+    assert_eq!(body["skills"][1]["run_id"], "run-7");
+    assert_eq!(body["skills"][1]["session_id"], "session-9");
+
+    // Reverting a skill reflection created removes it.
+    let reply = harness
+        .send("POST", &format!("{list}/lint-gate/revert"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["result"], "removed");
+    assert!(!home.path.join(".otto/skills/lint-gate/SKILL.md").exists());
+    // It is gone from the list and a second revert is 404.
+    let reply = harness.send("GET", &list, None).await;
+    assert_eq!(reply.json()["skills"].as_array().expect("array").len(), 1);
+    let reply = harness
+        .send("POST", &format!("{list}/lint-gate/revert"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+    // A skill edited by hand is listed as not owned, and revert refuses it.
+    let edited = home.path.join(".otto/skills/fmt-check/SKILL.md");
+    std::fs::write(&edited, "my own version").expect("edit");
+    let reply = harness.send("GET", &list, None).await;
+    assert_eq!(reply.json()["skills"][0]["owned"], false);
+    let reply = harness
+        .send("POST", &format!("{list}/fmt-check/revert"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.json()["error"]["code"], "skill_not_owned");
+    assert_eq!(
+        std::fs::read_to_string(&edited).expect("read"),
+        "my own version"
+    );
+}
+
+#[tokio::test]
+async fn reverting_restores_the_previous_version_and_rejects_bad_names() {
+    let home = reflection_home();
+    write_generated_skill(&home, "lint-gate", GENERATED_BODY, false);
+    let first =
+        std::fs::read_to_string(home.path.join(".otto/skills/lint-gate/SKILL.md")).expect("first");
+    write_generated_skill(
+        &home,
+        "lint-gate",
+        &format!("{GENERATED_BODY}\n4. Re-run the tests."),
+        true,
+    );
+    let harness = Harness::with(HarnessOptions {
+        reflection: Some((Arc::clone(&home.store), home.path.clone())),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let base = format!("/v1/sessions/{id}/reflection/skills");
+
+    let reply = harness
+        .send("POST", &format!("{base}/lint-gate/revert"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["result"], "restored");
+    assert_eq!(
+        std::fs::read_to_string(home.path.join(".otto/skills/lint-gate/SKILL.md")).expect("read"),
+        first
+    );
+    let reply = harness
+        .send("POST", &format!("{base}/Not%20A%20Name/revert"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    let reply = harness
+        .send(
+            "POST",
+            "/v1/sessions/missing/reflection/skills/x/revert",
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn notices_are_listed_by_id_without_being_removed() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/notices");
+    let reply = harness.send("GET", &path, None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json(), serde_json::json!({"notices": [], "last": 0}));
+
+    let session = harness.server.lookup(&id).expect("session");
+    session.ctrl.push_notice("reflection: first");
+    session.ctrl.push_routed_notice(
+        "reflection: second",
+        crate::schedule::Origin::chat("telegram", "42").unwrap(),
+    );
+
+    let reply = harness.send("GET", &path, None).await;
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({
+            "notices": [
+                {"id": 1, "text": "reflection: first"},
+                {"id": 2, "text": "reflection: second", "presentation_origin": "chat:telegram:42"}
+            ],
+            "last": 2,
+        })
+    );
+    // A second client, or a repeated read, sees them again.
+    assert_eq!(
+        harness.send("GET", &path, None).await.json()["notices"]
+            .as_array()
+            .expect("array")
+            .len(),
+        2
+    );
+    let reply = harness.send("GET", &format!("{path}?after=1"), None).await;
+    assert_eq!(
+        reply.json()["notices"],
+        serde_json::json!([{
+            "id": 2,
+            "text": "reflection: second",
+            "presentation_origin": "chat:telegram:42"
+        }])
+    );
+    let reply = harness.send("GET", &format!("{path}?after=2"), None).await;
+    assert_eq!(reply.json(), serde_json::json!({"notices": [], "last": 2}));
+    let reply = harness
+        .send("GET", "/v1/sessions/missing/notices", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn wake_replies_are_listed_after_the_cursor_and_unknown_sessions_are_404() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/wake-replies");
+    let session = harness.server.lookup(&id).expect("session");
+    session.ctrl.push_notice("reflection: not a wake reply");
+    session.ctrl.push_wake_reply("first");
+    session.ctrl.push_wake_reply("second");
+
+    let reply = harness.send("GET", &path, None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({
+            "notices": [{"id": 1, "text": "first"}, {"id": 2, "text": "second"}],
+            "last": 2,
+        })
+    );
+    let reply = harness.send("GET", &format!("{path}?after=1"), None).await;
+    assert_eq!(
+        reply.json()["notices"],
+        serde_json::json!([{"id": 2, "text": "second"}])
+    );
+    let reply = harness
+        .send("GET", "/v1/sessions/missing/wake-replies", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn compacting_an_empty_session_is_a_noop() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/compact"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["noop"], true);
+}
+
+#[tokio::test]
+async fn sandbox_reload_is_501_when_the_factory_wires_none() {
+    let harness = Harness::new();
+    let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+    assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(reply.json()["error"]["code"], "not_implemented");
+}
+
+#[tokio::test]
+async fn sandbox_reload_response_is_unchanged_for_a_single_workspace() {
+    let harness = Harness::with(HarnessOptions {
+        sandbox_reload: Some(Ok(SandboxInfo {
+            mode: SandboxMode::Seatbelt,
+            network: SandboxNetwork::Allowed,
+            bash_available: true,
+            reason: SandboxReason::None,
+        })),
+        ..Default::default()
+    });
+    let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let body = reply.json();
+    assert_eq!(body["mode"], "seatbelt");
+    assert_eq!(body["network"], "allowed");
+    assert_eq!(body["bash_available"], true);
+    assert!(
+        body.get("workspaces").is_none(),
+        "single-workspace reload gained a workspaces field: {body}"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_reload_failure_is_unchanged_for_a_single_workspace() {
+    let harness = Harness::with(HarnessOptions {
+        sandbox_reload: Some(Err("boom".to_string())),
+        ..Default::default()
+    });
+    let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "sandbox_reload_failed");
+    assert_eq!(reply.json()["error"]["message"], "boom");
+}
+
+#[tokio::test]
+async fn sandbox_reload_reloads_every_loaded_workspace() {
+    let startup = "/startup".to_string();
+    let harness = Harness::with(HarnessOptions {
+        info: Info {
+            workspace: startup.clone(),
+            ..Default::default()
+        },
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..Default::default()
+        },
+        sandbox_reload: Some(Ok(SandboxInfo {
+            mode: SandboxMode::Seatbelt,
+            network: SandboxNetwork::Allowed,
+            bash_available: true,
+            reason: SandboxReason::None,
+        })),
+        sandbox_reload_others: vec![(
+            "/other".to_string(),
+            Ok(SandboxInfo {
+                mode: SandboxMode::Off,
+                network: SandboxNetwork::Unconfined,
+                bash_available: true,
+                reason: SandboxReason::None,
+            }),
+        )],
+        ..Default::default()
+    });
+    let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let body = reply.json();
+    assert_eq!(body["mode"], "seatbelt", "{body}");
+    let workspaces = body["workspaces"].as_array().expect("workspaces array");
+    assert_eq!(workspaces.len(), 2, "{body}");
+    assert_eq!(workspaces[0]["workspace"], startup);
+    assert_eq!(workspaces[0]["sandbox"]["mode"], "seatbelt");
+    assert_eq!(workspaces[1]["workspace"], "/other");
+    assert_eq!(workspaces[1]["sandbox"]["mode"], "off");
+}
+
+#[tokio::test]
+async fn sandbox_reload_names_the_workspace_that_failed() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..Default::default()
+        },
+        sandbox_reload: Some(Ok(SandboxInfo::default())),
+        sandbox_reload_others: vec![("/other".to_string(), Err("boom".to_string()))],
+        ..Default::default()
+    });
+    let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "sandbox_reload_failed");
+    let message = reply.json()["error"]["message"]
+        .as_str()
+        .expect("message")
+        .to_string();
+    assert!(message.contains("/other"), "{message}");
+    assert!(message.contains("boom"), "{message}");
+}
+
+#[tokio::test]
+async fn approval_route_is_session_scoped_and_fails_closed() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/approvals/approval-1"),
+            Some(r#"{"decision":"allow"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.json()["error"]["code"], "approval_failed");
+    for body in [None, Some(r#"{"decision":"maybe"}"#), Some("{}")] {
+        let bad = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/approvals/approval-1"),
+                body,
+            )
+            .await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{body:?}");
+    }
+    assert_eq!(
+        harness
+            .send(
+                "POST",
+                "/v1/sessions/missing/approvals/approval-1",
+                Some(r#"{"decision":"allow"}"#),
+            )
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn the_task_routes_answer_empty_for_a_session_with_no_tasks() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/tasks"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["tasks"].as_array().expect("tasks").len(), 0);
+
+    for (method, path) in [
+        ("GET", format!("/v1/sessions/{id}/tasks/t1")),
+        ("POST", format!("/v1/sessions/{id}/tasks/t1/cancel")),
+    ] {
+        assert_eq!(
+            harness.send(method, &path, None).await.status,
+            StatusCode::NOT_FOUND,
+            "{method} {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_mcp_route_answers_empty_for_a_session_with_no_servers_configured() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/mcp"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.json()["servers"].as_array().expect("servers").len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn the_mcp_route_answers_404_for_an_unknown_session() {
+    let harness = Harness::new();
+    let reply = harness.send("GET", "/v1/sessions/missing/mcp", None).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(reply.json()["error"]["code"], "not_found");
+}
+
+/// The routes read the runner's real registry. The list and detail task
+/// routes, driven through the registry rather than through a scripted
+/// `agent` tool call.
+#[tokio::test]
+async fn the_task_routes_list_and_detail_a_real_task() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let registry = harness
+        .server
+        .lookup(&id)
+        .expect("session")
+        .ctrl
+        .subagent_tasks()
+        .expect("registry");
+    let added = registry
+        .add(
+            crate::subagent::tasks::Task {
+                name: "lint".to_string(),
+                agent: "reviewer".to_string(),
+                description: "check the diff".to_string(),
+                model: "gpt-5".to_string(),
+                created_at: Some(chrono::Utc::now()),
+                ..crate::subagent::tasks::Task::default()
+            },
+            None,
+            None,
+        )
+        .expect("add");
+
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/tasks"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let listed = reply.json();
+    let listed = listed["tasks"].as_array().expect("tasks");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], added.id);
+    assert_eq!(listed[0]["name"], "lint");
+    assert_eq!(listed[0]["agent"], "reviewer");
+    assert_eq!(listed[0]["description"], "check the diff");
+    assert_eq!(listed[0]["model"], "gpt-5");
+    assert_eq!(listed[0]["status"], "queued");
+    // The wire record never carries the prompt.
+    assert!(listed[0].get("prompt").is_none());
+
+    let detail = harness
+        .send(
+            "GET",
+            &format!("/v1/sessions/{id}/tasks/{}", added.id),
+            None,
+        )
+        .await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    assert_eq!(detail.json()["id"], added.id);
+    assert_eq!(
+        detail.json()["history"].as_array().expect("history").len(),
+        0
+    );
+
+    let canceled = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/lint/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+    // Cancelling does not itself finish the task; once it is final the
+    // route answers 409 `task_done`.
+    assert_eq!(canceled.json()["status"], "queued");
+    registry.finish(
+        &added.id,
+        crate::subagent::tasks::TaskStatus::Canceled,
+        chrono::Utc::now(),
+        "",
+        "",
+    );
+    let repeat = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/tasks/lint/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(repeat.status, StatusCode::CONFLICT);
+    assert_eq!(repeat.json()["error"]["code"], "task_done");
+}
+
+// ---- workspaces ----
+
+#[tokio::test]
+async fn listing_workspaces_answers_the_startup_workspace_alone() {
+    let harness = Harness::new();
+    let reply = harness.send("GET", "/v1/workspaces", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    let body = reply.json();
+    let startup = harness.factory.workspaces.startup.clone();
+    assert_eq!(body["startup"], startup);
+    assert_eq!(body["roots"].as_array().expect("roots").len(), 0);
+    let workspaces = body["workspaces"].as_array().expect("workspaces");
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0]["path"], startup);
+    assert_eq!(workspaces[0]["open_sessions"], 0);
+    assert_eq!(workspaces[0]["workflows"], false);
+}
+
+#[tokio::test]
+async fn registering_a_relative_path_answers_400() {
+    let harness = Harness::new();
+    let reply = harness
+        .send_with(
+            "POST",
+            "/v1/workspaces",
+            Some(r#"{"path":"relative"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "INVALID_WORKSPACE");
+}
+
+#[tokio::test]
+async fn registering_an_unadmitted_path_answers_403() {
+    let harness = Harness::new();
+    let reply = harness
+        .send_with(
+            "POST",
+            "/v1/workspaces",
+            Some(r#"{"path":"/elsewhere"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_ADMITTED");
+}
+
+#[tokio::test]
+async fn registering_an_admitted_path_answers_201_then_200_on_repeat() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let first = harness
+        .send_with(
+            "POST",
+            "/v1/workspaces",
+            Some(r#"{"path":"/other"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    assert_eq!(first.json()["path"], "/other");
+    assert_eq!(first.json()["open_sessions"], 0);
+    assert_eq!(first.json()["workflows"], true);
+
+    let repeat = harness
+        .send_with(
+            "POST",
+            "/v1/workspaces",
+            Some(r#"{"path":"/other"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(repeat.status, StatusCode::OK, "{}", repeat.body);
+    assert_eq!(repeat.json()["path"], "/other");
+
+    let list = harness.send("GET", "/v1/workspaces", None).await.json();
+    let workspaces = list["workspaces"].as_array().expect("workspaces");
+    assert_eq!(workspaces.len(), 2);
+    assert_eq!(workspaces[0]["path"], harness.factory.workspaces.startup);
+    assert_eq!(workspaces[1]["path"], "/other");
+}
+
+#[tokio::test]
+async fn registering_an_unadmitted_path_with_trust_records_trust_then_answers_201() {
+    let harness = Harness::new();
+    let reply = harness
+        .send_with(
+            "POST",
+            "/v1/workspaces",
+            Some(r#"{"path":"/elsewhere","trust":true}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.json()["path"], "/elsewhere");
+    assert_eq!(
+        *harness.factory.workspaces.trusted.lock().expect("trusted"),
+        ["/elsewhere"]
+    );
+}
+
+#[tokio::test]
+async fn registering_an_admitted_path_with_trust_records_nothing() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let reply = harness
+        .send_with(
+            "POST",
+            "/v1/workspaces",
+            Some(r#"{"path":"/other","trust":true}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert!(
+        harness
+            .factory
+            .workspaces
+            .trusted
+            .lock()
+            .expect("trusted")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn browsing_directories_lists_subdirectories_of_the_first_root() {
+    let home = tempfile::tempdir().expect("home");
+    let root = std::fs::canonicalize(home.path()).expect("canonical");
+    std::fs::create_dir(root.join("project")).expect("mkdir");
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            browse_roots: vec![root.clone()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let reply = harness.send("GET", "/v1/fs/dirs", None).await;
+
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let body = reply.json();
+    assert_eq!(body["path"], root.to_string_lossy().as_ref());
+    assert_eq!(body["dirs"][0]["name"], "project");
+}
+
+#[tokio::test]
+async fn browsing_outside_the_roots_answers_403() {
+    let home = tempfile::tempdir().expect("home");
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            browse_roots: vec![std::fs::canonicalize(home.path()).expect("canonical")],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+    // A temp directory path has no characters that need escaping.
+    let query = format!("/v1/fs/dirs?path={}", elsewhere.path().display());
+
+    let reply = harness.send("GET", &query, None).await;
+
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "PATH_NOT_ALLOWED");
+}
+
+#[tokio::test]
+async fn browsing_with_no_roots_answers_404() {
+    let harness = Harness::new();
+    let reply = harness.send("GET", "/v1/fs/dirs", None).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "BROWSE_UNAVAILABLE");
+}
+
+#[tokio::test]
+async fn browsing_without_a_token_answers_401() {
+    let harness = Harness::with(HarnessOptions {
+        token: "secret".to_string(),
+        ..HarnessOptions::default()
+    });
+    let reply = harness.send("GET", "/v1/fs/dirs", None).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn a_failed_load_answers_500_with_the_real_message() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/broken".to_string()],
+            error: Some(("/broken".to_string(), "sandbox open failed".to_string())),
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let reply = harness
+        .send_with(
+            "POST",
+            "/v1/workspaces",
+            Some(r#"{"path":"/broken"}"#),
+            &[("content-type", b"application/json")],
+        )
+        .await;
+    assert_eq!(
+        reply.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        reply.body
+    );
+    assert_eq!(reply.json()["error"]["code"], "internal");
+    assert_eq!(reply.json()["error"]["message"], "sandbox open failed");
+}
+
+#[tokio::test]
+async fn deleting_a_loaded_workspace_unloads_it() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            loaded: tokio::sync::Mutex::new(BTreeMap::from([("/other".to_string(), true)])),
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let reply = harness
+        .send("DELETE", "/v1/workspaces?path=/other", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+
+    let list = harness.send("GET", "/v1/workspaces", None).await.json();
+    let workspaces = list["workspaces"].as_array().expect("workspaces");
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0]["path"], harness.factory.workspaces.startup);
+}
+
+#[tokio::test]
+async fn deleting_an_unknown_path_answers_404() {
+    let harness = Harness::new();
+    let reply = harness
+        .send("DELETE", "/v1/workspaces?path=/nope", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn deleting_the_startup_workspace_answers_409() {
+    let harness = Harness::new();
+    let startup = harness.factory.workspaces.startup.clone();
+    let reply = harness
+        .send("DELETE", &format!("/v1/workspaces?path={startup}"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_IS_STARTUP");
+}
+
+#[tokio::test]
+async fn deleting_a_workspace_with_an_open_session_answers_409() {
+    // A session registered directly against a second workspace's own
+    // builder, bypassing `TestFactory` (which always builds against the
+    // harness's one builder).
+    let other_workspace = tempfile::tempdir().expect("other workspace");
+    let other_sessions = tempfile::tempdir().expect("other sessions");
+    // Canonical, as a real session's workspace is (`/var` → `/private/var`).
+    let other_root = std::fs::canonicalize(other_workspace.path()).expect("canonical");
+    let other_builder = Arc::new(testutil::builder(&other_root, other_sessions.path()));
+    let other_path = other_builder.workspace_path.clone();
+
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec![other_path.clone()],
+            loaded: tokio::sync::Mutex::new(BTreeMap::from([(other_path.clone(), true)])),
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let session = SharedSession::memory(Header {
+        version: CURRENT_VERSION,
+        id: new_id().expect("id"),
+        workspace: other_path.clone(),
+        provider: "openai-compatible".to_string(),
+        profile: "alpha".to_string(),
+        model: "test-model".to_string(),
+        created_at: chrono::Utc::now(),
+    });
+    let runner = Runner::scripted(
+        session.clone(),
+        Arc::clone(&harness.provider) as Arc<dyn Provider + Send + Sync>,
+        Arc::new(crate::subagent::tasks::Tasks::new()),
+    );
+    let other_ctrl = Controller::with_builder(
+        other_builder,
+        true,
+        session,
+        runner,
+        RuntimeInfo {
+            provider: "openai-compatible".to_string(),
+            profile: "alpha".to_string(),
+            model: "test-model".to_string(),
+            thinking: "high".to_string(),
+            context_window: 128_000,
+            sandbox: SandboxInfo::default(),
+        },
+    );
+    harness.server.register(other_ctrl);
+
+    let reply = harness
+        .send("DELETE", &format!("/v1/workspaces?path={other_path}"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_IN_USE");
+
+    // A non-canonical spelling of the same directory is checked too.
+    let reply = harness
+        .send(
+            "DELETE",
+            &format!("/v1/workspaces?path={other_path}/."),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+
+    let list = harness.send("GET", "/v1/workspaces", None).await.json();
+    assert_eq!(list["workspaces"].as_array().expect("workspaces").len(), 2);
+}
+
+#[tokio::test]
+async fn deleting_a_workspace_with_an_active_run_answers_409() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            loaded: tokio::sync::Mutex::new(BTreeMap::from([("/other".to_string(), true)])),
+            in_use: Some("/other".to_string()),
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+
+    let reply = harness
+        .send("DELETE", "/v1/workspaces?path=/other", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_IN_USE");
+
+    let list = harness.send("GET", "/v1/workspaces", None).await.json();
+    assert_eq!(list["workspaces"].as_array().expect("workspaces").len(), 2);
+}
+
+#[tokio::test]
+async fn deleting_a_workspace_without_a_token_answers_401() {
+    let harness = Harness::with(HarnessOptions {
+        token: "secret".to_string(),
+        ..HarnessOptions::default()
+    });
+    let reply = harness
+        .send("DELETE", "/v1/workspaces?path=/other", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+}
+
+// ---- workspace diff ----
+
+/// A `CommandExecutor` double that records every request and answers
+/// each call with the next canned `(exit code, stdout)` pair, or
+/// `(0, "")` once the list runs out.
+#[derive(Default)]
+struct RecordingExecutor {
+    requests: Mutex<Vec<crate::sandbox::Request>>,
+    outputs: Mutex<Vec<(i32, String)>>,
+}
+
+impl RecordingExecutor {
+    fn with(outputs: Vec<(i32, String)>) -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+            outputs: Mutex::new(outputs),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::sandbox::CommandExecutor for RecordingExecutor {
+    async fn execute(
+        &self,
+        request: crate::sandbox::Request,
+        streams: crate::sandbox::Streams<'_>,
+        _cancel: &CancellationToken,
+    ) -> (
+        crate::sandbox::ExitStatus,
+        Result<(), crate::sandbox::Error>,
+    ) {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(request);
+        let (code, text) = {
+            let mut outputs = self
+                .outputs
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if outputs.is_empty() {
+                (0, String::new())
+            } else {
+                outputs.remove(0)
+            }
+        };
+        let _ = streams.stdout.write_all(text.as_bytes());
+        (
+            crate::sandbox::ExitStatus {
+                code,
+                ..crate::sandbox::ExitStatus::default()
+            },
+            Ok(()),
+        )
+    }
+}
+
+fn diff_options(executor: &Arc<RecordingExecutor>, environment: Vec<String>) -> HarnessOptions {
+    HarnessOptions {
+        diff_runner: Some((
+            Arc::clone(executor) as Arc<dyn crate::sandbox::CommandExecutor>,
+            environment,
+        )),
+        ..HarnessOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn the_diff_route_runs_git_through_the_workspace_executor() {
+    let environment = vec!["PATH=/usr/bin".to_string()];
+    let executor = RecordingExecutor::with(vec![
+        (0, "true\n".to_string()),
+        (0, "main\n".to_string()),
+        (0, String::new()),
+        (0, String::new()),
+    ]);
+    let harness = Harness::with(diff_options(&executor, environment.clone()));
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["repository"], true);
+    assert_eq!(reply.json()["branch"], "main");
+    assert_eq!(reply.json()["files"], serde_json::json!([]));
+    assert_eq!(reply.json()["truncated"], false);
+
+    let requests = executor.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].argv,
+        vec![
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotepath=off",
+            "rev-parse",
+            "--is-inside-work-tree",
+        ]
+    );
+    assert_eq!(
+        requests[2].argv,
+        vec![
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "HEAD",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--relative",
+            "-M",
+            "--",
+            ".",
+        ]
+    );
+    assert_eq!(
+        requests[3].argv,
+        vec![
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotepath=off",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ]
+    );
+    assert_eq!(
+        requests[0].dir,
+        PathBuf::from(&harness.factory.workspaces.startup)
+    );
+    let mut expected_env = environment.clone();
+    expected_env.push("GIT_OPTIONAL_LOCKS=0".to_string());
+    assert_eq!(requests[0].env, expected_env);
+}
+
+#[tokio::test]
+async fn a_directory_outside_any_work_tree_answers_repository_false() {
+    let executor = RecordingExecutor::with(vec![(1, String::new())]);
+    let harness = Harness::with(diff_options(&executor, Vec::new()));
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["repository"], false);
+    assert_eq!(reply.json()["branch"], Value::Null);
+    assert_eq!(reply.json()["files"], serde_json::json!([]));
+    assert_eq!(executor.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn before_the_first_commit_diffs_against_the_empty_tree() {
+    let executor = RecordingExecutor::with(vec![
+        (0, "true\n".to_string()),
+        (1, String::new()),
+        (0, String::new()),
+        (0, String::new()),
+    ]);
+    let harness = Harness::with(diff_options(&executor, Vec::new()));
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["repository"], true);
+    assert_eq!(reply.json()["branch"], Value::Null);
+
+    let requests = executor.requests.lock().unwrap();
+    assert_eq!(
+        requests[2].argv[5..7],
+        [
+            "diff".to_string(),
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_untracked_file_is_reported_and_its_diff_no_index_exit_1_is_accepted() {
+    let patch = "diff --git a/dev/null b/new.txt\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n";
+    let executor = RecordingExecutor::with(vec![
+        (0, "true\n".to_string()),
+        (0, "main\n".to_string()),
+        (0, String::new()),
+        (0, "new.txt\0".to_string()),
+        (1, patch.to_string()),
+    ]);
+    let harness = Harness::with(diff_options(&executor, Vec::new()));
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let files = reply.json()["files"].as_array().expect("files").clone();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "new.txt");
+    assert_eq!(files[0]["status"], "untracked");
+    assert!(
+        files[0]["patch"]
+            .as_str()
+            .expect("patch")
+            .contains("+hello")
+    );
+
+    let requests = executor.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests[4].argv,
+        vec![
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--no-index",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            "/dev/null",
+            "new.txt",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn no_executor_answers_501_diff_unavailable() {
+    let harness = Harness::new();
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "diff_unavailable");
+}
+
+#[tokio::test]
+async fn the_diff_route_requires_a_token_like_every_v1_route() {
+    let executor = RecordingExecutor::with(vec![(1, String::new())]);
+    let mut options = diff_options(&executor, Vec::new());
+    options.token = "secret".to_string();
+    let harness = Harness::with(options);
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn an_unadmitted_workspace_query_answers_403() {
+    let executor = RecordingExecutor::with(vec![(1, String::new())]);
+    let mut options = diff_options(&executor, Vec::new());
+    options.workspaces = FakeWorkspaces::default();
+    let harness = Harness::with(options);
+    let reply = harness
+        .send("GET", "/v1/workspaces/diff?workspace=/elsewhere", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_ADMITTED");
+}
+
+#[tokio::test]
+async fn a_failing_git_diff_answers_500_git_failed() {
+    let executor = RecordingExecutor::with(vec![
+        (0, "true\n".to_string()),
+        (0, "main\n".to_string()),
+        (128, String::new()),
+    ]);
+    let harness = Harness::with(diff_options(&executor, Vec::new()));
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        reply.body
+    );
+    assert_eq!(reply.json()["error"]["code"], "git_failed");
+    assert!(
+        reply.json()["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("128")
+    );
+}
+
+#[tokio::test]
+async fn a_real_git_repository_reports_modified_added_and_untracked_files() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    // The repository lives in the harness's own startup workspace, so
+    // the route's default (no `?workspace=`) resolves straight to it.
+    let repo = tempfile::tempdir().expect("temp dir");
+    // Canonicalized to match what `Harness::with` derives as the
+    // workspace path (see its comment on `canonical_workspace`).
+    let root = std::fs::canonicalize(repo.path()).expect("canonicalize");
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    };
+    std::fs::write(root.join("tracked.txt"), "one\n").expect("write");
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "test"]);
+    run(&["add", "tracked.txt"]);
+    run(&["commit", "-q", "-m", "initial"]);
+    std::fs::write(root.join("tracked.txt"), "one\ntwo\n").expect("write");
+    std::fs::write(root.join("added.txt"), "added\n").expect("write");
+    run(&["add", "added.txt"]);
+    std::fs::write(root.join("untracked.txt"), "untracked\n").expect("write");
+
+    let executor: Arc<dyn crate::sandbox::CommandExecutor> = Arc::new(
+        crate::sandbox::Executor::new(
+            Arc::new(crate::sandbox::direct::DirectDriver::new()),
+            crate::sandbox::Policy {
+                filesystem: crate::sandbox::FilesystemMode::Unconfined,
+                network: crate::sandbox::NetworkMode::Allow,
+            },
+            &root,
+        )
+        .expect("the executor opens"),
+    );
+    // The direct driver runs with only the given environment (no
+    // inherited `PATH`), so `git` must be resolvable from it.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let harness = Harness::with(HarnessOptions {
+        workspace: Some(repo),
+        diff_runner: Some((executor, vec![format!("PATH={path}")])),
+        ..HarnessOptions::default()
+    });
+    let reply = harness.send("GET", "/v1/workspaces/diff", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["repository"], true);
+    let files = reply.json()["files"].as_array().expect("files").clone();
+    let by_path = |path: &str| files.iter().find(|file| file["path"] == path);
+    assert_eq!(
+        by_path("tracked.txt").expect("tracked.txt")["status"],
+        "modified"
+    );
+    assert_eq!(by_path("added.txt").expect("added.txt")["status"], "added");
+    assert_eq!(
+        by_path("untracked.txt").expect("untracked.txt")["status"],
+        "untracked"
+    );
+}
+
+// ---- cross-process task routes (tasks.db) ----
+
+/// A `TaskContext` for `parent_session`, workspace `/work`.
+fn agents_context(parent_session: &str) -> crate::subagent::record::TaskContext {
+    crate::subagent::record::TaskContext {
+        parent_session: parent_session.to_string(),
+        parent_session_path: format!("/home/me/.otto/sessions/{parent_session}.jsonl"),
+        workspace: "/work".to_string(),
+        pid: 4_294_967_294, // a pid that cannot exist, so queued/running rows read as interrupted
+        process_started_at: "2026-09-25T10:00:00Z".to_string(),
+    }
+}
+
+/// A stored task row: `task_id`, `status`, and `created_at` (RFC 3339,
+/// determines list order and the `before` cursor) vary per call.
+fn agents_task(
+    task_id: &str,
+    status: crate::subagent::tasks::TaskStatus,
+    created_at: &str,
+) -> crate::subagent::tasks::Task {
+    crate::subagent::tasks::Task {
+        id: task_id.to_string(),
+        name: "reviewer".to_string(),
+        agent: "code-reviewer".to_string(),
+        description: "review the diff".to_string(),
+        model: "gpt-5.1".to_string(),
+        status,
+        created_at: chrono::DateTime::parse_from_rfc3339(created_at)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc)),
+        session_path: format!("/home/me/.otto/sessions/parent/{task_id}-child.jsonl"),
+        ..crate::subagent::tasks::Task::default()
+    }
+}
+
+#[tokio::test]
+async fn the_v1_tasks_route_lists_newest_first_and_filters_by_status_and_workspace() {
+    use crate::subagent::record::{Recorder, Store, TaskContext};
+    use crate::subagent::tasks::TaskStatus;
+
+    let store = Arc::new(Store::open_in_memory().expect("store"));
+    store.upsert(
+        &agents_context("s1"),
+        &agents_task("t1", TaskStatus::Running, "2026-09-25T10:00:00Z"),
+    );
+    store.upsert(
+        &agents_context("s1"),
+        &agents_task("t2", TaskStatus::Succeeded, "2026-09-25T10:01:00Z"),
+    );
+    store.upsert(
+        &TaskContext {
+            workspace: "/other".to_string(),
+            ..agents_context("s2")
+        },
+        &agents_task("t3", TaskStatus::Running, "2026-09-25T10:02:00Z"),
+    );
+
+    let harness = Harness::with(HarnessOptions {
+        task_recorder: Some(store.clone()),
+        ..HarnessOptions::default()
+    });
+
+    let reply = harness.send("GET", "/v1/tasks", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let body = reply.json();
+    let tasks = body["tasks"].as_array().expect("tasks");
+    // Newest first.
+    assert_eq!(
+        tasks
+            .iter()
+            .map(|t| t["task_id"].clone())
+            .collect::<Vec<_>>(),
+        vec!["t3", "t2", "t1"]
+    );
+
+    let by_status = harness
+        .send("GET", "/v1/tasks?status=succeeded", None)
+        .await
+        .json();
+    let by_status = by_status["tasks"].as_array().expect("tasks");
+    assert_eq!(by_status.len(), 1);
+    assert_eq!(by_status[0]["task_id"], "t2");
+
+    let by_workspace = harness
+        .send("GET", "/v1/tasks?workspace=/other", None)
+        .await
+        .json();
+    let by_workspace = by_workspace["tasks"].as_array().expect("tasks");
+    assert_eq!(by_workspace.len(), 1);
+    assert_eq!(by_workspace[0]["task_id"], "t3");
+}
+
+#[tokio::test]
+async fn the_v1_tasks_route_bounds_limit_and_pages_with_before() {
+    use crate::subagent::record::{Recorder, Store};
+    use crate::subagent::tasks::TaskStatus;
+
+    let store = Arc::new(Store::open_in_memory().expect("store"));
+    for n in 0..3 {
+        store.upsert(
+            &agents_context("s1"),
+            &agents_task(
+                &format!("t{n}"),
+                TaskStatus::Succeeded,
+                &format!("2026-09-25T10:0{n}:00Z"),
+            ),
+        );
+    }
+    let harness = Harness::with(HarnessOptions {
+        task_recorder: Some(store.clone()),
+        ..HarnessOptions::default()
+    });
+
+    // limit=1 returns only the newest row; next_before is an exclusive
+    // cursor on its own created_at, so paging by it skips past it.
+    let first_page = harness.send("GET", "/v1/tasks?limit=1", None).await.json();
+    let tasks = first_page["tasks"].as_array().expect("tasks");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["task_id"], "t2");
+    let next_before = first_page["next_before"].as_str().expect("next_before");
+    assert_eq!(next_before, "2026-09-25T10:02:00.000000000Z");
+
+    let second_page = harness
+        .send(
+            "GET",
+            &format!("/v1/tasks?limit=1&before={next_before}"),
+            None,
+        )
+        .await
+        .json();
+    let tasks = second_page["tasks"].as_array().expect("tasks");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["task_id"], "t1");
+
+    // limit clamps to 500 rather than erroring on an out-of-range value.
+    let clamped = harness
+        .send("GET", "/v1/tasks?limit=100000", None)
+        .await
+        .json();
+    assert_eq!(clamped["tasks"].as_array().expect("tasks").len(), 3);
+}
+
+#[tokio::test]
+async fn the_v1_tasks_route_marks_cancelable_only_for_an_owned_non_final_task() {
+    use crate::subagent::record::{Recorder, Store, TaskContext};
+    use crate::subagent::tasks::TaskStatus;
+
+    let store = Arc::new(Store::open_in_memory().expect("store"));
+    let harness = Harness::with(HarnessOptions {
+        task_recorder: Some(store.clone()),
+        ..HarnessOptions::default()
+    });
+    let owned_session = harness.create().await;
+    // The current process's own pid and start time, so a `queued`/
+    // `running` row reads back as verifiably alive instead of
+    // `interrupted` (see `record::interrupted`).
+    let (pid, process_started_at) = crate::subagent::record::current_process();
+    let live_context = |parent_session: &str| TaskContext {
+        parent_session: parent_session.to_string(),
+        parent_session_path: format!("/home/me/.otto/sessions/{parent_session}.jsonl"),
+        workspace: "/work".to_string(),
+        pid,
+        process_started_at: process_started_at.clone(),
+    };
+    store.upsert(
+        &live_context(&owned_session),
+        &agents_task("running-owned", TaskStatus::Running, "2026-09-25T10:00:00Z"),
+    );
+    store.upsert(
+        &live_context(&owned_session),
+        &agents_task(
+            "finished-owned",
+            TaskStatus::Succeeded,
+            "2026-09-25T10:01:00Z",
+        ),
+    );
+    store.upsert(
+        &live_context("not-open-here"),
+        &agents_task(
+            "running-elsewhere",
+            TaskStatus::Running,
+            "2026-09-25T10:02:00Z",
+        ),
+    );
+
+    let body = harness.send("GET", "/v1/tasks", None).await.json();
+    let tasks = body["tasks"].as_array().expect("tasks");
+    let cancelable = |task_id: &str| {
+        tasks.iter().find(|t| t["task_id"] == task_id).expect("row")["cancelable"]
+            .as_bool()
+            .expect("cancelable")
+    };
+    assert!(cancelable("running-owned"));
+    assert!(!cancelable("finished-owned"));
+    assert!(!cancelable("running-elsewhere"));
+}
+
+#[tokio::test]
+async fn the_v1_tasks_detail_route_reads_the_child_transcript_and_reports_a_missing_one() {
+    use crate::subagent::record::{Recorder, Store};
+    use crate::subagent::tasks::TaskStatus;
+
+    let sessions = tempfile::tempdir().expect("sessions");
+    let store = Arc::new(Store::open_in_memory().expect("store"));
+    let harness = Harness::with(HarnessOptions {
+        task_recorder: Some(store.clone()),
+        ..HarnessOptions::default()
+    });
+
+    // A task whose child transcript file exists beside its parent.
+    let parent_path = sessions.path().join("s1.jsonl");
+    let child_store = crate::session::Store::create_child_lazy(
+        &parent_path,
+        "with-transcript-child",
+        Header {
+            version: CURRENT_VERSION,
+            id: "t1-child".to_string(),
+            workspace: "/work".to_string(),
+            provider: "openai-compatible".to_string(),
+            profile: "alpha".to_string(),
+            model: "test-model".to_string(),
+            created_at: chrono::Utc::now(),
+        },
+    )
+    .expect("create child session");
+    child_store
+        .append_message(&testutil::user("hello from the child"))
+        .expect("append");
+    let child_path = child_store.path();
+    let mut context = agents_context("s1");
+    context.parent_session_path = parent_path.to_string_lossy().into_owned();
+    let mut task = agents_task(
+        "with-transcript",
+        TaskStatus::Succeeded,
+        "2026-09-25T10:00:00Z",
+    );
+    task.session_path = child_path;
+    store.upsert(&context, &task);
+
+    // A task whose recorded session_path does not exist on disk.
+    store.upsert(
+        &agents_context("s1"),
+        &agents_task(
+            "no-transcript",
+            TaskStatus::Succeeded,
+            "2026-09-25T10:01:00Z",
+        ),
+    );
+    let mut unsafe_path = agents_task("unsafe-path", TaskStatus::Succeeded, "2026-09-25T10:02:00Z");
+    unsafe_path.session_path = "/etc/passwd".to_string();
+    store.upsert(&context, &unsafe_path);
+
+    let found = harness
+        .send("GET", "/v1/tasks/s1/with-transcript", None)
+        .await;
+    assert_eq!(found.status, StatusCode::OK, "{}", found.body);
+    let found = found.json();
+    assert_eq!(found["task"]["task_id"], "with-transcript");
+    assert_eq!(found["transcript_missing"], false);
+    assert_eq!(
+        found["history"].as_array().expect("history").len(),
+        1,
+        "{found:?}"
+    );
+
+    let missing = harness
+        .send("GET", "/v1/tasks/s1/no-transcript", None)
+        .await
+        .json();
+    assert_eq!(missing["transcript_missing"], true);
+    assert_eq!(missing["history"].as_array().expect("history").len(), 0);
+
+    let unsafe_detail = harness
+        .send("GET", "/v1/tasks/s1/unsafe-path", None)
+        .await
+        .json();
+    assert_eq!(unsafe_detail["transcript_missing"], true);
+    assert_eq!(
+        unsafe_detail["history"].as_array().expect("history").len(),
+        0
+    );
+
+    let not_found = harness.send("GET", "/v1/tasks/s1/nope", None).await;
+    assert_eq!(not_found.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_timer_routes_list_and_cancel_a_real_timer() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let reminders = harness
+        .server
+        .lookup(&id)
+        .expect("session")
+        .ctrl
+        .reminders()
+        .expect("registry");
+    let scheduled = reminders
+        .schedule(Duration::from_secs(600), "check the build".to_string())
+        .expect("schedule");
+
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/timers"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let listed = reply.json();
+    let listed = listed["timers"].as_array().expect("timers");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], scheduled.id);
+    assert_eq!(listed[0]["message"], "check the build");
+    assert!(listed[0]["fire_at"].is_string(), "{listed:?}");
+
+    let path = format!("/v1/sessions/{id}/timers/{}/cancel", scheduled.id);
+    let canceled = harness.send("POST", &path, None).await;
+    assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+    assert_eq!(canceled.json()["id"], scheduled.id);
+    assert!(reminders.list().is_empty());
+
+    // A second cancel finds nothing left to cancel.
+    let repeat = harness.send("POST", &path, None).await;
+    assert_eq!(repeat.status, StatusCode::NOT_FOUND);
+    assert_eq!(repeat.json()["error"]["code"], "not_found");
+}
+
+// ---- wake turns ----
+
+/// A harness whose every controller shares `tasks`, plus the registry.
+fn wake_harness(script: Script) -> (Harness, Arc<crate::subagent::tasks::Tasks>) {
+    let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+    let harness = Harness::with(HarnessOptions {
+        script,
+        tasks: Some(Arc::clone(&tasks)),
+        ..HarnessOptions::default()
+    });
+    (harness, tasks)
+}
+
+fn notification() -> otto_core::agent::inbox::Notification {
+    otto_core::agent::inbox::Notification {
+        task_id: "t1".to_string(),
+        kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
+        text: "done".to_string(),
+        usage: None,
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_notification_starts_a_wake_turn_while_idle() {
+    let (harness, tasks) = wake_harness(Script {
+        deltas: vec!["ok".to_string()],
+        ..Script::default()
+    });
+    let id = harness.create().await;
+
+    tasks.notifications().push(notification());
+
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+        .await
+        .expect("the pending notification did not start a wake turn");
+    assert_eq!(harness.provider.roles(), vec![Role::Context]);
+
+    let session = harness
+        .send("GET", &format!("/v1/sessions/{id}"), None)
+        .await;
+    let turn = session.json()["turn"].clone();
+    assert_eq!(turn["trigger"], turn::TRIGGER_TASK, "{}", session.body);
+    let turn_id = turn["id"].as_str().expect("turn id").to_string();
+
+    let done = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(done["trigger"], turn::TRIGGER_TASK);
+}
+
+/// A client retry of `POST .../turns` with the same `input_id` returns
+/// the turn it already started; after a restart, when only the
+/// transcript remembers the id, it answers `409 duplicate_input`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repeated_input_id_starts_one_turn() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/turns");
+    let body = serde_json::json!({"text": "hi", "stream": false, "input_id": "req-1"}).to_string();
+    let first = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    let again = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    assert_eq!(first.json()["id"], again.json()["id"]);
+    assert_eq!(harness.provider.texts().len(), 1, "the retry ran no turn");
+
+    let session = harness.server.lookup(&id).expect("session");
+    assert!(
+        session.ctrl.has_input("req-1"),
+        "the user message carries it"
+    );
+    // A restart forgets the turns the server started.
+    session.lock().inputs.clear();
+    let after_restart = harness.send("POST", &path, Some(&body)).await;
+    assert_eq!(after_restart.status, StatusCode::CONFLICT);
+    assert_eq!(after_restart.json()["error"]["code"], "duplicate_input");
+
+    let bad = serde_json::json!({"text": "hi", "input_id": "no spaces"}).to_string();
+    let rejected = harness.send("POST", &path, Some(&bad)).await;
+    assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+}
+
+/// A wake turn on a session whose last turn never ended resumes it and
+/// is reported with trigger `recovery`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_turn_resuming_an_interrupted_turn_reports_trigger_recovery() {
+    let (harness, tasks) = wake_harness(Script {
+        deltas: vec!["ok".to_string()],
+        ..Script::default()
+    });
+    let id = harness.create().await;
+    let session = harness.server.lookup(&id).expect("session");
+    let runner = session.ctrl.current_runner().expect("runner");
+    otto_core::session::Session::append_custom(
+        runner.session(),
+        otto_core::session::TURN_CUSTOM_TYPE,
+        &otto_core::session::encode_turn_record(&otto_core::session::TurnRecord::started(
+            "op_lost",
+            otto_core::session::TurnTrigger::User,
+            1,
+            None,
+        )),
+    )
+    .await
+    .expect("seed an interrupted turn");
+
+    tasks.notifications().push(notification());
+
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+        .await
+        .expect("the notification did not start a wake turn");
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}"), None)
+        .await;
+    let turn = reply.json()["turn"].clone();
+    assert_eq!(turn["trigger"], turn::TRIGGER_RECOVERY, "{}", reply.body);
+    let turn_id = turn["id"].as_str().expect("turn id").to_string();
+    let done = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(done["trigger"], turn::TRIGGER_RECOVERY);
+    assert!(!session.ctrl.resumes_interrupted_turn());
+}
+
+/// R13: `failover::recovery::notify` pushes through the same
+/// `tasks.notifications()` inbox `build_subagents` wires the recovery
+/// push into, so it starts a wake turn the same way any other pending
+/// notification does; no separate signaling code exists for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_notification_starts_a_wake_turn_while_idle() {
+    let (harness, tasks) = wake_harness(Script {
+        deltas: vec!["ok".to_string()],
+        ..Script::default()
+    });
+    harness.create().await;
+
+    let takeover = crate::session::Recovery {
+        cause: crate::session::RecoveryCause::TakenOver(crate::failover::lease::Holder {
+            epoch: 1,
+            host: "stopped-host".to_string(),
+            pid: 4242,
+        }),
+        repaired: Vec::new(),
+        replayable: Vec::new(),
+        interrupted_turn: None,
+    };
+    crate::failover::recovery::notify(
+        tasks.notifications().as_ref(),
+        Some(takeover),
+        &tempfile::tempdir().expect("dir").path().join("children"),
+        1000,
+        &[],
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+        .await
+        .expect("the recovery notification did not start a wake turn");
+    assert_eq!(harness.provider.roles(), vec![Role::Context]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_wake_logs_inbox_kind() {
+    let (harness, tasks) = wake_harness(Script {
+        deltas: vec!["ok".to_string()],
+        ..Script::default()
+    });
+    harness.create().await;
+    tasks
+        .notifications()
+        .push(otto_core::agent::inbox::Notification {
+            kind: Some(otto_core::agent::inbox::NotificationKind::Message),
+            text: "[feishu] hi".to_string(),
+            ..otto_core::agent::inbox::Notification::default()
+        });
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+        .await
+        .expect("the message did not start a wake turn");
+    let log = harness.logged();
+    assert!(log.contains("msg=turn_started"), "{log}");
+    assert!(log.contains("inbox_kind=message"), "{log}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_notification_during_a_user_turn_waits_for_it_to_finish() {
+    let gate = CancellationToken::new();
+    let (harness, tasks) = wake_harness(Script {
+        deltas: vec!["ok".to_string()],
+        gate: Some(gate.clone()),
+        ..Script::default()
+    });
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    // A notification while the user turn is active must not start a
+    // second turn: the active turn's own inbox drain handles it.
+    tasks.notifications().push(notification());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.provider.roles(), vec![Role::User]);
+
+    gate.cancel();
+
+    // The user turn's end-of-turn check finds the notification still
+    // pending and starts exactly one wake turn.
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(2))
+        .await
+        .expect("the finished user turn did not start a wake turn");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.provider.roles(), vec![Role::User, Role::Context]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_notification_landing_as_a_user_turn_ends_starts_one_wake_turn() {
+    let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+    let pusher = Arc::clone(&tasks);
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["ok".to_string()],
+            // The notification lands during the parent's last provider
+            // call, so the turn's own drain never sees it.
+            on_call: Some(Box::new(move |call| {
+                if call == 1 {
+                    pusher
+                        .notifications()
+                        .push(otto_core::agent::inbox::Notification {
+                            task_id: "t1".to_string(),
+                            kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
+                            text: "done".to_string(),
+                            usage: None,
+                            ..Default::default()
+                        });
+                }
+            })),
+            ..Script::default()
+        },
+        tasks: Some(Arc::clone(&tasks)),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"hi","stream":false}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(2))
+        .await
+        .expect("the late notification did not start a wake turn");
+    // Give an incorrect extra wake turn a chance to start.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.provider.roles(), vec![Role::User, Role::Context]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_the_server_ends_the_wake_loop() {
+    let (harness, _tasks) = wake_harness(Script::default());
+    harness.create().await;
+
+    tokio::time::timeout(Duration::from_secs(2), harness.server.close())
+        .await
+        .expect("close did not return; the wake loop leaked")
+        .expect("close");
+}
+
+// ---- status ----
+
+/// Reads the next frame off a `/v1/status` reader and decodes its data.
+async fn status_snapshot(reader: &mut SseReader) -> Value {
+    let frame = reader.next().await.expect("status frame");
+    assert_eq!(frame.event, "status");
+    assert_eq!(frame.id, None, "the status stream sends no id");
+    serde_json::from_str(&frame.data).expect("status json")
+}
+
+#[tokio::test]
+async fn status_stream_without_a_token_is_401() {
+    let harness = Harness::with(HarnessOptions {
+        token: "secret".to_string(),
+        ..HarnessOptions::default()
+    });
+    assert_eq!(
+        harness.send("GET", "/v1/status", None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn status_stream_with_no_open_sessions_is_an_empty_snapshot() {
+    let harness = Harness::new();
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let mut reader = SseReader::new(response);
+    let snapshot = status_snapshot(&mut reader).await;
+    assert_eq!(snapshot, serde_json::json!({"sessions": []}));
+}
+
+#[tokio::test]
+async fn status_stream_ends_when_the_server_is_cancelled() {
+    let harness = Harness::new();
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    status_snapshot(&mut reader).await;
+
+    harness.server.cancel_token().cancel();
+
+    let frame = tokio::time::timeout(Duration::from_secs(2), reader.next())
+        .await
+        .expect("the status stream should end once the server is cancelled");
+    assert!(frame.is_none(), "expected end of stream, got {frame:?}");
+}
+
+#[tokio::test]
+async fn creating_a_session_appears_in_the_status_stream() {
+    let harness = Harness::new();
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    let empty = status_snapshot(&mut reader).await;
+    assert_eq!(empty["sessions"].as_array().expect("rows").len(), 0);
+
+    let id = harness.create().await;
+    let snapshot = status_snapshot(&mut reader).await;
+    let rows = snapshot["sessions"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id.as_str());
+    assert!(rows[0]["turn"].is_null());
+    assert_eq!(rows[0]["approvals"], 0);
+    assert_eq!(rows[0]["tasks"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn starting_a_turn_shows_running_then_finishing_shows_ok() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    let before = status_snapshot(&mut reader).await;
+    assert!(before["sessions"][0]["turn"].is_null());
+
+    let (_stream, turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    let running = status_snapshot(&mut reader).await;
+    assert_eq!(running["sessions"][0]["turn"], turn::TURN_RUNNING);
+
+    gate.cancel();
+    harness.wait_turn_done(&id, &turn_id).await;
+
+    let done = status_snapshot(&mut reader).await;
+    assert_eq!(done["sessions"][0]["turn"], turn::TURN_OK);
+}
+
+#[tokio::test]
+async fn a_failing_turn_shows_error_in_the_status_stream() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            error: Some("boom".to_string()),
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    status_snapshot(&mut reader).await; // the session with no turn yet
+
+    harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"hi","stream":false}"#),
+        )
+        .await;
+
+    let after = status_snapshot(&mut reader).await;
+    assert_eq!(after["sessions"][0]["turn"], turn::TURN_ERROR);
+}
+
+#[tokio::test]
+async fn a_session_in_a_second_workspace_appears_with_its_workspace() {
+    let harness = Harness::with(HarnessOptions {
+        workspaces: FakeWorkspaces {
+            admitted: vec!["/other".to_string()],
+            ..FakeWorkspaces::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    status_snapshot(&mut reader).await;
+
+    let reply = harness
+        .send("POST", "/v1/sessions", Some(r#"{"workspace":"/other"}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    let snapshot = status_snapshot(&mut reader).await;
+    let rows = snapshot["sessions"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["workspace"], "/other");
+}
+
+#[tokio::test]
+async fn closing_a_session_removes_it_from_the_status_stream() {
+    let harness = Harness::new();
+    harness.create().await;
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    let first = status_snapshot(&mut reader).await;
+    assert_eq!(first["sessions"].as_array().expect("rows").len(), 1);
+
+    let id = first["sessions"][0]["id"].as_str().expect("id").to_string();
+    harness
+        .send("DELETE", &format!("/v1/sessions/{id}"), None)
+        .await;
+
+    let after = status_snapshot(&mut reader).await;
+    assert_eq!(after["sessions"].as_array().expect("rows").len(), 0);
+}
+
+#[tokio::test]
+async fn identical_snapshots_in_a_row_are_sent_once() {
+    let harness = Harness::new();
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    status_snapshot(&mut reader).await;
+
+    // Two bumps that leave the snapshot unchanged must coalesce into no
+    // further frame; the reader only sees a change.
+    harness
+        .server
+        .status_changed
+        .send_modify(|version| *version += 1);
+    harness
+        .server
+        .status_changed
+        .send_modify(|version| *version += 1);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), reader.next())
+            .await
+            .is_err(),
+        "an unchanged snapshot must not be resent"
+    );
+}
+
+#[tokio::test]
+async fn api_server_does_not_serve_frontend_resources() {
+    let harness = Harness::with(HarnessOptions {
+        token: "secret".to_string(),
+        ..HarnessOptions::default()
+    });
+    for path in ["/", "/assets/app.js", "/no-such-path"] {
+        assert_eq!(
+            harness.send("GET", path, None).await.status,
+            StatusCode::NOT_FOUND,
+            "{path} must not serve a frontend"
+        );
+    }
+    assert_eq!(
+        harness.send("GET", "/healthz", None).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        harness.send("GET", "/v1/sessions", None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+// ---- turn queue, stream frames, approvals ----
+
+async fn post_turn(harness: &Harness, session: &str, text: &str, queue: bool) -> Response {
+    let body = serde_json::json!({"text": text, "queue": queue}).to_string();
+    harness
+        .raw(
+            "POST",
+            &format!("/v1/sessions/{session}/turns"),
+            Some(&body),
+            &[],
+        )
+        .await
+}
+
+async fn post_turn_with_channel(
+    harness: &Harness,
+    session: &str,
+    text: &str,
+    channel: Option<&str>,
+    queue: bool,
+) -> Response {
+    let mut body = serde_json::json!({"text": text, "queue": queue});
+    if let Some(channel) = channel {
+        body["channel"] = serde_json::Value::String(channel.to_string());
+    }
+    harness
+        .raw(
+            "POST",
+            &format!("/v1/sessions/{session}/turns"),
+            Some(&body.to_string()),
+            &[],
+        )
+        .await
+}
+
+fn turn_header(response: &Response) -> String {
+    response
+        .headers()
+        .get("otto-turn-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("Otto-Turn-Id header")
+        .to_string()
+}
+
+/// Reads frames until one named `name`, and returns its data.
+async fn frame_named_untimed(reader: &mut SseReader, name: &str) -> Value {
+    loop {
+        let frame = reader
+            .next()
+            .await
+            .unwrap_or_else(|| panic!("stream ended before {name}"));
+        if frame.event == name {
+            return serde_json::from_str(&frame.data).expect("frame data");
+        }
+    }
+}
+
+async fn frame_named(reader: &mut SseReader, name: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), frame_named_untimed(reader, name))
+        .await
+        .unwrap_or_else(|_| panic!("no {name} frame in time"))
+}
+
+/// The events of a finished stream: first and last frame names, and the
+/// `turn_end` status.
+async fn ends_of(reader: SseReader) -> (String, String, String) {
+    let frames = tokio::time::timeout(Duration::from_secs(10), reader.all())
+        .await
+        .expect("stream did not end");
+    let last = frames.last().expect("frames");
+    let status = serde_json::from_str::<Value>(&last.data).expect("data")["status"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    (frames[0].event.clone(), last.event.clone(), status)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_turns_run_in_arrival_order() {
+    let (gate, mut options) = gated();
+    options.script.echo = true;
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+
+    let first = post_turn(&harness, &id, "one", false).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    harness.provider.wait_started(1).await;
+    let mut readers = vec![SseReader::new(first)];
+    let mut ids = Vec::new();
+    for text in ["two", "three"] {
+        let queued = post_turn(&harness, &id, text, true).await;
+        assert_eq!(queued.status(), StatusCode::OK);
+        ids.push(turn_header(&queued));
+        readers.push(SseReader::new(queued));
+    }
+    let waiting = harness
+        .send("GET", &format!("/v1/sessions/{id}/turns/{}", ids[0]), None)
+        .await
+        .json();
+    assert_eq!(waiting["status"], turn::TURN_QUEUED);
+
+    gate.cancel();
+    for reader in readers {
+        let (first, last, status) = ends_of(reader).await;
+        assert_eq!(first, "user_message");
+        assert_eq!(last, "turn_end");
+        assert_eq!(status, "ok");
+    }
+    assert_eq!(harness.provider.texts(), ["one", "two", "three"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_session_refuses_a_turn_without_queue_and_the_seventeenth_with_it() {
+    let (_gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let first = post_turn(&harness, &id, "one", false).await;
+    harness.provider.wait_started(1).await;
+
+    let refused = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"x"}"#),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(refused.json()["error"]["code"], "turn_active");
+
+    let mut held = vec![first];
+    for index in 0..MAX_QUEUED_TURNS {
+        let queued = post_turn(&harness, &id, &format!("q{index}"), true).await;
+        assert_eq!(queued.status(), StatusCode::OK, "queued turn {index}");
+        held.push(queued);
+    }
+    let full = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"late","queue":true}"#),
+        )
+        .await;
+    assert_eq!(full.status, StatusCode::CONFLICT, "{}", full.body);
+    assert_eq!(full.json()["error"]["code"], "queue_full");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_queued_turn_removes_it_and_ends_its_events() {
+    let (gate, mut options) = gated();
+    options.script.echo = true;
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let first = post_turn(&harness, &id, "one", false).await;
+    harness.provider.wait_started(1).await;
+    let second = post_turn(&harness, &id, "two", true).await;
+    let second_id = turn_header(&second);
+    let third = post_turn(&harness, &id, "three", true).await;
+
+    let cancel = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns/{second_id}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(cancel.status, StatusCode::ACCEPTED);
+    let (_, last, status) = ends_of(SseReader::new(second)).await;
+    assert_eq!((last.as_str(), status.as_str()), ("turn_end", "canceled"));
+
+    gate.cancel();
+    for reader in [SseReader::new(first), SseReader::new(third)] {
+        assert_eq!(ends_of(reader).await.2, "ok");
+    }
+    assert_eq!(harness.provider.texts(), ["one", "three"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_turn_does_not_start_while_a_turn_is_queued() {
+    let (harness, tasks) = wake_harness(Script {
+        deltas: vec!["ok".to_string()],
+        ..Script::default()
+    });
+    let id = harness.create().await;
+    let session = harness.server.lookup(&id).expect("session");
+    session.lock().queue.push_back(QueuedTurn {
+        turn: Arc::new(Turn::queued(
+            "q1".to_string(),
+            turn::TRIGGER_USER,
+            CancellationToken::new(),
+        )),
+        text: "x".to_string(),
+        image: None,
+        channel: None,
+        origin: None,
+        input_id: None,
+    });
+
+    tasks.notifications().push(notification());
+    harness.server.wake_turn(&session).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(harness.provider.roles().is_empty());
+    assert!(session.current_turn().is_none());
+
+    // With the queue empty the same notification starts a wake turn.
+    session.lock().queue.clear();
+    harness.server.wake_turn(&session).await;
+    assert_eq!(harness.provider.roles(), vec![Role::Context]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_the_server_cancels_queued_turns() {
+    let (_gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let first = post_turn(&harness, &id, "one", false).await;
+    harness.provider.wait_started(1).await;
+    let second = post_turn(&harness, &id, "two", true).await;
+
+    harness.server.close().await.expect("close");
+
+    assert_eq!(ends_of(SseReader::new(first)).await.2, "canceled");
+    let (_, last, status) = ends_of(SseReader::new(second)).await;
+    assert_eq!((last.as_str(), status.as_str()), ("turn_end", "canceled"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compact_answers_409_while_a_turn_is_running_with_a_queue() {
+    let (_gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let _first = post_turn(&harness, &id, "one", false).await;
+    harness.provider.wait_started(1).await;
+    let _second = post_turn(&harness, &id, "two", true).await;
+
+    let reply = harness
+        .send("POST", &format!("/v1/sessions/{id}/compact"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "turn_active");
+}
+
+#[test]
+fn a_session_with_only_a_queued_turn_is_busy() {
+    let mut state = SessionState::default();
+    assert!(!state.busy());
+    let turn = Arc::new(Turn::queued(
+        "t1".to_string(),
+        turn::TRIGGER_USER,
+        CancellationToken::new(),
+    ));
+    state.queue.push_back(QueuedTurn {
+        turn,
+        text: "x".to_string(),
+        image: None,
+        channel: None,
+        origin: None,
+        input_id: None,
+    });
+    assert!(state.busy());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_stream_starts_with_user_message_and_ends_with_turn_end() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (mut reader, turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+    gate.cancel();
+    let user = harness
+        .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
+        .await;
+    assert_eq!(user.status, StatusCode::OK);
+
+    let mut last = None;
+    while let Some(frame) = reader.next().await {
+        last = Some(frame);
+    }
+    let last = last.expect("frames");
+    assert_eq!(last.event, "turn_end");
+    let last_id = last.id.expect("id");
+
+    // A reconnect after the last delta frame still receives turn_end.
+    let response = harness
+        .raw(
+            "GET",
+            &format!(
+                "/v1/sessions/{id}/turns/{turn_id}/events?after={}",
+                last_id - 1
+            ),
+            None,
+            &[],
+        )
+        .await;
+    let frames = SseReader::new(response).all().await;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].event, "turn_end");
+    assert_eq!(
+        serde_json::from_str::<Value>(&frames[0].data).expect("data")["status"],
+        "ok"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_before_turn_omits_the_running_turns_messages() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_reader, turn_id) = start_stream(&harness, &id).await;
+    // The provider is called after the prompt is appended.
+    harness.provider.wait_started(1).await;
+    let count = |path: String| {
+        let harness = &harness;
+        async move {
+            let response = harness.send("GET", &path, None).await;
+            assert_eq!(response.status, StatusCode::OK, "{path}");
+            response.json().as_array().expect("array").len()
+        }
+    };
+    assert_eq!(count(format!("/v1/sessions/{id}/history")).await, 1);
+    assert_eq!(
+        count(format!("/v1/sessions/{id}/history?before_turn={turn_id}")).await,
+        0
+    );
+    let unknown = harness
+        .send(
+            "GET",
+            &format!("/v1/sessions/{id}/history?before_turn=missing"),
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    gate.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_user_message_frame_carries_text_and_image_flag() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let response = harness
+        .raw(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"look","image":{"data":"iVBORw0KGgo=","mime_type":"image/png"}}"#),
+            &[],
+        )
+        .await;
+    let mut reader = SseReader::new(response);
+    let user = frame_named(&mut reader, "user_message").await;
+    assert_eq!(user["text"], "look");
+    assert_eq!(user["image"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_provider_error_is_redacted_in_the_frame_the_summary_and_the_log() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            error: Some("upstream rejected key sk-alpha-secret".to_string()),
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let response = post_turn(&harness, &id, "hi", false).await;
+    let turn_id = turn_header(&response);
+    let frames = SseReader::new(response).all().await;
+    let end = frames.last().expect("frames");
+    assert_eq!(end.event, "turn_end");
+    assert!(frames.iter().any(|frame| frame.event == "agent_error"));
+    for frame in &frames {
+        assert!(!frame.data.contains("sk-alpha-secret"), "{}", frame.data);
+    }
+    assert!(end.data.contains("upstream rejected key"), "{}", end.data);
+
+    let reply = harness
+        .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
+        .await;
+    assert!(!reply.body.contains("sk-alpha-secret"), "{}", reply.body);
+    assert_eq!(reply.json()["status"], "error");
+    assert!(!harness.logged().contains("sk-alpha-secret"));
+}
+
+#[tokio::test]
+async fn list_rows_carry_the_last_user_text_and_modified_time() {
+    let long = "x".repeat(200);
+    let harness = Harness::with(HarnessOptions {
+        list: Some(ListResult {
+            sessions: vec![SessionInfo {
+                id: "a1".to_string(),
+                last_user_text: long,
+                ..SessionInfo::default()
+            }],
+            skipped: 0,
+        }),
+        ..HarnessOptions::default()
+    });
+    let body = harness.send("GET", "/v1/sessions", None).await.json();
+    let row = &body["sessions"][0];
+    assert_eq!(row["last_user_text"].as_str().expect("text").len(), 80);
+    let modified = row["modified"].as_str().expect("modified");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(modified).is_ok(),
+        "{modified}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_rows_carry_the_turn_id_and_the_queued_count() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let response = harness.raw("GET", "/v1/status", None, &[]).await;
+    let mut reader = SseReader::new(response);
+    let idle = status_snapshot(&mut reader).await;
+    assert_eq!(idle["sessions"][0]["queued"], 0);
+
+    let first = post_turn(&harness, &id, "one", false).await;
+    let turn_id = turn_header(&first);
+    harness.provider.wait_started(1).await;
+    let _second = post_turn(&harness, &id, "two", true).await;
+    let _third = post_turn(&harness, &id, "three", true).await;
+
+    let row = loop {
+        let snapshot = status_snapshot(&mut reader).await;
+        let row = snapshot["sessions"][0].clone();
+        if row["queued"] == 2 {
+            break row;
+        }
+    };
+    assert_eq!(row["turn_id"], turn_id.as_str());
+    gate.cancel();
+}
+
+// ---- approvals decided inside the waiting turn ----
+
+fn approval_harness() -> Harness {
+    Harness::with(HarnessOptions {
+        script: Script {
+            tool_command: Some("echo hi".to_string()),
+            deltas: vec!["done".to_string()],
+            ..Script::default()
+        },
+        elevate: true,
+        ..HarnessOptions::default()
+    })
+}
+
+async fn decide(harness: &Harness, session: &str, approval: &str, decision: &str) -> Reply {
+    harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{session}/approvals/{approval}"),
+            Some(&serde_json::json!({ "decision": decision }).to_string()),
+        )
+        .await
+}
+
+/// Starts a turn that requests an approval; returns the reader, turn id
+/// and approval id once the `approval_requested` frame arrived.
+async fn waiting_turn(harness: &Harness, session: &str) -> (SseReader, String, String) {
+    let response = post_turn(harness, session, "run it", false).await;
+    let turn_id = turn_header(&response);
+    let mut reader = SseReader::new(response);
+    let requested = frame_named(&mut reader, "approval_requested").await;
+    let approval = requested["approval_id"].as_str().expect("id").to_string();
+    assert_eq!(requested["command"], "echo hi");
+    (reader, turn_id, approval)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_waits_for_an_approval_then_retries_in_the_same_turn() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let response = post_turn_with_channel(&harness, &id, "run it", Some("telegram"), false).await;
+    let turn_id = turn_header(&response);
+    let mut reader = SseReader::new(response);
+    let requested = frame_named(&mut reader, "approval_requested").await;
+    let approval = requested["approval_id"].as_str().expect("id").to_string();
+
+    let waiting = harness
+        .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
+        .await
+        .json();
+    assert_eq!(waiting["status"], turn::TURN_RUNNING);
+    let status = harness.raw("GET", "/v1/status", None, &[]).await;
+    let snapshot = status_snapshot(&mut SseReader::new(status)).await;
+    assert_eq!(snapshot["sessions"][0]["approvals"], 1);
+
+    let allowed = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+    assert_eq!(allowed.json()["decision"], "allow");
+    let decided = frame_named(&mut reader, "approval_decided").await;
+    assert_eq!(decided["decision"], "allow");
+    assert_eq!(decided["approval_id"], approval.as_str());
+
+    let (_, last, end) = ends_of(reader).await;
+    assert_eq!((last.as_str(), end.as_str()), ("turn_end", "ok"));
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["status"], "ok");
+    // The retry ran in the same turn: no second turn exists.
+    let session = harness
+        .send("GET", &format!("/v1/sessions/{id}"), None)
+        .await
+        .json();
+    assert_eq!(session["turn"]["id"], turn_id.as_str());
+    let prompts = harness.provider.system_prompts();
+    // Each scripted run makes a tool request and a completion request.
+    assert_eq!(prompts.len(), 4);
+    assert!(prompts.iter().all(|prompt| prompt.contains("Telegram")));
+
+    let again = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(again.json()["error"]["code"], "approval_decided");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_withdrawal_publishes_denial_and_refuses_the_old_card() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+    let approvals = harness.factory.builder.bash_approvals.as_ref().unwrap();
+    let tool = crate::tool::otto::Approvals {
+        session: id.clone(),
+        approvals: Arc::clone(approvals),
+        revoke: true,
+        expected_id: Some(approval.clone()),
+    };
+    let result = crate::tool::Tool::execute(
+        &tool,
+        &serde_json::value::RawValue::from_string(serde_json::json!({"id":approval}).to_string())
+            .unwrap(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.content);
+    let decided = frame_named(&mut reader, "approval_decided").await;
+    assert_eq!(decided["decision"], "deny");
+    assert_eq!(harness.wait_turn_done(&id, &turn_id).await["status"], "ok");
+    let late = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(late.status, StatusCode::CONFLICT);
+    assert_eq!(late.json()["error"]["code"], "approval_decided");
+    assert_eq!(approvals.pending_count(&id), 0);
+    assert_eq!(
+        harness.provider.roles.lock().unwrap().len(),
+        2,
+        "withdrawal must not retry the elevated command"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn approval_dialogue_explains_without_deciding_and_none_means_normal_input() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/approvals/message");
+    let none = harness
+        .send("POST", &path, Some(r#"{"text":"hello"}"#))
+        .await;
+    assert_eq!(none.status, StatusCode::OK);
+    assert!(none.json().is_null());
+    let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+    let original_turn = harness
+        .server
+        .lookup(&id)
+        .unwrap()
+        .find_turn(&turn_id)
+        .unwrap();
+    let response = harness
+        .send(
+            "POST",
+            &path,
+            Some(r#"{"text":"Why does this need approval?"}"#),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.json()["text"], "done");
+    assert_eq!(response.json()["queued"], false);
+    assert!(harness.server.lookup(&id).unwrap().lock().waiting.is_some());
+    assert_eq!(
+        decide(&harness, &id, &approval, "deny").await.status,
+        StatusCode::OK
+    );
+    let decided = frame_named(&mut reader, "approval_decided").await;
+    assert_eq!(decided["decision"], "deny");
+    Harness::wait_done(&original_turn).await;
+    assert_eq!(original_turn.summary().status, "ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn denying_an_approval_ends_the_turn_ok() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+    let denied = decide(&harness, &id, &approval, "deny").await;
+    assert_eq!(denied.status, StatusCode::OK, "{}", denied.body);
+    assert_eq!(denied.json()["decision"], "deny");
+    let decided = frame_named(&mut reader, "approval_decided").await;
+    assert_eq!(decided["decision"], "deny");
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["status"], "ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_approval_id_answers_409_approval_failed() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let (_reader, _turn_id, _approval) = waiting_turn(&harness, &id).await;
+    let reply = decide(&harness, &id, "nope", "allow").await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "approval_failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_turn_during_an_approval_wait_ends_it_canceled() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+    let cancel = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns/{turn_id}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(cancel.status, StatusCode::ACCEPTED);
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["status"], "canceled");
+    let mut names = Vec::new();
+    while let Some(frame) = reader.next().await {
+        names.push(frame.event);
+    }
+    assert!(!names.iter().any(|name| name == "approval_decided"));
+    assert_eq!(names.last().map(String::as_str), Some("turn_end"));
+    let late = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(late.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_approval_not_decided_in_ten_minutes_times_out_as_a_denial() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+    tokio::time::pause();
+    tokio::time::advance(APPROVAL_TIMEOUT + Duration::from_secs(1)).await;
+    let decided = frame_named_untimed(&mut reader, "approval_decided").await;
+    assert_eq!(decided["decision"], "timeout");
+    assert_eq!(decided["approval_id"], approval.as_str());
+    tokio::time::resume();
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["status"], "ok");
+    let late = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(late.status, StatusCode::CONFLICT);
+    assert_eq!(late.json()["error"]["code"], "approval_decided");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_turn_waits_for_an_approval_too() {
+    let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            tool_command: Some("echo hi".to_string()),
+            deltas: vec!["done".to_string()],
+            ..Script::default()
+        },
+        elevate: true,
+        tasks: Some(Arc::clone(&tasks)),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    tasks.notifications().push(notification());
+
+    let turn_id = loop {
+        let session = harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await
+            .json();
+        if let Some(turn_id) = session["turn"]["id"].as_str() {
+            break turn_id.to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    let response = harness
+        .raw(
+            "GET",
+            &format!("/v1/sessions/{id}/turns/{turn_id}/events"),
+            None,
+            &[],
+        )
+        .await;
+    let mut reader = SseReader::new(response);
+    let requested = frame_named(&mut reader, "approval_requested").await;
+    let approval = requested["approval_id"].as_str().expect("id").to_string();
+    let allowed = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+    let summary = harness.wait_turn_done(&id, &turn_id).await;
+    assert_eq!(summary["trigger"], turn::TRIGGER_TASK);
+    assert_eq!(summary["status"], "ok");
+}
+
+#[tokio::test]
+async fn queued_review_asks_for_the_current_human_revision_without_an_early_prompt() {
+    struct AskReviewer {
+        started: CancellationToken,
+        release: CancellationToken,
+    }
+    #[async_trait::async_trait]
+    impl crate::approval::reviewer::ReviewProvider for AskReviewer {
+        async fn assess(
+            &self,
+            _: &otto_core::approval::Request,
+            _: &crate::approval::reviewer::ReviewContext,
+            cancel: &CancellationToken,
+        ) -> std::result::Result<otto_core::approval::ReviewAssessment, String> {
+            self.started.cancel();
+            tokio::select! {
+                () = cancel.cancelled() => return Err("cancelled".into()),
+                () = self.release.cancelled() => {},
+            }
+            Ok(otto_core::approval::ReviewAssessment {
+                risk: otto_core::approval::RiskLevel::Medium,
+                user_authorization: otto_core::approval::UserAuthorization::Unknown,
+                outcome: otto_core::approval::ReviewOutcome::Ask,
+                reason: "Confirm the exact target before running.".into(),
+            })
+        }
+    }
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let session = harness.server.lookup(&id).unwrap();
+    let scope = session.ctrl.approval_scope();
+    let started = CancellationToken::new();
+    let release = CancellationToken::new();
+    let service = session.ctrl.approval_service();
+    service
+        .register_reviewer(
+            &scope.workspace,
+            &scope.session_id,
+            Arc::new(AskReviewer {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        )
+        .unwrap();
+    service
+        .set_review_context(
+            &scope.workspace,
+            &scope.session_id,
+            crate::approval::reviewer::ReviewContext {
+                trusted_user_messages: vec!["Run the exact operation.".into()],
+                evidence_digest: "evidence".into(),
+                policy_digest: "policy".into(),
+                instructions: Vec::new(),
+            },
+        )
+        .unwrap();
+    let request = service
+        .create(crate::approval::Proposal {
+            kind: otto_core::approval::Kind::Authorization,
+            authority: otto_core::approval::Authority::Boundary,
+            scope: scope.clone(),
+            subject: otto_core::approval::Subject {
+                tool_call_id: "held-call".into(),
+                source: "tool".into(),
+                id: "held-operation".into(),
+                version: "exact-version".into(),
+                details: "Run the exact operation".into(),
+            },
+            title: "Review operation".into(),
+            reason: "User requested operation".into(),
+            blocking: true,
+            persistent: false,
+            expires_at: None,
+        })
+        .unwrap();
+    let turn = Arc::new(Turn::new(
+        "held-turn".into(),
+        TRIGGER_USER,
+        CancellationToken::new(),
+    ));
+    let waiting = {
+        let server = harness.server.clone();
+        let session = session.clone();
+        let turn = turn.clone();
+        let request_id = request.id.clone();
+        tokio::spawn(async move {
+            server
+                .wait_for_approval(
+                    &session,
+                    &turn,
+                    &CancellationToken::new(),
+                    ApprovalRequest {
+                        approval_id: request_id,
+                        tool_call_id: "held-call".into(),
+                        command: "exact-operation".into(),
+                        justification: "Run the exact operation".into(),
+                        read_path: String::new(),
+                    },
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), started.cancelled())
+        .await
+        .unwrap();
+    assert!(
+        turn.snapshot(0).0.is_empty(),
+        "reviewing must not emit a permission prompt"
+    );
+    assert!(session.lock().waiting.is_none());
+    release.cancel();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while session.lock().waiting.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let current = service
+        .get(&request.id, &scope.workspace, Some(&scope.session_id))
+        .unwrap();
+    assert!(current.is_human_pending());
+    assert_eq!(current.subject, request.subject);
+    assert_eq!(
+        session.lock().waiting.as_ref().unwrap().shared_revision,
+        Some(current.revision)
+    );
+    service
+        .set_mode(&scope, otto_core::approval::ApprovalMode::Manual)
+        .unwrap();
+    let fresh = service
+        .get(&request.id, &scope.workspace, Some(&scope.session_id))
+        .unwrap();
+    assert!(fresh.revision > current.revision);
+    assert_eq!(fresh.subject, current.subject);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while session
+            .lock()
+            .waiting
+            .as_ref()
+            .and_then(|waiting| waiting.shared_revision)
+            != Some(fresh.revision)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for option in ["approve", "reject"] {
+        let body =
+            serde_json::json!({"session_id":id,"revision":current.revision,"option_id":option})
+                .to_string();
+        assert_eq!(
+            harness
+                .raw(
+                    "POST",
+                    &format!("/v1/approvals/{}/decision", request.id),
+                    Some(&body),
+                    &[("content-type", b"application/json")],
+                )
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(
+            service
+                .get(&request.id, &scope.workspace, Some(&scope.session_id))
+                .unwrap()
+                .is_human_pending()
+        );
+    }
+    assert_eq!(
+        decide(&harness, &id, &request.id, "allow").await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap(),
+        ApprovalDecision::Allow
+    );
+}
+
+#[tokio::test]
+async fn approval_policy_requires_revision_and_preserves_reviewer_when_disabled() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let url = format!("/v1/sessions/{id}/approval-policy");
+    let initial = harness.send("GET", &url, None).await.json();
+    assert_eq!(initial["policy"], "on_request");
+    assert_eq!(initial["reviewer"], "auto_review");
+    assert_eq!(initial["revision"], 1);
+    let update = r#"{"expected_revision":1,"policy":"never","reviewer":"user"}"#;
+    let changed = harness.send("PUT", &url, Some(update)).await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    let body = changed.json();
+    assert_eq!(body["policy"], "never");
+    assert_eq!(body["reviewer"], "user");
+    assert_eq!(body["reviewer_active"], false);
+    assert_eq!(body["mode"], "auto");
+    assert_eq!(body["automatic"], true);
+    assert_eq!(body["revision"], 2);
+    assert_eq!(
+        harness.send("PUT", &url, Some(update)).await.status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        harness
+            .send("PUT", &url, Some(r#"{"policy":"never","reviewer":"user"}"#))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    let legacy = harness
+        .send("GET", &format!("/v1/sessions/{id}/approval-mode"), None)
+        .await
+        .json();
+    assert_eq!(legacy["policy"], "never");
+    assert_eq!(legacy["reviewer_active"], false);
+    let manual = harness
+        .send(
+            "PUT",
+            &format!("/v1/sessions/{id}/approval-mode"),
+            Some(r#"{"mode":"manual"}"#),
+        )
+        .await
+        .json();
+    assert_eq!(manual["policy"], "on_request");
+    assert_eq!(manual["reviewer"], "user");
+}
+
+#[tokio::test]
+async fn approval_mode_api_is_session_scoped_and_events_capture_auto_decisions() {
+    let harness = Harness::new();
+    let one = harness.create().await;
+    let two = harness.create().await;
+    let url = format!("/v1/sessions/{one}/approval-mode");
+    let body = harness.send("GET", &url, None).await.json();
+    assert_eq!(body["automatic"], true);
+    assert_eq!(body["mode"], "auto");
+    let body = harness
+        .send("PUT", &url, Some(r#"{"automatic":false}"#))
+        .await
+        .json();
+    assert_eq!(body["mode"], "manual");
+    let body = harness.send("GET", &url, None).await.json();
+    assert_eq!(body["automatic"], false);
+    assert_eq!(body["mode"], "manual");
+    // The mode form selects YOLO, and the response agrees with itself.
+    let body = harness
+        .send("PUT", &url, Some(r#"{"mode":"yolo"}"#))
+        .await
+        .json();
+    assert_eq!(body["automatic"], true);
+    assert_eq!(body["mode"], "yolo");
+    assert_eq!(harness.send("GET", &url, None).await.json()["mode"], "yolo");
+    // A boolean and a contradicting mode are refused, not guessed.
+    assert_eq!(
+        harness
+            .send("PUT", &url, Some(r#"{"automatic":false,"mode":"yolo"}"#))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(harness.send("GET", &url, None).await.json()["mode"], "yolo");
+    assert_eq!(
+        harness
+            .send("PUT", &url, Some(r#"{"mode":"on"}"#))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        harness
+            .send("PUT", &url, Some(r#"{"automatic":true}"#))
+            .await
+            .json()["mode"],
+        "auto"
+    );
+    assert_eq!(
+        harness
+            .send("GET", &format!("/v1/sessions/{two}/approval-mode"), None)
+            .await
+            .json()["mode"],
+        "auto"
+    );
+    assert_eq!(
+        harness
+            .send("PUT", &url, Some(r#"{"automatic":"yes"}"#))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    let ctrl = &harness.server.lookup(&two).unwrap().ctrl;
+    // A bounded authorization is still decided by AUTO without a dialog.
+    let request = ctrl
+        .approval_service()
+        .create(crate::approval::Proposal {
+            kind: otto_core::approval::Kind::Authorization,
+            authority: otto_core::approval::Authority::Bounded,
+            scope: ctrl.approval_scope(),
+            subject: otto_core::approval::Subject {
+                source: "plugin".into(),
+                id: "api-test".into(),
+                version: "1".into(),
+                details: "Run a plugin command".into(),
+                tool_call_id: String::new(),
+            },
+            title: "Run a plugin command".into(),
+            reason: "Inside the current sandbox".into(),
+            blocking: true,
+            persistent: false,
+            expires_at: None,
+        })
+        .unwrap();
+    assert_eq!(request.state, otto_core::approval::State::Approved);
+    // A plan review is a human judgement, so AUTO leaves it pending.
+    let review = ctrl
+        .approval_service()
+        .create(crate::approval::Proposal {
+            kind: otto_core::approval::Kind::Confirmation,
+            authority: otto_core::approval::Authority::Consent,
+            scope: ctrl.approval_scope(),
+            subject: otto_core::approval::Subject {
+                source: "conversation".into(),
+                id: "api-test-plan".into(),
+                version: "1".into(),
+                details: "Test plan".into(),
+                tool_call_id: String::new(),
+            },
+            title: "Plan approval".into(),
+            reason: "Test consent".into(),
+            blocking: true,
+            persistent: false,
+            expires_at: None,
+        })
+        .unwrap();
+    assert_eq!(review.state, otto_core::approval::State::Pending);
+    let events = harness
+        .send(
+            "GET",
+            &format!("/v1/sessions/{two}/approval-events?after=0"),
+            None,
+        )
+        .await
+        .json();
+    let events = events.as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["request"]["state"], "pending");
+    assert_eq!(
+        events[1]["request"]["decision"]["transport"],
+        "bounded-authority"
+    );
+    assert_eq!(events[2]["request"]["state"], "pending");
+    assert!(events[2]["request"]["decision"].is_null());
+    let other = harness
+        .send(
+            "GET",
+            &format!("/v1/sessions/{one}/approval-events?after=0"),
+            None,
+        )
+        .await
+        .json();
+    assert!(other.as_array().unwrap().is_empty());
+}
+
+// ---- observability: request ID and step events ----
+
+fn log_lines(harness: &Harness, event: &str) -> Vec<String> {
+    let needle = format!("msg={event} ");
+    harness
+        .logged()
+        .lines()
+        .filter(|line| line.contains(&needle))
+        .map(str::to_string)
+        .collect()
+}
+
+/// [`log_lines`] once at least one line is there. A turn is marked done
+/// before `turn_finished` is written, so a test that has seen the turn
+/// end can still be ahead of that line.
+async fn wait_log_lines(harness: &Harness, event: &str) -> Vec<String> {
+    for _ in 0..600 {
+        let lines = log_lines(harness, event);
+        if !lines.is_empty() {
+            return lines;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Vec::new()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_logs_its_request_id_on_every_event() {
+    let harness = approval_harness();
+    let id = harness.create().await;
+    let body = serde_json::json!({"text": "run it", "queue": false}).to_string();
+    let response = harness
+        .raw(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(&body),
+            &[("x-request-id", b"req-abc")],
+        )
+        .await;
+    let turn_id = turn_header(&response);
+    let mut reader = SseReader::new(response);
+    let requested = frame_named(&mut reader, "approval_requested").await;
+    let approval = requested["approval_id"].as_str().expect("id").to_string();
+    decide(&harness, &id, &approval, "allow").await;
+    ends_of(reader).await;
+    harness.wait_turn_done(&id, &turn_id).await;
+
+    let ids = format!("session_id={id} turn_id={turn_id} request_id=req-abc");
+    for event in [
+        "turn_started",
+        "provider_request_finished",
+        "tool_call_finished",
+        "turn_finished",
+    ] {
+        let lines = wait_log_lines(&harness, event).await;
+        assert!(!lines.is_empty(), "no {event}:\n{}", harness.logged());
+        assert!(
+            lines.iter().all(|line| line.contains(&ids)),
+            "{event}: {lines:?}"
+        );
+    }
+    let finished = log_lines(&harness, "turn_finished").remove(0);
+    for field in [
+        "provider_requests=4 ",
+        "provider_ms=",
+        "tool_calls=",
+        "tool_ms=",
+        "input_tokens=",
+        "output_tokens=",
+    ] {
+        assert!(finished.contains(field), "{field}: {finished}");
+    }
+    let provider = log_lines(&harness, "provider_request_finished").remove(0);
+    for field in [
+        "provider=",
+        "model=",
+        "status=",
+        "attempts=",
+        "duration_ms=",
+    ] {
+        assert!(provider.contains(field), "{field}: {provider}");
+    }
+    let tool = log_lines(&harness, "tool_call_finished").remove(0);
+    assert!(tool.contains("tool=bash"), "{tool}");
+    assert!(tool.contains("status=ok") || tool.contains("status=error"));
+    assert!(
+        log_lines(&harness, "http_request").iter().any(|line| line
+            .contains("route=\"POST /v1/sessions/{id}/turns\"")
+            && line.contains("request_id=req-abc")),
+        "{}",
+        harness.logged()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_without_the_header_logs_no_request_id_field() {
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"hi","stream":false}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    for event in ["turn_started", "provider_request_finished", "turn_finished"] {
+        let lines = wait_log_lines(&harness, event).await;
+        assert!(!lines.is_empty(), "no {event}");
+        for line in lines {
+            assert!(line.contains(&format!("session_id={id} ")), "{line}");
+            assert!(!line.contains("request_id="), "{line}");
+        }
+    }
+}

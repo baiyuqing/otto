@@ -9,7 +9,6 @@ pub mod files;
 pub mod guard;
 pub mod json;
 pub mod proposed;
-pub mod remote;
 pub mod repository;
 pub mod scope;
 pub mod service;

@@ -97,7 +97,6 @@ impl MemoryService for External {
         }
         Ok(RecallResult {
             items: vec![RecallItem {
-                remote: None,
                 reference: Some(MemoryRef {
                     organization_id: None,
                     service: self.description.identity.clone(),

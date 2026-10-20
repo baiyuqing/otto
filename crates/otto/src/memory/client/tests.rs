@@ -310,7 +310,6 @@ async fn validates_returned_scopes_and_rejects_secrets() {
     let mut raw = Fake::new(&[Operation::Remember]);
     raw.recall = Some(RecallResult {
         items: vec![RecallItem {
-            remote: None,
             reference: Some(MemoryRef {
                 organization_id: None,
                 service: "fake-service".into(),
@@ -464,7 +463,6 @@ async fn invalid_completion_and_secret_output_are_not_accepted() {
     let mut raw = Fake::new(&[]);
     raw.recall = Some(RecallResult {
         items: vec![RecallItem {
-            remote: None,
             reference: None,
             content: Content::Text("password=hunter2".into()),
             sources: vec![],
@@ -486,7 +484,7 @@ async fn invalid_completion_and_secret_output_are_not_accepted() {
 }
 
 #[tokio::test]
-async fn workspace_learning_grant_preserves_read_authority_and_narrows_remote_write() {
+async fn workspace_learning_grant_preserves_read_authority_and_narrows_write() {
     let workspace = Scope {
         namespace: "workspace".into(),
         id: "project-1".into(),

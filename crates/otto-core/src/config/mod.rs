@@ -42,7 +42,7 @@ pub use agents::{Agents, AgentsRuntime, resolve_agents};
 pub use approval::ApprovalConfig;
 pub use failover::{Failover, FailoverRuntime, resolve_failover};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
-pub use memory::{Memory, MemoryRemote, MemoryRuntime, MemoryTurso, RemoteRuntime, resolve_memory};
+pub use memory::{Memory, MemoryRuntime, MemoryTurso, resolve_memory};
 pub use model_limits::ModelLimits;
 pub use plugins::{PluginBindings, Plugins};
 pub use projects::{Project, TrustLevel};
@@ -250,20 +250,42 @@ pub fn parse(text: &str) -> Result<File, ConfigError> {
             Ok(file)
         }
         Err(err) => {
-            let message = err.message();
-            if message.starts_with("unknown field `inbound`")
-                && toml::from_str::<toml::Table>(text).is_ok_and(|t| t.contains_key("inbound"))
-            {
-                Err(ConfigError::new(
-                    "[inbound] was removed: Feishu messages now reach otto through otto-connect (see \"Chat connector\" in the user manual); delete the [inbound] table from config.toml",
-                ))
-            } else if message.contains("unknown field") {
+            if let Some(removed) = removed_table_error(text, &err) {
+                Err(ConfigError::new(removed))
+            } else if err.message().contains("unknown field") {
                 Err(ConfigError::new(format!("unknown field: {err}")))
             } else {
                 Err(ConfigError::new(err.to_string()))
             }
         }
     }
+}
+
+/// The migration message when `err` rejects a table that earlier releases
+/// accepted: `[inbound]` or `[memory.remote]`. Only a table that the document
+/// really holds matches, so `[server] inbound = 1` keeps the generic error.
+pub(crate) fn removed_table_error(text: &str, err: &toml::de::Error) -> Option<&'static str> {
+    let message = err.message();
+    let removed_inbound = message.starts_with("unknown field `inbound`");
+    let removed_memory_remote = message.starts_with("unknown field `remote`");
+    if !removed_inbound && !removed_memory_remote {
+        return None;
+    }
+    let table = toml::from_str::<toml::Table>(text).ok()?;
+    if removed_inbound && table.contains_key("inbound") {
+        return Some(
+            "[inbound] was removed: Feishu messages now reach otto through otto-connect (see \"Chat connector\" in the user manual); delete the [inbound] table from config.toml",
+        );
+    }
+    let memory_has_remote = table
+        .get("memory")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|memory| memory.contains_key("remote"));
+    (removed_memory_remote && memory_has_remote).then_some(concat!(
+        "[memory.remote] was removed: run an external memory service as an Otto plugin, ",
+        "such as the otto-mem plugin (https://github.com/baiyuqing/otto-mem), and bind its token ",
+        "under [plugins.bindings.otto-mem]; delete [memory.remote] from config.toml"
+    ))
 }
 
 /// Sets the top-level `default_profile` of `content` to `profile`, changing
@@ -315,6 +337,30 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn other_unknown_inbound_keys_keep_the_generic_error() {
         for text in ["bogus = 1\n", "[server]\ninbound = 1\n"] {
+            let message = parse(text).expect_err("unknown key").to_string();
+            assert!(message.starts_with("unknown field:"), "{message}");
+            assert!(!message.contains("was removed"), "{message}");
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn removed_memory_remote_table_gets_a_specific_error() {
+        let text = parse("[memory.remote]\nurl = \"https://mem.example\"\n")
+            .expect_err("memory.remote is removed")
+            .to_string();
+        assert!(text.starts_with("[memory.remote] was removed:"), "{text}");
+        assert!(text.contains("[plugins.bindings.otto-mem]"), "{text}");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn other_unknown_remote_keys_keep_the_generic_error() {
+        for text in [
+            "[server]\nremote = 1\n",
+            "remote = 1\n",
+            "[memory]\nbogus = 1\n",
+        ] {
             let message = parse(text).expect_err("unknown key").to_string();
             assert!(message.starts_with("unknown field:"), "{message}");
             assert!(!message.contains("was removed"), "{message}");

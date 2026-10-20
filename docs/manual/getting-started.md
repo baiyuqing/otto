@@ -165,7 +165,7 @@ line: process listings and shell history can expose them.
 ## Environment variables
 
 Use the environment binding selected by the active provider profile
-(`api_key_env` for OpenAI-compatible profiles). MCP, chat and remote-memory
+(`api_key_env` for OpenAI-compatible profiles). MCP, chat and plugin package
 credentials likewise come from their configured environment bindings, never
 literal secrets in configuration. `otto login` manages ChatGPT credentials.
 
@@ -206,7 +206,7 @@ sandbox grants, listeners, admission, storage, reflection and catalog roots
 require user/managed sources. Ignored fields produce diagnostics. Projects
 cannot retarget credential-bound MCP servers, interpolate environment variables
 in project MCP definitions, or supply their env, headers or OAuth bindings.
-Remote-memory organization/user/token authority is also host-only.
+Plugin package bindings (`[plugins.bindings.*]`) are also host-only.
 
 ### Inspecting and editing scopes
 

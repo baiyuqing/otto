@@ -1252,6 +1252,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 text,
                 usage: notification.usage.unwrap_or_default(),
                 present: notification.usage.is_some(),
+                cached_input_tokens_present: notification.cached_input_tokens_present,
             });
         }
         Ok(())
@@ -1348,6 +1349,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 text,
                 usage: Usage::default(),
                 present: false,
+                cached_input_tokens_present: false,
             });
         }
         Ok(())

@@ -2517,7 +2517,14 @@ fn store_round_trips_role_context_as_custom_message() {
         assert_eq!(persisted[1].context_type, context_type);
         assert!(persisted[1].display);
         assert_eq!(persisted[1].text(), text);
-        assert_eq!(persisted[1].usage, None, "context usage is dropped");
+        assert_eq!(
+            persisted[1].usage,
+            Some(Usage {
+                input_tokens: 5,
+                ..Usage::default()
+            }),
+            "a context message keeps the token usage it carried"
+        );
 
         let path = store.path();
         store.close().expect("close");
@@ -2528,6 +2535,7 @@ fn store_round_trips_role_context_as_custom_message() {
         assert_eq!(entry["customType"], context_type);
         assert_eq!(entry["display"], true);
         assert_eq!(entry["content"], text);
+        assert_eq!(entry["details"]["otto"]["usage"]["input_tokens"], 5);
 
         let (reopened, warnings) = Store::open(&path).expect("open");
         assert!(warnings.is_empty(), "{warnings:?}");

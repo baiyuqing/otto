@@ -1432,7 +1432,18 @@ impl App {
                     }
                 }
             }
-            "notification" => self.push_system(format!("[task {}] {}", event.task_id, event.text)),
+            "notification" => {
+                // A finished sub-agent task reports its tokens here. The
+                // session snapshot already counts them, so only the cache
+                // breakdown's presence is taken from this report: without it
+                // the footer must not present a share as measured.
+                if event.usage_present == Some(true) {
+                    let reported = event.cached_input_tokens_present == Some(true);
+                    self.cache_breakdown_complete =
+                        Some(self.cache_breakdown_complete.unwrap_or(true) && reported);
+                }
+                self.push_system(format!("[task {}] {}", event.task_id, event.text))
+            }
             APPROVAL_REQUESTED => {
                 if let Some(req) = &event.approval {
                     if req.is_human_pending() {
@@ -2093,6 +2104,7 @@ mod tests {
                 text: text.into(),
                 usage: Default::default(),
                 present: false,
+                cached_input_tokens_present: false,
             });
             app.apply_event(&event);
             assert_eq!(
@@ -2191,6 +2203,51 @@ mod tests {
                 cached_input_tokens: 9,
             }
         );
+    }
+
+    #[test]
+    fn a_task_notification_decides_whether_the_cache_share_is_shown() {
+        let (mut app, _) = app();
+        app.cache_breakdown_complete = Some(true);
+
+        // A finished sub-agent that never reported the cached breakdown: the
+        // footer must stop presenting the share as measured, because the
+        // session totals now include tokens its cache count cannot explain.
+        app.apply_event(&WireEvent {
+            event_type: "notification".into(),
+            task_id: "t1".into(),
+            text: "[task-notification] task t1 succeeded".into(),
+            usage: Some(Usage {
+                input_tokens: 40,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+            }),
+            usage_present: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(app.cache_breakdown_complete, Some(false));
+    }
+
+    #[test]
+    fn a_measured_task_notification_keeps_the_cache_share() {
+        let (mut app, _) = app();
+        app.cache_breakdown_complete = Some(true);
+
+        app.apply_event(&WireEvent {
+            event_type: "notification".into(),
+            task_id: "t1".into(),
+            text: "[task-notification] task t1 succeeded".into(),
+            usage: Some(Usage {
+                input_tokens: 40,
+                output_tokens: 5,
+                cached_input_tokens: 30,
+            }),
+            usage_present: Some(true),
+            cached_input_tokens_present: Some(true),
+            ..Default::default()
+        });
+
+        assert_eq!(app.cache_breakdown_complete, Some(true));
     }
 
     #[test]

@@ -56,6 +56,7 @@ mod memory_context;
 mod progress_recovery;
 mod provider_tools;
 mod redaction;
+mod turn_end_turn;
 mod turn_records;
 mod yield_provider_calls;
 

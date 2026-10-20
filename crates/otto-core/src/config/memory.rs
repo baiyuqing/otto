@@ -13,9 +13,9 @@ const DEFAULT_MEMORY_MAX_RESULTS: i64 = 12;
 
 /// The error for `backend = "remote"`, a value that earlier builds of main accepted.
 const REMOTE_BACKEND_REMOVED: &str = concat!(
-    "memory backend \"remote\" was removed: run an external memory service as an Otto plugin, ",
-    "such as the otto-mem plugin (https://github.com/baiyuqing/otto-mem), and bind its token ",
-    "under [plugins.bindings.otto-mem]; remove backend = \"remote\" from [memory]"
+    "memory backend \"remote\" was removed: install the external memory service as an Otto plugin, ",
+    "such as otto-mem (https://github.com/baiyuqing/otto-mem), set backend = \"plugin:otto-mem\" ",
+    "in [memory], and bind its token under [plugins.bindings.otto-mem]"
 );
 
 /// The recall budget and page size a request may ask for. Hardcoded rather
@@ -72,6 +72,28 @@ pub struct MemoryRuntime {
     pub turso_busy_timeout: Duration,
 }
 
+impl MemoryRuntime {
+    /// The package name when `backend` is `plugin:<name>`.
+    pub fn plugin_package(&self) -> Option<&str> {
+        self.backend.strip_prefix("plugin:")
+    }
+}
+
+/// The same rule as `otto::plugin::package::valid_name`; otto-core cannot
+/// depend on the native crate.
+fn valid_plugin_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'.' || *b == b'-')
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        && !name.contains("--")
+        && !name.contains("..")
+}
+
 /// Resolves `[memory]`. The store directory is `$HOME/.otto/memory`; the
 /// Turso path, defaulting to `$HOME/.otto/memory/memory.db`, only locates the
 /// database that the first start imports.
@@ -90,16 +112,18 @@ pub fn resolve_memory(
     };
     // Earlier releases selected the Turso engine with `turso` or `sqlite`; all
     // three values select the file store.
-    match backend.as_str() {
-        "files" | "turso" | "sqlite" => {}
+    let backend = match backend.as_str() {
+        "files" | "turso" | "sqlite" => DEFAULT_MEMORY_BACKEND.to_string(),
         "remote" => return Err(ConfigError::new(REMOTE_BACKEND_REMOVED)),
-        _ => {
-            return Err(ConfigError::new(format!(
-                "unsupported memory backend \"{backend}\": must be files"
-            )));
-        }
-    }
-    let backend = DEFAULT_MEMORY_BACKEND.to_string();
+        other => match other.strip_prefix("plugin:") {
+            Some(name) if valid_plugin_name(name) => backend.clone(),
+            _ => {
+                return Err(ConfigError::new(format!(
+                    "unsupported memory backend \"{backend}\": must be files or plugin:<package>"
+                )));
+            }
+        },
+    };
 
     let recall_tokens = match file.memory.recall_tokens {
         Some(value) if value <= 0 => {
@@ -286,7 +310,11 @@ busy_timeout = "10s"
         file.memory.backend = "postgres".into();
         let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
         assert!(err.to_string().contains("postgres"), "{err}");
-        assert!(err.to_string().contains("must be files"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("must be files or plugin:<package>"),
+            "{err}"
+        );
         assert!(!err.to_string().contains("was removed"), "{err}");
         assert!(!err.to_string().contains("remote"), "{err}");
     }
@@ -298,6 +326,43 @@ busy_timeout = "10s"
         let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
         assert_eq!(err.to_string(), REMOTE_BACKEND_REMOVED);
         assert!(err.to_string().contains("otto-mem"), "{err}");
+        assert!(
+            err.to_string().contains("backend = \"plugin:otto-mem\""),
+            "{err}"
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_plugin_backend_names_its_package() {
+        let mut file = File::default();
+        file.memory.backend = "plugin:x".into();
+        let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
+        assert_eq!(runtime.backend, "plugin:x");
+        assert_eq!(runtime.plugin_package(), Some("x"));
+        let files = resolve_memory(&File::default(), &env("/home/u")).expect("resolve");
+        assert_eq!(files.plugin_package(), None);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn rejects_invalid_plugin_backends() {
+        for value in [
+            "plugin:",
+            "plugin:Bad_Name",
+            "plugin:a--b",
+            "plugin:-a",
+            "plugin",
+            "plugin:x/y",
+        ] {
+            let mut file = File::default();
+            file.memory.backend = value.into();
+            let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
+            assert!(
+                err.to_string().contains("plugin:<package>"),
+                "{value}: {err}"
+            );
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

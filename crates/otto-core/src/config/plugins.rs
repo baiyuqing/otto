@@ -84,6 +84,23 @@ mod tests {
     }
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn memory_component_parses_and_is_omitted_when_absent() {
+        let with: Components = serde_json::from_str(
+            r#"{"version":1,"memory":{"command":["run","x"],"timeout":"5s"}}"#,
+        )
+        .unwrap();
+        assert_eq!(with.memory.as_ref().unwrap().command, ["run", "x"]);
+        assert!(with.has_executables());
+        let without = Components {
+            version: 1,
+            ..Default::default()
+        };
+        assert!(!without.has_executables());
+        assert!(!serde_json::to_string(&without).unwrap().contains("memory"));
+        assert!(serde_json::to_string(&with).unwrap().contains("\"memory\""));
+    }
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn credential_names_are_explicit_and_deduplicated() {
         let file=parse("[plugins.bindings.'example:tools'.env]\nA='${TOKEN}'\nB='${TOKEN:-fallback}'\nC='literal'\n[plugins.bindings.'example:remote'.headers]\nX='${REMOTE_KEY}'").unwrap();
         assert_eq!(
@@ -154,6 +171,15 @@ pub struct Tool {
     pub timeout: String,
 }
 
+/// The command that serves a package's memory operations.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryCommand {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub timeout: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Components {
@@ -162,9 +188,19 @@ pub struct Components {
     pub hooks: Hooks,
     #[serde(default)]
     pub tools: Vec<Tool>,
+    /// Omitted when absent: `registry.json` stores parsed components with
+    /// `deny_unknown_fields`, so a `null` key would break older binaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryCommand>,
 }
 
 impl Components {
+    /// True when the package declares any command Otto can run.
+    pub fn has_executables(&self) -> bool {
+        self.hooks.entries().iter().any(|(_, h)| !h.is_empty())
+            || !self.tools.is_empty()
+            || self.memory.is_some()
+    }
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }

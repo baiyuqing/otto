@@ -206,6 +206,8 @@ pub struct Runner {
     output_logs: Arc<crate::tool::bash_output::Logs>,
     authorization_run: Arc<Mutex<String>>,
     approvals: Option<(Arc<crate::approval::Service>, otto_core::approval::Scope)>,
+    /// Reviewer registered for this runner; `close` unregisters it.
+    review_provider: Option<Arc<dyn crate::approval::reviewer::ReviewProvider>>,
     review_context: tokio::sync::Mutex<crate::approval::reviewer::ReviewContext>,
     pending_authorization: Mutex<Vec<String>>,
     agent: Agent<ProviderClient, Registry, SharedSession>,

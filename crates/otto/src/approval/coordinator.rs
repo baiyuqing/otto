@@ -17,11 +17,11 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-type SessionKey = (String, String);
+pub(super) type SessionKey = (String, String);
 #[derive(Default)]
 pub(super) struct ReviewState {
-    providers: BTreeMap<SessionKey, Arc<dyn ReviewProvider>>,
-    contexts: BTreeMap<SessionKey, ReviewContext>,
+    pub(super) providers: BTreeMap<SessionKey, Arc<dyn ReviewProvider>>,
+    pub(super) contexts: BTreeMap<SessionKey, ReviewContext>,
     configs: BTreeMap<String, otto_core::config::ApprovalConfig>,
     managed: BTreeMap<String, otto_core::config::ApprovalConfig>,
 }
@@ -200,6 +200,24 @@ impl Service {
             })?;
         }
         self.refresh_pending(workspace, root_session)
+    }
+    /// Removes the reviewer and review context of a closed runner. A newer
+    /// runner of the same session may already have replaced the provider, so
+    /// nothing is removed unless `provider` is still the registered one.
+    pub fn unregister_reviewer(
+        &self,
+        workspace: &str,
+        root_session: &str,
+        provider: &Arc<dyn ReviewProvider>,
+    ) -> Result<()> {
+        let session_key = (workspace.to_string(), root_session.to_string());
+        let mut state = self.review_state.write().map_err(|_| Error::Unavailable)?;
+        let current = state.providers.get(&session_key);
+        if current.is_some_and(|stored| Arc::ptr_eq(stored, provider)) {
+            state.providers.remove(&session_key);
+            state.contexts.remove(&session_key);
+        }
+        Ok(())
     }
     pub fn set_review_context(
         &self,

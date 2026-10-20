@@ -44,6 +44,7 @@ Canonical targets (see root `Makefile`):
 | `make connect-check` | Build test runtime; Go formatting, vet and race tests |
 | `make scripts-test` | Offline Node tests beside scripts |
 | `make license-check` | Rust non-dev dependency license policy |
+| `make code-limits` | File length, line length and file-name limits |
 | `make check` | macOS: formatting, lint and `check-tests` |
 | `make check-tests` | Native, connector, WASM and script tests; diff whitespace check |
 | `make check-linux` | Formatting, lint, native/connector tests, WASM check, script/license checks |
@@ -82,6 +83,22 @@ do not hide failing gates or weaken checks. Use focused imperative commits.
 After implementation and verification, open the PR without another blanket
 confirmation; opening it ends the task.
 
+### Code limits
+
+`scripts/code-limits.mjs` enforces the size and file-name rules of
+[AGENTS.md](../../AGENTS.md#code-size-and-naming) on code files (`.rs`, `.go`,
+`.js`, `.mjs`, `.py`, `.sh`): at most 800 lines per file, at most 200 Unicode
+code points per line, and no file or Rust module named `utils`, `util`,
+`helpers`, `helper`, `common`, `misc`, `types` or `config`. A Rust `mod.rs`
+counts under its directory name and a Go `_test` suffix is ignored.
+`GENERIC_NAME_EXCEPTIONS` keeps the two configuration modules,
+`otto_core::config` and `otto::config`. No baseline exempts a file from the
+size limits.
+
+The pre-commit hook checks staged content (`--staged`). `make code-limits`,
+`make check`, `make check-linux` and `make check-fast` check every tracked or
+untracked, not ignored, code file in the worktree.
+
 ### ACP integration-test navigation
 
 `crates/otto/tests/acp_stdio.rs` and `acp_attach.rs` own the process/JSON-RPC
@@ -100,8 +117,11 @@ contracts in Otto and client implementation/tests in the frontend repository.
 
 Install Gitleaks (`brew install gitleaks` on macOS), then run
 `make setup-git-hooks` once per clone. The shared worktree pre-commit hook scans
-staged changes, fails on findings or scanner errors, and refuses to overwrite a
-different hook. There is no CI history scan. For a manual scan:
+staged changes with Gitleaks and then applies the [code limits](#code-limits)
+to them; it fails on findings, violations or scanner errors, and refuses to
+overwrite a different hook. A hook installed before the code limits differs
+from `scripts/pre-commit`: delete `$(git rev-parse --git-path hooks)/pre-commit`
+and run `make setup-git-hooks` again. There is no CI history scan. For a manual scan:
 
 ```bash
 gitleaks git -v --redact --ignore-gitleaks-allow

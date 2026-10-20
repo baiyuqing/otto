@@ -167,7 +167,6 @@ fn item(service: &str, record: Record, standing: bool) -> port::RecallItem {
     metadata.insert("otto.key".into(), record.key);
     metadata.insert("otto.standing".into(), standing.to_string());
     port::RecallItem {
-        remote: None,
         reference: Some(reference(
             service,
             &record.scope,

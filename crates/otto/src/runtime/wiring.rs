@@ -163,9 +163,6 @@ pub struct MemoryWiring {
     pub recall_token_budget: i64,
     /// The append-only advice audit log, absent when it could not be opened.
     pub advice_audit: Option<Arc<dyn crate::memory::advice::audit::AuditStore>>,
-    /// Uploads finished turns to the remote memory service; absent for every
-    /// other backend.
-    pub turns: Option<Arc<crate::memory::remote::upload::Uploader>>,
 }
 
 fn neutral_scope(scope: &Scope) -> otto_core::memory::Scope {
@@ -241,14 +238,12 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
                             format!("Resource reference ({media_type}): {uri}")
                         }
                     },
-                    remote: item.remote,
                     standing: false,
                 }
             })
             .collect();
         // Provider token counts are advisory. Bound the complete rendered host
         // projection independently, using bytes as a conservative token bound.
-        let remote = records.iter().any(|record| record.remote.is_some());
         let mut admitted = Vec::new();
         let budget = usize::try_from(request.token_budget)
             .unwrap_or(0)
@@ -256,11 +251,6 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
         for record in records {
             admitted.push(record);
             if agent::render_memory_context(&admitted).len() > budget {
-                if remote {
-                    return Err(agent::MemoryError(
-                        "remote memory rendering exceeds budget".into(),
-                    ));
-                }
                 admitted.pop();
             }
         }
@@ -288,7 +278,6 @@ impl Default for MemoryWiring {
             recall_limit: 0,
             recall_token_budget: 0,
             advice_audit: None,
-            turns: None,
         }
     }
 }

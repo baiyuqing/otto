@@ -275,10 +275,6 @@ impl Log {
         );
     }
 
-    pub(super) fn memory_turn(&self, event: &'static str, fields: &[(&str, String)]) {
-        self.fixed(event, &["reason", "turn_id", "bytes", "kind"], fields);
-    }
-
     /// Writes `event` with only the `allowed` fields.
     fn fixed(&self, event: &str, allowed: &[&str], fields: &[(&str, String)]) {
         let mut record = json!({"event": event, "schema_version": 1});

@@ -54,15 +54,6 @@ pub(crate) async fn load_workspace(
         .map_err(|error| error.to_string())?;
     let workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
-    if memory_config.remote.is_some()
-        && let (Some(client), Some(extension)) = (&scoped.memory.client, &scoped.memory.extension)
-    {
-        let grant = remote_learning_grant(extension.user_scope.clone(), &workspace_scope);
-        let client = client
-            .with_grant(grant)
-            .map_err(|error| error.to_string())?;
-        scoped.memory.client = Some(Arc::new(client));
-    }
     let shared = Arc::new(scoped);
     let workspace = leaked_workspace(canonical_path).map_err(|error| error.to_string())?;
     let mcp_config = resolve_mcp(&shared.config, &shared.environment, &workspace_path)

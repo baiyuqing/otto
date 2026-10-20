@@ -51,6 +51,9 @@ impl Merged {
     ) -> Result<(), ConfigError> {
         // Validate unknown fields/types before filtering: ignored does not mean invalid TOML.
         toml::from_str::<File>(text).map_err(|error| {
+            if let Some(removed) = super::removed_table_error(text, &error) {
+                return ConfigError::new(format!("{source}: {removed}"));
+            }
             let at = error.span().map_or(0, |span| span.start.min(text.len()));
             let line = text[..at].bytes().filter(|b| *b == b'\n').count() + 1;
             ConfigError::new(format!("invalid configuration in {source} at line {line}"))
@@ -326,11 +329,6 @@ fn filter(
 
 fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str> {
     let keys: Vec<&str> = p.iter().map(String::as_str).collect();
-    if keys.starts_with(&["memory", "remote"]) {
-        return Some(
-            "remote memory identity and credential selection require user or managed configuration",
-        );
-    }
     let allowed = match keys.as_slice() {
         ["default_profile"] => true,
         ["ui", "mode"] => true,

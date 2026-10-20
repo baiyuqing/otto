@@ -61,15 +61,29 @@ impl Store {
         keeper: Arc<Keeper>,
         replayable: fn(&str) -> bool,
     ) -> Result<(Self, Vec<Warning>), PiError> {
-        file.lock_exclusive()
-            .map_err(|error| PiError::other(format!("lock session file: {error}")))?;
-        reject_oversized_session_file(file.as_ref())?;
-        let (decoded, mut warnings) = decode_pi_file_for_open(file.as_mut(), path)?;
-        let state = resolve_pi_store_state(&decoded)?;
-        warnings.extend(state.warnings);
-        let position = file
-            .seek(SeekFrom::End(0))
-            .map_err(|error| PiError::other(format!("seek session file: {error}")))?;
+        // Until the store exists, nothing else releases `lease`: a failure
+        // here must release it, or the next open waits out the lease period.
+        let decoded_file = (|| {
+            file.lock_exclusive()
+                .map_err(|error| PiError::other(format!("lock session file: {error}")))?;
+            reject_oversized_session_file(file.as_ref())?;
+            let (decoded, mut warnings) = decode_pi_file_for_open(file.as_mut(), path)?;
+            let mut state = resolve_pi_store_state(&decoded)?;
+            warnings.extend(std::mem::take(&mut state.warnings));
+            let position = file
+                .seek(SeekFrom::End(0))
+                .map_err(|error| PiError::other(format!("seek session file: {error}")))?;
+            Ok::<_, PiError>((decoded, warnings, state, position))
+        })();
+        let (decoded, mut warnings, state, position) = match decoded_file {
+            Ok(parts) => parts,
+            Err(error) => {
+                if let Some((lease, _)) = lease.as_ref() {
+                    let _ = lease.release();
+                }
+                return Err(error);
+            }
+        };
 
         let (lease_value, acquired) = match lease {
             Some((lease, acquired)) => (Some(lease), Some(acquired)),

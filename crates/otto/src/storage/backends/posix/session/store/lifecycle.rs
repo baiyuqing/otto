@@ -75,32 +75,34 @@ impl Store {
 
     /// Closes the session file. Idempotent. Releases the lease this store
     /// acquired (see [`Store::set_lease_check`] for a store that only
-    /// checks a lease it does not own), but only once the file has synced,
-    /// so a lease is never given up while a write to it might still be in
-    /// flight on disk.
+    /// checks a lease it does not own). The lease is released on every path,
+    /// including when the file is missing or its sync fails, because
+    /// `closed` stops `Drop` from releasing it; after a failed sync the
+    /// sync error is returned and the file is not written again. A release
+    /// failure is returned only when the sync succeeded.
     pub fn close(&self) -> Result<(), PiError> {
         let mut state = self.lock()?;
         if state.closed {
             return Ok(());
         }
         state.closed = true;
-        let Some(file) = state.file.take() else {
-            return Ok(());
+        let sync_result = match state.file.take() {
+            Some(file) => file
+                .sync_all()
+                .map_err(|error| PiError::other(format!("close session file: {error}"))),
+            None => Ok(()),
         };
-        file.sync_all()
-            .map_err(|error| PiError::other(format!("close session file: {error}")))?;
-        if state.owns_lease {
-            if let Some(ownership) = state.writer_ownership.as_ref() {
-                ownership
-                    .release()
-                    .map_err(|error| PiError::other(format!("release session lease: {error}")))?;
-            } else if let Some(lease) = state.lease.as_ref() {
-                lease
-                    .release()
-                    .map_err(|error| PiError::other(format!("release session lease: {error}")))?;
-            }
-        }
-        Ok(())
+        let release_result = if !state.owns_lease {
+            Ok(())
+        } else if let Some(ownership) = state.writer_ownership.as_ref() {
+            ownership.release().map_err(|error| error.to_string())
+        } else if let Some(lease) = state.lease.as_ref() {
+            lease.release().map_err(|error| error.to_string())
+        } else {
+            Ok(())
+        };
+        sync_result?;
+        release_result.map_err(|error| PiError::other(format!("release session lease: {error}")))
     }
 
     /// Repairs trailing tool calls according to their durable operation facts.

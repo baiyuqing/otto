@@ -24,6 +24,11 @@ const (
 	resetAfter      = 60 * time.Second
 	exitWait        = 5 * time.Second
 	closeTimeout    = 10 * time.Second
+	// initializeTimeout bounds the ACP initialize call.
+	initializeTimeout = 30 * time.Second
+	// waitDelay bounds cmd.Wait after the child exits while a descendant
+	// still holds its pipes.
+	waitDelay = 3 * time.Second
 )
 
 // ErrNotOpen is returned by Prompt when the session is not open in the
@@ -82,7 +87,7 @@ type Options struct {
 type Agent struct {
 	opts Options
 
-	mu      sync.Mutex // guards the fields below; held while starting a process
+	mu      sync.Mutex // guards the fields below; held while starting a process, never while waiting out a restart delay
 	handler Handler
 	// platforms are the configured platform names, sent at initialize as
 	// _meta.otto.scheduleDelivery.
@@ -90,7 +95,9 @@ type Agent struct {
 	deliveryChats []string
 	cur           *process
 	delay         time.Duration // restart delay owed after the last exit
-	closed        bool
+	// backoffUntil is the earliest start time after an exit; zero when none.
+	backoffUntil time.Time
+	closed       bool
 }
 
 // New returns an Agent that has not started a process.
@@ -312,27 +319,53 @@ func (a *Agent) live() *process {
 
 // process returns the running process, starting one first when needed. The
 // restart waits until the previous process's exit time plus the current
-// delay.
+// delay. a.mu is released while waiting; a.backoffUntil makes concurrent
+// callers wait for the same deadline. The start itself runs under a.mu so
+// two callers never start two processes.
 func (a *Agent) process(ctx context.Context) (*process, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
-		return nil, ErrClosed
-	}
-	if a.cur != nil {
-		if !a.cur.isDone() {
-			return a.cur, nil
+	for {
+		if a.closed {
+			return nil, ErrClosed
 		}
-		a.opts.Metrics.AgentRestart()
-		ended := a.cur.endedAt
-		a.delay = restartDelay(a.delay, ended.Sub(a.cur.startedAt))
-		a.cur = nil
-		if wait := ended.Add(a.delay).Sub(a.opts.Now()); a.delay > 0 && wait > 0 {
+		if a.cur != nil {
+			if !a.cur.isDone() {
+				return a.cur, nil
+			}
+			// The child is stopped when its connection closes; wait for
+			// endedAt to be set.
+			prev := a.cur
+			a.mu.Unlock()
+			<-prev.exited
+			a.mu.Lock()
+			if a.cur != prev {
+				continue
+			}
+			a.opts.Metrics.AgentRestart()
+			a.delay = restartDelay(a.delay, prev.endedAt.Sub(prev.startedAt))
+			a.backoffUntil = prev.endedAt.Add(a.delay)
+			if a.delay == 0 {
+				a.backoffUntil = time.Time{}
+			}
+			a.cur = nil
+		}
+		until := a.backoffUntil
+		if wait := until.Sub(a.opts.Now()); !until.IsZero() && wait > 0 {
 			slog.Info("agent_restart_scheduled", "delay_ms", wait.Milliseconds())
-			if err := a.opts.Sleep(ctx, wait); err != nil {
+			a.mu.Unlock()
+			err := a.opts.Sleep(ctx, wait)
+			a.mu.Lock()
+			if err != nil {
 				return nil, err
 			}
+			if a.backoffUntil.Equal(until) {
+				a.backoffUntil = time.Time{}
+			}
+			continue
 		}
+		a.backoffUntil = time.Time{}
+		break
 	}
 	p, err := a.start(ctx)
 	if err == nil {

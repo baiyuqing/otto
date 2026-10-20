@@ -74,9 +74,14 @@ type process struct {
 	loadMu  sync.Mutex // serialize replay and publication of loaded sessions
 }
 
+// isDone reports whether the child has exited or the ACP connection has
+// closed. The SDK closes the connection on overflow of its notification queue
+// or an oversized line while the child keeps running.
 func (p *process) isDone() bool {
 	select {
 	case <-p.exited:
+		return true
+	case <-p.conn.Done():
 		return true
 	default:
 		return false
@@ -164,6 +169,7 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 	cmd := exec.Command(a.opts.Command[0], a.opts.Command[1:]...)
 	cmd.Dir = a.opts.Dir
 	cmd.Env = a.opts.Env
+	cmd.WaitDelay = waitDelay
 	p := &process{cmd: cmd, exited: make(chan struct{}), writeFailed: make(chan struct{}), open: map[string]bool{}, loading: map[string]bool{}}
 	p.tail = &tail{level: a.opts.StderrLevel}
 	cmd.Stderr = p.tail
@@ -198,6 +204,10 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 	go func() {
 		<-p.conn.Done()
 		stdoutR.Close()
+		// A closed connection leaves the child unattached; stop it so
+		// exited closes and the next call starts a new one.
+		_ = p.stdin.Close()
+		_ = cmd.Process.Kill()
 	}()
 	a.cur = p
 
@@ -205,6 +215,8 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 }
 
 func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
+	ctx, cancel := context.WithTimeout(ctx, initializeTimeout)
+	defer cancel()
 	resp, err := p.conn.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
 		ClientInfo:         &acp.Implementation{Name: "otto-connect"},

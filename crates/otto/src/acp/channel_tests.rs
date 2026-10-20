@@ -278,3 +278,123 @@ fn channel_context_capability_is_advertised() {
         );
     }
 }
+
+fn local_test_connection(
+    workspace: &Path,
+    controller: &Arc<Controller>,
+) -> (Arc<Connection>, Arc<PromptSlot>, String) {
+    let id = controller.info().session_id;
+    let builder = Arc::clone(controller.builder());
+    let slot = Arc::new(PromptSlot::default());
+    let (out, _frames) = mpsc::unbounded_channel();
+    let connection = Arc::new(Connection {
+        workspace: workspace.to_path_buf(),
+        backend: Backend::Local(Box::new(Local {
+            config: Config {
+                runtime: crate::cli::fixture_tests::initial_runtime(&builder),
+                builder,
+                workspace: workspace.to_path_buf(),
+                sandbox: None,
+            },
+            sessions: Mutex::new(HashMap::from([(
+                id.clone(),
+                Arc::new(Session {
+                    controller: Arc::clone(controller),
+                    prompt: Arc::clone(&slot),
+                }),
+            )])),
+        })),
+        out,
+        pending: Mutex::new(HashMap::new()),
+        next_request_id: AtomicU64::new(1),
+        client_capabilities: Mutex::new(Value::Null),
+        task_stop: CancellationToken::new(),
+        notice_stop: CancellationToken::new(),
+        watching_notices: Mutex::new(HashMap::new()),
+        notice_ready: Mutex::new(HashMap::new()),
+        wake_loops: Mutex::new(HashMap::new()),
+    });
+    (connection, slot, id)
+}
+
+#[test]
+fn enqueue_ignores_an_input_id_that_is_already_queued() {
+    let slot = PromptSlot::default();
+    let queued = |input_id: Option<&str>| {
+        slot.enqueue("run".into(), (None, None), input_id.map(str::to_string))
+    };
+    assert_eq!(queued(Some("in_1")), Ok(true));
+    assert_eq!(queued(Some("in_1")), Ok(false));
+    assert_eq!(queued(Some("in_2")), Ok(false));
+    assert_eq!(queued(None), Ok(false));
+    assert_eq!(queued(None), Ok(false));
+    assert_eq!(
+        slot.state.lock().unwrap().queue.len(),
+        4,
+        "in_1 once, in_2 once, two prompts without an input id"
+    );
+}
+
+#[tokio::test]
+async fn drain_skips_a_queued_prompt_whose_input_id_is_in_the_session() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller =
+        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let (connection, slot, session_id) = local_test_connection(workspace.path(), &controller);
+    otto_core::session::Session::append_input_if_absent(
+        &controller.current_session(),
+        "in_done",
+        crate::cli::fixture_tests::user("already delivered"),
+    )
+    .await
+    .unwrap();
+    assert!(controller.has_input("in_done"));
+    let delivered = controller.history().len();
+    assert_eq!(
+        slot.enqueue("rerun".into(), (None, None), Some("in_done".into())),
+        Ok(true)
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Arc::clone(&slot).drain_queue(connection, session_id),
+    )
+    .await
+    .expect("the skipped prompt must not reach the model");
+    assert_eq!(controller.history().len(), delivered);
+    let state = slot.state.lock().unwrap();
+    assert!(state.queue.is_empty() && state.active.is_none() && !state.draining);
+    drop(state);
+    controller.close().unwrap();
+}
+
+#[tokio::test]
+async fn cancel_read_right_after_a_prompt_finds_its_token() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller =
+        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let (connection, slot, session_id) = local_test_connection(workspace.path(), &controller);
+    let mut dispatcher = Dispatcher {
+        connection,
+        scheduling: false,
+        tasks: JoinSet::new(),
+        stop: CancellationToken::new(),
+    };
+    // No await between the two lines: the spawned prompt task has not run.
+    dispatcher.handle_line(
+        &json!({"jsonrpc":"2.0","id":1,"method":"session/prompt","params":
+            {"sessionId": session_id, "prompt":[{"type":"text","text":"work"}]}})
+        .to_string(),
+    );
+    dispatcher.handle_line(
+        &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId": session_id}})
+            .to_string(),
+    );
+    assert!(
+        slot.active_cancel().is_cancelled(),
+        "the cancel must reach the prompt admitted just before it"
+    );
+    dispatcher.tasks.abort_all();
+    controller.close().unwrap();
+}

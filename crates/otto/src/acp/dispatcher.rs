@@ -420,12 +420,20 @@ impl Dispatcher {
             _ => {}
         }
         let stop = self.stop.clone();
+        // Claimed here, before the task is spawned, so a `session/cancel`
+        // read next finds the token. `None` when the slot is busy; the task
+        // then claims it as before.
+        let early_token = slot.begin(&stop);
+        let holds_slot = early_token.is_some();
         self.tasks.spawn(async move {
             match connection
                 .admit_prompt(&session_id, &text, input_id.as_deref())
                 .await
             {
                 Ok(ActiveInputAdmission::Steered) => {
+                    if holds_slot {
+                        slot.end();
+                    }
                     connection.say(
                         &session_id,
                         "Guidance accepted for the active task; it will be delivered at the next safe boundary.",
@@ -434,6 +442,9 @@ impl Dispatcher {
                     return;
                 }
                 Ok(ActiveInputAdmission::ApprovalPending) => {
+                    if holds_slot {
+                        slot.end();
+                    }
                     connection.say(
                         &session_id,
                         "The active task is waiting for approval; resolve that approval before sending task guidance.",
@@ -443,12 +454,15 @@ impl Dispatcher {
                 }
                 Ok(ActiveInputAdmission::Idle) => {}
                 Err(failure) => {
+                    if holds_slot {
+                        slot.end();
+                    }
                     connection.reply(id, Err(failure));
                     return;
                 }
             }
 
-            let Some(token) = slot.begin(&stop) else {
+            let Some(token) = early_token.or_else(|| slot.begin(&stop)) else {
                 // A wake turn is not a prompt: wait for it, then run.
                 if let Some(token) = slot.wait_for_wake(&stop) {
                     if !slot.claim_after_wake(&token).await {

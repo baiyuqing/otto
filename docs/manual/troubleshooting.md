@@ -99,19 +99,8 @@ history was deleted; see [Sessions](interactive-use.md#sessions).
   phases, retries and heartbeats. Do not interpret network activity as proof
   that a tool/provider is making useful progress. See [logging](servers-and-connectors.md#logs-metrics-and-request-correlation).
 
-### Remote memory is disabled because the token variable is unset or empty
+### Startup fails with `[memory.remote] was removed` or `memory backend "remote" was removed`
 
-Set the configured `memory.remote.token_env` variable in the environment of
-`otto serve`, ACP or the standalone runtime and restart. Attaching does not
-forward the client's environment. `required = true` makes this fatal rather
-than continuing without memory. Startup performs no service readiness probe.
-
-### `memory service unavailable` with the remote backend
-
-Inspect endpoint/status/code in runtime logs, then verify service reachability,
-token/delegation, organization/project membership and schema compatibility.
-Recall fails open **without memory**, not with another tenant or local fallback.
-Organization memory is not an outage-proof policy channel. Do not retry an
-unknown-outcome write blindly; exact-read state or consult the service first.
-See [remote recovery](memory-and-extensions.md#failure-recovery-and-uploads) and
-[protocol errors](remote-memory-protocol.md#errors-and-recovery).
+The remote memory backend no longer exists. Delete `[memory.remote]` and
+`backend = "remote"` from `config.toml`. To use an external memory service, run
+it as a plugin; see [external memory services](memory-and-extensions.md#external-memory-services-run-as-plugins).

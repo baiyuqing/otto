@@ -32,9 +32,9 @@ channel context.
 
 Memory consumers use the service's bound accessors or the controller facade,
 never repositories directly. Files are the default memory backend and are not
-a storage domain. Model writes become review candidates; human management and
-remote service authority follow their own explicit contracts. Keep remote
-protocol validation and tenant scope checks at the service boundary. See the
+a storage domain. Model writes become review candidates; human management
+follows its own explicit contract. External memory services run as plugins,
+not as a memory backend. See the
 [memory manual](../manual/memory-and-extensions.md#memory).
 
 ## Workspace ownership

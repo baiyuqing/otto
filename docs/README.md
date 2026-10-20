@@ -17,7 +17,6 @@ choose a topic in the [user manual](user-manual.md):
 
 - [Code organization](code-organization.md)
 - [Development guide](development.md)
-- [Remote memory protocol](manual/remote-memory-protocol.md)
 - [Architecture diagram](architecture/otto-architecture.svg)
 - [Changelog](../CHANGELOG.md)
 

@@ -9,7 +9,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
-- Plugin hooks can now carry an external memory service:
+- `[memory] backend = "remote"` and `[memory.remote]` now fail startup with an
+  error naming the otto-mem plugin. Builds from `main` after
+  [#493](https://github.com/baiyuqing/otto/pull/493) must move to the
+  [otto-mem plugin](https://github.com/baiyuqing/otto-mem) and
+  `[plugins.bindings.otto-mem]`. Rust embedders:
+  `otto_core::memory::RecallItem` no longer has a `remote` field,
+  `RemoteProjection` and `MemoryView` are removed, so a `MemoryService`
+  implementation must drop `remote: None`. The memory tools no longer accept
+  `organization_id`.
+- Plugin hooks can now carry an external memory service, which runs as a plugin
+  such as [otto-mem](https://github.com/baiyuqing/otto-mem):
   - `turn_end` hook data includes `turn.messages` with the user, assistant,
     tool-call and tool-result blocks appended during the run. When the input
     would exceed 1 MiB it includes `turn_omitted: "size"` instead.
@@ -68,10 +78,6 @@ commit ledger; Git and release tags retain the full history. See the
   of the schema-version-2 database. Check the imported files before manually
   deleting the old database. Memory is no longer a storage domain and is not
   moved by `otto storage transfer`. ([#491](https://github.com/baiyuqing/otto/pull/491))
-- Optional remote memory supports authorized user/workspace/organization scopes,
-  tenant-bound references and revision-checked mutations. `memory_search` can
-  inspect by ID or browse a bounded effective set with `query: ""`; this is
-  not a complete inventory. See [remote memory setup](docs/manual/memory-and-extensions.md#remote-memory-service).
 - Approval content is no longer secret-scanned. It may be displayed and
   persisted: **do not include actual secrets**. Policy, permissions, human
   checkpoints, model redaction and non-approval protections are unchanged.

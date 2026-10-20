@@ -130,14 +130,12 @@ struct MemoryState {
 pub struct SharedSession(
     Arc<dyn SessionHandle>,
     Arc<otto_core::agent::hooks::State>,
-    Recorder,
     Arc<Mutex<Option<Arc<super::workflow_notifications::Binding>>>>,
 );
 
 pub(crate) struct WeakWorkflowSession(
     std::sync::Weak<dyn SessionHandle>,
     std::sync::Weak<otto_core::agent::hooks::State>,
-    std::sync::Weak<std::sync::Mutex<Option<Vec<Message>>>>,
     std::sync::Weak<Mutex<Option<Arc<super::workflow_notifications::Binding>>>>,
 );
 impl WeakWorkflowSession {
@@ -146,14 +144,9 @@ impl WeakWorkflowSession {
             self.0.upgrade()?,
             self.1.upgrade()?,
             self.2.upgrade()?,
-            self.3.upgrade()?,
         ))
     }
 }
-
-/// Conversation messages appended while recording is on; `None` when off.
-/// Shared by clones, so the frontend and the agent see one recorder.
-type Recorder = Arc<std::sync::Mutex<Option<Vec<Message>>>>;
 
 /// The provider an agent calls, or the refusal used when the redaction boundary
 /// is closed.

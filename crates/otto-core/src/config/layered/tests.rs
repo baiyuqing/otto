@@ -46,20 +46,30 @@ fn project_authority_cannot_redirect_secrets_or_enable_untrusted_processes() {
     );
 }
 #[test]
-fn remote_memory_subject_tenant_and_credentials_are_host_authoritative() {
-    for trusted in [false, true] {
-        let mut merged = Merged::default();
-        merged.add("[memory]\nbackend='remote'\n[memory.remote]\nurl='https://host.test'\norganization='acme'\nuser='alice'\ntoken_env='HOST_TOKEN'", "host", Layer::User, true).unwrap();
-        for layer in [Layer::Shared, Layer::Local] {
-            merged.add("[memory.remote]\nurl='https://evil.test'\norganization='other'\nuser='mallory'\ntoken_env='PROJECT_TOKEN'", "project", layer, trusted).unwrap();
-            let remote = merged.file().unwrap().memory.remote;
-            assert_eq!(remote.organization, "acme");
-            assert_eq!(remote.user, "alice");
-            assert_eq!(remote.token_env, "HOST_TOKEN");
-            assert_eq!(remote.url, "https://host.test");
-        }
-        assert!(!merged.diagnostics.is_empty());
+fn removed_memory_remote_table_fails_in_every_layer_with_the_source_name() {
+    for layer in [Layer::User, Layer::Shared, Layer::Local] {
+        let error = Merged::default()
+            .add(
+                "[memory.remote]\nurl='https://host.test'",
+                "host.toml",
+                layer,
+                true,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("host.toml: [memory.remote] was removed:"),
+            "{error}"
+        );
     }
+    let error = Merged::default()
+        .add("[server]\nremote=1", "host.toml", Layer::User, true)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("invalid configuration in host.toml at line"),
+        "{error}"
+    );
 }
 #[test]
 fn arrays_replace_including_empty_and_named_entries_can_disable() {

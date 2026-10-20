@@ -1,4 +1,5 @@
 //! Optional extension boundary; core never launches commands.
+use crate::model::{Block, BlockType, Message, Role};
 use crate::operation::OperationControl;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -78,6 +79,36 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
         state.complete_start(result.clone());
         result
     }
+    /// Appends to the session and, on success, records the message for the
+    /// `turn_end` hook when a hooked run is active.
+    pub(super) async fn append_message(
+        &self,
+        message: Message,
+    ) -> Result<(), crate::session::SessionError> {
+        let recording = self
+            .hook_turn_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        let recorded = recording.then(|| message.clone());
+        self.session.append(message).await?;
+        if let Some(recorded) = recorded {
+            self.record_turn_message(recorded);
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_turn_message(&self, message: Message) {
+        if let Some(messages) = self
+            .hook_turn_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            messages.push(message);
+        }
+    }
+
     pub(super) async fn hook(
         &self,
         event: &str,
@@ -157,5 +188,47 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
                 .await;
         }
         state.end_done.cancel();
+    }
+}
+
+/// Converts messages to the `turn_end` `turn` JSON: text, tool call and tool
+/// result blocks only; messages without such blocks are skipped.
+pub(super) fn turn_json(messages: &[Message]) -> Value {
+    let messages: Vec<Value> = messages
+        .iter()
+        .filter_map(|message| {
+            let role = match message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+                Role::Context => "context",
+                Role::Other(_) => return None,
+            };
+            let blocks: Vec<Value> = message.blocks.iter().filter_map(turn_block_json).collect();
+            (!blocks.is_empty()).then(|| serde_json::json!({"role": role, "blocks": blocks}))
+        })
+        .collect();
+    serde_json::json!({ "messages": messages })
+}
+
+fn turn_block_json(block: &Block) -> Option<Value> {
+    match block.block_type {
+        BlockType::Text => Some(serde_json::json!({"type":"text","text":block.text})),
+        BlockType::ToolCall => {
+            // Absent or unparseable arguments become an empty object.
+            let arguments = block
+                .arguments
+                .as_ref()
+                .and_then(|raw| serde_json::from_str(raw.get()).ok())
+                .filter(Value::is_object)
+                .unwrap_or_else(|| Value::Object(Default::default()));
+            Some(
+                serde_json::json!({"type":"tool_call","id":block.tool_call_id,"name":block.tool_name,"arguments":arguments}),
+            )
+        }
+        BlockType::ToolResult => Some(serde_json::json!({
+            "type":"tool_result","id":block.tool_call_id,"name":block.tool_name,"text":block.text,"is_error":block.is_error
+        })),
+        _ => None,
     }
 }

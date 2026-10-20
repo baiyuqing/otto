@@ -141,6 +141,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = (self.options.new_operation_id)()
             .map_err(|message| self.fail(emit, AgentError::OperationIdentity { message }))?
             .to_string();
+        *self
+            .hook_turn_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
         let result = async {
             let mut context = system_context.to_owned();
             let start=self.start_hooks(control).await.map_err(|message|self.fail(emit,self.hook_error(message,control)))?;
@@ -164,14 +168,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         } else {
             "error"
         };
-        if let Err(message) = self
-            .hook(
-                "turn_end",
-                serde_json::json!({"status":status,"stop_reason":control.stop_reason(),"error":result.as_ref().err().map(|e|self.redactor.redact_string(&e.to_string()))}),
-                &end_control,
-            )
-            .await
-        {
+        let turn_messages = self
+            .hook_turn_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_default();
+        let mut turn_end_data = serde_json::json!({"status":status,"stop_reason":control.stop_reason(),"error":result.as_ref().err().map(|e|self.redactor.redact_string(&e.to_string()))});
+        turn_end_data["turn"] = hooks::turn_json(&turn_messages);
+        if let Err(message) = self.hook("turn_end", turn_end_data, &end_control).await {
             self.hook_warning(emit, &message);
         }
         self.hook_turn_id
@@ -407,7 +412,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 input_id: input_id.unwrap_or_default(),
                 ..Message::default()
             };
-            if let Err(source) = self.session.append(user).await {
+            if let Err(source) = self.append_message(user).await {
                 return Err(self.fail(
                     emit,
                     AgentError::Persist {
@@ -482,7 +487,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .filter(|block| block.block_type == BlockType::ToolCall)
                 .cloned()
                 .collect();
-            if let Err(source) = self.session.append(assistant).await {
+            if let Err(source) = self.append_message(assistant).await {
                 return Err(self.fail(
                     emit,
                     AgentError::Persist {

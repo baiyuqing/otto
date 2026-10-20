@@ -18,6 +18,61 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Resolves `[plugins.bindings.<package>]` (a key without `:`) into environment
+/// entries for that package's hook and tool commands. Only `env` is allowed.
+pub(crate) fn package_environment(
+    file: &File,
+    package: &str,
+    environment: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let Some(binding) = file.plugins.bindings.get(package) else {
+        return Ok(Vec::new());
+    };
+    let invalid =
+        |reason: &str| format!("invalid credential binding for package {package}: {reason}");
+    if binding.headers.is_some()
+        || binding.auth.is_some()
+        || binding.oauth_client_id.is_some()
+        || binding.oauth_scopes.is_some()
+    {
+        return Err(invalid("only env is allowed"));
+    }
+    let bound_env = binding.env.clone().unwrap_or_default();
+    for name in bound_env.keys() {
+        let mut chars = name.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(invalid("invalid environment name"));
+        }
+    }
+    // A fixed server name: package names may contain dots or exceed the
+    // 32-byte MCP server name limit.
+    let mut config = File::default();
+    config.mcp.servers.insert(
+        "package".into(),
+        McpServer {
+            transport: "stdio".into(),
+            command: Some("plugin".into()),
+            env: Some(bound_env.clone()),
+            ..McpServer::default()
+        },
+    );
+    let resolved = resolve_mcp(&config, environment, "")
+        .map_err(|_| invalid("check environment references and literal values"))?;
+    let McpTransport::Stdio { env, .. } = &resolved.servers[0].transport else {
+        return Err(invalid("unexpected transport"));
+    };
+    // resolve_mcp also inherits PATH/HOME; keep only the declared names.
+    Ok(env
+        .iter()
+        .filter(|(key, _)| bound_env.contains_key(key))
+        .cloned()
+        .collect())
+}
+
 #[derive(Default)]
 pub struct Snapshot {
     pub packages: Vec<Installed>,

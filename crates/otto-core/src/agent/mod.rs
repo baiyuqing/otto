@@ -194,6 +194,8 @@ pub struct Agent<P, T, S> {
     /// The memory block the last user turn recalled, for the context report.
     last_memory_context: std::sync::Mutex<String>,
     hook_turn_id: std::sync::Mutex<String>,
+    /// Messages appended during the current hooked run; `None` when no hooks are active.
+    hook_turn_messages: std::sync::Mutex<Option<Vec<Message>>>,
     /// The client input id of the next run's user message; taken by every
     /// run, used or not. See [`Agent::set_next_input_id`].
     next_input_id: std::sync::Mutex<Option<String>>,
@@ -249,6 +251,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             options,
             redactor,
             hook_turn_id: std::sync::Mutex::new(String::new()),
+            hook_turn_messages: std::sync::Mutex::new(None),
             next_input_id: std::sync::Mutex::new(None),
             last_memory_context: std::sync::Mutex::default(),
         }

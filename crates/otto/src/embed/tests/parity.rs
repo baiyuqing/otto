@@ -197,6 +197,8 @@ async fn sessions_made_by_otto_and_by_the_cli_open_in_each_other() {
 /// The files under `~/.otto` and the session root of a fixture, as
 /// relative paths with session, workspace and diagnostic runtime ids replaced.
 fn tree(fixture: &Fixture, session: &str) -> Vec<String> {
+    // Session directories and workflow locks are named by this key.
+    let workspace = crate::session::workspace_key(&fixture.workspace).unwrap();
     let mut names: Vec<String> = walk(&fixture.home)
         .iter()
         .filter(|path| {
@@ -211,12 +213,9 @@ fn tree(fixture: &Fixture, session: &str) -> Vec<String> {
                     part.as_os_str()
                         .to_string_lossy()
                         .replace(session, "<session>")
+                        .replace(&workspace, "<workspace>")
                 })
                 .collect();
-            // `.otto/sessions/<hash of the workspace path>/<id>.jsonl`
-            if parts.len() == 4 && parts[1] == "sessions" {
-                parts[2] = "<workspace>".to_string();
-            }
             // Each runtime owns a random diagnostic family. Keep suffixes
             // and duplicate entries so missing or extra files still differ.
             if parts.len() == 3
@@ -235,7 +234,7 @@ fn tree(fixture: &Fixture, session: &str) -> Vec<String> {
 }
 
 #[test]
-fn diagnostic_tree_normalization_preserves_file_kinds_and_counts() {
+fn tree_normalization_preserves_file_kinds_and_counts() {
     let fixture = fixture("");
     let logs = fixture.home.join(".otto/logs");
     std::fs::create_dir_all(&logs).unwrap();
@@ -248,6 +247,12 @@ fn diagnostic_tree_normalization_preserves_file_kinds_and_counts() {
         }
     }
     std::fs::write(logs.join("other.jsonl"), "").unwrap();
+    let locks = fixture.home.join(".otto/workflow-locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    let key = crate::session::workspace_key(&fixture.workspace).unwrap();
+    for name in [key.as_str(), "0000000000000000"] {
+        std::fs::write(locks.join(format!("{name}.lock")), "").unwrap();
+    }
     assert_eq!(
         tree(&fixture, "unused-session"),
         vec![
@@ -259,6 +264,8 @@ fn diagnostic_tree_normalization_preserves_file_kinds_and_counts() {
             ".otto/logs/diagnostic-<runtime>.lock",
             ".otto/logs/diagnostic-<runtime>.lock",
             ".otto/logs/other.jsonl",
+            ".otto/workflow-locks/0000000000000000.lock",
+            ".otto/workflow-locks/<workspace>.lock",
         ]
     );
 }

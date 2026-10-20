@@ -41,7 +41,7 @@ impl Builder {
                 .clone()
                 .expect("bash_configured implies an executor");
             let mut tool = bash::BashTool::new_with_grace(
-                self.workspace,
+                &self.workspace,
                 executor,
                 &self.shell,
                 self.sandbox_environment.clone().unwrap_or_default(),
@@ -246,7 +246,7 @@ impl Builder {
             Utc::now(),
             context_executor,
             self.sandbox_environment.as_deref(),
-            self.workspace,
+            &self.workspace,
         )
         .await?;
         let prompt_tail = redactor.redact_string(&(environment.clone() + &catalogs.skill_section));

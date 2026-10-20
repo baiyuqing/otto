@@ -6,7 +6,7 @@ use super::*;
 /// workspace registry calls this the first time a path is loaded.
 ///
 /// Reuses the startup sequence's pieces rather than duplicating them:
-/// `leaked_workspace` and `resolve_mcp` resolve against `canonical_path`
+/// `Workspace::new` and `resolve_mcp` resolve against `canonical_path`
 /// instead of the ones `cli::run` resolved for the startup workspace, then
 /// `compose_workspace_sandbox` opens this workspace's own sandbox, elevated
 /// bash-approval executor, and `/sandbox reload` state the same way startup
@@ -55,7 +55,7 @@ pub(crate) async fn load_workspace(
     let workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
     let shared = Arc::new(scoped);
-    let workspace = leaked_workspace(canonical_path).map_err(|error| error.to_string())?;
+    let workspace = Arc::new(Workspace::new(canonical_path).map_err(|error| error.to_string())?);
     let mcp_config = resolve_mcp(&shared.config, &shared.environment, &workspace_path)
         .map_err(|error| error.to_string())?;
     let mut builder = Builder::for_workspace(
@@ -266,7 +266,7 @@ pub(crate) fn canonical_workspace(cwd: &str, boundary: &StartupBoundary) -> Resu
 /// The workspace initialized on disk and the session root.
 pub(crate) struct PreparedWorkspace {
     pub(crate) memory_config: MemoryRuntime,
-    pub(crate) workspace: &'static Workspace,
+    pub(crate) workspace: Arc<Workspace>,
     pub(crate) session_root: PathBuf,
 }
 
@@ -291,8 +291,8 @@ pub(crate) fn prepare_workspace(
     if let Err(error) = crate::workspace::initialize(Path::new(workspace_path), memory_override) {
         return Err(startup.redact(&error.to_string()));
     }
-    let workspace = match leaked_workspace(Path::new(workspace_path)) {
-        Ok(workspace) => workspace,
+    let workspace = match Workspace::new(Path::new(workspace_path)) {
+        Ok(workspace) => Arc::new(workspace),
         Err(error) => {
             return Err(startup.redact(&format!("create workspace: {error}")));
         }

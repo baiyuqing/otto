@@ -372,7 +372,7 @@ impl Builder {
                 .clone()
                 .expect("bash_configured implies an executor");
             let mut tool = crate::tool::bash::BashTool::new_with_grace(
-                self.workspace,
+                &self.workspace,
                 executor,
                 &self.shell,
                 self.sandbox_environment.clone().unwrap_or_default(),

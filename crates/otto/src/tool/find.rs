@@ -4,6 +4,8 @@
 //! reported but never followed, `.git` subtrees are skipped, and a search root
 //! that resolves into repository metadata returns nothing.
 
+use std::sync::Arc;
+
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
 use serde::Deserialize;
@@ -37,13 +39,13 @@ struct FindArgs {
 }
 
 /// Finds workspace files by glob.
-pub struct FindTool<'a> {
-    workspace: &'a Workspace,
+pub struct FindTool {
+    workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }
 
-impl<'a> FindTool<'a> {
-    pub fn new(workspace: &'a Workspace, max_output_bytes: usize) -> Self {
+impl FindTool {
+    pub fn new(workspace: Arc<Workspace>, max_output_bytes: usize) -> Self {
         Self {
             workspace,
             max_output_bytes,
@@ -88,7 +90,7 @@ pub(crate) const FIND_RETRY: (&str, otto_core::model::RetrySafety) =
     ("find", otto_core::model::RetrySafety::ReadOnly);
 
 #[async_trait::async_trait]
-impl Tool for FindTool<'_> {
+impl Tool for FindTool {
     fn retry_safety(&self) -> otto_core::model::RetrySafety {
         FIND_RETRY.1
     }
@@ -128,7 +130,7 @@ impl Tool for FindTool<'_> {
             Ok(root) => root.to_string_lossy().into_owned(),
             Err(error) => return error_result(error),
         };
-        match search_root_inside_git(self.workspace, search_path, &root) {
+        match search_root_inside_git(&self.workspace, search_path, &root) {
             Ok(true) => return ToolResult::default(),
             Ok(false) => {}
             Err(error) => return error_result(error),
@@ -213,7 +215,7 @@ mod tests {
         .unwrap();
 
         let workspace = workspace(root.path());
-        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let result = run(&tool, r#"{"pattern":"**/*.go"}"#).await;
         assert!(!result.is_error, "{result:?}");
@@ -233,7 +235,7 @@ mod tests {
         write_search_file(root.path(), "a.go", "a");
         write_search_file(root.path(), "b.go", "b");
         let workspace = workspace(root.path());
-        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let limited = run(&tool, r#"{"pattern":"**/*.go","limit":1}"#).await;
         assert!(!limited.is_error, "{limited:?}");
@@ -284,7 +286,7 @@ mod tests {
         }
         write_search_file(root.path(), "src/.gitignore", "nested.go\n");
         let workspace = workspace(root.path());
-        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let ignored = run(&tool, r#"{"pattern":"**/*"}"#).await;
         assert!(!ignored.is_error, "{ignored:?}");
@@ -308,7 +310,7 @@ mod tests {
         write_search_file(root.path(), "target/build.go", "content\n");
         write_search_file(root.path(), "target/deep/more.go", "content\n");
         let workspace = workspace(root.path());
-        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         let result = run(&tool, r#"{"pattern":"**/*.go","path":"target"}"#).await;
         assert!(!result.is_error, "{result:?}");
         assert_eq!(result.content, "target/build.go\ntarget/deep/more.go\n");
@@ -321,7 +323,7 @@ mod tests {
         write_search_file(root.path(), "src/keep.go", "content\n");
         write_search_file(root.path(), "src/drop.tmp", "content\n");
         let workspace = workspace(root.path());
-        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         let result = run(&tool, r#"{"pattern":"**/*","path":"src"}"#).await;
         assert!(!result.is_error, "{result:?}");
         assert_eq!(result.content, "src/keep.go\n");
@@ -332,7 +334,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_search_file(root.path(), ".git/config", "secret");
         let workspace = workspace(root.path());
-        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = FindTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
         for search_path in [".git", ".git/config"] {
             let result = run(
                 &tool,
@@ -351,7 +353,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_search_file(root.path(), "long-file-name.go", "x");
         let workspace = workspace(root.path());
-        let result = run(&FindTool::new(&workspace, 8), r#"{"pattern":"**/*.go"}"#).await;
+        let result = run(
+            &FindTool::new(Arc::clone(&workspace), 8),
+            r#"{"pattern":"**/*.go"}"#,
+        )
+        .await;
         assert!(!result.is_error, "{result:?}");
         assert!(result.content.contains("truncated"), "{result:?}");
         assert!(result.content.len() <= 80, "{result:?}");

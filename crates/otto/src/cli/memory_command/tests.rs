@@ -41,34 +41,6 @@ fn memory(args: &[&str], home: &Path) -> (i32, String, String) {
 }
 
 #[test]
-fn remote_backend_rejects_every_subcommand_without_opening_the_store() {
-    let home = tempfile::tempdir().expect("home");
-    let config = home.path().join("otto.toml");
-    std::fs::write(
-            &config,
-            "[memory]\nenabled = true\nbackend = \"remote\"\n[memory.remote]\norganization = \"acme\"\nurl = \"https://mem.example.test\"\nuser = \"u1\"\n",
-        )
-        .expect("write config");
-    let config = config.to_string_lossy().into_owned();
-    for args in [
-        vec!["list"],
-        vec!["status"],
-        vec!["show", "x"],
-        vec!["forget", "x"],
-    ] {
-        let mut args = args;
-        args.extend(["--config", &config]);
-        let (code, _, stderr) = memory(&args, home.path());
-        assert_ne!(code, 0, "{args:?}");
-        assert!(
-            stderr.contains("unsupported for the remote memory backend"),
-            "{args:?}: {stderr}"
-        );
-    }
-    assert!(!store_dir(home.path()).exists());
-}
-
-#[test]
 fn status_reports_pending_candidates_in_the_current_scopes() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");

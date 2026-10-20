@@ -192,13 +192,6 @@ pub fn run_with_storage(
     let Ok(memory_config) = resolve_memory(&config_file, &environment) else {
         return fail(stderr, CONFIG_UNAVAILABLE);
     };
-    if memory_config.remote.is_some() {
-        return fail(
-            stderr,
-            "memory operation is unsupported for the remote memory backend; the memory service manages its records",
-        );
-    }
-
     let (secret_values, complete) = boundary::boundary_secret_values(
         &BoundaryInputs {
             sandbox_secrets: &captured_auth.redaction_values,

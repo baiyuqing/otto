@@ -17,28 +17,6 @@ mod tool_sets;
 mod turn_limits;
 mod workflows;
 
-#[tokio::test]
-async fn recording_captures_appended_messages_until_finished() {
-    let session = SharedSession::memory(Header::default());
-    let message = |text: &str| Message {
-        id: text.into(),
-        role: otto_core::model::Role::User,
-        blocks: vec![Block::text(text)],
-        ..Message::default()
-    };
-    session.append(message("before")).await.unwrap();
-    assert!(session.finish_recording().is_empty());
-
-    session.start_recording();
-    session.clone().append(message("during")).await.unwrap();
-    let recorded = session.finish_recording();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].text(), "during");
-
-    session.append(message("after")).await.unwrap();
-    assert!(session.finish_recording().is_empty());
-}
-
 fn shared(root: &Path) -> Arc<Shared> {
     Arc::new(Shared {
         storage: Arc::new(Default::default()),

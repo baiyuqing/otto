@@ -102,12 +102,6 @@ impl Client {
         self.guarded(&self.description)?;
         Ok(self)
     }
-    /// A client over the same service and guard with another learning grant.
-    /// It does not own provider shutdown.
-    pub(crate) fn with_grant(&self, grant: LearningGrant) -> Result<Self> {
-        Self::with_learning(self.service.clone(), grant)?.with_guard(self.guard.clone())
-    }
-
     /// Transfer provider shutdown responsibility to this client explicitly.
     /// The host must assign a single owner for a shared provider instance.
     pub fn with_provider_shutdown(mut self, owned: bool) -> Self {
@@ -224,19 +218,6 @@ impl Client {
         context: &MemoryContext,
         scopes: Vec<Scope>,
     ) -> Result<MemoryContext> {
-        if self.description.identity == "remote" {
-            for scope in &scopes {
-                context.validate_scope(scope)?;
-            }
-            if scopes.iter().any(|scope| {
-                self.grant
-                    .as_ref()
-                    .is_none_or(|grant| !grant.scopes.contains(scope))
-            }) {
-                return Err(err(ErrorKind::Unauthorized));
-            }
-            return Ok(context.clone());
-        }
         if self.mode == AuthorizationMode::ReviewedChanges {
             return Ok(context.clone());
         }
@@ -344,11 +325,7 @@ impl Client {
         };
         effective.context = self.effective_context(&request.context, vec![scope.clone()])?;
         let request = &effective;
-        let mut admission = request.context.clone();
-        if self.description.identity == "remote" {
-            admission.scopes = vec![scope.clone()];
-        }
-        self.direct(&admission, "explicit_memory", capability)?;
+        self.direct(&request.context, "explicit_memory", capability)?;
         self.guarded(request)?;
         self.checked_receipt(
             &request.context,
@@ -413,11 +390,7 @@ impl Client {
         let mut effective = request.clone();
         effective.context = self.effective_context(&request.context, scopes.clone())?;
         let request = &effective;
-        let mut admission = request.context.clone();
-        if self.description.identity == "remote" {
-            admission.scopes = scopes;
-        }
-        self.direct(&admission, "explicit_memory", capability)?;
+        self.direct(&request.context, "explicit_memory", capability)?;
         self.guarded(request)?;
         let receipt = self.service.forget(request, control).await.map_err(safe)?;
         receipt

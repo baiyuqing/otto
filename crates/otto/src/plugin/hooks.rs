@@ -1,4 +1,5 @@
 //! Sandboxed lifecycle hooks and custom tools on installed, content-authorized packages.
+use crate::hex::to_hex;
 use crate::{
     sandbox::{CommandExecutor, Request, Streams},
     tool::workspace::Workspace,
@@ -136,7 +137,7 @@ fn fingerprint_file(workspace: &Path, path: &Path) -> Result<String, String> {
     if bytes.len() > MAX_INPUT {
         return Err("hook source exceeds 1 MiB".into());
     }
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(to_hex(&Sha256::digest(bytes)))
 }
 
 #[derive(Clone)]

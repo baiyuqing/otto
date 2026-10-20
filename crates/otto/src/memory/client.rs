@@ -18,6 +18,7 @@ use super::{
     GuardField, GuardInput,
     guard::{ContentGuard, DefaultGuard},
 };
+use crate::hex::to_hex;
 
 const MAX_PREPARED: usize = 64;
 
@@ -563,7 +564,7 @@ impl Client {
 /// Possessing this value does not grant permission to apply the snapshot.
 pub fn prepared_digest(snapshot: &PreparedChanges) -> Result<String> {
     let bytes = serde_json::to_vec(snapshot).map_err(|_| err(ErrorKind::InvalidInput))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(to_hex(&Sha256::digest(bytes)))
 }
 
 fn err(kind: ErrorKind) -> Error {

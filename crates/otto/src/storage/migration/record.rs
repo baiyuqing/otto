@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::{Error, Record, Result};
+use crate::hex::to_hex;
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -137,7 +138,7 @@ pub fn digest(
     Ok(super::DomainDigest {
         records: records.len() as u64,
         blob_bytes: 0,
-        sha256: format!("{:x}", hash.finalize()),
+        sha256: to_hex(&hash.finalize()),
     })
 }
 

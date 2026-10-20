@@ -95,7 +95,18 @@ counts under its directory name and a Go `_test` suffix is ignored.
 `otto_core::config` and `otto::config`. No baseline exempts a file from the
 size limits.
 
-The pre-commit hook checks staged content (`--staged`). `make code-limits`,
+A Rust file under `crates/*/src` is test-only when its `mod name;`
+declaration, or an ancestor module's, carries a `cfg` that requires `test`,
+such as `#[cfg(test)]` or `#[cfg(all(test, unix))]` but not
+`#[cfg(any(test, feature = "..."))]`. The check walks the module tree from
+`lib.rs` and `main.rs` and resolves `#[path]`. A test-only file needs a
+directory or file stem named `tests` or ending in `_tests` in its path, and a
+file with such a name must be test-only. Inline `#[cfg(test)] mod name { ... }`
+blocks are not files and are not checked.
+
+The pre-commit hook checks staged content (`--staged`); the test-module rule
+reads every crate source from the index, because a staged parent module can
+change how an unstaged child is compiled. `make code-limits`,
 `make check`, `make check-linux` and `make check-fast` check every tracked or
 untracked, not ignored, code file in the worktree.
 

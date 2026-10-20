@@ -3,6 +3,7 @@ use super::{
     Installed, Service, digest,
     package::{self, Server},
 };
+use crate::hex::to_hex;
 use crate::{
     mcp::{self, CallError, CallOutcome, ToolServer},
     skill::Catalog,
@@ -261,7 +262,7 @@ impl Snapshot {
     }
 }
 pub fn internal_name(logical: &str) -> String {
-    let digest = format!("{:x}", Sha256::digest(logical.as_bytes()));
+    let digest = to_hex(&Sha256::digest(logical.as_bytes()));
     format!("p_{}", &digest[..16])
 }
 pub(super) fn expand(raw: &str, root: &Path, data: &Path, legacy: bool) -> String {

@@ -7,6 +7,7 @@ pub mod skill_checks;
 pub mod tasks;
 pub mod usage;
 pub mod workflow;
+use crate::hex::to_hex;
 use crate::storage::migration::{chunk_hash, contracts::*};
 use crate::storage::{Connection, OptionalExtension, params};
 use async_trait::async_trait;
@@ -660,7 +661,7 @@ fn scan_version(
         DomainDigest {
             records,
             blob_bytes: 0,
-            sha256: format!("{:x}", hash.finalize()),
+            sha256: to_hex(&hash.finalize()),
         },
         cursor,
     ))

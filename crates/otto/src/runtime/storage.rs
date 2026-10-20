@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::approval::repository::ApprovalStore;
+use crate::hex::to_hex;
 use crate::memory::advice::audit::AuditStore;
 use crate::reflection::repository::ReflectionStore;
 use crate::schedule::ScheduleStore;
@@ -378,8 +379,10 @@ impl Storage {
         }
         use sha2::{Digest, Sha256};
         let identity = format!(
-            "local:{:x}",
-            Sha256::digest(canonical_home.as_os_str().as_encoded_bytes())
+            "local:{}",
+            to_hex(&Sha256::digest(
+                canonical_home.as_os_str().as_encoded_bytes()
+            ))
         );
         let authority = LocalCutover::open(
             &canonical_home.join(".otto/storage"),

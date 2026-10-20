@@ -406,6 +406,13 @@ func (t *tail) Write(b []byte) (int, error) {
 	for {
 		i := bytes.IndexByte(t.buf, '\n')
 		if i < 0 {
+			if len(t.buf) > stderrLineBytes {
+				// No newline within the cap: record the cap-sized prefix as
+				// one line and drop it from the buffer.
+				t.add(string(t.buf[:stderrLineBytes]))
+				t.buf = append(t.buf[:0], t.buf[stderrLineBytes:]...)
+				continue
+			}
 			break
 		}
 		t.add(string(bytes.TrimRight(t.buf[:i], "\r")))

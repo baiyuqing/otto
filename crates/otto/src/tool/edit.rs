@@ -161,7 +161,12 @@ impl<'a> EditTool<'a> {
         Self { workspace, publish }
     }
 
-    fn execute_locked(&self, rel_path: &str, edits: &[EditReplacement]) -> ToolResult {
+    fn execute_locked(
+        &self,
+        rel_path: &str,
+        locked_key: &Path,
+        edits: &[EditReplacement],
+    ) -> ToolResult {
         let path = Path::new(rel_path);
         let file = match self.workspace.open(path) {
             Ok(file) => file,
@@ -181,6 +186,11 @@ impl<'a> EditTool<'a> {
             Ok(relative) => relative,
             Err(error) => return preflight_error(error),
         };
+        // The lock was taken on the first resolution; a symbolic link replaced
+        // since then must not move the write to a file this lock does not cover.
+        if relative != locked_key {
+            return preflight_error(format!("{rel_path} changed while it was being edited"));
+        }
         if let Err(error) = write_file_atomic(
             &self.workspace,
             &relative,
@@ -293,7 +303,7 @@ impl Tool for EditTool<'_> {
             Err(error) => return preflight_error(error),
         };
         let _guard = self.workspace.lock_path(&key).await;
-        self.execute_locked(&request.path, &edits)
+        self.execute_locked(&request.path, &key, &edits)
     }
 }
 

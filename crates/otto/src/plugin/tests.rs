@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::fixture_tests;
 use otto_core::{
     config::{File, McpTransport, PluginBindings},
     tool::ToolResult,
@@ -409,7 +410,7 @@ while IFS= read -r line; do
 done
 "#).unwrap();
     f.install(&path);
-    let mut builder = crate::cli::testutil::builder(f.home.path(), &f.home.path().join("sessions"));
+    let mut builder = fixture_tests::builder(f.home.path(), &f.home.path().join("sessions"));
     builder.shared_mut().environment.extend(f.env());
     builder.mcp.enabled = true;
     builder.mcp.connect_timeout_secs = 2;
@@ -513,7 +514,7 @@ fn plugin_bindings_participate_in_environment_capture_and_redaction() {
         lookup.get("PLUGIN_CREDENTIAL")
     );
     let root = tempfile::tempdir().unwrap();
-    let mut builder = crate::cli::testutil::builder(root.path(), &root.path().join("sessions"));
+    let mut builder = fixture_tests::builder(root.path(), &root.path().join("sessions"));
     builder.shared_mut().config = file;
     builder.shared_mut().environment = environment;
     let secrets = builder.secret_values(None);

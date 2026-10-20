@@ -216,7 +216,10 @@ fn a_prefix_lookalike_sibling_of_a_trusted_directory_is_not_admitted() {
 /// sandbox or workflow controller.
 fn dummy_host(workspace_root: &Path, session_root: &Path) -> Arc<WorkspaceHost> {
     Arc::new(WorkspaceHost {
-        builder: Arc::new(crate::cli::testutil::builder(workspace_root, session_root)),
+        builder: Arc::new(crate::cli::fixture_tests::builder(
+            workspace_root,
+            session_root,
+        )),
         workflows: None,
         delivery_setup: None,
         reloader: None,
@@ -269,7 +272,7 @@ fn factory_with(
     config_path: PathBuf,
 ) -> ServeFactory {
     let startup_host = dummy_host(startup, sessions);
-    let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&startup_host.builder);
     ServeFactory {
         workspaces: Arc::new(Workspaces {
             startup: startup.to_string_lossy().into_owned(),
@@ -286,7 +289,7 @@ fn factory_with(
 
 fn factory_over(startup_path: &Path, sessions: &Path) -> (ServeFactory, Arc<WorkspaceHost>) {
     let startup_host = dummy_host(startup_path, sessions);
-    let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&startup_host.builder);
     let factory = ServeFactory {
         workspaces: Arc::new(Workspaces {
             startup: startup_path.to_string_lossy().into_owned(),

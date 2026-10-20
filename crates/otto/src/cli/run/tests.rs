@@ -557,7 +557,7 @@ async fn help_writes_usage_and_exits_zero() {
 
 // ---- load_workspace ----
 
-use crate::cli::testutil::{shared_with_offline_sandbox, shared_with_sandbox_driver_override};
+use crate::cli::fixture_tests::{shared_with_offline_sandbox, shared_with_sandbox_driver_override};
 
 /// Loading a second workspace must not open a second memory service: the
 /// service lives on `Shared`, and `load_workspace` only computes the new

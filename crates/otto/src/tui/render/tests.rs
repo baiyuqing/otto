@@ -5,14 +5,14 @@ use ratatui::Terminal;
 use ratatui::backend::{Backend, TestBackend};
 
 use super::*;
-use crate::cli::testutil;
+use crate::cli::fixture_tests;
 use crate::tui::entries::{Entry, EntryKind};
 use crate::tui::wire_frame;
 
 async fn app_fixture() -> (tempfile::TempDir, tempfile::TempDir, App) {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = testutil::controller(workspace.path(), sessions.path()).await;
+    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
     let app = App::new(&crate::tui::app::Backend::Local(&controller));
     (workspace, sessions, app)
 }

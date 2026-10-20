@@ -16,9 +16,9 @@ use super::*;
 /// depends on how the tasks were started.
 #[tokio::test]
 async fn migrate_releases_the_lease_after_cancelling_subagent_tasks() {
+    use crate::subagent::doubles_tests::{FakeProvider, assistant_text, match_any, wait_status};
     use crate::subagent::runner::StartRequest;
     use crate::subagent::tasks::{TaskStatus, Tasks};
-    use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any, wait_status};
     use otto_core::model::Usage;
     use otto_core::provider::Provider;
 
@@ -42,7 +42,7 @@ async fn migrate_releases_the_lease_after_cancelling_subagent_tasks() {
     child_provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
 
     let mut child_config =
-        crate::subagent::testsupport::test_config(&child_provider, &tasks, Vec::new());
+        crate::subagent::doubles_tests::test_config(&child_provider, &tasks, Vec::new());
     child_config.max_parallel = 1;
     let parent_path = PathBuf::from(&session_path);
     child_config.child_session = Some(Arc::new(move |task_id: &str| {
@@ -132,7 +132,7 @@ async fn migrate_on_an_idle_lease_managed_session_still_releases_the_lease() {
     let tasks = Arc::new(Tasks::new());
     let runner = Runner::scripted(
         session.clone(),
-        crate::subagent::testsupport::FakeProvider::new() as Arc<dyn Provider + Send + Sync>,
+        crate::subagent::doubles_tests::FakeProvider::new() as Arc<dyn Provider + Send + Sync>,
         Arc::clone(&tasks),
     );
     let info = builder.runtime_info(&runtime);

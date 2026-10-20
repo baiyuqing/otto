@@ -346,7 +346,7 @@ mod contract {
     use async_trait::async_trait;
 
     use super::DirectDriver;
-    use crate::sandbox::conformance::{Contract, Fixture};
+    use crate::sandbox::conformance_tests::{Contract, Fixture};
     use crate::sandbox::{Driver, Request};
 
     #[derive(Debug, Clone, Copy)]
@@ -393,5 +393,5 @@ mod contract {
         }
     }
 
-    crate::sandbox::conformance::driver_contract!(DirectContract);
+    crate::sandbox::conformance_tests::driver_contract!(DirectContract);
 }

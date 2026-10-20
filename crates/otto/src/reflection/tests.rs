@@ -9,7 +9,7 @@ use otto_core::session::Session;
 use serde_json::value::RawValue;
 
 use super::*;
-use crate::cli::testutil::{builder, initial_runtime};
+use crate::cli::fixture_tests::{builder, initial_runtime};
 use crate::memory::decide_default_policy;
 use crate::subagent::tasks::Tasks;
 

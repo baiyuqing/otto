@@ -50,19 +50,38 @@ pub async fn handle(
         cancel
     };
 
-    // ponytail: axum gives a handler no client-disconnect signal, so only
-    // shutdown cancels. Add a disconnect watcher if a hung compaction after a
-    // dropped client is ever observed.
+    // Runs in its own task so a dropped handler future (the client closed the
+    // connection) still clears `compacting` and starts the next queued turn.
+    // axum gives a handler no disconnect signal, so the compaction itself is
+    // cancelled only by shutdown.
     let result = {
-        let mut emit = |_event| {};
-        session
-            .ctrl
-            .compact(&parsed.focus, &mut emit, &cancel)
-            .await
+        let (server, session) = (Arc::clone(&server), Arc::clone(&session));
+        tokio::spawn(async move {
+            let result = {
+                let mut emit = |_event| {};
+                session
+                    .ctrl
+                    .compact(&parsed.focus, &mut emit, &cancel)
+                    .await
+            };
+            cancel.cancel();
+            session.lock().compacting = None;
+            server.start_next(&session);
+            result
+        })
+        .await
     };
-    cancel.cancel();
-    session.lock().compacting = None;
-    server.start_next(&session);
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let message = error.to_string();
+            server.logger().error(
+                "compaction_error",
+                &[("session_id", id), ("error", message.clone())],
+            );
+            return error_response(StatusCode::CONFLICT, "compaction_failed", &message);
+        }
+    };
 
     match result {
         Ok(compaction) => {

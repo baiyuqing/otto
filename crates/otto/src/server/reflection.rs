@@ -166,14 +166,34 @@ pub async fn reflect(
         cancel
     };
 
+    // Runs in its own task so a dropped handler future (the client closed the
+    // connection) still clears `reflecting` and starts the next queued turn.
     // Only the matching cancel endpoint, shutdown, or closing the session
     // cancels; axum gives a handler no client-disconnect signal (see
     // `compact`).
-    let result = session.ctrl.reflect(&parsed.focus, &cancel).await;
-    cancel.cancel();
-    session.lock().reflecting = None;
-    server.start_next(&session);
-    server.bump_status();
+    let result = {
+        let (server, session) = (Arc::clone(&server), Arc::clone(&session));
+        tokio::spawn(async move {
+            let result = session.ctrl.reflect(&parsed.focus, &cancel).await;
+            cancel.cancel();
+            session.lock().reflecting = None;
+            server.start_next(&session);
+            server.bump_status();
+            result
+        })
+        .await
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let message = error.to_string();
+            server.logger().error(
+                "reflection_error",
+                &[("session_id", id), ("error", message.clone())],
+            );
+            return error_response(StatusCode::CONFLICT, "reflection_failed", &message);
+        }
+    };
 
     match result {
         Ok(report) => {

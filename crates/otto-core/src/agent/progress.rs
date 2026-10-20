@@ -316,7 +316,10 @@ impl ProgressGuard {
         if entry.singles >= 3 && !entry.advised {
             entry.advised = true;
             Some(
-                "\nBatching advice: several single replacements were applied to this file. Collect the remaining known changes and apply one non-overlapping edits batch; use a checked script for repetitive cross-file changes. This edit succeeded.",
+                "\nBatching advice: several single replacements were applied to this \
+                    file. Collect the remaining known changes and apply one non-overlapping \
+                    edits batch; use a checked script for repetitive cross-file changes. \
+                    This edit succeeded.",
             )
         } else {
             None

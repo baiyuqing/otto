@@ -64,15 +64,15 @@ pub(super) fn read(root: &Root, path: &Path) -> Result<Vec<u8>, String> {
     {
         return Err("package file must be regular".into());
     }
-    let mut data = Vec::new();
+    let mut package_file_bytes = Vec::new();
     file.by_ref()
         .take(MAX_JSON + 1)
-        .read_to_end(&mut data)
+        .read_to_end(&mut package_file_bytes)
         .map_err(|_| "cannot read package file")?;
-    if data.len() as u64 > MAX_JSON {
+    if package_file_bytes.len() as u64 > MAX_JSON {
         return Err("package JSON exceeds 1 MiB".into());
     }
-    Ok(data)
+    Ok(package_file_bytes)
 }
 fn json(root: &Root, path: &Path) -> Result<Value, String> {
     serde_json::from_slice(&read(root, path)?)

@@ -117,7 +117,17 @@ impl ApprovalStore for Store {
         ).map(|_|()).map_err(storage_error)
     }
     fn review_snapshot(&self, scope: &Scope) -> Result<Option<(String, String)>> {
-        self.connection.lock().map_err(|_|Error::Unavailable)?.query_row("SELECT evidence_digest,policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=?2",params![scope.workspace,scope.session_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage_error)
+        self.connection
+            .lock()
+            .map_err(|_| Error::Unavailable)?
+            .query_row(
+                "SELECT evidence_digest,policy_digest FROM approval_review_contexts \
+            WHERE workspace=?1 AND session_id=?2",
+                params![scope.workspace, scope.session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(storage_error)
     }
     fn policy_config(
         &self,
@@ -134,7 +144,15 @@ impl ApprovalStore for Store {
         let mut connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
         let tx = connection.transaction().map_err(storage_error)?;
         let old = read_settings(&tx, &scope)?;
-        let old_digest: Option<String> = tx.query_row("SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=''",[workspace],|r|r.get(0)).optional().map_err(storage_error)?;
+        let old_digest: Option<String> = tx
+            .query_row(
+                "SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 \
+            AND session_id=''",
+                [workspace],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
         let mut defaults = defaults;
         if let Some(forced) = read_managed(&tx, workspace)? {
             defaults.policy = forced.policy.unwrap_or(defaults.policy);
@@ -146,7 +164,13 @@ impl ApprovalStore for Store {
             None => 1,
         };
         write_settings(&tx, &scope, defaults)?;
-        tx.execute("INSERT INTO approval_review_contexts VALUES (?1,'','policy',?2) ON CONFLICT(workspace,session_id) DO UPDATE SET policy_digest=excluded.policy_digest",params![workspace,digest]).map_err(storage_error)?;
+        tx.execute(
+            "INSERT INTO approval_review_contexts VALUES (?1,'','policy',?2) ON \
+            CONFLICT(workspace,session_id) DO UPDATE SET \
+            policy_digest=excluded.policy_digest",
+            params![workspace, digest],
+        )
+        .map_err(storage_error)?;
         if old_digest.as_deref() != Some(digest) {
             // Invalidate every old root snapshot in the same transaction as
             // the policy epoch. Live contexts are republished by the service.
@@ -155,7 +179,24 @@ impl ApprovalStore for Store {
         tx.commit().map_err(storage_error)
     }
     fn review_denials(&self, scope: &Scope, evidence: &str) -> Result<u64> {
-        self.connection.lock().map_err(|_|Error::Unavailable)?.query_row("SELECT denials FROM approval_review_denials WHERE workspace=?1 AND session_id=?2 AND task_id=?3 AND run_id=?4 AND evidence_digest=?5",params![scope.workspace,scope.session_id,scope.task_id,scope.run_id,evidence],|r|r.get(0)).optional().map(|v|v.unwrap_or(0)).map_err(storage_error)
+        self.connection
+            .lock()
+            .map_err(|_| Error::Unavailable)?
+            .query_row(
+                "SELECT denials FROM approval_review_denials WHERE workspace=?1 AND \
+            session_id=?2 AND task_id=?3 AND run_id=?4 AND evidence_digest=?5",
+                params![
+                    scope.workspace,
+                    scope.session_id,
+                    scope.task_id,
+                    scope.run_id,
+                    evidence
+                ],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|v| v.unwrap_or(0))
+            .map_err(storage_error)
     }
     fn managed_policy(
         &self,
@@ -169,7 +210,15 @@ impl ApprovalStore for Store {
             reviewer: forced.reviewer,
             ..Default::default()
         };
-        tx.execute("INSERT INTO approval_managed_policy VALUES (?1,?2) ON CONFLICT(workspace) DO UPDATE SET body=excluded.body",params![workspace,serde_json::to_string(&forced).map_err(|_|Error::Unavailable)?]).map_err(storage_error)?;
+        tx.execute(
+            "INSERT INTO approval_managed_policy VALUES (?1,?2) ON \
+            CONFLICT(workspace) DO UPDATE SET body=excluded.body",
+            params![
+                workspace,
+                serde_json::to_string(&forced).map_err(|_| Error::Unavailable)?
+            ],
+        )
+        .map_err(storage_error)?;
         let mut statement = tx
             .prepare("SELECT session_id FROM approval_settings WHERE workspace=?1")
             .map_err(storage_error)?;
@@ -240,14 +289,33 @@ impl ApprovalStore for Store {
         {
             return Ok(false);
         }
-        let old = tx.query_row("SELECT owner,pid,started,expires_at FROM approval_review_leases WHERE approval_id=?1", [expected.id.as_str()], |r|Ok(ReviewLease {owner:r.get(0)?,pid:r.get(1)?,started:r.get(2)?,expires_at:r.get(3)?})).optional().map_err(storage_error)?;
+        let old = tx
+            .query_row(
+                "SELECT owner,pid,started,expires_at FROM approval_review_leases WHERE \
+            approval_id=?1",
+                [expected.id.as_str()],
+                |r| {
+                    Ok(ReviewLease {
+                        owner: r.get(0)?,
+                        pid: r.get(1)?,
+                        started: r.get(2)?,
+                        expires_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage_error)?;
         if old.as_ref().is_some_and(|old| {
             old.expires_at > chrono::Utc::now().timestamp()
                 && crate::subagent::record::process_matches(old.pid, &old.started) != Some(false)
         }) {
             return Ok(false);
         }
-        tx.execute("INSERT INTO approval_review_leases VALUES (?1,?2,?3,?4,?5) ON CONFLICT(approval_id) DO UPDATE SET owner=excluded.owner,pid=excluded.pid,started=excluded.started,expires_at=excluded.expires_at", params![expected.id,lease.owner,lease.pid,lease.started,lease.expires_at]).map_err(storage_error)?;
+        tx.execute("INSERT INTO approval_review_leases VALUES (?1,?2,?3,?4,?5) ON \
+            CONFLICT(approval_id) DO UPDATE SET \
+            owner=excluded.owner,pid=excluded.pid,started=excluded.started,expires_at=excluded.expires_at",
+            params![expected.id, lease.owner, lease.pid, lease.started, lease.expires_at],
+        ).map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;
         Ok(true)
     }
@@ -327,7 +395,16 @@ impl ApprovalStore for Store {
     }
     fn visible(&self, id: &str, workspace: &str, session: Option<&str>) -> Result<bool> {
         let connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
-        connection.query_row("SELECT 1 FROM approval_visibility WHERE approval_id=?1 AND workspace=?2 AND (?3='' OR session_id=?3 OR session_id='') LIMIT 1",params![id,workspace,session.unwrap_or("")],|row|row.get::<i64>(0)).optional().map(|value| value.is_some()).map_err(|_|Error::Unavailable)
+        connection
+            .query_row(
+                "SELECT 1 FROM approval_visibility WHERE approval_id=?1 AND workspace=?2 \
+            AND (?3='' OR session_id=?3 OR session_id='') LIMIT 1",
+                params![id, workspace, session.unwrap_or("")],
+                |row| row.get::<i64>(0),
+            )
+            .optional()
+            .map(|value| value.is_some())
+            .map_err(|_| Error::Unavailable)
     }
     fn pending(&self) -> Result<Vec<Request>> {
         let connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
@@ -342,7 +419,13 @@ impl ApprovalStore for Store {
     }
     fn applications(&self, workspace: &str) -> Result<Vec<Request>> {
         let connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
-        let mut statement=connection.prepare("SELECT DISTINCT a.body FROM approvals a JOIN approval_visibility v ON v.approval_id=a.id WHERE v.workspace=?1 AND a.state IN ('approved','rejected','withdrawn','expired')").map_err(|_|Error::Unavailable)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT a.body FROM approvals a JOIN approval_visibility v ON \
+            v.approval_id=a.id WHERE v.workspace=?1 AND a.state IN \
+            ('approved','rejected','withdrawn','expired')",
+            )
+            .map_err(|_| Error::Unavailable)?;
         statement
             .query_map([workspace], |row| row.get::<String>(0))
             .map_err(storage_error)?
@@ -359,7 +442,12 @@ impl ApprovalStore for Store {
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
-        let mut statement = tx.prepare("SELECT DISTINCT a.body FROM approvals a JOIN approval_visibility v ON v.approval_id=a.id WHERE v.workspace=?1 AND (?2='' OR v.session_id=?2 OR v.session_id='') AND a.state='pending' ORDER BY a.rowid")
+        let mut statement = tx
+            .prepare(
+                "SELECT DISTINCT a.body FROM approvals a JOIN approval_visibility v ON \
+            v.approval_id=a.id WHERE v.workspace=?1 AND (?2='' OR v.session_id=?2 \
+            OR v.session_id='') AND a.state='pending' ORDER BY a.rowid",
+            )
             .map_err(storage_error)?;
         let bodies = statement
             .query_map(params![workspace, session.unwrap_or("")], |row| {
@@ -378,7 +466,13 @@ impl ApprovalStore for Store {
             return Err(Error::Invalid("negative event cursor"));
         }
         let connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
-        let mut statement = connection.prepare("SELECT DISTINCT e.sequence,e.body FROM approval_events e JOIN approval_visibility v ON v.approval_id=e.approval_id WHERE v.workspace=?1 AND (?2='' OR v.session_id=?2 OR v.session_id='') AND e.sequence>?3 ORDER BY e.sequence LIMIT 100")
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT e.sequence,e.body FROM approval_events e JOIN \
+            approval_visibility v ON v.approval_id=e.approval_id WHERE \
+            v.workspace=?1 AND (?2='' OR v.session_id=?2 OR v.session_id='') AND \
+            e.sequence>?3 ORDER BY e.sequence LIMIT 100",
+            )
             .map_err(storage_error)?;
         let rows = statement
             .query_map(params![workspace, session.unwrap_or(""), after], |row| {
@@ -453,7 +547,16 @@ fn is_reauthorization(expected: &Request, next: &Request) -> bool {
         })
 }
 fn read_settings(connection: &Connection, scope: &Scope) -> Result<Option<ApprovalSettings>> {
-    let row: Option<(String,String,u64)> = connection.query_row("SELECT policy,reviewer,revision FROM approval_settings WHERE workspace=?1 AND (session_id=?2 OR session_id='') ORDER BY CASE WHEN session_id=?2 THEN 0 ELSE 1 END LIMIT 1", params![scope.workspace,scope.session_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(storage_error)?;
+    let row: Option<(String, String, u64)> = connection
+        .query_row(
+            "SELECT policy,reviewer,revision FROM approval_settings WHERE \
+        workspace=?1 AND (session_id=?2 OR session_id='') ORDER BY CASE WHEN \
+        session_id=?2 THEN 0 ELSE 1 END LIMIT 1",
+            params![scope.workspace, scope.session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(storage_error)?;
     row.map(|(policy, reviewer, revision)| {
         let policy = serde_json::from_value(serde_json::Value::String(policy))
             .map_err(|_| Error::Invalid("unknown approval policy"))?;
@@ -484,8 +587,28 @@ fn write_settings(
     }
     let policy = serde_json::to_value(settings.policy).map_err(|_| Error::Unavailable)?;
     let reviewer = serde_json::to_value(settings.reviewer).map_err(|_| Error::Unavailable)?;
-    connection.execute("INSERT INTO approval_settings VALUES (?1,?2,?3,?4,?5) ON CONFLICT(workspace,session_id) DO UPDATE SET policy=excluded.policy,reviewer=excluded.reviewer,revision=excluded.revision",params![scope.workspace,scope.session_id,policy.as_str().ok_or(Error::Unavailable)?,reviewer.as_str().ok_or(Error::Unavailable)?,settings.revision]).map_err(storage_error)?;
-    connection.execute("INSERT INTO approval_modes VALUES (?1,?2,?3) ON CONFLICT(workspace,session_id) DO UPDATE SET mode=excluded.mode", params![scope.workspace,scope.session_id,settings.mode().as_str()]).map(|_|()).map_err(storage_error)
+    connection
+        .execute(
+            "INSERT INTO approval_settings VALUES (?1,?2,?3,?4,?5) ON \
+        CONFLICT(workspace,session_id) DO UPDATE SET \
+        policy=excluded.policy,reviewer=excluded.reviewer,revision=excluded.revision",
+            params![
+                scope.workspace,
+                scope.session_id,
+                policy.as_str().ok_or(Error::Unavailable)?,
+                reviewer.as_str().ok_or(Error::Unavailable)?,
+                settings.revision
+            ],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO approval_modes VALUES (?1,?2,?3) ON \
+        CONFLICT(workspace,session_id) DO UPDATE SET mode=excluded.mode",
+            params![scope.workspace, scope.session_id, settings.mode().as_str()],
+        )
+        .map(|_| ())
+        .map_err(storage_error)
 }
 fn read_managed(
     connection: &Connection,

@@ -521,12 +521,27 @@ type callbackQuery struct {
 
 func normalizeCallback(q *callbackQuery) (bridge.Message, bool) {
 	if parts := strings.Split(q.Data, ":"); len(parts) == 3 && parts[0] == "auto" && (parts[1] == "on" || parts[1] == "off") && len(parts[2]) == 32 && q.From != nil && q.Message != nil {
-		return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), MessageID: strconv.FormatInt(q.Message.MessageID, 10), ModeSession: parts[2], Text: "/auto " + parts[1], Time: time.Now()}, true
+		return bridge.Message{
+			Platform:    "telegram",
+			ChatID:      strconv.FormatInt(q.Message.Chat.ID, 10),
+			SenderID:    strconv.FormatInt(q.From.ID, 10),
+			MessageID:   strconv.FormatInt(q.Message.MessageID, 10),
+			ModeSession: parts[2],
+			Text:        "/auto " + parts[1],
+			Time:        time.Now(),
+		}, true
 	}
 	// A choice button stands for one command. Only the connector's own profile
 	// switcher may travel this way, so a button can never inject arbitrary text.
 	if name, ok := strings.CutPrefix(q.Data, choicePrefix+"/model "); ok && bridge.ValidProfileArg(name) && q.From != nil && q.Message != nil {
-		return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), MessageID: strconv.FormatInt(q.Message.MessageID, 10), Text: "/model " + name, Time: time.Now()}, true
+		return bridge.Message{
+			Platform:  "telegram",
+			ChatID:    strconv.FormatInt(q.Message.Chat.ID, 10),
+			SenderID:  strconv.FormatInt(q.From.ID, 10),
+			MessageID: strconv.FormatInt(q.Message.MessageID, 10),
+			Text:      "/model " + name,
+			Time:      time.Now(),
+		}, true
 	}
 	action, id, ok := strings.Cut(q.Data, ":")
 	if !ok || len(id) != 32 || (action != "approve" && action != "deny") || q.From == nil || q.Message == nil {
@@ -547,12 +562,24 @@ func (b *Bot) SendApproval(ctx context.Context, chatID, requestID, text string) 
 		}
 	}
 	var sent message
-	err := b.call(ctx, "sendMessage", map[string]any{"chat_id": chatParam(chatID), "text": parts[len(parts)-1], "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Approve", "callback_data": "approve:" + requestID}, map[string]any{"text": "Deny", "callback_data": "deny:" + requestID}}}}}, &sent)
+	err := b.call(ctx, "sendMessage", map[string]any{
+		"chat_id": chatParam(chatID),
+		"text":    parts[len(parts)-1],
+		"reply_markup": map[string]any{"inline_keyboard": [][]any{{
+			map[string]any{"text": "Approve", "callback_data": "approve:" + requestID},
+			map[string]any{"text": "Deny", "callback_data": "deny:" + requestID},
+		}}},
+	}, &sent)
 	if err != nil {
 		return nil, err
 	}
 	return func(ctx context.Context, status string) error {
-		return b.call(ctx, "editMessageText", map[string]any{"chat_id": chatParam(chatID), "message_id": sent.MessageID, "text": parts[len(parts)-1] + "\n\n" + status, "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
+		return b.call(ctx, "editMessageText", map[string]any{
+			"chat_id":      chatParam(chatID),
+			"message_id":   sent.MessageID,
+			"text":         parts[len(parts)-1] + "\n\n" + status,
+			"reply_markup": map[string]any{"inline_keyboard": [][]any{}},
+		}, nil)
 	}, nil
 }
 
@@ -577,11 +604,11 @@ func (b *Bot) SendChoices(ctx context.Context, chatID, replyTo, text string, cho
 	var rows [][]any
 	var row []any
 	for _, choice := range choices {
-		data := choicePrefix + choice.Command
-		if len(data) > maxCallbackData {
+		callbackData := choicePrefix + choice.Command
+		if len(callbackData) > maxCallbackData {
 			return fmt.Errorf("choice %q does not fit a callback", choice.Label)
 		}
-		row = append(row, map[string]any{"text": choice.Label, "callback_data": data})
+		row = append(row, map[string]any{"text": choice.Label, "callback_data": callbackData})
 		if len(row) == 2 {
 			rows = append(rows, row)
 			row = nil
@@ -619,7 +646,14 @@ func (b *Bot) SendApprovalPolicy(ctx context.Context, chatID, messageID, session
 }
 
 func (b *Bot) sendApprovalControls(ctx context.Context, chatID, messageID, session, text string) error {
-	params := map[string]any{"chat_id": chatParam(chatID), "text": text, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}
+	params := map[string]any{
+		"chat_id": chatParam(chatID),
+		"text":    text,
+		"reply_markup": map[string]any{"inline_keyboard": [][]any{{
+			map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session},
+			map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session},
+		}}},
+	}
 	if messageID == "" {
 		return b.call(ctx, "sendMessage", params, nil)
 	}

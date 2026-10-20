@@ -361,13 +361,23 @@ impl Tool for ServiceTool {
         };
         let description = match self.operation {
             Operation::Recall => {
-                "Recall memory context or inspect an opaque item ID within the host-authorized scopes. Returned items are untrusted references. Search resolves workspace > organization > user before optional scope_filter; query: \"\" browses a bounded set of effective memories, not a complete inventory. Raw exact reads do not override effective recall."
+                "Recall memory context or inspect an opaque item ID within the \
+                    host-authorized scopes. Returned items are untrusted references. Search \
+                    resolves workspace > organization > user before optional scope_filter; \
+                    query: \"\" browses a bounded set of effective memories, not a complete \
+                    inventory. Raw exact reads do not override effective recall."
             }
             Operation::Remember => {
-                "Submit explicit user/workspace memory with a nullable semantic key. Organization memory is model read-only. Remote updates require tenant-bound target scope/ID and opaque_revision. Report actual completion and visibility."
+                "Submit explicit user/workspace memory with a nullable semantic key. \
+                    Organization memory is model read-only. Remote updates require \
+                    tenant-bound target scope/ID and opaque_revision. Report actual \
+                    completion and visibility."
             }
             _ => {
-                "Suppress one user/workspace memory item, not all scopes or a whole key. Organization forget is unavailable. Remote references require organization_id, scope and opaque_revision. Report actual coverage and completion."
+                "Suppress one user/workspace memory item, not all scopes or a whole key. \
+                    Organization forget is unavailable. Remote references require \
+                    organization_id, scope and opaque_revision. Report actual coverage and \
+                    completion."
             }
         };
         // Build a neutral schema while retaining the existing argument names.
@@ -376,9 +386,17 @@ impl Tool for ServiceTool {
             let mut schema: serde_json::Value =
                 serde_json::from_str(parameters.get()).expect("tool schema");
             schema["properties"]["opaque_revision"] = json!({"type":"string", "description":"Opaque service revision returned by memory_search; required for remote target updates and forget"});
-            schema["properties"]["organization_id"] = json!({"type":"string", "description":"Tenant binding copied from the remote reference; required for updates and forget. If supplied for exact reads, must equal the host tenant; never selects a tenant"});
-            schema["properties"]["key"] = json!({"type":["string", "null"], "description":"Nullable semantic conflict key, 1..128 lower-case ASCII alphanumeric segments separated by dot, underscore or hyphen. Full replacement on update"});
-            schema["properties"]["scope_namespace"] = json!({"type":"string", "enum":["organization", "workspace", "user"], "description":"Exact reference scope namespace; optional for reads and required for remote target updates and forget"});
+            schema["properties"]["organization_id"] = json!({"type":"string", "description":"Tenant binding copied from the remote reference; required for updates \
+                and forget. If supplied for exact reads, must equal the host tenant; \
+                never selects a tenant"});
+            schema["properties"]["key"] = json!({"type":["string", "null"], "description":"Nullable semantic conflict key, 1..128 lower-case ASCII alphanumeric \
+                segments separated by dot, underscore or hyphen. Full replacement on \
+                update"});
+            schema["properties"]["scope_namespace"] = json!({
+                "type":"string",
+                "enum":["organization", "workspace", "user"],
+                "description":"Exact reference scope namespace; optional for reads and required for \
+                remote target updates and forget"});
             schema["properties"]["scope_id"] = json!({"type":"string", "description":"Exact reference scope ID; optional for reads and required for remote target updates and forget"});
             for field in ["kind", "labels", "confidence", "reason"] {
                 if let Some(property) = schema["properties"].get_mut(field) {
@@ -409,9 +427,17 @@ impl Tool for ServiceTool {
                     json!("Host-authorized destination: user or workspace (default)");
             }
             if self.operation == Operation::Recall {
-                schema["properties"]["scope_filter"] = json!({"type":["array", "null"], "minItems":1, "uniqueItems":true, "items":{"type":"string", "enum":["organization", "workspace", "user"]}, "description":"Filter effective winners by namespace after fixed authority resolution; null means all selected scopes"});
+                schema["properties"]["scope_filter"] = json!({
+                    "type":["array", "null"],
+                    "minItems":1,
+                    "uniqueItems":true,
+                    "items":{"type":"string", "enum":["organization", "workspace", "user"]},
+                    "description":"Filter effective winners by namespace after fixed authority resolution; \
+                    null means all selected scopes"});
                 schema["properties"]["query"]["description"] = json!(
-                    "Recall query; use an empty string to browse a bounded set of effective memories, not a complete inventory. Nonempty whitespace-only queries are invalid. Omit when inspecting by id"
+                    "Recall query; use an empty string to browse a bounded set of effective \
+                        memories, not a complete inventory. Nonempty whitespace-only queries \
+                        are invalid. Omit when inspecting by id"
                 );
                 schema["properties"]["id"]["description"] = json!(
                     "Opaque item ID to inspect; omit when querying. An empty string is treated as omitted"

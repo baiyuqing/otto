@@ -98,7 +98,9 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
                 amend_sandbox(&c, SandboxChange::ExcludeCommand(entry)).await?;
             prompt = followup;
             format!(
-                "{message}\nSaved {summary} in {} and reloaded immediately (existing entries are not duplicated). Matching simple commands run outside the sandbox; other approval requirements still apply.",
+                "{message}\nSaved {summary} in {} and reloaded immediately (existing \
+                    entries are not duplicated). Matching simple commands run outside the \
+                    sandbox; other approval requirements still apply.",
                 c.config_path().display()
             )
         }
@@ -294,6 +296,12 @@ async fn amend_sandbox(
     };
     let summary = change.summary();
     let info = c.amend_sandbox(change).await?;
-    let prompt = widens.then(|| format!("The user changed the sandbox configuration: {summary} is now allowed. Sandbox: {}. If a command failed because of the sandbox, retry it now.", info.summary()));
+    let prompt = widens.then(|| {
+        format!(
+            "The user changed the sandbox configuration: {summary} is now allowed. \
+        Sandbox: {}. If a command failed because of the sandbox, retry it now.",
+            info.summary()
+        )
+    });
     Ok((format!("Sandbox: {} ({summary})", info.summary()), prompt))
 }

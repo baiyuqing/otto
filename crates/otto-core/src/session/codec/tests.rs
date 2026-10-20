@@ -227,7 +227,15 @@ test!(
 );
 
 test!(decode_pi_v3_tolerates_additional_nested_fields, {
-    const INPUT: &str = r#"{"type":"message","id":"e0000001","parentId":null,"timestamp":"2026-08-27T12:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"ok","futureText":true}],"api":"openai-completions","provider":"openai-compatible","model":"test-model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"futureCost":0},"futureUsage":0},"stopReason":"stop","timestamp":1787832000000,"futureMessage":true},"futureEntry":true}"#;
+    const INPUT: &str = concat!(
+        r#"{"type":"message","id":"e0000001","parentId":null,"timestamp":"2026-08-27T12:00:00Z","#,
+        r#""message":{"role":"assistant","content":[{"type":"text","text":"ok","#,
+        r#""futureText":true}],"api":"openai-completions","provider":"openai-compatible","#,
+        r#""model":"test-model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"#,
+        r#""totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"#,
+        r#""futureCost":0},"futureUsage":0},"stopReason":"stop","timestamp":1787832000000,"#,
+        r#""futureMessage":true},"futureEntry":true}"#,
+    );
     let entry = decode_pi_entry(INPUT.as_bytes()).expect("decode");
     assert!(entry.message.is_some());
     assert_eq!(entry.raw, INPUT.as_bytes());
@@ -302,31 +310,66 @@ test!(decode_pi_v3_rejects_malformed_known_shapes, {
         (
             "tool arguments",
             format!(
-                r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[{{"type":"toolCall","id":"call-1","name":"read","arguments":[]}}],"api":"openai-completions","provider":"openai-compatible","model":"test",{usage},"stopReason":"toolUse","timestamp":1}}}}"#
+                concat!(
+                    r#"{{"type":"message",{BASE},"message":{{"role":"assistant","#,
+                    r#""content":[{{"type":"toolCall","id":"call-1","name":"read","#,
+                    r#""arguments":[]}}],"api":"openai-completions","#,
+                    r#""provider":"openai-compatible","model":"test",{usage},"#,
+                    r#""stopReason":"toolUse","timestamp":1}}}}"#,
+                ),
+                BASE = BASE,
+                usage = usage,
             ),
         ),
         (
             "tool namespace",
             format!(
-                r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[{{"type":"toolCall","id":"call-1","name":"read","arguments":{{}},"namespace":1}}],"api":"openai-completions","provider":"openai-compatible","model":"test",{usage},"stopReason":"toolUse","timestamp":1}}}}"#
+                concat!(
+                    r#"{{"type":"message",{BASE},"message":{{"role":"assistant","#,
+                    r#""content":[{{"type":"toolCall","id":"call-1","name":"read","#,
+                    r#""arguments":{{}},"namespace":1}}],"api":"openai-completions","#,
+                    r#""provider":"openai-compatible","model":"test",{usage},"#,
+                    r#""stopReason":"toolUse","timestamp":1}}}}"#,
+                ),
+                BASE = BASE,
+                usage = usage,
             ),
         ),
         (
             "usage",
             format!(
-                r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[],"api":"openai-completions","provider":"openai-compatible","model":"test","usage":{{"input":"zero"}},"stopReason":"stop","timestamp":1}}}}"#
+                concat!(
+                    r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[],"#,
+                    r#""api":"openai-completions","provider":"openai-compatible","model":"test","#,
+                    r#""usage":{{"input":"zero"}},"stopReason":"stop","timestamp":1}}}}"#,
+                ),
+                BASE = BASE,
             ),
         ),
         (
             "deferred handle",
             format!(
-                r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[],"api":"openai-completions","provider":"openai-compatible","model":"test",{usage},"stopReason":"deferred","deferred":{{"provider":1}},"timestamp":1}}}}"#
+                concat!(
+                    r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[],"#,
+                    r#""api":"openai-completions","provider":"openai-compatible","model":"test","#,
+                    r#"{usage},"stopReason":"deferred","deferred":{{"provider":1}},"#,
+                    r#""timestamp":1}}}}"#,
+                ),
+                BASE = BASE,
+                usage = usage,
             ),
         ),
         (
             "diagnostic timestamp",
             format!(
-                r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[],"api":"openai-completions","provider":"openai-compatible","model":"test",{usage},"stopReason":"stop","diagnostics":[{{"type":"warning","timestamp":"now"}}],"timestamp":1}}}}"#
+                concat!(
+                    r#"{{"type":"message",{BASE},"message":{{"role":"assistant","content":[],"#,
+                    r#""api":"openai-completions","provider":"openai-compatible","model":"test","#,
+                    r#"{usage},"stopReason":"stop","diagnostics":[{{"type":"warning","#,
+                    r#""timestamp":"now"}}],"timestamp":1}}}}"#,
+                ),
+                BASE = BASE,
+                usage = usage,
             ),
         ),
         (

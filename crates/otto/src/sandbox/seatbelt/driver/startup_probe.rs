@@ -27,11 +27,11 @@ impl SeatbeltDriver {
             })
         };
         let home = self.state.directories.home.to_string_lossy().into_owned();
-        let temp = self.state.directories.temp.to_string_lossy().into_owned();
+        let temp_path = self.state.directories.temp.to_string_lossy().into_owned();
         let mut fixtures = selftest::Fixtures::prepare(
             &home,
             &self.workspace,
-            &temp,
+            &temp_path,
             &self.state.profiles,
             ALLOWED_READ,
             DENIED,
@@ -168,7 +168,7 @@ impl SeatbeltDriver {
         let mut stderr = StderrFilter::new(&mut ordinary, None);
 
         let home = self.state.directories.home.to_string_lossy().into_owned();
-        let temp = self.state.directories.temp.to_string_lossy().into_owned();
+        let temp_path = self.state.directories.temp.to_string_lossy().into_owned();
         let spec = Spec {
             stdin: None,
             path: SANDBOX_EXEC_PATH.to_string(),
@@ -177,7 +177,7 @@ impl SeatbeltDriver {
             environment: vec![
                 "PATH=/usr/bin:/bin".to_string(),
                 format!("HOME={home}"),
-                format!("TMPDIR={temp}"),
+                format!("TMPDIR={temp_path}"),
                 "LC_ALL=C".to_string(),
             ],
         };

@@ -494,7 +494,18 @@ func TestApprovalButtonsLifecycle(t *testing.T) {
 
 func TestPollingDeliversAndAcknowledgesApproval(t *testing.T) {
 	id := strings.Repeat("b", 32)
-	api := botAPI(t, okR([]any{map[string]any{"update_id": 1, "callback_query": map[string]any{"id": "query1", "from": map[string]any{"id": 7}, "message": map[string]any{"message_id": 42, "chat": map[string]any{"id": 123}}, "data": "approve:" + id}}}))
+	api := botAPI(t, okR([]any{map[string]any{
+		"update_id": 1,
+		"callback_query": map[string]any{
+			"id":   "query1",
+			"from": map[string]any{"id": 7},
+			"message": map[string]any{
+				"message_id": 42,
+				"chat":       map[string]any{"id": 123},
+			},
+			"data": "approve:" + id,
+		},
+	}}))
 	store, _ := openStore(t)
 	b := newBot(api, store)
 	r := start(b)

@@ -85,16 +85,16 @@ pub fn order(domain: &str, record: &Record) -> Result<RecordOrder> {
         return Ok(RecordOrder { kind, identity });
     }
     let schemas = super::references::schemas(domain)?;
-    let data = LogicalRecord::decode(record, schemas)?;
+    let logical_record = LogicalRecord::decode(record, schemas)?;
     let kind = schemas
         .iter()
-        .position(|schema| schema.name == data.kind)
+        .position(|schema| schema.name == logical_record.kind)
         .ok_or_else(|| Error::Invalid("unsupported logical record kind".into()))?;
     let identity = schemas[kind]
         .keys
         .iter()
         .map(|key| {
-            let value = &data.fields[*key];
+            let value = &logical_record.fields[*key];
             if let Some(value) = value.as_i64() {
                 Ok(IdentityPart::Integer(value))
             } else if let Some(value) = value.as_str() {

@@ -4,7 +4,13 @@ use super::*;
 
 #[tokio::test]
 async fn catalog_uses_subscription_auth_and_official_models_shape() {
-    let server = testserver::spawn(|_| testserver::json_response( r#"{"models":[{"slug":"fixture-text","visibility":"list","input_modalities":["text"],"supported_in_api":false,"description":"catalog-access-secret"}]}"#)).await;
+    let server = testserver::spawn(|_| {
+        testserver::json_response(concat!(
+            r#"{"models":[{"slug":"fixture-text","visibility":"list","input_modalities":["text"],"#,
+            r#""supported_in_api":false,"description":"catalog-access-secret"}]}"#
+        ))
+    })
+    .await;
     let client = Client::with_base_url(
         &server.url,
         static_tokens("catalog-access-secret"),

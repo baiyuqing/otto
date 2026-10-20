@@ -138,8 +138,8 @@ impl Catalog {
                     continue;
                 };
                 let agent_path = directory.join("AGENT.md");
-                let data = match read_agent_file(&directory_fs, Path::new("AGENT.md")) {
-                    Ok(Some(data)) => data,
+                let agent_file_bytes = match read_agent_file(&directory_fs, Path::new("AGENT.md")) {
+                    Ok(Some(agent_file_bytes)) => agent_file_bytes,
                     // A directory without a readable regular AGENT.md is
                     // silently ignored, as is one reached by an escaping link.
                     Ok(None) => continue,
@@ -149,7 +149,7 @@ impl Catalog {
                     }
                 };
                 match load_candidate(
-                    &data,
+                    &agent_file_bytes,
                     &directory,
                     &agent_path,
                     &entry.name.to_string_lossy(),
@@ -279,14 +279,15 @@ fn read_agent_file(root_fs: &Root, name: &Path) -> io::Result<Option<Vec<u8>>> {
             metadata.len()
         )));
     }
-    let mut data = Vec::new();
-    file.take(MAX_AGENT_FILE_BYTES + 1).read_to_end(&mut data)?;
-    if data.len() as u64 > MAX_AGENT_FILE_BYTES {
+    let mut agent_file_bytes = Vec::new();
+    file.take(MAX_AGENT_FILE_BYTES + 1)
+        .read_to_end(&mut agent_file_bytes)?;
+    if agent_file_bytes.len() as u64 > MAX_AGENT_FILE_BYTES {
         return Err(io::Error::other(format!(
             "file is too large; maximum is {MAX_AGENT_FILE_BYTES} bytes"
         )));
     }
-    Ok(Some(data))
+    Ok(Some(agent_file_bytes))
 }
 
 fn is_symlink(root_fs: &Root, name: &Path) -> bool {

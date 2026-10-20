@@ -36,7 +36,14 @@ fn journal(root: &Path) -> Vec<u8> {
         .create(root.join("workspace"))
         .unwrap();
     let header = serde_json::json!({"type":"session","version":3,"id":"parent","timestamp":"2026-10-06T00:00:00Z","cwd":"/workspace","futureHeader":{"keep":true}});
-    let runtime = serde_json::json!({"type":"custom","id":"00000001","parentId":null,"timestamp":"2026-10-06T00:00:00Z","customType":"otto.runtime","data":{"profile":"test","provider":"openai-compatible","model":"test"}});
+    let runtime = serde_json::json!({"type":"custom",
+        "id":"00000001",
+        "parentId":null,
+        "timestamp":"2026-10-06T00:00:00Z",
+        "customType":"otto.runtime",
+        "data":{"profile":"test",
+        "provider":"openai-compatible",
+        "model":"test"}});
     let entry = serde_json::json!({"type":"future_entry","id":"00000002","parentId":"00000001","timestamp":"2026-10-06T00:00:01Z","unknown":{"verbatim":"yes"}});
     let bytes = format!("{header}\n{runtime}\n{entry}\n").into_bytes();
     let path = root.join("workspace/parent.jsonl");

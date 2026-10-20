@@ -438,8 +438,34 @@ impl Span {
     }
     fn record(&self, event: &'static str, p: &Progress, finish: Option<&Finish>) {
         let elapsed = self.elapsed();
-        self.log.write(json!({"schema_version":1,"event":event,"span_id":self.id,"kind":self.kind,"session_id":self.session,"task_id":self.task,"operation_id":self.operation,"tool":self.tool,"provider":self.provider,"model":self.model,
-            "started_at":self.started_at,"phase":p.phase,"first_network_ms":p.first_network_ms,"first_model_ms":p.first_model_ms,"retry_delay_ms":p.retry_delay_ms,"last_retry_reason":p.last_retry_reason,"elapsed_ms":elapsed,"last_activity_ms":p.last_activity_ms,"idle_ms":if matches!(self.kind, Kind::Turn | Kind::Tool) { None } else { Some(elapsed.saturating_sub(p.last_activity_ms)) },"last_network_ms":p.last_network_ms,"last_model_ms":p.last_model_ms,"network_bytes":p.network_bytes,"model_bytes":p.model_bytes,"stream_events":p.stream_events,"http_status":p.http_status,"attempt":p.attempt,"next_attempt":p.next_attempt,"finish":finish}));
+        self.log.write(json!({"schema_version":1,
+            "event":event,
+            "span_id":self.id,
+            "kind":self.kind,
+            "session_id":self.session,
+            "task_id":self.task,
+            "operation_id":self.operation,
+            "tool":self.tool,
+            "provider":self.provider,
+            "model":self.model,
+            "started_at":self.started_at,
+            "phase":p.phase,
+            "first_network_ms":p.first_network_ms,
+            "first_model_ms":p.first_model_ms,
+            "retry_delay_ms":p.retry_delay_ms,
+            "last_retry_reason":p.last_retry_reason,
+            "elapsed_ms":elapsed,
+            "last_activity_ms":p.last_activity_ms,
+            "idle_ms":if matches!(self.kind, Kind::Turn | Kind::Tool) { None } else { Some(elapsed.saturating_sub(p.last_activity_ms)) },
+            "last_network_ms":p.last_network_ms,
+            "last_model_ms":p.last_model_ms,
+            "network_bytes":p.network_bytes,
+            "model_bytes":p.model_bytes,
+            "stream_events":p.stream_events,
+            "http_status":p.http_status,
+            "attempt":p.attempt,
+            "next_attempt":p.next_attempt,
+            "finish":finish}));
     }
 }
 impl Observer for Span {

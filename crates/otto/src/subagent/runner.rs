@@ -106,7 +106,19 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 20] = [
 
 /// Appended to a child's system prompt inside `<subagent_role>` when it has
 /// no definition, or its definition's body is empty.
-const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete the entire delegated change within its assigned file scope. Reuse the agreed shared interfaces; report a needed contract change before expanding scope. Batch known same-file edits and use checked scripts for repetitive call-site changes. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Do not send progress updates, plans, or interim findings with agent_report; put them in the final report instead. Call agent_report only to answer a question that arrives in a [parent-message], or to report a blocker that needs a parent decision while you can keep working on other parts of the task. If you cannot continue, end with a final report that states the blocker.";
+const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete the entire delegated \
+    change within its assigned file scope. Reuse the agreed shared \
+    interfaces; report a needed contract change before expanding scope. \
+    Batch known same-file edits and use checked scripts for repetitive \
+    call-site changes. Complete only the delegated task below with the \
+    available tools, then reply with a self-contained final report. That \
+    final message is returned to the caller as your result. Do not send \
+    progress updates, plans, or interim findings with agent_report; put \
+    them in the final report instead. Call agent_report only to answer a \
+    question that arrives in a [parent-message], or to report a blocker \
+    that needs a parent decision while you can keep working on other parts \
+    of the task. If you cannot continue, end with a final report that \
+    states the blocker.";
 
 const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16384;

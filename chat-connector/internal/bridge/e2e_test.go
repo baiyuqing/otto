@@ -343,7 +343,9 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if calls == 1 {
 			args, _ := json.Marshal(`{"kind":"preference","key":"tabs","text":"prefers tabs"}`)
-			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-memory\",\"type\":\"function\",\"function\":{\"name\":\"remember\",\"arguments\":%s}}]},\"finish_reason\":null}]}\n\n", args)
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-memory\","+
+				"\"type\":\"function\",\"function\":{\"name\":\"remember\",\"arguments\":%s}}]},"+
+				"\"finish_reason\":null}]}\n\n", args)
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
 		} else {
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Queued.\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")

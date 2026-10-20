@@ -356,7 +356,11 @@ mod tests {
 
     #[test]
     fn non_canonical_spacing_and_a_short_source_are_read() {
-        let content = "---\nscope:   { \"namespace\" : \"user\", \"id\":\"u1\" }\nkind: \"preference\"\nkey: \"k\"\nlabels: [ ]\nconfidence: 1\nrevision: 2\ncreated_at: \"2026-03-01T12:00:00Z\"\nupdated_at: \"2026-03-01T13:00:00+01:00\"\nexpires_at: null\nsource: {\"origin\":\"human\"}\nmetadata: {}\n---\nhello";
+        let content = "---\nscope:   { \"namespace\" : \"user\", \"id\":\"u1\" }\nkind: \
+            \"preference\"\nkey: \"k\"\nlabels: [ ]\nconfidence: 1\nrevision: \
+            2\ncreated_at: \"2026-03-01T12:00:00Z\"\nupdated_at: \
+            \"2026-03-01T13:00:00+01:00\"\nexpires_at: null\nsource: \
+            {\"origin\":\"human\"}\nmetadata: {}\n---\nhello";
         let parsed = parse_record("r1", content).expect("parse");
         assert_eq!(parsed.text, "hello");
         assert_eq!(parsed.source.origin, Some(Origin::Human));

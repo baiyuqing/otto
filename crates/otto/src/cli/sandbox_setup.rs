@@ -139,7 +139,10 @@ pub async fn run(
 
     let _ = write!(
         stdout,
-        "Sandbox setup for {}\nShell commands can modify the whole workspace. Home files are hidden unless explicitly allowed.\nExisting extra permissions are retained and shown below. Setup enables Seatbelt even if sandbox was off.\n",
+        "Sandbox setup for {}\nShell commands can modify the whole workspace. \
+            Home files are hidden unless explicitly allowed.\nExisting extra \
+            permissions are retained and shown below. Setup enables Seatbelt even \
+            if sandbox was off.\n",
         quote(&workspace)
     );
     let Some(network) = ask(
@@ -450,9 +453,9 @@ mod tests {
             .await;
             assert_eq!(code, 0, "{name}: {}", String::from_utf8_lossy(&stderr));
 
-            let data = std::fs::read_to_string(&path).expect("read back");
+            let config_text = std::fs::read_to_string(&path).expect("read back");
             if !saved {
-                assert_eq!(data, PRESERVED, "{name}: changed on cancel");
+                assert_eq!(config_text, PRESERVED, "{name}: changed on cancel");
                 continue;
             }
             let file = crate::config::load_required(&path).expect("load");
@@ -469,7 +472,7 @@ mod tests {
             );
             let out = String::from_utf8_lossy(&stdout).into_owned();
             assert!(out.contains("GH_CONFIG_DIR="), "{name}: {out}");
-            assert!(data.contains(PRESERVED), "{name}: {data}");
+            assert!(config_text.contains(PRESERVED), "{name}: {config_text}");
         }
     }
 

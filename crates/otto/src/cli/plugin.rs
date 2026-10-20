@@ -38,15 +38,34 @@ pub fn run(
             }
             ("install", [source]) => {
                 let p = service.install(source, None)?;
-                writeln!(stdout,"Installed {} ({}). Skills enabled; MCP, hooks and custom tools require explicit trust. Start a new session to activate.",p.name,p.digest).map_err(|_| "cannot write installation status")?;
+                writeln!(
+                    stdout,
+                    "Installed {} ({}). Skills enabled; MCP, hooks and custom tools require \
+                    explicit trust. Start a new session to activate.",
+                    p.name, p.digest
+                )
+                .map_err(|_| "cannot write installation status")?;
             }
             ("install", [source, flag, rev]) if flag == "--rev" => {
                 let p = service.install(source, Some(rev))?;
-                writeln!(stdout,"Installed {} at {}. Skills enabled; MCP, hooks and custom tools require explicit trust. Start a new session to activate.",p.name,p.commit.as_deref().unwrap_or("")).map_err(|_| "cannot write installation status")?;
+                writeln!(
+                    stdout,
+                    "Installed {} at {}. Skills enabled; MCP, hooks and custom tools require \
+                    explicit trust. Start a new session to activate.",
+                    p.name,
+                    p.commit.as_deref().unwrap_or("")
+                )
+                .map_err(|_| "cannot write installation status")?;
             }
             ("inspect", [name]) => {
                 let p = service.inspect(name)?;
-                let report = serde_json::json!({"plugin":p,"content_authorized":service.authorized(name,&p.digest),"data_directory":service.data_path(name),"mcp_identities":p.package.servers.iter().map(|(s,_)| {let logical=format!("{name}:{s}");serde_json::json!({"logical":logical,"internal":crate::plugin::runtime_name(&logical)})}).collect::<Vec<_>>()});
+                let report = serde_json::json!({"plugin":p,
+                    "content_authorized":service.authorized(name,&p.digest),
+                    "data_directory":service.data_path(name),
+                    "mcp_identities":p.package.servers.iter().map(|(s,_)| {
+                        let logical=format!("{name}:{s}");
+                        serde_json::json!({"logical":logical,"internal":crate::plugin::runtime_name(&logical)})
+                    }).collect::<Vec<_>>()});
                 writeln!(
                     stdout,
                     "{}",
@@ -98,7 +117,13 @@ pub fn run(
             }
             ("enable" | "disable" | "revoke" | "remove", [name]) => {
                 service.change(name, action)?;
-                writeln!(stdout,"Plugin {name}: {action}. Enable/disable changes apply to new sessions; revoke/remove stops active plugin commands and MCP servers. Persistent data is retained.").map_err(|_| "cannot write plugin status")?;
+                writeln!(
+                    stdout,
+                    "Plugin {name}: {action}. Enable/disable changes apply to new sessions; \
+                    revoke/remove stops active plugin commands and MCP servers. Persistent \
+                    data is retained."
+                )
+                .map_err(|_| "cannot write plugin status")?;
             }
             _ => return Err(USAGE.into()),
         }

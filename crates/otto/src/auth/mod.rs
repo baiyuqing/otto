@@ -174,9 +174,9 @@ impl Credentials {
         if !self.within_bounds() {
             return Err(AuthError::CredentialsPersistence);
         }
-        let data =
+        let credentials_json =
             serde_json::to_vec_pretty(self).map_err(|_| AuthError::CredentialsPersistence)?;
-        write_secret_file(path, &data)
+        write_secret_file(path, &credentials_json)
     }
 
     fn within_bounds(&self) -> bool {
@@ -272,15 +272,15 @@ pub fn load(path: &Path) -> Result<Credentials, AuthError> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Err(AuthError::NoCredentials),
         Err(_) => return Err(AuthError::CredentialsUnavailable),
     };
-    let mut data = Vec::new();
+    let mut credentials_bytes = Vec::new();
     file.take(MAX_CREDENTIAL_FILE_BYTES as u64 + 1)
-        .read_to_end(&mut data)
+        .read_to_end(&mut credentials_bytes)
         .map_err(|_| AuthError::CredentialsUnavailable)?;
-    if data.len() > MAX_CREDENTIAL_FILE_BYTES {
+    if credentials_bytes.len() > MAX_CREDENTIAL_FILE_BYTES {
         return Err(AuthError::CredentialsUnavailable);
     }
-    let credentials: Credentials =
-        serde_json::from_slice(&data).map_err(|_| AuthError::CredentialsUnavailable)?;
+    let credentials: Credentials = serde_json::from_slice(&credentials_bytes)
+        .map_err(|_| AuthError::CredentialsUnavailable)?;
     if !credentials.within_bounds() {
         return Err(AuthError::CredentialsUnavailable);
     }

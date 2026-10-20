@@ -155,7 +155,11 @@ pub fn subagent_model_diagnostic(
     Some(super::layered::Diagnostic {
         key: "subagent_models".into(),
         source: "runtime".into(),
-        reason: "Configured subagent_models are disabled because the provider connection changed. Child tasks inherit the active parent model. Select the original profile/connection or configure subagent_models for the active connection; failed model requests are not automatically retried.".into(),
+        reason: "Configured subagent_models are disabled because the provider connection \
+            changed. Child tasks inherit the active parent model. Select the \
+            original profile/connection or configure subagent_models for the active \
+            connection; failed model requests are not automatically retried."
+            .into(),
     })
 }
 

@@ -17,7 +17,14 @@ use super::result::decode_strict_json;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 use crate::runtime::builder::SharedSession;
 
-const DESCRIPTION: &str = "Validate a verification verdict against prior, durably persisted typed ToolResult blocks in this current session. This tool does not run commands, inspect output meaning, infer command families, judge coverage, or gate completion. claim is nonblank and at most 2000 characters; evidence has at most 32 unique tool_call_id items; limitations has at most 16 nonblank items of at most 1000 characters each. Success returns the accepted verdict as canonical JSON; invalid submissions return a tool error.";
+const DESCRIPTION: &str = "Validate a verification verdict against prior, durably persisted typed \
+    ToolResult blocks in this current session. This tool does not run \
+    commands, inspect output meaning, infer command families, judge \
+    coverage, or gate completion. claim is nonblank and at most 2000 \
+    characters; evidence has at most 32 unique tool_call_id items; \
+    limitations has at most 16 nonblank items of at most 1000 characters \
+    each. Success returns the accepted verdict as canonical JSON; invalid \
+    submissions return a tool error.";
 
 pub fn verification_definition() -> ToolDefinition {
     definition(
@@ -193,7 +200,11 @@ mod tests {
         assert!(!result.is_error, "{result:?}");
         assert_eq!(
             result.content,
-            r#"{"verdict":"passed","claim":"works","evidence":[{"tool_call_id":"call-7","relation":"supports","tool_name":"anything","disposition":"succeeded","effect_certainty":"completed"}],"limitations":["narrow test"]}"#
+            concat!(
+                r#"{"verdict":"passed","claim":"works","evidence":[{"tool_call_id":"call-7","#,
+                r#""relation":"supports","tool_name":"anything","disposition":"succeeded","#,
+                r#""effect_certainty":"completed"}],"limitations":["narrow test"]}"#,
+            )
         );
     }
 

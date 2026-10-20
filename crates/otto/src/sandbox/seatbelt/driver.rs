@@ -453,7 +453,19 @@ impl SeatbeltDriver {
 /// the values the host measured, then truncates and rewrites it. A mismatch
 /// exits non-zero rather than writing, so a fixture swapped between the host's
 /// last check and the child's open is caught inside the sandbox.
-const WRITE_PROBE_SCRIPT: &str = r#"my $value = $ARGV[0]; for my $base (1, 8) { my ($path, $device, $inode, $type, $uid, $mode, $links) = @ARGV[$base..$base+6]; sysopen(my $fh, $path, O_WRONLY|O_NOFOLLOW) or exit 65; my @stat = stat($fh); @stat or exit 66; $stat[0] == $device && $stat[1] == $inode && ($stat[2] & 0170000) == $type && $stat[4] == $uid && ($stat[2] & 07777) == $mode && $stat[3] == $links or exit 67; truncate($fh, 0) or exit 68; my $written = 0; while ($written < length($value)) { my $count = syswrite($fh, $value, length($value) - $written, $written); defined($count) && $count > 0 or exit 69; $written += $count; } close($fh) or exit 70; }"#;
+const WRITE_PROBE_SCRIPT: &str = concat!(
+    r#"my $value = $ARGV[0]; for my $base (1, 8) { "#,
+    r#"my ($path, $device, $inode, $type, $uid, $mode, $links) = @ARGV[$base..$base+6]; "#,
+    r#"sysopen(my $fh, $path, O_WRONLY|O_NOFOLLOW) or exit 65; "#,
+    r#"my @stat = stat($fh); @stat or exit 66; "#,
+    r#"$stat[0] == $device && $stat[1] == $inode && ($stat[2] & 0170000) == $type "#,
+    r#"&& $stat[4] == $uid && ($stat[2] & 07777) == $mode && $stat[3] == $links or exit 67; "#,
+    r#"truncate($fh, 0) or exit 68; my $written = 0; "#,
+    r#"while ($written < length($value)) { "#,
+    r#"my $count = syswrite($fh, $value, length($value) - $written, $written); "#,
+    r#"defined($count) && $count > 0 or exit 69; $written += $count; } "#,
+    r#"close($fh) or exit 70; }"#,
+);
 
 #[cfg(test)]
 /// The availability probe: a nested or Linux host has `sandbox-exec` absent

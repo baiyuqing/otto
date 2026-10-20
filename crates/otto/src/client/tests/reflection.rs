@@ -128,7 +128,11 @@ async fn reflection_run_logs_use_their_routes_and_a_missing_run_is_none() {
     let (client, seen, _dir) = stub(|_, path| match path {
         "/v1/sessions/s1/reflection/runs" => json_body(
             StatusCode::OK,
-            r#"{"enabled":true,"runs":[{"id":"abcd1234","path":"/h/.otto/reflection/runs/x.md","started":"2026-10-05T02:03:00Z","trigger":"requested","status":"ok","headline":"Read the docs first."}]}"#,
+            concat!(
+                r#"{"enabled":true,"runs":[{"id":"abcd1234","path":"/h/.otto/reflection/runs/x.md","#,
+                r#""started":"2026-10-05T02:03:00Z","trigger":"requested","status":"ok","#,
+                r#""headline":"Read the docs first."}]}"#
+            ),
         ),
         "/v1/sessions/s1/reflection/runs/abcd1234" => json_body(
             StatusCode::OK,

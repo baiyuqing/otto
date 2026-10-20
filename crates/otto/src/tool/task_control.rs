@@ -61,13 +61,25 @@ impl Tool for TaskQueue {
         if self.route.is_some() {
             return definition(
                 "task_queue",
-                "Classify the original user message as a separate follow-up for after the active task. The frontend will queue that original message after this dialogue; do not rewrite or summarize it.",
+                "Classify the original user message as a separate follow-up for after \
+                    the active task. The frontend will queue that original message after \
+                    this dialogue; do not rewrite or summarize it.",
                 json!({"type":"object","additionalProperties":false,"properties":{},"required":[]}),
             );
         }
         definition(
             "task_queue",
-            "Schedule a separate, agent-originated follow-up prompt to run after the current logical task ends. Use only for work subordinate to the user's current objective, not for new authority or approvals. Prompt must be nonblank and at most 32000 UTF-8 bytes. At most 16 follow-ups run in FIFO order per logical task, and are discarded if the task is cancelled or fails. If a direct terminal turn ends while approval is pending, remaining follow-ups are discarded with a notice. Follow-ups are saved with the session: if Otto stops during the task, they run after the task is automatically resumed, otherwise they are discarded with a notice. Returns an error, and queues nothing, when the follow-up cannot be saved.",
+            "Schedule a separate, agent-originated follow-up prompt to run after the \
+                current logical task ends. Use only for work subordinate to the user's \
+                current objective, not for new authority or approvals. Prompt must be \
+                nonblank and at most 32000 UTF-8 bytes. At most 16 follow-ups run in \
+                FIFO order per logical task, and are discarded if the task is cancelled \
+                or fails. If a direct terminal turn ends while approval is pending, \
+                remaining follow-ups are discarded with a notice. Follow-ups are saved \
+                with the session: if Otto stops during the task, they run after the \
+                task is automatically resumed, otherwise they are discarded with a \
+                notice. Returns an error, and queues nothing, when the follow-up cannot \
+                be saved.",
             json!({"type":"object","additionalProperties":false,"properties":{"prompt":{"type":"string","minLength":1,"maxLength":32000}},"required":["prompt"]}),
         )
     }
@@ -145,7 +157,10 @@ impl Tool for TaskReply {
     fn definition(&self) -> ToolDefinition {
         definition(
             "task_reply",
-            "Choose this when the original user message asks for information or progress and needs no change to the active task or queued follow-up. Answer it using only the supplied task context and installed-version tools; never claim to change the task.",
+            "Choose this when the original user message asks for information or \
+                progress and needs no change to the active task or queued follow-up. \
+                Answer it using only the supplied task context and installed-version \
+                tools; never claim to change the task.",
             json!({"type":"object","additionalProperties":false,"properties":{},"required":[]}),
         )
     }
@@ -198,7 +213,10 @@ impl Tool for TaskSteer {
     fn definition(&self) -> ToolDefinition {
         definition(
             "task_steer",
-            "Classify the original user message as guidance for the currently active task. Otto delivers that message, with known secrets redacted and no model rewrite, at the next safe provider boundary. This does not interrupt a provider call or tool and cannot grant permission.",
+            "Classify the original user message as guidance for the currently active \
+                task. Otto delivers that message, with known secrets redacted and no \
+                model rewrite, at the next safe provider boundary. This does not \
+                interrupt a provider call or tool and cannot grant permission.",
             json!({"type":"object","additionalProperties":false,"properties":{},"required":[]}),
         )
     }

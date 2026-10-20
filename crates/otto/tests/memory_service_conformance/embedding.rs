@@ -12,9 +12,17 @@ fn embed_builder(
     let workspace = root.join("workspace");
     std::fs::create_dir_all(home.join(".config/otto")).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(home.join(".config/otto/config.toml"), format!(
-        "default_profile = \"test\"\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"{url}\"\nmodel = \"offline-test\"\napi_key_env = \"TEST_KEY\"\n[sandbox]\ndriver = \"off\"\n[server]\nworkspace_roots = [\"{}\"]\n{memory}\n", root.to_string_lossy()
-    )).unwrap();
+    std::fs::write(
+        home.join(".config/otto/config.toml"),
+        format!(
+            "default_profile = \"test\"\n[profiles.test]\nprovider = \
+            \"openai-compatible\"\nbase_url = \"{url}\"\nmodel = \
+            \"offline-test\"\napi_key_env = \"TEST_KEY\"\n[sandbox]\ndriver = \
+            \"off\"\n[server]\nworkspace_roots = [\"{}\"]\n{memory}\n",
+            root.to_string_lossy()
+        ),
+    )
+    .unwrap();
     otto::embed::Otto::builder()
         .workspace(workspace)
         .environment([

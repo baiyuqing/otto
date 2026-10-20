@@ -242,11 +242,11 @@ pub(super) fn stream_sse(metrics: &Arc<Metrics>, turn: Arc<Turn>, after: usize) 
                 if !events.is_empty() {
                     let mut chunk = String::new();
                     for (offset, event) in events.iter().enumerate() {
-                        let data = serde_json::to_string(event).unwrap_or_default();
+                        let event_json = serde_json::to_string(event).unwrap_or_default();
                         chunk.push_str(&format_frame(
                             (after + offset) as i64,
                             &event.event_type,
-                            &data,
+                            &event_json,
                         ));
                     }
                     after += events.len();
@@ -286,8 +286,8 @@ pub(super) fn stream_status(server: Arc<Server>) -> Response {
             loop {
                 let snapshot = server.status_snapshot();
                 if last.as_ref() != Some(&snapshot) {
-                    let data = serde_json::to_string(&snapshot).unwrap_or_default();
-                    let frame = format!("event: status\ndata: {data}\n\n");
+                    let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_default();
+                    let frame = format!("event: status\ndata: {snapshot_json}\n\n");
                     return Some((
                         Ok::<String, std::io::Error>(frame),
                         (server, changed, Some(snapshot)),

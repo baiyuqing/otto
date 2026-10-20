@@ -540,7 +540,12 @@ async fn google_sends_key_and_engine_as_parameters_clamps_count_and_never_return
 
 #[tokio::test]
 async fn bing_needs_no_key_and_sends_no_credentials() {
-    const PAGE: &str = r#"<ol id="b_results"><li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;u=a1aHR0cHM6Ly90b2tpby5ycy90b2tpby90dXRvcmlhbC9hc3luYw&amp;ntb=1">Tokio</a></h2><div class="b_caption"><p>A runtime</p></div></li></ol>"#;
+    const PAGE: &str = concat!(
+        r#"<ol id="b_results"><li class="b_algo"><h2>"#,
+        r#"<a href="https://www.bing.com/ck/a?!&amp;&amp;"#,
+        r#"u=a1aHR0cHM6Ly90b2tpby5ycy90b2tpby90dXRvcmlhbC9hc3luYw&amp;ntb=1">Tokio</a></h2>"#,
+        r#"<div class="b_caption"><p>A runtime</p></div></li></ol>"#,
+    );
     let server = serve(Arc::new(|_| {
         response(
             "200 OK",

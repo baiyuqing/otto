@@ -96,12 +96,12 @@ pub(super) fn build_state(
     );
 
     let home = profile::join(&root_path, "home");
-    let temp = profile::join(&root_path, "tmp");
+    let temp_path = profile::join(&root_path, "tmp");
     let cache = profile::join(&root_path, "cache");
     let profiles = profile::join(&root_path, "profiles");
     let child_paths = [
         ("home", home.as_str()),
-        ("tmp", temp.as_str()),
+        ("tmp", temp_path.as_str()),
         ("cache", cache.as_str()),
         ("profiles", profiles.as_str()),
     ];
@@ -175,7 +175,7 @@ pub(super) fn build_state(
         directories: PrivateDirectories {
             root: root_path.clone().into(),
             home: home.into(),
-            temp: temp.into(),
+            temp: temp_path.into(),
             cache: cache.into(),
         },
         profiles,

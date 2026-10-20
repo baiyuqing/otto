@@ -336,7 +336,11 @@ fn reported_errors_carry_the_server_detail() {
         ),
         (
             "response error type precedes nested error code",
-            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"\",\"type\":\"server_error\",\"message\":\"response message\"}},\"error\":{\"code\":\"nested_code\",\"message\":\"nested message\"},\"code\":\"top_code\",\"message\":\"top message\"}\n\n",
+            "data: \
+                {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"\",\
+                \"type\":\"server_error\",\"message\":\"response message\"}},\
+                \"error\":{\"code\":\"nested_code\",\"message\":\"nested \
+                message\"},\"code\":\"top_code\",\"message\":\"top message\"}\n\n",
             "responses stream reported response.failed: server_error: response message",
         ),
         (

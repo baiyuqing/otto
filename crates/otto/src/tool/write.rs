@@ -249,7 +249,7 @@ pub(crate) fn write_file_atomic(
         .map_err(|error| before_rename(error.to_string()))?;
     let suffix =
         crate::auth::random_hex::<8>().map_err(|error| before_rename(error.to_string()))?;
-    let temp = format!(".otto-{suffix}");
+    let temp_name = format!(".otto-{suffix}");
     // The publish fsyncs the directory after the rename: `fsync` on the
     // temporary file covers the file's data and metadata but not the
     // directory entry that now points the destination name at it. Without
@@ -258,7 +258,7 @@ pub(crate) fn write_file_atomic(
         &parent,
         &Publish {
             name: &name,
-            temp: &temp,
+            temp: &temp_name,
             permissions: mode,
             mode: PublishMode::Replace,
         },

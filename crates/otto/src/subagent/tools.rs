@@ -26,22 +26,105 @@ use super::{Catalog, runner};
 use crate::tool::result::decode_strict_json;
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\" or fork_before is set), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Research stays in the child context: use fresh context, download pinned sources once into its temporary research directory, and return a summary, uncertainty, report path and section index within 4 KiB; put longer findings in the assigned persistent report directory using write when permitted. Oversized final answers are automatically saved when workspace storage is available. Temporary research directories are removed at task exit; report directories persist. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; when only child dependencies remain, call agent_yield rather than polling agent_status. Use agent_status to inspect progress or retrieve a report path, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. For implementation, settle shared interfaces first and assign each writable file to one owner. Delegate a complete coherent change, including its call-site adaptations; keep tightly coupled edits in one task. Assign a bounded file scope and request findings with file/line evidence. After delegation, do not read those same files again; rely on the child report, use read on its report file for omitted sections, and ask follow-up questions only while the child is queued or running. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with \
+    its task id. The sub-agent runs in parallel with you, has its own \
+    context (fresh unless context is \"inherit\" or fork_before is set), \
+    the same workspace and file tools, and receives follow-up parent task \
+    updates only when you call agent_send. Research stays in the child \
+    context: use fresh context, download pinned sources once into its \
+    temporary research directory, and return a summary, uncertainty, report \
+    path and section index within 4 KiB; put longer findings in the \
+    assigned persistent report directory using write when permitted. \
+    Oversized final answers are automatically saved when workspace storage \
+    is available. Temporary research directories are removed at task exit; \
+    report directories persist. Its final report arrives later as a \
+    [task-notification] message that starts a runtime-owned wake turn when \
+    the parent is idle; when only child dependencies remain, call \
+    agent_yield rather than polling agent_status. Use agent_status to \
+    inspect progress or retrieve a report path, and agent_send when the \
+    user adds constraints, priorities, facts, or direction changes for a \
+    queued or running task. For implementation, settle shared interfaces \
+    first and assign each writable file to one owner. Delegate a complete \
+    coherent change, including its call-site adaptations; keep tightly \
+    coupled edits in one task. Assign a bounded file scope and request \
+    findings with file/line evidence. After delegation, do not read those \
+    same files again; rely on the child report, use read on its report file \
+    for omitted sections, and ask follow-up questions only while the child \
+    is queued or running. Put the initial goal, relevant paths, \
+    constraints, and requested report format in prompt; pass agent to use a \
+    named definition from the Agents list.";
 
-const AGENT_YIELD_DESCRIPTION: &str = "Yield this parent turn when only child dependencies remain and there is no independent work to do. Returns immediately and requests a safe-boundary stop of model calls after this tool batch settles; child messages/completion or user input resume the parent through the runtime. Does not wait in the tool, poll, or cancel children. Takes no arguments. Returns an error without yielding if no child is queued or running. Pending input, tool errors and approval replanning take precedence.";
+const AGENT_YIELD_DESCRIPTION: &str = "Yield this parent turn when only child dependencies remain and there is \
+    no independent work to do. Returns immediately and requests a \
+    safe-boundary stop of model calls after this tool batch settles; child \
+    messages/completion or user input resume the parent through the \
+    runtime. Does not wait in the tool, poll, or cancel children. Takes no \
+    arguments. Returns an error without yielding if no child is queued or \
+    running. Pending input, tool errors and approval replanning take \
+    precedence.";
 
-const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus truncation and report-file metadata). Recent research steps are omitted by default; set include_history only when explicitly needed. For a truncated final answer, returns its persistent report path when storage succeeds; use read on that file to retrieve sections without restarting the child. Pass task_id for detail including model and model_source (explicit, definition, configured_first, parent, or unknown for legacy records). Omit task_id to list tasks. When only child dependencies remain, call agent_yield instead of polling. Live detail distinguishes tool, provider/runtime and approval phases; unchanged last-tool counters do not establish a stall.";
+const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus \
+    truncation and report-file metadata). Recent research steps are omitted \
+    by default; set include_history only when explicitly needed. For a \
+    truncated final answer, returns its persistent report path when storage \
+    succeeds; use read on that file to retrieve sections without restarting \
+    the child. Pass task_id for detail including model and model_source \
+    (explicit, definition, configured_first, parent, or unknown for legacy \
+    records). Omit task_id to list tasks. When only child dependencies \
+    remain, call agent_yield instead of polling. Live detail distinguishes \
+    tool, provider/runtime and approval phases; unchanged last-tool \
+    counters do not establish a stall.";
 
-const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the user adds constraints, clarifies priorities, provides new facts, or asks the child to adjust direction. You can also ask the child a question; the answer arrives later as a [task-report] notification. The child reads updates at the next safe checkpoint; this does not interrupt an in-flight provider or tool call. It cannot be sent to a finished task. Returns an error, and the child does not receive the update, when it cannot be saved to the child's pending-message file. Updates not yet read survive a restart and reach the child when it is resumed. To check progress instead, use agent_status, which reads the task registry and does not run the child model.";
+const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the \
+    user adds constraints, clarifies priorities, provides new facts, or \
+    asks the child to adjust direction. You can also ask the child a \
+    question; the answer arrives later as a [task-report] notification. The \
+    child reads updates at the next safe checkpoint; this does not \
+    interrupt an in-flight provider or tool call. It cannot be sent to a \
+    finished task. Returns an error, and the child does not receive the \
+    update, when it cannot be saved to the child's pending-message file. \
+    Updates not yet read survive a restart and reach the child when it is \
+    resumed. To check progress instead, use agent_status, which reads the \
+    task registry and does not run the child model.";
 
-const AGENT_CANCEL_DESCRIPTION: &str = "Cancel a queued or running sub-agent task. Use it for tasks that are no longer needed or have concrete failure/stall evidence. Do not infer a stall from an unchanged last tool or step count while the task is in provider/runtime or approval activity. Cancellation is cooperative: the task stops at its next safe checkpoint, a task inside a tool call stops once that call settles, and a queued task never starts. The task ends as canceled and produces the usual [task-notification].";
+const AGENT_CANCEL_DESCRIPTION: &str = "Cancel a queued or running sub-agent task. Use it for tasks that are no \
+    longer needed or have concrete failure/stall evidence. Do not infer a \
+    stall from an unchanged last tool or step count while the task is in \
+    provider/runtime or approval activity. Cancellation is cooperative: the \
+    task stops at its next safe checkpoint, a task inside a tool call stops \
+    once that call settles, and a queued task never starts. The task ends \
+    as canceled and produces the usual [task-notification].";
 
-const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): it sees only prompt. inherit: it also receives a copy of this conversation up to this call, or up to fork_before when that is set. Prefer, in order: (1) fresh with a self-contained prompt: goal, paths, constraints, what to report back; (2) fresh, with the context you already obtained pasted into prompt (file excerpts, tool output, decisions), so the sub-agent skips the tool calls that produced it; (3) inherit, when that context is too large or too scattered to paste and the sub-agent would otherwise repeat expensive tool calls. A sub-agent never shares your prompt cache, so inherit costs one full uncached pass over this conversation per sub-agent, and everything irrelevant to the task goes in with it.";
+const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): \
+    it sees only prompt. inherit: it also receives a copy of this \
+    conversation up to this call, or up to fork_before when that is set. \
+    Prefer, in order: (1) fresh with a self-contained prompt: goal, paths, \
+    constraints, what to report back; (2) fresh, with the context you \
+    already obtained pasted into prompt (file excerpts, tool output, \
+    decisions), so the sub-agent skips the tool calls that produced it; (3) \
+    inherit, when that context is too large or too scattered to paste and \
+    the sub-agent would otherwise repeat expensive tool calls. A sub-agent \
+    never shares your prompt cache, so inherit costs one full uncached pass \
+    over this conversation per sub-agent, and everything irrelevant to the \
+    task goes in with it.";
 
-const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task id in agent_status, agent_send, agent_cancel, and /task. 1 to 64 letters, digits, '_' or '-'.";
+const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task \
+    id in agent_status, agent_send, agent_cancel, and /task. 1 to 64 \
+    letters, digits, '_' or '-'.";
 
-const AGENT_FORK_BEFORE_DESCRIPTION: &str = "Text of an earlier user prompt in this conversation that started a turn: its full text or its first line. The sub-agent receives this conversation as it was just before that prompt, including turns that compaction has since summarized, and context becomes inherit. Exactly one prompt must match; otherwise the error lists the prompts that can be used.";
-const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, name, description, and fork_before must be absent or empty, and context absent or \"fresh\"; the task keeps its recorded values. For completed tasks, use agent_status and read the saved report instead.";
+const AGENT_FORK_BEFORE_DESCRIPTION: &str = "Text of an earlier user prompt in this conversation that started a \
+    turn: its full text or its first line. The sub-agent receives this \
+    conversation as it was just before that prompt, including turns that \
+    compaction has since summarized, and context becomes inherit. Exactly \
+    one prompt must match; otherwise the error lists the prompts that can \
+    be used.";
+const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With \
+    resume set, this continues that task on its own transcript instead of \
+    starting a new one: prompt is the next user message delivered to it, \
+    and agent, model, name, description, and fork_before must be absent or \
+    empty, and context absent or \"fresh\"; the task keeps its recorded \
+    values. For completed tasks, use agent_status and read the saved report \
+    instead.";
 
 /// Parent agent tools, including explicit nonblocking `agent_yield`,
 /// without a built [`Runner`]. The redaction boundary check needs the tool set
@@ -87,7 +170,9 @@ fn agent_definition() -> ToolDefinition {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "The complete task, assigned file ownership, agreed shared interfaces, constraints and requested evidence. Include all call-site adaptations for a coherent change; the sub-agent sees nothing else."
+                    "description": "The complete task, assigned file ownership, agreed shared interfaces, \
+                        constraints and requested evidence. Include all call-site adaptations \
+                        for a coherent change; the sub-agent sees nothing else."
                 },
                 "description": {
                     "type": "string",
@@ -99,7 +184,11 @@ fn agent_definition() -> ToolDefinition {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Provider model ID for the sub-agent. Overrides the definition's model. When omitted, uses the definition's model, then the first configured sub-agent model, then this session's model. Otto does not validate availability; an ID the endpoint rejects fails the task with the provider's error."
+                    "description": "Provider model ID for the sub-agent. Overrides the definition's model. \
+                        When omitted, uses the definition's model, then the first configured \
+                        sub-agent model, then this session's model. Otto does not validate \
+                        availability; an ID the endpoint rejects fails the task with the \
+                        provider's error."
                 },
                 "agent": {
                     "type": "string",

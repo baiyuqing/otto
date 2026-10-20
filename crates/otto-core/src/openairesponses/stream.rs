@@ -293,9 +293,9 @@ impl StreamAssembler {
             self.event_name.clear();
             return Ok(());
         }
-        let data = std::mem::take(&mut self.data_lines).join(&b'\n');
+        let event_bytes = std::mem::take(&mut self.data_lines).join(&b'\n');
         self.data_bytes = 0;
-        let mut event: WireEvent = serde_json::from_slice(&data)
+        let mut event: WireEvent = serde_json::from_slice(&event_bytes)
             .map_err(|error| StreamError::Decode(error.to_string()))?;
         if event.event_type.is_empty() {
             event.event_type = std::mem::take(&mut self.event_name);

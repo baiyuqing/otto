@@ -198,7 +198,10 @@ async fn interrupted_text_reasoning_and_tool_streams_are_retried() {
     for prefix in [
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial answer long enough to be visible\"}\n\n",
         "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"partial reasoning long enough to be visible\"}\n\n",
-        "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item1\",\"call_id\":\"unfinished\",\"name\":\"get_time\",\"arguments\":\"\"}}\n\n",
+        "event: response.output_item.added\ndata: \
+            {\"type\":\"response.output_item.added\",\"output_index\":0,\
+            \"item\":{\"type\":\"function_call\",\"id\":\"item1\",\"call_id\":\"unfinished\",\
+            \"name\":\"get_time\",\"arguments\":\"\"}}\n\n",
     ] {
         let count = std::sync::atomic::AtomicUsize::new(0);
         let server = testserver::spawn(move |_| {

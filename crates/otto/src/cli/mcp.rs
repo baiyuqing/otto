@@ -16,7 +16,12 @@ use tokio_util::sync::CancellationToken;
 use super::login::{SharedWriter, browser_opener};
 use super::run::fail;
 
-const USAGE: &str = "usage: otto mcp login <server> | otto mcp logout <server> | otto mcp list | otto mcp add <server> --transport stdio --command CMD [--arg ARG...] [--env KEY=ENVVAR...] [--cwd DIR] | otto mcp add <server> --transport http --url URL [--header KEY=VALUE...] [--auth none|oauth] [--oauth-client-id ID] [--scope SCOPE...] | otto mcp remove <server> | otto mcp enable <server> | otto mcp disable <server>";
+const USAGE: &str = "usage: otto mcp login <server> | otto mcp logout <server> | otto mcp \
+    list | otto mcp add <server> --transport stdio --command CMD [--arg \
+    ARG...] [--env KEY=ENVVAR...] [--cwd DIR] | otto mcp add <server> \
+    --transport http --url URL [--header KEY=VALUE...] [--auth none|oauth] \
+    [--oauth-client-id ID] [--scope SCOPE...] | otto mcp remove <server> | \
+    otto mcp enable <server> | otto mcp disable <server>";
 
 /// Runs `otto mcp ...` and returns its exit code.
 pub async fn run(

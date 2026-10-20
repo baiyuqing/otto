@@ -93,7 +93,12 @@ test("counts Pi compactionSummary context metadata", async () => {
     '{"type":"session","version":3,"id":"probe-first","timestamp":"2026-08-28T10:00:00Z","cwd":"/workspace"}',
     '{"type":"message","id":"a1","parentId":null,"timestamp":"2026-08-28T10:00:01Z","message":{"role":"user","content":"u1","timestamp":1}}',
     '{"type":"compaction","id":"a2","parentId":"a1","timestamp":"2026-08-28T10:00:02Z","summary":"summary","firstKeptEntryId":"a1","tokensBefore":17}',
-    '{"type":"message","id":"a3","parentId":"a2","timestamp":"2026-08-28T10:00:03Z","message":{"role":"assistant","content":"a1","api":"openai-completions","provider":"openai-compatible","model":"model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":3}}',
+    '{"type":"message","id":"a3","parentId":"a2","timestamp":"2026-08-28T10:00:03Z",' +
+      '"message":{"role":"assistant","content":"a1","api":"openai-completions",' +
+      '"provider":"openai-compatible","model":"model",' +
+      '"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,' +
+      '"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},' +
+      '"stopReason":"stop","timestamp":3}}',
   ], { OTTO_PI_INTEROP: "1" }, async (result) => {
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(result.stdout);

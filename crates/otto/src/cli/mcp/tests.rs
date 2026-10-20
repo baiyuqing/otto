@@ -274,7 +274,10 @@ async fn edits_keep_every_other_byte_of_the_file() {
     let directory = home.path().join(".config").join("otto");
     std::fs::create_dir_all(&directory).expect("config dir");
     let path = directory.join("config.toml");
-    let original = "# my config\ndefault_profile = \"a\"\n\n# servers\n[mcp.servers.docs]\ntransport = \"http\" # remote\nurl = \"https://mcp.example.com\"\n\n# profiles\n[profiles.a]\nprovider = \"chatgpt\"\n";
+    let original = "# my config\ndefault_profile = \"a\"\n\n# \
+        servers\n[mcp.servers.docs]\ntransport = \"http\" # remote\nurl = \
+        \"https://mcp.example.com\"\n\n# profiles\n[profiles.a]\nprovider = \
+        \"chatgpt\"\n";
     std::fs::write(&path, original).expect("write config");
     let lookup = HashMap::from([(
         "HOME".to_string(),

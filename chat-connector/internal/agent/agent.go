@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	stderrLines  = 20
-	minDelay     = time.Second
-	maxDelay     = 60 * time.Second
-	resetAfter   = 60 * time.Second
-	exitWait     = 5 * time.Second
-	closeTimeout = 10 * time.Second
+	stderrLines     = 20
+	stderrLineBytes = 64 << 10 // longest stderr line kept before a forced split
+	minDelay        = time.Second
+	maxDelay        = 60 * time.Second
+	resetAfter      = 60 * time.Second
+	exitWait        = 5 * time.Second
+	closeTimeout    = 10 * time.Second
 )
 
 // ErrNotOpen is returned by Prompt when the session is not open in the

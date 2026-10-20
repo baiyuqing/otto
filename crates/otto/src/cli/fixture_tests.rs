@@ -14,7 +14,7 @@ use otto_core::config::{File, Profile};
 use otto_core::model::{Block, BlockType, Message, Role};
 
 use super::controller::Controller;
-use crate::runtime::builder::{Builder, Shared, leaked_workspace, resolve_initial_runtime};
+use crate::runtime::builder::{Builder, Shared, resolve_initial_runtime};
 use crate::runtime::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 pub fn config() -> File {
@@ -89,7 +89,9 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
     });
     let mut builder = Builder::for_workspace(
         shared,
-        leaked_workspace(workspace_root).expect("workspace"),
+        std::sync::Arc::new(
+            crate::tool::workspace::Workspace::new(workspace_root).expect("workspace"),
+        ),
         workspace_root.to_string_lossy().into_owned(),
         otto_core::config::McpRuntime {
             enabled: false,

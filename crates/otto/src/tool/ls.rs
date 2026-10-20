@@ -5,6 +5,7 @@
 //! never followed, so the listing cannot reveal a target outside the workspace.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -25,13 +26,13 @@ struct LsArgs {
 }
 
 /// Lists a workspace directory.
-pub struct LsTool<'a> {
-    workspace: &'a Workspace,
+pub struct LsTool {
+    workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }
 
-impl<'a> LsTool<'a> {
-    pub fn new(workspace: &'a Workspace, max_output_bytes: usize) -> Self {
+impl LsTool {
+    pub fn new(workspace: Arc<Workspace>, max_output_bytes: usize) -> Self {
         Self {
             workspace,
             max_output_bytes,
@@ -61,7 +62,7 @@ pub(crate) const LS_RETRY: (&str, otto_core::model::RetrySafety) =
     ("ls", otto_core::model::RetrySafety::ReadOnly);
 
 #[async_trait::async_trait]
-impl Tool for LsTool<'_> {
+impl Tool for LsTool {
     fn retry_safety(&self) -> otto_core::model::RetrySafety {
         LS_RETRY.1
     }
@@ -139,7 +140,7 @@ mod tests {
         write_file(root.path(), "dir/nested.txt", "nested");
         std::os::unix::fs::symlink(root.path().join("a.txt"), root.path().join("link")).unwrap();
         let workspace = workspace(root.path());
-        let tool = LsTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = LsTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         let listing = run(&tool, "{}").await;
         assert!(!listing.is_error, "{listing:?}");
@@ -157,7 +158,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("outside")).unwrap();
         let workspace = workspace(root.path());
-        let tool = LsTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let tool = LsTool::new(Arc::clone(&workspace), MAX_OUTPUT_BYTES);
 
         for arguments in [
             r#"{"extra":true}"#,
@@ -185,7 +186,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_file(root.path(), "long-file-name.txt", "x");
         let workspace = workspace(root.path());
-        let result = run(&LsTool::new(&workspace, 8), "{}").await;
+        let result = run(&LsTool::new(Arc::clone(&workspace), 8), "{}").await;
         assert!(!result.is_error, "{result:?}");
         assert!(result.content.contains("truncated"), "{result:?}");
         assert!(result.content.len() <= 80, "{result:?}");

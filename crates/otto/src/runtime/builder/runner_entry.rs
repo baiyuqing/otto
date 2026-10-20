@@ -41,12 +41,12 @@ impl Builder {
 
     pub(crate) fn builtin_file_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
         vec![
-            Box::new(read::ReadTool::new(self.workspace, max_output)),
-            Box::new(grep::GrepTool::new(self.workspace, max_output)),
-            Box::new(find::FindTool::new(self.workspace, max_output)),
-            Box::new(ls::LsTool::new(self.workspace, max_output)),
-            Box::new(write::WriteTool::new(self.workspace)),
-            Box::new(edit::EditTool::new(self.workspace)),
+            Box::new(read::ReadTool::new(Arc::clone(&self.workspace), max_output)),
+            Box::new(grep::GrepTool::new(Arc::clone(&self.workspace), max_output)),
+            Box::new(find::FindTool::new(Arc::clone(&self.workspace), max_output)),
+            Box::new(ls::LsTool::new(Arc::clone(&self.workspace), max_output)),
+            Box::new(write::WriteTool::new(Arc::clone(&self.workspace))),
+            Box::new(edit::EditTool::new(Arc::clone(&self.workspace))),
         ]
     }
 

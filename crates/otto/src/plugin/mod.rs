@@ -4,6 +4,7 @@
 pub mod hooks;
 pub mod package;
 mod runtime;
+use crate::hex::to_hex;
 use crate::{
     fsops,
     tool::root::{self, Root},
@@ -479,7 +480,7 @@ pub(crate) fn digest(path: &Path) -> Result<String, String> {
         Ok(())
     }
     walk(&root, Path::new("."), &mut hash, &mut count, &mut total, 0)?;
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(to_hex(&hash.finalize()))
 }
 fn permissions_tree(path: &Path, writable: bool) -> Result<(), String> {
     fs::set_permissions(

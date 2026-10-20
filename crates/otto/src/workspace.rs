@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::fsops;
+use crate::hex::to_hex;
 
 pub const MARKER: &str = ".otto/workspace.json";
 /// Protect the marker and its parent entry from model-originated replacement.
@@ -211,7 +212,7 @@ fn update(workspace: &Path, memory_override: &str, fork: bool) -> Result<Identit
 }
 
 fn legacy_session_key(canonical: &str) -> String {
-    format!("{:x}", Sha256::digest(canonical.as_bytes()))[..16].to_owned()
+    to_hex(&Sha256::digest(canonical.as_bytes()))[..16].to_owned()
 }
 
 /// Stable directory key with a read-only legacy fallback.

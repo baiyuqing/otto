@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -143,12 +144,12 @@ fn replacement(old_text: Option<&str>, new_text: Option<&str>) -> Result<EditRep
 
 /// Replaces text in a workspace file.
 pub struct EditTool<'a> {
-    workspace: &'a Workspace,
+    workspace: Arc<Workspace>,
     publish: &'a dyn PublishOps,
 }
 
 impl<'a> EditTool<'a> {
-    pub fn new(workspace: &'a Workspace) -> Self {
+    pub fn new(workspace: Arc<Workspace>) -> Self {
         Self {
             workspace,
             publish: &PosixPublish,
@@ -156,7 +157,7 @@ impl<'a> EditTool<'a> {
     }
 
     #[cfg(test)]
-    fn with_publish_ops(workspace: &'a Workspace, publish: &'a dyn PublishOps) -> Self {
+    fn with_publish_ops(workspace: Arc<Workspace>, publish: &'a dyn PublishOps) -> Self {
         Self { workspace, publish }
     }
 
@@ -180,9 +181,12 @@ impl<'a> EditTool<'a> {
             Ok(relative) => relative,
             Err(error) => return preflight_error(error),
         };
-        if let Err(error) =
-            write_file_atomic(self.workspace, &relative, replaced.as_bytes(), self.publish)
-        {
+        if let Err(error) = write_file_atomic(
+            &self.workspace,
+            &relative,
+            replaced.as_bytes(),
+            self.publish,
+        ) {
             return error.into_tool_result();
         }
         let mut output = format!("edited {rel_path}\n{diff}");

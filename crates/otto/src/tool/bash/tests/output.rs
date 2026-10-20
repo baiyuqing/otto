@@ -152,7 +152,7 @@ async fn default_preview_caps_large_output_and_read_can_retrieve_an_omitted_rang
         .lines()
         .find_map(|line| line.strip_prefix("full_output: "))
         .unwrap();
-    let read = crate::tool::read::ReadTool::new(&workspace, 51200);
+    let read = crate::tool::read::ReadTool::new(std::sync::Arc::clone(&workspace), 51200);
     let args =
         serde_json::value::to_raw_value(&json!({"path":path,"offset":2001,"limit":1})).unwrap();
     let excerpt = read.execute(&args, &CancellationToken::new()).await;

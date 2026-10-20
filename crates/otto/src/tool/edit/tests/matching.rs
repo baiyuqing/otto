@@ -6,7 +6,7 @@ use super::*;
 async fn an_ambiguous_or_absent_match_is_an_error() {
     let (root, _) = sample("same\nsame\n");
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
 
     let ambiguous = run(
         &tool,
@@ -64,7 +64,7 @@ async fn overlapping_occurrences_are_ambiguous() {
             "new_text": "X",
         })
         .to_string();
-        let result = run(&EditTool::new(&workspace), &arguments).await;
+        let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
         assert!(result.is_error, "{name}: {result:?}");
         assert_eq!(
             result.content,
@@ -83,7 +83,7 @@ async fn overlapping_occurrences_are_ambiguous() {
 async fn match_errors_show_only_bounded_file_lines() {
     let (root, _) = sample("dup\ndup\n");
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
 
     let arguments = serde_json::json!({
         "path": "sample.txt",
@@ -101,7 +101,7 @@ async fn match_errors_show_only_bounded_file_lines() {
     let (root, _) = sample(&"dup\n".repeat(300));
     let big = crate::tool::testutil::workspace(root.path());
     let ambiguous = run(
-        &EditTool::new(&big),
+        &EditTool::new(Arc::clone(&big)),
         r#"{"path":"sample.txt","old_text":"dup","new_text":"new"}"#,
     )
     .await;
@@ -129,7 +129,7 @@ async fn match_errors_show_only_bounded_file_lines() {
         "new_text": "new",
     })
     .to_string();
-    let capped = run(&EditTool::new(&big), &arguments).await;
+    let capped = run(&EditTool::new(Arc::clone(&big)), &arguments).await;
     assert!(capped.is_error, "{capped:?}");
     let (_, listing) = capped.content.split_once(":\n").unwrap();
     assert!(listing.ends_with("\n... (truncated)"), "{capped:?}");
@@ -151,7 +151,7 @@ async fn an_ambiguous_match_lists_lines_around_each_match() {
         "new_text": "X",
     })
     .to_string();
-    let result = run(&EditTool::new(&workspace), &arguments).await;
+    let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
     assert!(result.is_error, "{result:?}");
     assert_eq!(
         result.content,
@@ -177,7 +177,7 @@ async fn an_ambiguous_fuzzy_match_maps_to_file_lines() {
     let (root, _) = sample("a\nsay(\u{201c}hi\u{201d})\nb\nc\nsay(\u{201c}hi\u{201d})\nd\n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"say(\"hi\")","new_text":"X"}"#,
     )
     .await;
@@ -201,7 +201,7 @@ async fn a_stale_old_text_shows_the_closest_current_lines() {
         "new_text": "X",
     })
     .to_string();
-    let result = run(&EditTool::new(&workspace), &arguments).await;
+    let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
     assert!(result.is_error, "{result:?}");
     assert_eq!(
         result.content,
@@ -226,7 +226,7 @@ async fn the_closest_lines_take_the_earliest_tie_and_stop_at_20() {
     let (root, _) = sample("one\nmid\none\n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"one\nmissing","new_text":"X"}"#,
     )
     .await;
@@ -246,7 +246,7 @@ async fn the_closest_lines_take_the_earliest_tie_and_stop_at_20() {
         "new_text": "X",
     })
     .to_string();
-    let result = run(&EditTool::new(&workspace), &arguments).await;
+    let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
     let listing: Vec<String> = (1..=20).map(|n| format!("{n:>2} | l{n}")).collect();
     assert!(
             result.content.ends_with(&format!(
@@ -262,7 +262,7 @@ async fn a_not_found_without_any_matching_line_says_so() {
     let (root, _) = sample("one\ntwo\n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"zzz\nyyy","new_text":"X"}"#,
     )
     .await;
@@ -277,7 +277,7 @@ async fn a_batch_match_error_keeps_its_edit_number_and_listing() {
     let (root, path) = sample("a\nb\nc\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","edits":[{"old_text":"a","new_text":"A"},{"old_text":"x\nb","new_text":"B"}]}"#,
         )
         .await;
@@ -294,7 +294,7 @@ async fn a_long_file_line_is_cut_in_an_error() {
     let (root, _) = sample(&format!("{line}\n{line}\n"));
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"AB","new_text":"X"}"#,
     )
     .await;
@@ -322,7 +322,7 @@ async fn binary_and_oversized_files_are_rejected() {
         .set_len(crate::tool::read::MAX_READ_FILE_BYTES + 1)
         .unwrap();
     let workspace = workspace(root.path());
-    let tool = EditTool::new(&workspace);
+    let tool = EditTool::new(Arc::clone(&workspace));
 
     let binary = run(&tool, r#"{"path":"binary","old_text":"a","new_text":"c"}"#).await;
     assert!(

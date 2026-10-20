@@ -70,8 +70,8 @@ async fn a_cancelled_turn_reports_the_guidance_it_never_delivered() {
 /// A turn that delivers its guidance loses nothing, so it adds no notice.
 #[tokio::test]
 async fn a_turn_that_delivers_its_guidance_reports_no_loss() {
+    use crate::subagent::doubles_tests::{FakeProvider, assistant_text, match_any};
     use crate::subagent::tasks::Tasks;
-    use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any};
     use otto_core::model::Usage;
 
     let provider = FakeProvider::new();

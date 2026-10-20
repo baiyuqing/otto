@@ -53,9 +53,9 @@ pub(super) fn heartbeat_released(session_path: &str) -> bool {
 #[tokio::test]
 async fn migrate_cancels_a_running_child_task_and_releases_the_lease() {
     use crate::cli::terminate::{Action, Terminate};
+    use crate::subagent::doubles_tests::{FakeProvider, assistant_text, match_any, wait_status};
     use crate::subagent::runner::StartRequest;
     use crate::subagent::tasks::{TaskStatus, Tasks};
-    use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any, wait_status};
 
     let terminate = Terminate::new();
     assert_eq!(terminate.on_signal(true), Action::Migrate);
@@ -64,15 +64,15 @@ async fn migrate_cancels_a_running_child_task_and_releases_the_lease() {
 
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let mut builder = testutil::builder(workspace.path(), sessions.path());
+    let mut builder = fixture_tests::builder(workspace.path(), sessions.path());
     builder.shared_mut().config.failover = otto_core::config::Failover {
         enabled: true,
         lease_seconds: 12,
     };
-    let runtime = testutil::initial_runtime(&builder);
+    let runtime = fixture_tests::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("create session");
     session
-        .append(testutil::user("go"))
+        .append(fixture_tests::user("go"))
         .await
         .expect("first append");
     let session_path = session.path();
@@ -85,7 +85,7 @@ async fn migrate_cancels_a_running_child_task_and_releases_the_lease() {
     child_provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
 
     let mut child_config =
-        crate::subagent::testsupport::test_config(&child_provider, &tasks, Vec::new());
+        crate::subagent::doubles_tests::test_config(&child_provider, &tasks, Vec::new());
     child_config.max_parallel = 1;
     let parent_path = PathBuf::from(&session_path);
     child_config.child_session = Some(Arc::new(move |task_id: &str| {

@@ -133,7 +133,7 @@ async fn a_followup_whose_step_already_ran_is_not_run_again() {
 
 #[tokio::test]
 async fn read_approval_reload_failure_rolls_back_and_does_not_grant() {
-    use crate::cli::testutil::{FakeSandbox, seatbelt_info};
+    use crate::cli::fixture_tests::{FakeSandbox, seatbelt_info};
     use crate::runtime::info::SandboxNetwork;
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();

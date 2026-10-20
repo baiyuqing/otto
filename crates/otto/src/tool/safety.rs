@@ -85,7 +85,7 @@ mod tests {
                 let name = path.file_name().unwrap().to_string_lossy();
                 // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
                 let stem = name.trim_end_matches(".rs");
-                if name == "testsupport.rs" || stem == "tests" || stem.ends_with("_tests") {
+                if stem == "tests" || stem.ends_with("_tests") {
                     continue;
                 }
                 if path.is_dir() {

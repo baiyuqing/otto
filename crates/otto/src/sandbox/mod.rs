@@ -36,7 +36,7 @@ pub mod seatbelt;
 pub mod worktrees;
 
 #[cfg(test)]
-pub(crate) mod conformance;
+pub(crate) mod conformance_tests;
 
 /// Workspace paths that stay read-only because git runs hooks and the
 /// configuration's program settings outside the sandbox: `(suffix, subpath)`,

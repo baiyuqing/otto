@@ -1,5 +1,5 @@
 use super::*;
-use crate::cli::testutil;
+use crate::cli::fixture_tests;
 use std::path::{Path, PathBuf};
 
 /// Writes `<root>/<directory>/<file>` with the standard frontmatter shape
@@ -34,7 +34,7 @@ fn fixture() -> Fixture {
     let workspace_dir = tempfile::tempdir().expect("workspace");
     let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
     let workspace = std::fs::canonicalize(workspace_dir.path()).expect("canonical workspace");
-    let mut builder = testutil::builder(&workspace, workspace_dir.path());
+    let mut builder = fixture_tests::builder(&workspace, workspace_dir.path());
     builder
         .shared_mut()
         .environment

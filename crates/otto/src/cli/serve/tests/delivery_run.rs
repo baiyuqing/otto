@@ -46,7 +46,7 @@ async fn controlled_delivery_run_persists_notifies_and_closes() {
         config_path: PathBuf::new(),
         loaded: tokio::sync::Mutex::new(BTreeMap::new()),
     });
-    let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder);
     let manager = Arc::new(
         DeliveryManager::open(
             &home.path().to_string_lossy(),
@@ -173,7 +173,7 @@ async fn delivery_source_notification_is_once_only_and_capability_free() {
         config_path: PathBuf::new(),
         loaded: tokio::sync::Mutex::new(BTreeMap::new()),
     });
-    let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder);
     let manager = Arc::new(
         DeliveryManager::open(
             &home.path().to_string_lossy(),
@@ -254,7 +254,7 @@ async fn delivery_tool_factory_is_fresh_and_unadmitted_preflight_has_no_source_b
         config_path: PathBuf::new(),
         loaded: tokio::sync::Mutex::new(BTreeMap::new()),
     });
-    let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder);
     let manager = Arc::new(
         DeliveryManager::open(
             &home.path().to_string_lossy(),
@@ -367,8 +367,8 @@ async fn delivery_factory_complete_controlled_flow_persists_status_notifies_and_
         git_text,
         head,
     ])));
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
-    let mut builder = crate::cli::testutil::builder(&target_path, home.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(home.path());
+    let mut builder = crate::cli::fixture_tests::builder(&target_path, home.path());
     builder.command_executor = Some(replies as Arc<dyn crate::sandbox::CommandExecutor>);
     builder.sandbox_environment = Some(Vec::new());
     let host = Arc::new(WorkspaceHost {
@@ -387,7 +387,7 @@ async fn delivery_factory_complete_controlled_flow_persists_status_notifies_and_
             host,
         )])),
     });
-    let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+    let runtime = crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder);
     let manager = Arc::new(
         DeliveryManager::open(
             &home.path().to_string_lossy(),

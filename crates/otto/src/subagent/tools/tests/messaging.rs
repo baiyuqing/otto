@@ -122,7 +122,7 @@ async fn agent_send_can_address_named_queued_task() {
     let queued_request = provider
         .requests()
         .into_iter()
-        .find(|request| crate::subagent::testsupport::last_user_text(request) == "b")
+        .find(|request| crate::subagent::doubles_tests::last_user_text(request) == "b")
         .expect("queued task eventually ran");
     assert!(queued_request.messages.iter().any(|message| {
         message.role == otto_core::model::Role::Context

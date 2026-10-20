@@ -52,7 +52,7 @@ async fn new_session_keeps_runtime_changed_in_the_current_session() {
 #[tokio::test]
 async fn resume_keeps_process_selection_and_appends_without_rewriting_history() {
     use crate::runtime::builder::TEST_PROVIDERS;
-    use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any};
+    use crate::subagent::doubles_tests::{FakeProvider, assistant_text, match_any};
     struct ProviderGuard(String);
     impl Drop for ProviderGuard {
         fn drop(&mut self) {

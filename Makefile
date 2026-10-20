@@ -51,7 +51,7 @@ rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
 
-code-limits: ## fail if a code file has over 800 lines, a line over 200 characters, or a generic name
+code-limits: ## fail if a code file has over 800 lines, a line over 200 characters, a generic name, or a test module name that disagrees with cfg(test)
 	node scripts/code-limits.mjs
 
 license-check: ## fail if a shipped Rust crate uses a license outside the allowlist in scripts/license-check.mjs

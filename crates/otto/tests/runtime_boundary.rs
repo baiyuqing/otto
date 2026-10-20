@@ -7,7 +7,7 @@
 //! `docs/specs/2026-10-05-otto-crate-split.md`.
 //!
 //! The scan covers the non-test source of every runtime module. Test code
-//! may still use frontend helpers such as `cli::testutil`. Fix a failure by
+//! may still use frontend helpers such as `cli::fixture_tests`. Fix a failure by
 //! moving the item the runtime needs into the runtime layer, not by adding an
 //! exemption.
 
@@ -220,8 +220,8 @@ fn the_scan_finds_paths_groups_and_super_imports() {
 #[test]
 fn test_only_items_are_not_scanned() {
     let source = "use crate::app::Controller;\n\
-                  #[cfg(test)]\nmod mcp_tests {\n    use crate::cli::testutil;\n}\n\
-                  #[cfg(test)]\npub(crate) fn helper() {\n    use crate::cli::testutil::builder;\n}\n\
+                  #[cfg(test)]\nmod mcp_tests {\n    use crate::cli::fixture_tests;\n}\n\
+                  #[cfg(test)]\npub(crate) fn helper() {\n    use crate::cli::fixture_tests::builder;\n}\n\
                   #[cfg(test)]\nuse crate::tui::app;\n\
                   fn production() { crate::server::listen(); }\n";
     assert_eq!(

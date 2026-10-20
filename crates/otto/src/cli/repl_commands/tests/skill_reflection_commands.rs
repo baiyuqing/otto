@@ -35,7 +35,7 @@ async fn controller_with_reflection(
 ) -> (Controller, Arc<crate::reflection::Store>) {
     use crate::reflection::{Reflector, Store};
     let store = Arc::new(Store::open_in_memory().expect("store"));
-    let mut builder = testutil::builder(workspace, sessions);
+    let mut builder = fixture_tests::builder(workspace, sessions);
     builder.shared_mut().home = home.to_string_lossy().into_owned();
     let skills_root = home.join(".otto/skills");
     builder.shared_mut().config.skills.paths =
@@ -50,7 +50,7 @@ async fn controller_with_reflection(
     )
     .expect("roots");
     before_build(&roots, &store);
-    let runtime = testutil::initial_runtime(&builder);
+    let runtime = fixture_tests::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder
         .build_runner(&session, &runtime)
@@ -140,7 +140,7 @@ async fn the_repl_lists_and_shows_reflection_run_logs() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let logs = tempfile::tempdir().expect("logs");
-    let mut builder = testutil::builder(workspace.path(), sessions.path());
+    let mut builder = fixture_tests::builder(workspace.path(), sessions.path());
     builder.shared_mut().reflector = Arc::new(
         crate::reflection::Reflector::new(Default::default(), None)
             .with_log_dir(logs.path().to_path_buf()),
@@ -152,7 +152,7 @@ async fn the_repl_lists_and_shows_reflection_run_logs() {
             "# Reflection run abcd1234-run\n\n- trigger: requested\n- status: ok\n- started: 2026-10-05T02:03:00Z\n\n## Retrospective\n\n> Read the docs first.\n",
         )
         .expect("write a log");
-    let runtime = testutil::initial_runtime(&builder);
+    let runtime = fixture_tests::initial_runtime(&builder);
     let session_store = builder.create_session(&runtime).expect("session");
     let runner = builder
         .build_runner(&session_store, &runtime)
@@ -260,7 +260,7 @@ async fn skill_revert_refuses_what_reflection_does_not_own() {
 async fn skill_generated_reports_when_reflection_is_off() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = testutil::controller(workspace.path(), sessions.path()).await;
+    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
     let text = skill_report(&controller, "generated");
     assert!(text.starts_with("skill generated:"), "{text}");
     let text = skill_report(&controller, "revert lint-gate");

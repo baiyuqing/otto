@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
-mod common;
-use common::{Script, serve, text_reply, tool_call_reply};
+mod binary_harness;
+use binary_harness::{Script, serve, text_reply, tool_call_reply};
 
 use otto::session::Store;
 use otto_core::model::{Block, BlockType};

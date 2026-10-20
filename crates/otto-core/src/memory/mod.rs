@@ -4,10 +4,10 @@
 //! Implementations are concurrent, honor cancellation, and report uncertain
 //! effects without inventing completion or safe retry guarantees.
 
-mod types;
+mod memory_types;
 mod validate;
 
-pub use types::*;
+pub use memory_types::*;
 pub use validate::*;
 
 use crate::operation::OperationControl;

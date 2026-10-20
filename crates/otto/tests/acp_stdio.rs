@@ -12,8 +12,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-mod common;
-use common::{
+mod binary_harness;
+use binary_harness::{
     Script, assert_terminal_tool_update, serve, summary_reply, text_reply, tool_call_reply,
 };
 

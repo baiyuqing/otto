@@ -1,4 +1,3 @@
-
 use super::*;
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();

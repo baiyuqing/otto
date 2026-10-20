@@ -1,4 +1,3 @@
-
 use super::*;
 use otto_core::approval::{Authority, Subject};
 use std::sync::Mutex;

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::storage::{SqlCapabilities, SqlConnection, SqlDialect, WriteIsolation};
 use otto_core::approval::ApprovalMode;

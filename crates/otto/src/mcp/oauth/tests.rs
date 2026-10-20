@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::faults::http::{
     self as testserver, json_response, status_response, unauthorized_response,

@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn apply(events: &[&str]) -> Vec<Item> {

@@ -1,0 +1,284 @@
+//! Memory service opening and the straight-through `start` phase.
+
+use super::*;
+
+/// Opens the memory service and the workspace memory scope when the boundary
+/// allows dynamic content, then the advice audit log and the recall limits.
+/// The error is already redacted; the caller closes what it opened.
+pub(crate) fn open_memory(
+    builder: &mut Builder,
+    memory_config: &MemoryRuntime,
+    runtime: &Runtime,
+    dynamic_content: bool,
+    home: &str,
+    stderr: &mut (dyn Write + Send),
+) -> Result<(), String> {
+    let resolved = runtime;
+    let workspace_path = builder.workspace_path.clone();
+    if dynamic_content && memory_config.enabled {
+        builder.workspace_scope =
+            crate::runtime::wiring::workspace_memory_scope(memory_config, &workspace_path)?;
+        if let Some(remote) = &memory_config.remote {
+            if builder.memory.extension.is_some() {
+                return Err(
+                    "an injected memory extension cannot be combined with backend = \"remote\""
+                        .into(),
+                );
+            }
+            let token = builder
+                .environment
+                .get(&remote.token_env)
+                .cloned()
+                .unwrap_or_default();
+            if token.is_empty() {
+                let message = format!(
+                    "memory service token variable {} is unset or empty",
+                    remote.token_env
+                );
+                if memory_config.required {
+                    return Err(message);
+                }
+                let _ = writeln!(stderr, "warning: {message}; continuing without memory");
+            } else {
+                let service = Arc::new(crate::memory::remote::RemoteService::new(
+                    crate::memory::remote::Config {
+                        url: remote.url.clone(),
+                        token,
+                        recall_timeout: remote.recall_timeout,
+                        logger: builder.logger.clone(),
+                    },
+                )?);
+                let user_scope = otto_core::memory::Scope {
+                    namespace: "user".into(),
+                    id: remote.user.clone(),
+                };
+                let grant = remote_learning_grant(user_scope.clone(), &builder.workspace_scope);
+                let turns = crate::memory::remote::upload::Uploader::new(
+                    service.clone(),
+                    builder.logger.clone(),
+                );
+                let shared = builder.shared_mut();
+                shared.memory.turns = Some(turns);
+                shared.memory.extension = Some(
+                    crate::runtime::wiring::MemoryExtension::owned(service, user_scope)
+                        .with_organization(remote.organization.clone())
+                        .with_learning(grant),
+                );
+            }
+        }
+        if let Some(extension) = builder.memory.extension.clone() {
+            extension
+                .user_scope
+                .validate()
+                .map_err(|error| error.to_string())?;
+            let guard_values: Vec<String> = builder
+                .secret_values(Some(runtime))
+                .into_iter()
+                .filter(|value| value.len() <= crate::memory::MAX_EXACT_GUARD_VALUE_BYTES)
+                .collect();
+            let exact = crate::memory::guard::ExactGuard::new(&guard_values)
+                .map_err(|_| "build memory secret guard".to_string())?;
+            let guard = crate::memory::guard::CompositeGuard::new(vec![
+                Box::new(crate::memory::guard::DefaultGuard),
+                Box::new(exact),
+            ]);
+            let client = extension
+                .client()
+                .map_err(|error| error.to_string())?
+                .with_guard(Arc::new(guard))
+                .map_err(|error| builder.redact_error(&error.to_string(), Some(runtime)))?;
+            if memory_config.require_encryption
+                && client.describe().encryption_at_rest != Some(true)
+            {
+                return Err("selected memory service does not guarantee encryption at rest".into());
+            }
+            let shared = builder.shared_mut();
+            shared.memory.client = Some(Arc::new(client));
+            shared.memory.usable = true;
+        } else if memory_config.remote.is_none() {
+            let secrets = builder.secret_values(Some(resolved));
+            match crate::runtime::wiring::open_memory_service_with_storage(
+                &builder.storage,
+                memory_config,
+                &secrets,
+                stderr,
+            ) {
+                Ok((service, user_scope, usable)) => {
+                    let shared = builder.shared_mut();
+                    shared.memory.service = service;
+                    shared.memory.user_scope = user_scope;
+                    shared.memory.usable = usable;
+                    if usable {
+                        let adapter = crate::memory::adapter::BuiltinAdapter::new(
+                            shared.memory.service.clone(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                        shared.memory.client = Some(Arc::new(
+                            crate::memory::client::Client::new(Arc::new(adapter))
+                                .map_err(|error| error.to_string())?,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(builder.redact_error(&error, Some(resolved)));
+                }
+            }
+        }
+    }
+    let advice_audit = if builder.memory.usable && builder.memory.extension.is_none() {
+        match builder
+            .storage
+            .memory_advice(&Path::new(home).join(".otto/memory-advice.db"))
+        {
+            Ok(store) => Some(store),
+            Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "warning: memory advice audit log unavailable, continuing without it"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    {
+        let shared = builder.shared_mut();
+        shared.memory.recall_limit = memory_config.max_results;
+        shared.memory.recall_token_budget = memory_config.recall_tokens;
+        shared.memory.advice_audit = advice_audit;
+    }
+    Ok(())
+}
+
+/// The remote backend's grant: explicit writes to the user scope and one
+/// workspace scope. The client checks every request's scopes against it, so
+/// each workspace `otto serve` loads needs its own (`load_workspace`).
+pub(super) fn remote_learning_grant(
+    user_scope: otto_core::memory::Scope,
+    workspace_scope: &crate::memory::Scope,
+) -> otto_core::memory::LearningGrant {
+    otto_core::memory::LearningGrant {
+        scopes: vec![
+            user_scope,
+            otto_core::memory::Scope {
+                namespace: workspace_scope.namespace.clone(),
+                id: workspace_scope.id.clone(),
+            },
+        ],
+        input_classes: vec!["explicit_memory".into()],
+        background: false,
+    }
+}
+
+// ---- straight-through start ----
+
+pub(crate) struct StartOptions {
+    pub(crate) memory_extension: Option<super::super::wiring::MemoryExtension>,
+    pub(crate) host_entries: Vec<Vec<u8>>,
+    pub(crate) config_path: String,
+    pub(crate) explicit_config: bool,
+    pub(crate) cwd: String,
+    pub(crate) overrides: Overrides,
+    pub(crate) logger: Arc<crate::log::Logger>,
+    pub(crate) disabled: Disabled,
+}
+
+pub(crate) struct Started {
+    pub(crate) builder: Builder,
+    pub(crate) runtime: Runtime,
+    pub(crate) workspace_path: String,
+    pub(crate) sandbox: WorkspaceSandbox,
+}
+
+/// Builds the runtime `otto acp` runs on, from environment capture to the
+/// memory service, without a frontend. Warnings go to `stderr` as each step
+/// emits them; `Err` is the text the CLI would pass to `fail`.
+pub(crate) async fn start(
+    options: StartOptions,
+    cancel: &CancellationToken,
+    stderr: &mut (dyn Write + Send),
+) -> Result<Started, String> {
+    let host_entries = capture_environment(options.host_entries)?;
+    let lookup = environment_lookup(&host_entries)?;
+    let mut loaded = load(
+        &host_entries,
+        &lookup,
+        &options.config_path,
+        options.explicit_config,
+        &options.cwd,
+        &options.overrides.base_url,
+    )?;
+    let storage = open_storage(
+        &loaded,
+        &lookup,
+        &crate::runtime::storage::BackendRegistry::default(),
+    )
+    .await?;
+    let configured = configure(&mut loaded, &host_entries, &lookup, &mut *stderr);
+    // After the boundary and the credential capture, so the redaction set
+    // does not depend on the disabled components.
+    options.disabled.apply(&mut loaded.config);
+    let workspace_path = canonical_workspace(&options.cwd, &loaded.boundary)?;
+    let prepared = prepare_workspace(&loaded, &configured.environment, &storage, &workspace_path)?;
+    let composed = compose(
+        ComposeOptions {
+            memory_extension: options.memory_extension,
+            sandbox_driver_override: None,
+            no_session: false,
+            headless: false,
+            overrides: options.overrides.clone(),
+            explicit_config: options.explicit_config,
+            logger: options.logger,
+            disabled: options.disabled,
+        },
+        &loaded,
+        &configured,
+        &host_entries,
+        &lookup,
+        &storage,
+        &prepared,
+        &workspace_path,
+        &mut *stderr,
+    )?;
+    let mut builder = composed.builder;
+    let runtime = initial_runtime(&builder, None)?;
+    let sandbox = compose_workspace_sandbox(
+        &mut builder,
+        &composed.sandbox_settings,
+        Path::new(&loaded.config_path),
+        options.explicit_config,
+        None,
+        &runtime.api_key_env,
+        true,
+        &options.disabled,
+        cancel,
+        &mut *stderr,
+    )
+    .await;
+    if cancel.is_cancelled() {
+        let _ = sandbox.control.close().await;
+        return Err("startup cancelled".to_string());
+    }
+    if !builder.boundary_allows_dynamic(Some(&runtime)) {
+        let _ = sandbox.control.close().await;
+        return Err(SESSION_OPERATION_UNAVAILABLE.to_string());
+    }
+    if let Err(message) = open_memory(
+        &mut builder,
+        &prepared.memory_config,
+        &runtime,
+        true,
+        &loaded.home,
+        &mut *stderr,
+    ) {
+        let _ = sandbox.control.close().await;
+        return Err(message);
+    }
+    Ok(Started {
+        builder,
+        runtime,
+        workspace_path,
+        sandbox,
+    })
+}

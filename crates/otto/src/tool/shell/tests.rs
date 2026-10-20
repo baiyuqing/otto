@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn segments(command: &str) -> Vec<Vec<String>> {

@@ -1,4 +1,3 @@
-
 use super::{Reply, Request};
 use otto_core::{memory as port, operation::OperationControl};
 use std::sync::{Arc, Mutex};

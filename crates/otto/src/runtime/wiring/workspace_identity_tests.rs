@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::memory::files::testsupport::{open_temp, sample_record};
 use crate::memory::{RecordKey, UpsertRequest};

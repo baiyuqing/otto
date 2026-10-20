@@ -1,4 +1,3 @@
-
 use otto_core::model::{Block, BlockType, Message, Role};
 use unicode_width::UnicodeWidthStr;
 

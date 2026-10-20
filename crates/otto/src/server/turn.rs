@@ -521,6 +521,7 @@ mod tests {
             text: text.into(),
             usage: Usage::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
         drop(emit);
         let (live, _) = turn.snapshot(0);
@@ -559,6 +560,7 @@ mod tests {
             text: "[task-notification] task t1 succeeded".to_string(),
             usage: usage(10, 20, 1),
             present: true,
+            cached_input_tokens_present: true,
         });
         drop(emit);
         assert_eq!(turn.summary().usage, usage(11, 22, 4));

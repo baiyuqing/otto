@@ -1,5 +1,7 @@
 use super::*;
-use crate::subagent::testsupport::{FakeProvider, assistant_text, assistant_tool_call, match_any};
+use crate::subagent::doubles_tests::{
+    FakeProvider, assistant_text, assistant_tool_call, match_any,
+};
 use crate::workflow::conversation_tests::{controller, fixture, session};
 use crate::workflow::{RunStatus, Store, WorkflowStore};
 use otto_core::model::{BlockType, OperationId, Usage};

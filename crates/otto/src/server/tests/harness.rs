@@ -119,7 +119,7 @@ impl Harness {
         // an already-canonical path, and macOS's `$TMPDIR` is a symlink.
         let canonical_workspace = std::fs::canonicalize(workspace.path())
             .unwrap_or_else(|_| workspace.path().to_path_buf());
-        let mut builder = testutil::builder(&canonical_workspace, sessions.path());
+        let mut builder = fixture_tests::builder(&canonical_workspace, sessions.path());
         if let Some((store, home)) = &options.reflection {
             let skills_root = home.join(".otto/skills");
             builder.shared_mut().home = home.to_string_lossy().into_owned();

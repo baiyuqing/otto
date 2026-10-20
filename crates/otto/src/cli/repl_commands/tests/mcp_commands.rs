@@ -59,14 +59,14 @@ async fn controller_with_mcp_servers(
     servers: Vec<otto_core::config::McpServerRuntime>,
     dynamic_content: bool,
 ) -> Controller {
-    let mut builder = testutil::builder(workspace, sessions);
+    let mut builder = fixture_tests::builder(workspace, sessions);
     builder.mcp = otto_core::config::McpRuntime {
         enabled: true,
         call_timeout_secs: 5,
         connect_timeout_secs: 1,
         servers,
     };
-    let runtime = testutil::initial_runtime(&builder);
+    let runtime = fixture_tests::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder
         .build_runner(&session, &runtime)
@@ -109,7 +109,7 @@ fn http_server(name: &str, auth: McpAuth) -> otto_core::config::McpServerRuntime
 async fn mcp_with_no_servers_reports_none_configured() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = testutil::controller(workspace.path(), sessions.path()).await;
+    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
 
     let (stdout, stderr) = session("/mcp\n/exit\n", &controller).await;
     assert!(stderr.is_empty(), "{stderr}");
@@ -120,7 +120,7 @@ async fn mcp_with_no_servers_reports_none_configured() {
 async fn mcp_with_malformed_arguments_prints_usage_on_stderr() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = testutil::controller(workspace.path(), sessions.path()).await;
+    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
 
     for input in ["/mcp bogus\n/exit\n", "/mcp login\n/exit\n"] {
         let (_, stderr) = session(input, &controller).await;

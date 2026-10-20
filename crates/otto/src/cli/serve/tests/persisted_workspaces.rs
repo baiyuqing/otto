@@ -15,7 +15,7 @@ async fn a_persisted_workspace_reloads_at_startup_and_is_listed() {
     let workspace_path = roots_path.join("project");
     std::fs::create_dir(&workspace_path).expect("workspace directory");
     let sessions = tempfile::tempdir().expect("sessions");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(home.path());
     let runtime = runtime_for(&shared);
     let cancel = CancellationToken::new();
     let mut stderr = Vec::new();
@@ -80,7 +80,7 @@ async fn a_listed_path_outside_current_roots_is_skipped_others_load() {
     std::fs::create_dir(&admitted).expect("admitted child");
     let outside = tempfile::tempdir().expect("outside");
     let outside_path = canonical_directory(outside.path()).expect("canonical");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(home.path());
     let runtime = runtime_for(&shared);
     let home_str = home.path().to_str().expect("utf-8 home");
     add_to_workspace_list(home_str, &admitted.to_string_lossy()).expect("add admitted");
@@ -121,7 +121,7 @@ async fn a_deleted_persisted_directory_is_skipped_with_a_warning() {
     let startup_path = canonical_directory(startup.path()).expect("canonical");
     let sessions = tempfile::tempdir().expect("sessions");
     let missing = home.path().join("does-not-exist");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(home.path());
     let runtime = runtime_for(&shared);
     add_to_workspace_list(
         home.path().to_str().expect("utf-8 home"),
@@ -158,7 +158,7 @@ async fn an_unparsable_workspace_list_file_warns_and_is_left_unchanged() {
     let startup = tempfile::tempdir().expect("startup");
     let startup_path = canonical_directory(startup.path()).expect("canonical");
     let sessions = tempfile::tempdir().expect("sessions");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(home.path());
     let runtime = runtime_for(&shared);
     let home_str = home.path().to_str().expect("utf-8 home");
     std::fs::create_dir_all(home.path().join(".otto")).expect(".otto dir");
@@ -192,7 +192,7 @@ async fn the_startup_workspace_is_never_persisted_and_duplicate_adds_collapse() 
     let startup = tempfile::tempdir().expect("startup");
     let startup_path = canonical_directory(startup.path()).expect("canonical");
     let sessions = tempfile::tempdir().expect("sessions");
-    let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(home.path());
     let runtime = runtime_for(&shared);
     let cancel = CancellationToken::new();
     let mut stderr = Vec::new();

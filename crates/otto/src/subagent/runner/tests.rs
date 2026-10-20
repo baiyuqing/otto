@@ -446,6 +446,7 @@ async fn resume_with_recorded_tools(recorded: &[&str]) -> otto_core::provider::R
     requests[0].clone()
 }
 
+mod cancel_cases;
 mod notifications;
 mod records;
 mod resume;

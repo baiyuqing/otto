@@ -121,6 +121,17 @@ impl PromptSlot {
         if state.queue.len() >= ACP_QUEUE_LIMIT {
             return Err("queue is full (16 pending prompts)");
         }
+        // A repeated restore of the same saved prompt (two `session/load`
+        // requests) must not queue it twice. A copy already running is
+        // skipped by the drain once its input id is in the session.
+        if let Some(input_id) = &input_id
+            && state
+                .queue
+                .iter()
+                .any(|queued| queued.input_id.as_ref() == Some(input_id))
+        {
+            return Ok(false);
+        }
         state.queue.push_back(QueuedPrompt {
             text,
             channel,
@@ -172,6 +183,17 @@ impl PromptSlot {
                 }
             };
             let controller = connection.local_controller(&session_id);
+            // Same check as `Connection::prompt`: an input id already in the
+            // transcript was delivered, so the saved copy is dropped unrun.
+            if let (Some(controller), Some(input_id)) = (&controller, &queued.input_id)
+                && controller.has_input(input_id)
+            {
+                if let Some(journal) = controller.turn_queue() {
+                    journal.forget(input_id);
+                }
+                self.end();
+                continue;
+            }
             if let Some(controller) = &controller {
                 controller.set_next_input_id(queued.input_id.clone());
             }

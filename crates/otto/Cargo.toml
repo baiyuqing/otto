@@ -18,7 +18,7 @@ fault-injection = []
 [dependencies]
 # Static shell analysis for approval rules and review facts (`tool::shell`).
 # Native-only C grammar; otto-core must stay wasm32-buildable.
-tree-sitter = "=0.27.0"
+tree-sitter = "=0.27.1"
 tree-sitter-bash = "=0.25.1"
 otto-core.workspace = true
 async-trait.workspace = true
@@ -70,7 +70,7 @@ unicode-width = "=0.2.2"
 # adds JSON Schema generation. The crate enables serde_json's
 # `preserve_order`, so every serde_json map in a native workspace build keeps
 # insertion order (see docs/development.md).
-agent-client-protocol-schema = { version = "=1.10.2", default-features = false }
+agent-client-protocol-schema = { version = "=1.12.0", default-features = false }
 
 tower.workspace = true
 

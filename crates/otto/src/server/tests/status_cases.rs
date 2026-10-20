@@ -160,6 +160,58 @@ async fn compacting_while_a_turn_runs_is_409_turn_active() {
     gate.cancel();
 }
 
+/// Dropping the request future (the client closed the connection) must not
+/// leave the session marked as compacting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_compact_request_still_releases_the_session() {
+    const TURNS: usize = 3;
+    let gate = CancellationToken::new();
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["ok".to_string()],
+            gate: Some(gate.clone()),
+            // The turns finish; the provider call after them (the
+            // compaction summary) waits on the gate.
+            gate_after_calls: TURNS,
+            ..Script::default()
+        },
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    // Large enough that the retained tail cannot hold the earlier turns, so
+    // the compaction has something to summarize through the provider.
+    let text = "x".repeat(80_000);
+    for _ in 0..TURNS {
+        super::sessions_cases::complete_turn(&harness, &id, &text).await;
+    }
+
+    let path = format!("/v1/sessions/{id}/compact");
+    let mut request = Box::pin(harness.send("POST", &path, None));
+    tokio::select! {
+        reply = &mut request => panic!("compaction finished before the gate: {}", reply.body),
+        () = harness.provider.wait_started(TURNS + 1) => {}
+    }
+    drop(request);
+    gate.cancel();
+
+    let session = harness.server.lookup(&id).expect("session");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while session.lock().compacting.is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("compacting stayed set after the request was dropped");
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            Some(r#"{"text":"hi","stream":false}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
 // ---- status ----
 
 /// Reads the next frame off a `/v1/status` reader and decodes its data.

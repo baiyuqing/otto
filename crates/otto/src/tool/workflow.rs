@@ -90,7 +90,8 @@ pub(crate) fn bounded(value: serde_json::Value) -> ToolResult {
     if text.len() <= 65536 {
         text_result(text)
     } else {
-        text_result(json!({"truncated":true,"summary":text.chars().take(7000).collect::<String>(),"guidance":"Use workflow_inspect for one definition or workflow_status for one run; full results remain in workflow storage."}).to_string())
+        text_result(json!({"truncated":true,"summary":text.chars().take(7000).collect::<String>(),"guidance":"Use workflow_inspect for one definition or workflow_status for one run; \
+            full results remain in workflow storage."}).to_string())
     }
 }
 fn excerpt(value: &str) -> String {
@@ -101,8 +102,22 @@ pub(crate) fn status(controller: &Controller, id: &str) -> Result<serde_json::Va
     let requests = controller.requests(id).map_err(|e| e.to_string())?;
     Ok(
         json!({"run_id":run.id,"workflow":run.workflow,"status":run.status,
-        "steps":run.steps.iter().map(|step| json!({"id":step.id,"kind":step.kind,"status":step.status,"attempt":step.attempt,"result":excerpt(&step.result),"error":excerpt(&step.error),"truncated":step.result.chars().count()>2048 || step.error.chars().count()>2048})).collect::<Vec<_>>(),
-        "requests":requests,"guidance":"Human gates require an actual human decision via approvals or `otto workflow approve REQUEST_ID` / `otto workflow reject REQUEST_ID`. Paused/interrupted: inspect possible effects first; a paused run requires selecting a failed/interrupted step for explicit retry with `otto workflow resume RUN_ID --retry STEP_ID`. `otto workflow resume RUN_ID` without --retry does not retry failed steps and rejects paused runs. Never automatically retry uncertain effects."}),
+        "steps":run.steps.iter().map(|step| json!({
+            "id":step.id,
+            "kind":step.kind,
+            "status":step.status,
+            "attempt":step.attempt,
+            "result":excerpt(&step.result),
+            "error":excerpt(&step.error),
+            "truncated":step.result.chars().count()>2048 || step.error.chars().count()>2048
+        })).collect::<Vec<_>>(),
+        "requests":requests,"guidance":"Human gates require an actual human decision via approvals or `otto \
+            workflow approve REQUEST_ID` / `otto workflow reject REQUEST_ID`. \
+            Paused/interrupted: inspect possible effects first; a paused run \
+            requires selecting a failed/interrupted step for explicit retry with \
+            `otto workflow resume RUN_ID --retry STEP_ID`. `otto workflow resume \
+            RUN_ID` without --retry does not retry failed steps and rejects paused \
+            runs. Never automatically retry uncertain effects."}),
     )
 }
 #[async_trait::async_trait]
@@ -110,7 +125,10 @@ impl Tool for WorkflowTool {
     fn definition(&self) -> ToolDefinition {
         let (description, properties, required) = match self.name {
             "workflow_list" => (
-                "List existing workflow summaries, source paths and discovery diagnostics (100 definitions, 20 diagnostics maximum). Empty catalog includes setup guidance; catalog changes require owner restart. Does not execute anything.",
+                "List existing workflow summaries, source paths and discovery \
+                    diagnostics (100 definitions, 20 diagnostics maximum). Empty catalog \
+                    includes setup guidance; catalog changes require owner restart. Does \
+                    not execute anything.",
                 json!({}),
                 json!([]),
             ),
@@ -120,12 +138,30 @@ impl Tool for WorkflowTool {
                 json!(["name"]),
             ),
             "workflow_start" => (
-                "Start one authorized existing workflow asynchronously; returns run_id/status and delivery limits. Input is a string up to 65536 UTF-8 bytes. Durable operation receipt prevents duplicate same-operation starts. Human gates remain human-owned; no automatic uncertain-effect retry. Owner process must remain alive.",
-                json!({"name":{"type":"string","minLength":1,"maxLength":128,"description":"Exact inspected workflow name."},"input":{"type":"string","maxLength":65536,"description":"Existing workflow's plain text domain input, at most 65536 UTF-8 bytes."}}),
+                "Start one authorized existing workflow asynchronously; returns \
+                    run_id/status and delivery limits. Input is a string up to 65536 UTF-8 \
+                    bytes. Durable operation receipt prevents duplicate same-operation \
+                    starts. Human gates remain human-owned; no automatic uncertain-effect \
+                    retry. Owner process must remain alive.",
+                json!({
+                    "name":{
+                        "type":"string",
+                        "minLength":1,
+                        "maxLength":128,
+                        "description":"Exact inspected workflow name."
+                    },
+                    "input":{
+                        "type":"string",
+                        "maxLength":65536,
+                        "description":"Existing workflow's plain text domain input, at most 65536 UTF-8 bytes."
+                    }
+                }),
                 json!(["name", "input"]),
             ),
             _ => (
-                "Read one workspace workflow run's status, step results/errors (2048 characters each), human gate IDs and recovery guidance. Does not wait, poll, approve or retry. Output capped at 64KiB.",
+                "Read one workspace workflow run's status, step results/errors (2048 \
+                    characters each), human gate IDs and recovery guidance. Does not wait, \
+                    poll, approve or retry. Output capped at 64KiB.",
                 json!({"run_id":{"type":"string","minLength":1,"maxLength":128,"description":"Run ID returned by workflow_start."}}),
                 json!(["run_id"]),
             ),
@@ -200,21 +236,43 @@ impl Tool for WorkflowTool {
 }
 impl WorkflowTool {
     async fn invoke(&self, call: ToolCall<'_>) -> Result<serde_json::Value, String> {
-        let controller = self.parent.controller.as_ref().map_err(|error| format!("Workflow controller unavailable: {error}. Stop the other workspace owner, enable agents if disabled, then restart this owner. No run was admitted."))?;
+        let controller = self.parent.controller.as_ref().map_err(|error| {
+            format!(
+                "Workflow controller unavailable: {error}. Stop the other workspace \
+            owner, enable agents if disabled, then restart this owner. No run was \
+            admitted."
+            )
+        })?;
         match self.name {
             "workflow_list" => {
                 let _: Empty = decode(call.arguments)?;
                 let (definitions, diagnostics) = controller.catalog();
-                Ok(
-                    json!({"definitions":definitions.iter().take(100).map(|d| json!({"name":d.name,"description":d.description,"source":d.source,"steps":d.steps.len(),"gates":d.steps.iter().filter(|s| s.kind==crate::workflow::StepKind::Approval).count()})).collect::<Vec<_>>(),"diagnostics":diagnostics.iter().take(20).collect::<Vec<_>>(),"truncated":definitions.len()>100 || diagnostics.len()>20,"guidance":"Place TOML definitions in ~/.otto/workflows or <workspace>/.otto/workflows, named agents in .otto/agents/<name>/AGENT.md, then restart the owner. Workspace names override home definitions. Empty discovery is normal on a fresh install; never invent a workflow."}),
-                )
+                Ok(json!({
+                        "definitions":definitions.iter().take(100).map(|d| json!({
+                            "name":d.name,
+                            "description":d.description,
+                            "source":d.source,
+                            "steps":d.steps.len(),
+                            "gates":d.steps.iter()
+                                .filter(|s| s.kind==crate::workflow::StepKind::Approval)
+                                .count()
+                        })).collect::<Vec<_>>(),
+                        "diagnostics":diagnostics.iter().take(20).collect::<Vec<_>>(),
+                        "truncated":definitions.len()>100 || diagnostics.len()>20,
+                        "guidance":"Place TOML definitions in ~/.otto/workflows or \
+                        <workspace>/.otto/workflows, named agents in \
+                        .otto/agents/<name>/AGENT.md, then restart the owner. Workspace names \
+                        override home definitions. Empty discovery is normal on a fresh \
+                        install; never invent a workflow."}))
             }
             "workflow_inspect" => {
                 let args: Named = decode(call.arguments)?;
                 identifier(&args.name)?;
                 let d = controller.inspect(&args.name).map_err(|e| e.to_string())?;
                 Ok(
-                    json!({"definition":d,"input":"Plain text string, at most 65536 UTF-8 bytes; no typed required input fields.","guidance":"Inspection grants no authority. Human approval steps require actual human decisions."}),
+                    json!({"definition":d,"input":"Plain text string, at most 65536 UTF-8 bytes; no typed required input \
+                        fields.","guidance":"Inspection grants no authority. Human approval steps require actual \
+                        human decisions."}),
                 )
             }
             "workflow_status" => {
@@ -238,7 +296,12 @@ impl WorkflowTool {
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(
-                    json!({"run_id":run.id,"status":run.status,"delivery":if self.parent.durable {"Lifecycle notices are bound to this exact source session. Closed sessions receive pending notices when reopened; /new never redirects them. The owning process must stay alive; restart recovery requires explicit resume."} else {"No durable source session: asynchronous conversational delivery is unavailable. Save this run_id and use workflow_status or `otto workflow status RUN_ID`; keep the owner process alive."}}),
+                    json!({"run_id":run.id,"status":run.status,"delivery":if self.parent.durable {"Lifecycle notices are bound to this exact source session. Closed \
+                        sessions receive pending notices when reopened; /new never redirects \
+                        them. The owning process must stay alive; restart recovery requires \
+                        explicit resume."} else {"No durable source session: asynchronous conversational delivery is \
+                        unavailable. Save this run_id and use workflow_status or `otto workflow \
+                        status RUN_ID`; keep the owner process alive."}}),
                 )
             }
         }

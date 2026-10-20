@@ -62,11 +62,40 @@ fn execute(
                     public_env.insert(key.to_string(), value.clone());
                 }
             }
-            let effective = otto_core::config::resolve::resolve_without_credentials(&loaded.file, &public_env, &Default::default(), &Default::default()).ok().map(|r| {
-                let diagnostics: Vec<_> = otto_core::config::resolve::subagent_model_diagnostic(&loaded.file, &r).into_iter().collect();
-                serde_json::json!({"profile":r.profile,"provider":r.provider,"model":r.model,"thinking":r.thinking,"subagent_models":r.subagent_models,"diagnostics":diagnostics,"max_output_bytes":r.max_output_bytes,"shell_timeout_seconds":r.shell_timeout.as_secs(),"compaction":{"auto":r.compaction.auto,"reserve_tokens":r.compaction.reserve_tokens,"keep_recent_tokens":r.compaction.keep_recent_tokens}})
+            let effective = otto_core::config::resolve::resolve_without_credentials(
+                &loaded.file,
+                &public_env,
+                &Default::default(),
+                &Default::default(),
+            )
+            .ok()
+            .map(|r| {
+                let diagnostics: Vec<_> =
+                    otto_core::config::resolve::subagent_model_diagnostic(&loaded.file, &r)
+                        .into_iter()
+                        .collect();
+                serde_json::json!({"profile":r.profile,
+                    "provider":r.provider,
+                    "model":r.model,
+                    "thinking":r.thinking,
+                    "subagent_models":r.subagent_models,
+                    "diagnostics":diagnostics,
+                    "max_output_bytes":r.max_output_bytes,
+                    "shell_timeout_seconds":r.shell_timeout.as_secs(),
+                    "compaction":{"auto":r.compaction.auto,
+                    "reserve_tokens":r.compaction.reserve_tokens,
+                    "keep_recent_tokens":r.compaction.keep_recent_tokens}})
             });
-            let report = serde_json::json!({"workspace_boundary":loaded.boundary, "project_sources":loaded.sources, "project_executables_trusted":loaded.trusted, "configuration":loaded.merged.explained(), "managed_policy": loaded.file.policy.as_ref().map(|p| serde_json::json!({"require_sandbox":p.require_sandbox,"allow_project_executables":p.allow_project_executables,"ceilings":p.ceilings})), "defaults":"Unspecified values use built-in runtime defaults; environment credentials are never resolved by explain."});
+            let report = serde_json::json!({"workspace_boundary":loaded.boundary,
+                "project_sources":loaded.sources,
+                "project_executables_trusted":loaded.trusted,
+                "configuration":loaded.merged.explained(),
+                "managed_policy": loaded.file.policy.as_ref().map(|p| serde_json::json!({
+                    "require_sandbox":p.require_sandbox,
+                    "allow_project_executables":p.allow_project_executables,
+                    "ceilings":p.ceilings})),
+                "defaults":"Unspecified values use built-in runtime defaults; environment \
+                credentials are never resolved by explain."});
             let mut report = report;
             report["effective_runtime"] = effective.unwrap_or(serde_json::Value::Null);
             report["effective_runtime_note"] = "null means a complete provider/model has not been configured; raw merged values and provenance are still available".into();
@@ -225,7 +254,15 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let dir = home.path().join(".config/otto");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.toml"), "default_profile='work'\n[profiles.work]\nprovider='openai-compatible'\nmodel='parent'\nbase_url='https://example.test/v1'\napi_key_env='PRIVATE_KEY'\nsubagent_models=['child']\n").unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            concat!(
+                "default_profile='work'\n[profiles.work]\nprovider='openai-compatible'\n",
+                "model='parent'\nbase_url='https://example.test/v1'\n",
+                "api_key_env='PRIVATE_KEY'\nsubagent_models=['child']\n"
+            ),
+        )
+        .unwrap();
         let args = [
             "explain",
             "--json",

@@ -196,13 +196,13 @@ impl Snapshot {
                         continue;
                     }
                     let result = (|| {
-                        let data = service.ensure_data(&installed.name)?;
+                        let package_data_dir = service.ensure_data(&installed.name)?;
                         let (mut runtime, declaration) = adapt_server(
                             server,
                             &name,
                             &logical,
                             &path,
-                            &data,
+                            &package_data_dir,
                             package.format != "agent-plugins-1.0",
                             file,
                             environment,
@@ -243,7 +243,21 @@ impl Snapshot {
         diagnostics
     }
     pub fn provenance(&self) -> String {
-        serde_json::to_string(&self.packages.iter().map(|p| serde_json::json!({"name":p.name,"version":p.version,"digest":p.digest,"commit":p.commit})).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into())
+        serde_json::to_string(
+            &self
+                .packages
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name":p.name,
+                        "version":p.version,
+                        "digest":p.digest,
+                        "commit":p.commit
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".into())
     }
 }
 pub fn internal_name(logical: &str) -> String {

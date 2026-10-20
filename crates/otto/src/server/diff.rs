@@ -537,7 +537,9 @@ mod tests {
 
     #[test]
     fn splits_a_renamed_file() {
-        let output = "diff --git a/old.txt b/new.txt\nsimilarity index 66%\nrename from old.txt\nrename to new.txt\nindex 111..222 100644\n--- a/old.txt\n+++ b/new.txt\n@@ -1,3 +1,4 @@\n line1\n+appended\n";
+        let output = "diff --git a/old.txt b/new.txt\nsimilarity index 66%\nrename from \
+            old.txt\nrename to new.txt\nindex 111..222 100644\n--- a/old.txt\n+++ \
+            b/new.txt\n@@ -1,3 +1,4 @@\n line1\n+appended\n";
         let files = split_diff_output(output, None);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "new.txt");
@@ -566,7 +568,12 @@ mod tests {
 
     #[test]
     fn splits_several_files_in_one_diff_output() {
-        let output = "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\nindex 111..000\n--- a/a.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-a\ndiff --git a/img.bin b/img.bin\nindex 111..222 100644\nBinary files a/img.bin and b/img.bin differ\ndiff --git a/new.txt b/new.txt\nnew file mode 100644\nindex 000..111\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 @@\n+new content\n";
+        let output = "diff --git a/a.txt b/a.txt\ndeleted file mode 100644\nindex \
+            111..000\n--- a/a.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-a\ndiff --git \
+            a/img.bin b/img.bin\nindex 111..222 100644\nBinary files a/img.bin and \
+            b/img.bin differ\ndiff --git a/new.txt b/new.txt\nnew file mode \
+            100644\nindex 000..111\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 \
+            @@\n+new content\n";
         let files = split_diff_output(output, None);
         assert_eq!(files.len(), 3);
         assert_eq!(files[0].path, "a.txt");

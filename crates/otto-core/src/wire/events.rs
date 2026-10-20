@@ -473,7 +473,12 @@ mod tests {
                 },
                 outcome: completed_error(),
             }),
-            r#"{"type":"tool_call_finished","tool_name":"read","tool_call_id":"c2","operation_id":"op_test","attempt":1,"result":{"content":"x","is_error":true,"operation_id":"op_test","disposition":"error","effect_certainty":"completed"}}"#
+            concat!(
+                r#"{"type":"tool_call_finished","tool_name":"read","tool_call_id":"c2","#,
+                r#""operation_id":"op_test","attempt":1,"result":{"content":"x","is_error":true,"#,
+                r#""operation_id":"op_test","disposition":"error","#,
+                r#""effect_certainty":"completed"}}"#,
+            )
         );
     }
 
@@ -571,7 +576,11 @@ mod tests {
                     mode: CompactionMode::SplitTurn,
                 },
             }),
-            r#"{"type":"compaction_planned","plan":{"reason":"overflow","automatic":false,"tokens_before":10,"estimated_tokens_after":4,"summarized_messages":3,"retained_messages":2,"mode":"split-turn"}}"#
+            concat!(
+                r#"{"type":"compaction_planned","plan":{"reason":"overflow","automatic":false,"#,
+                r#""tokens_before":10,"estimated_tokens_after":4,"summarized_messages":3,"#,
+                r#""retained_messages":2,"mode":"split-turn"}}"#,
+            )
         );
     }
 

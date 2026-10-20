@@ -68,7 +68,10 @@ impl<'a> GrepTool<'a> {
 pub fn grep_definition() -> ToolDefinition {
     definition(
         "grep",
-        "Search workspace file contents with a regular expression (read-only). Returns at most 4 KiB (or the smaller configured cap); narrow path/glob/pattern to inspect omitted matches. Files the workspace's .gitignore excludes are skipped unless no_ignore is set",
+        "Search workspace file contents with a regular expression (read-only). \
+            Returns at most 4 KiB (or the smaller configured cap); narrow \
+            path/glob/pattern to inspect omitted matches. Files the workspace's \
+            .gitignore excludes are skipped unless no_ignore is set",
         json!({
             "type": "object",
             "additionalProperties": false,

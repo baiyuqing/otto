@@ -90,17 +90,23 @@ impl SkillTool {
         if metadata.len() > MAX_READ_FILE_BYTES {
             return error_result(too_large(metadata.len(), MAX_READ_FILE_BYTES));
         }
-        let mut data = Vec::new();
+        let mut skill_file_bytes = Vec::new();
         if let Err(error) = (&mut opened)
             .take(MAX_READ_FILE_BYTES + 1)
-            .read_to_end(&mut data)
+            .read_to_end(&mut skill_file_bytes)
         {
             return describe(error.to_string());
         }
-        if data.len() as u64 > MAX_READ_FILE_BYTES {
-            return error_result(too_large(data.len() as u64, MAX_READ_FILE_BYTES));
+        if skill_file_bytes.len() as u64 > MAX_READ_FILE_BYTES {
+            return error_result(too_large(
+                skill_file_bytes.len() as u64,
+                MAX_READ_FILE_BYTES,
+            ));
         }
-        capped_text_result(&String::from_utf8_lossy(&data), self.max_output_bytes)
+        capped_text_result(
+            &String::from_utf8_lossy(&skill_file_bytes),
+            self.max_output_bytes,
+        )
     }
 }
 

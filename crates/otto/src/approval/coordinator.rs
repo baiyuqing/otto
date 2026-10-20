@@ -108,7 +108,14 @@ impl Service {
                 settings.revision,
                 ReviewStatus::HumanRequired,
             )?;
-            metadata.assessment=Some(ReviewAssessment {risk:RiskLevel::Medium,user_authorization:UserAuthorization::Unknown,outcome:ReviewOutcome::Ask,reason:"Authorization context or policy changed before dispatch; review the exact operation again.".into()});
+            metadata.assessment = Some(ReviewAssessment {
+                risk: RiskLevel::Medium,
+                user_authorization: UserAuthorization::Unknown,
+                outcome: ReviewOutcome::Ask,
+                reason: "Authorization context or policy changed before dispatch; review the \
+                exact operation again."
+                    .into(),
+            });
             next.review = Some(metadata);
             if settings.policy == ApprovalPolicy::Never
                 || super::policy::rule(&next, &config) == Some(RuleDecision::Deny)
@@ -680,7 +687,14 @@ impl Service {
             .review_denials(&expected.scope, &context.evidence_digest)?
             >= 3;
         let assessed = if denied_repeatedly {
-            Some(ReviewAssessment {risk: RiskLevel::High,user_authorization: UserAuthorization::Unknown,outcome: ReviewOutcome::Deny,reason:"Three review denials stop further escalation attempts for this task; choose a safer path or obtain a concrete user decision.".into()})
+            Some(ReviewAssessment {
+                risk: RiskLevel::High,
+                user_authorization: UserAuthorization::Unknown,
+                outcome: ReviewOutcome::Deny,
+                reason: "Three review denials stop further escalation attempts for this task; \
+                choose a safer path or obtain a concrete user decision."
+                    .into(),
+            })
         } else if let Ok(hydrated) = hydrated {
             if serde_json::to_vec(&(
                 &hydrated,

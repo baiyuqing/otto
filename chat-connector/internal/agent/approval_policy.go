@@ -83,7 +83,10 @@ func decodeApprovalPolicy(raw json.RawMessage) (*ApprovalPolicy, error) {
 	if err := json.Unmarshal(raw, &policy); err != nil {
 		return nil, err
 	}
-	if policy.Revision == 0 || (policy.Policy != "on_request" && policy.Policy != "never") || (policy.Reviewer != "user" && policy.Reviewer != "auto_review" && policy.Reviewer != "bypass") || (policy.Mode != "manual" && policy.Mode != "auto" && policy.Mode != "yolo") {
+	if policy.Revision == 0 ||
+		(policy.Policy != "on_request" && policy.Policy != "never") ||
+		(policy.Reviewer != "user" && policy.Reviewer != "auto_review" && policy.Reviewer != "bypass") ||
+		(policy.Mode != "manual" && policy.Mode != "auto" && policy.Mode != "yolo") {
 		return nil, errors.New("invalid approval policy response")
 	}
 	wantMode := "auto"

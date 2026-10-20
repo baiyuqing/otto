@@ -9,8 +9,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-mod common;
-use common::{Script, serve, text_reply, tool_call_reply};
+mod binary_harness;
+use binary_harness::{Script, serve, text_reply, tool_call_reply};
 
 fn configure(home: &std::path::Path, base_url: &str) {
     std::fs::create_dir_all(home.join("Library/Caches")).expect("cache base");

@@ -25,7 +25,7 @@ install: build connect-build ## install Otto, otto-connect and bundled skills
 	install -d "$(SKILLS_INSTALL_DIR)/sandbox-setup"
 	install -m 0644 .otto/skills/sandbox-setup/SKILL.md "$(SKILLS_INSTALL_DIR)/sandbox-setup/SKILL.md"
 
-setup-git-hooks: ## install the Gitleaks pre-commit hook for this clone and its worktrees
+setup-git-hooks: ## install the pre-commit hook (Gitleaks, code limits) for this clone and its worktrees
 	@command -v gitleaks >/dev/null || { echo "Install gitleaks first (macOS: brew install gitleaks)"; exit 1; }
 	@hooks="$$(git rev-parse --git-path hooks)"; \
 	if [ -L "$$hooks/pre-commit" ] || { [ -e "$$hooks/pre-commit" ] && ! cmp -s scripts/pre-commit "$$hooks/pre-commit"; }; then \
@@ -50,6 +50,9 @@ rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
+
+code-limits: ## fail if a code file has over 800 lines, a line over 200 characters, or a generic name
+	node scripts/code-limits.mjs
 
 license-check: ## fail if a shipped Rust crate uses a license outside the allowlist in scripts/license-check.mjs
 	node scripts/license-check.mjs
@@ -81,12 +84,12 @@ connect-build: ## build the chat connector to target/otto-connect
 check-fast: ## local gate: only the checks for paths changed since origin/main
 	@node scripts/check-changed.mjs
 
-check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, all Rust tests (PTY tests included), host integration (no release build; see `build`)
+check: code-limits rust-fmt rust-lint check-tests ## full macOS acceptance: code limits, format, lint, all Rust tests (PTY tests included), host integration (no release build; see `build`)
 
 check-tests: rust-test connect-check rust-wasm-test scripts-test ## `check` without rust-fmt and rust-lint
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test license-check ## Linux gate: no Seatbelt, so no sandbox conformance
+check-linux: code-limits rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test license-check ## Linux gate (code limits included): no Seatbelt, so no sandbox conformance
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 clean: ## remove the built binary and all Cargo build outputs in target/

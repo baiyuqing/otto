@@ -605,7 +605,20 @@ Installed `plugin.json` uses `extensions.dev.otto` version 1 for hooks/tools:
 
 Commands are argv arrays, not implicit shells. `${PLUGIN_ROOT}`/`${PLUGIN_DATA}`
 refer to the snapshot/data directory. Commands start in the workspace through
-the current sandbox/filtered env, without new filesystem or credential grants.
+the current sandbox/filtered env, without new filesystem grants. A package's
+commands also receive the variables bound to that package name in user or
+managed configuration:
+
+```toml
+[plugins.bindings.demo]
+env = { DEMO_TOKEN = "${DEMO_TOKEN}" }
+```
+
+Values use the MCP binding template rules and literal credentials are
+rejected. A package key accepts only `env`; `headers`, `auth` and OAuth fields
+are MCP-only (`plugin:server` keys). Bound values are redacted from hook
+input/output and model-visible text. Bash, standalone hooks and other packages
+do not receive them. An unresolvable package binding fails the runner build.
 Only explicit sandbox `off` is unconfined; Linux requires that choice to run
 commands. Hooks cannot request elevation or grant authorization. Untrusted
 packages omit commands with a diagnostic. Enable/disable affects new runners;
@@ -650,7 +663,7 @@ refuses late hooks; asynchronous shutdown awaits bounded cleanup.
 | `after_tool` | Identity/arguments, `content`, `is_error`, typed `outcome` | `content` |
 | `before_compaction` | `reason`, `focus` | `decision`, `reason`, `context` retention hint |
 | `after_compaction` | Committed `checkpoint_id`, `reason` | `{}` |
-| `turn_end` | `status`: `success`, `error`, `cancelled`; optional error/stop reason | `{}` |
+| `turn_end` | `status`: `success`, `error`, `cancelled`; optional error/stop reason; `turn` or `turn_omitted` | `{}` |
 | `session_end` | Session metadata | `{}` |
 
 Exit zero and emit one JSON object, or no stdout for no-op; diagnostics go to
@@ -666,6 +679,19 @@ Before-hook failure/denial/timeout stops dispatch (`NotStarted`); no `after_tool
 runs for refused tools. After-hook failure warns and preserves actual results;
 remaining after hooks still run. After-compaction requires a committed
 checkpoint. Failure/cancellation still invokes bounded `turn_end`.
+
+`turn_end` data carries `turn.messages`: the messages appended during the run,
+in order, including messages a compaction in the same run removed from the
+model context. Each message has `role` (`user`, `assistant`, `tool`,
+`context`) and `blocks`:
+
+```json
+{"turn":{"messages":[{"role":"user","blocks":[{"type":"text","text":"fix the test"}]},{"role":"assistant","blocks":[{"type":"tool_call","id":"call1","name":"bash","arguments":{"command":"cargo test"}}]},{"role":"tool","blocks":[{"type":"tool_result","id":"call1","name":"bash","text":"ok","is_error":false}]}]}}
+```
+
+Image and reasoning blocks are omitted. When the complete input would exceed
+1 MiB, `turn` is replaced by `"turn_omitted":"size"` and the hook still runs.
+Child-agent turns have a non-null `session.parent_session_id`.
 
 Timeout is positive, at most 300 s, default 10 s; before hooks also consume the
 operation budget. Input cap 1 MiB, stdout/stderr 64 KiB. Known secrets are

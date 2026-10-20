@@ -65,7 +65,16 @@ impl Presenter for Skills {
             search: Some(self.query.clone()),
             loading: !self.loaded,
             document: if self.loaded && rows.is_empty() {
-                if !self.global_enabled { "Skills globally disabled. Set [skills].enabled = true in Otto config and restart Otto; restarting alone will not enable skills." } else if self.rows.is_empty() { "No skills discovered. Add a SKILL.md under a configured skill root and restart Otto." } else { "No matching skills. Backspace to edit the search." }.into()
+                if !self.global_enabled {
+                    "Skills globally disabled. Set [skills].enabled = true in Otto config \
+                    and restart Otto; restarting alone will not enable skills."
+                } else if self.rows.is_empty() {
+                    "No skills discovered. Add a SKILL.md under a configured skill root and \
+                    restart Otto."
+                } else {
+                    "No matching skills. Backspace to edit the search."
+                }
+                .into()
             } else {
                 String::new()
             },

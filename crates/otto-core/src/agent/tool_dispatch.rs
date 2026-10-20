@@ -69,20 +69,64 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .iter()
                 .any(|tool| tool.name == block.tool_name)
         {
-            match self.hook("before_tool", serde_json::json!({"tool":block.tool_name, "tool_call_id":block.tool_call_id,"operation_id":operation_id, "attempt":attempt,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).unwrap_or_default()}), control).await {
+            match self
+                .hook(
+                    "before_tool",
+                    serde_json::json!({
+                        "tool": block.tool_name,
+                        "tool_call_id": block.tool_call_id,
+                        "operation_id": operation_id,
+                        "attempt": attempt,
+                        "arguments": serde_json::from_str::<serde_json::Value>(arguments.get())
+                            .unwrap_or_default()
+                    }),
+                    control,
+                )
+                .await
+            {
                 Err(message) => hook_denial = Some(message),
-                Ok(response) if response.decision == Some(hooks::Decision::Deny) => hook_denial = Some(response.reason.unwrap_or_else(|| "Hook denied this tool".into())),
-                Ok(response) => if let Some(value) = response.arguments {
-                    if !value.is_object() { hook_denial = Some("Hook arguments must be a JSON object".into()); }
-                    else {
-                        let replacement = RawValue::from_string(value.to_string()).expect("serialized JSON");
-                        if replacement.get() != arguments.get() {
-                            let audit = serde_json::json!({"version":1,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"arguments":value}).to_string();
-                            self.session.append_custom("otto.hook.arguments", self.redactor.redact_json_strings(&audit).get()).await.map_err(|source| self.fail(emit, AgentError::Persist {kind:"hook arguments".into(), source}))?;
-                            arguments = replacement;
+                Ok(response) if response.decision == Some(hooks::Decision::Deny) => {
+                    hook_denial = Some(
+                        response
+                            .reason
+                            .unwrap_or_else(|| "Hook denied this tool".into()),
+                    )
+                }
+                Ok(response) => {
+                    if let Some(value) = response.arguments {
+                        if !value.is_object() {
+                            hook_denial = Some("Hook arguments must be a JSON object".into());
+                        } else {
+                            let replacement =
+                                RawValue::from_string(value.to_string()).expect("serialized JSON");
+                            if replacement.get() != arguments.get() {
+                                let audit = serde_json::json!({
+                                    "version": 1,
+                                    "tool_call_id": block.tool_call_id,
+                                    "operation_id": operation_id,
+                                    "arguments": value
+                                })
+                                .to_string();
+                                self.session
+                                    .append_custom(
+                                        "otto.hook.arguments",
+                                        self.redactor.redact_json_strings(&audit).get(),
+                                    )
+                                    .await
+                                    .map_err(|source| {
+                                        self.fail(
+                                            emit,
+                                            AgentError::Persist {
+                                                kind: "hook arguments".into(),
+                                                source,
+                                            },
+                                        )
+                                    })?;
+                                arguments = replacement;
+                            }
                         }
                     }
-                },
+                }
             }
         }
         let hook_blocked = hook_denial.is_some();
@@ -127,14 +171,55 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         {
             // After hooks have their own bounded cleanup budget, even after cancellation.
             let token = CancellationToken::new();
-            match self.hook("after_tool", serde_json::json!({"tool":block.tool_name,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"attempt":attempt,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).unwrap_or_default(),"content":self.redactor.redact_string(&execution.result.content),"is_error":execution.result.is_error,"outcome":execution.outcome}), &token).await {
+            match self
+                .hook(
+                    "after_tool",
+                    serde_json::json!({
+                        "tool": block.tool_name,
+                        "tool_call_id": block.tool_call_id,
+                        "operation_id": operation_id,
+                        "attempt": attempt,
+                        "arguments": serde_json::from_str::<serde_json::Value>(arguments.get())
+                            .unwrap_or_default(),
+                        "content": self.redactor.redact_string(&execution.result.content),
+                        "is_error": execution.result.is_error,
+                        "outcome": execution.outcome
+                    }),
+                    &token,
+                )
+                .await
+            {
                 Err(message) => self.hook_warning(emit, &message),
-                Ok(response) => if let Some(content) = response.content {
-                    let audit = serde_json::json!({"version":1,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"content":execution.result.persisted_text(),"is_error":execution.result.is_error,"outcome":execution.outcome}).to_string();
-                    self.session.append_custom("otto.hook.result", self.redactor.redact_json_strings(&audit).get()).await.map_err(|source| self.fail(emit, AgentError::Persist{kind:"original tool result".into(),source}))?;
-                    execution.result.content = content;
-                    execution.result.persisted_content = None;
-                },
+                Ok(response) => {
+                    if let Some(content) = response.content {
+                        let audit = serde_json::json!({
+                            "version": 1,
+                            "tool_call_id": block.tool_call_id,
+                            "operation_id": operation_id,
+                            "content": execution.result.persisted_text(),
+                            "is_error": execution.result.is_error,
+                            "outcome": execution.outcome
+                        })
+                        .to_string();
+                        self.session
+                            .append_custom(
+                                "otto.hook.result",
+                                self.redactor.redact_json_strings(&audit).get(),
+                            )
+                            .await
+                            .map_err(|source| {
+                                self.fail(
+                                    emit,
+                                    AgentError::Persist {
+                                        kind: "original tool result".into(),
+                                        source,
+                                    },
+                                )
+                            })?;
+                        execution.result.content = content;
+                        execution.result.persisted_content = None;
+                    }
+                }
             }
         }
         if let Some(advice) = state.progress.edit_advice(

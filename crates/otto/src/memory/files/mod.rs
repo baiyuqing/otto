@@ -121,7 +121,7 @@ fn acquire(root: &Path, timeout: Duration) -> Result<Flock<File>> {
 /// directory and an atomic rename.
 fn publish_path(path: &Path, content: &str) -> Result<()> {
     let (parent, name) = fsops::open_parent(path).map_err(unavailable)?;
-    let temp = format!(
+    let temp_name = format!(
         ".{name}.{}.tmp",
         crate::auth::random_hex::<8>().map_err(unavailable)?
     );
@@ -129,7 +129,7 @@ fn publish_path(path: &Path, content: &str) -> Result<()> {
         &parent,
         &Publish {
             name,
-            temp: &temp,
+            temp: &temp_name,
             permissions: 0o600,
             mode: PublishMode::Replace,
         },

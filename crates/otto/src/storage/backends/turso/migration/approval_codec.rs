@@ -487,7 +487,19 @@ impl SqlDomainCodec for ApprovalCodec {
                 "unsupported approval database schema".into(),
             ));
         }
-        let unknown: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT IN ('approval_modes','approval_settings','approval_review_contexts','approval_review_leases','approval_review_denials','approval_managed_policy','approvals','approval_events','approval_claims','approval_visibility','sqlite_sequence','__turso_internal_seq___turso_internal_autoincrement_approval_events','otto_migration_stage','otto_migration_chunks')", (), |r| r.get(0)).map_err(sql_error)?;
+        let unknown: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT IN \
+            ('approval_modes','approval_settings','approval_review_contexts',\
+            'approval_review_leases','approval_review_denials','approval_managed_policy',\
+            'approvals','approval_events','approval_claims','approval_visibility',\
+            'sqlite_sequence',\
+            '__turso_internal_seq___turso_internal_autoincrement_approval_events',\
+            'otto_migration_stage','otto_migration_chunks')",
+                (),
+                |r| r.get(0),
+            )
+            .map_err(sql_error)?;
         if unknown != 0 {
             return Err(Error::Invalid(
                 "unsupported approval state tables; refusing partial migration".into(),
@@ -496,29 +508,68 @@ impl SqlDomainCodec for ApprovalCodec {
         // Current Turso implements this known AUTOINCREMENT using a physical
         // sequence table. Its contents are rebuilt by importing explicit event
         // IDs; it is not an independently owned domain record.
-        let sequence_schema:Option<String>=connection.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='__turso_internal_seq___turso_internal_autoincrement_approval_events' AND length(sql)<=4096",(),|row|row.get(0)).optional().map_err(sql_error)?;
+        let sequence_schema: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND \
+            name='__turso_internal_seq___turso_internal_autoincrement_approval_events' AND \
+            length(sql)<=4096",
+                (),
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
         if let Some(actual) = sequence_schema {
-            let expected = "CREATE TABLE \"__turso_internal_seq___turso_internal_autoincrement_approval_events\"(value INTEGER PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max INTEGER,cycle INTEGER)";
+            let expected = "CREATE TABLE \
+                \"__turso_internal_seq___turso_internal_autoincrement_approval_events\"(value INTEGER \
+                PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max \
+                INTEGER,cycle INTEGER)";
             if normalize_schema_sql(&actual) != normalize_schema_sql(expected) {
                 return Err(Error::Invalid(
                     "unsupported approval event sequence schema".into(),
                 ));
             }
-            let invalid:i64=connection.query_row("SELECT COUNT(*) FROM __turso_internal_seq___turso_internal_autoincrement_approval_events WHERE value<1 OR is_called NOT IN (0,1) OR start<>1 OR inc<>1 OR min<>1 OR max<>9223372036854775807 OR cycle<>0 OR is_called IS NULL OR start IS NULL OR inc IS NULL OR min IS NULL OR max IS NULL OR cycle IS NULL",(),|row|row.get(0)).map_err(sql_error)?;
+            let invalid: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM \
+                __turso_internal_seq___turso_internal_autoincrement_approval_events \
+                WHERE value<1 OR is_called NOT IN (0,1) OR start<>1 OR inc<>1 OR min<>1 \
+                OR max<>9223372036854775807 OR cycle<>0 OR is_called IS NULL OR start \
+                IS NULL OR inc IS NULL OR min IS NULL OR max IS NULL OR cycle IS NULL",
+                    (),
+                    |row| row.get(0),
+                )
+                .map_err(sql_error)?;
             if invalid != 0 {
                 return Err(Error::Invalid(
                     "unsupported approval event sequence configuration".into(),
                 ));
             }
         } else {
-            let exists:i64=connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name='__turso_internal_seq___turso_internal_autoincrement_approval_events'",(),|row|row.get(0)).map_err(sql_error)?;
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE \
+                name='__turso_internal_seq___turso_internal_autoincrement_approval_events'",
+                    (),
+                    |row| row.get(0),
+                )
+                .map_err(sql_error)?;
             if exists != 0 {
                 return Err(Error::Invalid(
                     "invalid approval event sequence schema".into(),
                 ));
             }
         }
-        let broken: i64 = connection.query_row("SELECT (SELECT COUNT(*) FROM approval_visibility v LEFT JOIN approvals a ON a.id=v.approval_id WHERE a.id IS NULL) + (SELECT COUNT(*) FROM approval_claims c LEFT JOIN approvals a ON a.id=c.approval_id WHERE a.id IS NULL) + (SELECT COUNT(*) FROM approval_events e LEFT JOIN approvals a ON a.id=e.approval_id WHERE a.id IS NULL)",(),|r|r.get(0)).map_err(sql_error)?;
+        let broken: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM approval_visibility v LEFT JOIN approvals \
+            a ON a.id=v.approval_id WHERE a.id IS NULL) + (SELECT COUNT(*) FROM \
+            approval_claims c LEFT JOIN approvals a ON a.id=c.approval_id WHERE \
+            a.id IS NULL) + (SELECT COUNT(*) FROM approval_events e LEFT JOIN \
+            approvals a ON a.id=e.approval_id WHERE a.id IS NULL)",
+                (),
+                |r| r.get(0),
+            )
+            .map_err(sql_error)?;
         if broken != 0 {
             return Err(Error::Invalid("approval references are incomplete".into()));
         }

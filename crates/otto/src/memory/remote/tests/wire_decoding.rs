@@ -131,7 +131,20 @@ async fn model_tools_bind_references_and_nullable_key_without_tenant_selection()
     assert!(forget.execute(&call(json!({"id":"m-17","organization_id":"acme","scope_namespace":"organization","scope_id":"acme","opaque_revision":"r4"})),&CancellationToken::new()).await.is_error);
     assert!(search.execute(&call(json!({"id":"m-17","organization_id":"other","scope_namespace":"user","scope_id":"alice","opaque_revision":"r4"})),&CancellationToken::new()).await.is_error);
     assert!(seen.lock().unwrap().is_empty());
-    let result=remember.execute(&call(json!({"text":"new value","key":"editor.default","target_id":"m-17","organization_id":"acme","scope_namespace":"workspace","scope_id":"project-a","opaque_revision":"r4"})),&CancellationToken::new()).await;
+    let result = remember
+        .execute(
+            &call(json!({
+                "text": "new value",
+                "key": "editor.default",
+                "target_id": "m-17",
+                "organization_id": "acme",
+                "scope_namespace": "workspace",
+                "scope_id": "project-a",
+                "opaque_revision": "r4",
+            })),
+            &CancellationToken::new(),
+        )
+        .await;
     assert!(!result.is_error, "{}", result.content);
     let sent: Value = serde_json::from_slice(&seen.lock().unwrap()[0].2).unwrap();
     assert_eq!(sent["key"], "editor.default");

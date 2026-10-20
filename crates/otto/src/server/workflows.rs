@@ -320,14 +320,14 @@ pub async fn events(
     };
     let mut body = String::new();
     for event in events {
-        let data = match serde_json::to_string(&event) {
-            Ok(data) => data,
+        let event_json = match serde_json::to_string(&event) {
+            Ok(event_json) => event_json,
             Err(_) => {
                 return super::internal_error(&server.log, "workflow event serialization failed");
             }
         };
         body.push_str(&format!(
-            "id: {}\nevent: workflow\ndata: {data}\n\n",
+            "id: {}\nevent: workflow\ndata: {event_json}\n\n",
             event.seq
         ));
     }

@@ -155,7 +155,24 @@ fn remember_request() -> RememberRequest {
     }
 }
 fn receipt(state: &str, namespace: &str, forget: bool) -> Value {
-    json!({"request_id":if forget {"fedcba9876543210fedcba9876543210"} else {"0123456789abcdef0123456789abcdef"},"state":state,"item":if matches!(state,"applied"|"no_change") { json!({"organization_id":"acme","scope":scope(namespace),"id":"m-17","revision":"r5"}) } else { Value::Null }})
+    json!({
+        "request_id": if forget {
+            "fedcba9876543210fedcba9876543210"
+        } else {
+            "0123456789abcdef0123456789abcdef"
+        },
+        "state": state,
+        "item": if matches!(state, "applied" | "no_change") {
+            json!({
+                "organization_id": "acme",
+                "scope": scope(namespace),
+                "id": "m-17",
+                "revision": "r5",
+            })
+        } else {
+            Value::Null
+        },
+    })
 }
 fn forget_request() -> ForgetRequest {
     ForgetRequest {

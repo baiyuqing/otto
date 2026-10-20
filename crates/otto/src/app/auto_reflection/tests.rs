@@ -221,7 +221,9 @@ use crate::cli::testutil::{builder, initial_runtime};
 use crate::runtime::builder::Runner;
 use crate::subagent::tasks::Tasks;
 
-const SUMMARY: &str = "## Goal\nx\n## Constraints & Preferences\nx\n## Observations\nx\n## Progress\n### Done\nx\n### In Progress\nx\n### Blocked\nx\n## Key Decisions\nx\n## Next Steps\nx\n## Critical Context\nx";
+const SUMMARY: &str = "## Goal\nx\n## Constraints & Preferences\nx\n## Observations\nx\n## \
+    Progress\n### Done\nx\n### In Progress\nx\n### Blocked\nx\n## Key \
+    Decisions\nx\n## Next Steps\nx\n## Critical Context\nx";
 
 /// Answers a compaction request with a valid summary and a reflection
 /// request with `reflection`, counting each.

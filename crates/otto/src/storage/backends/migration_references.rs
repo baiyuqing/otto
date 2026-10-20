@@ -161,7 +161,24 @@ fn session_reference(id: &str, sessions: &BTreeMap<String, String>) -> Result<()
     Ok(())
 }
 fn workflow_references(connection: &Connection, aliases: &BTreeMap<String, String>) -> Result<()> {
-    let broken:i64=connection.query_row("SELECT (SELECT COUNT(*) FROM workflow_runs r LEFT JOIN workflow_runs p ON p.id=r.forked_from_run_id LEFT JOIN workflow_events e ON e.seq=r.forked_from_event_seq AND e.run_id=r.forked_from_run_id WHERE r.forked_from_run_id IS NOT NULL AND (p.id IS NULL OR e.seq IS NULL OR e.step_id<>r.forked_from_step_id))+(SELECT COUNT(*) FROM workflow_steps s LEFT JOIN workflow_steps p ON p.run_id=s.source_run_id AND p.id=s.source_step_id LEFT JOIN workflow_attempts a ON a.run_id=s.source_run_id AND a.step_id=s.source_step_id AND a.attempt=s.source_attempt WHERE s.source_run_id IS NOT NULL AND (p.id IS NULL OR (s.source_attempt>0 AND a.attempt IS NULL)))+(SELECT COUNT(*) FROM workflow_attempts a LEFT JOIN workflow_steps s ON s.run_id=a.run_id AND s.id=a.step_id WHERE s.id IS NULL)",(),|r|r.get(0)).map_err(sql_error)?;
+    let broken: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM workflow_runs r LEFT JOIN workflow_runs p \
+        ON p.id=r.forked_from_run_id LEFT JOIN workflow_events e ON \
+        e.seq=r.forked_from_event_seq AND e.run_id=r.forked_from_run_id WHERE \
+        r.forked_from_run_id IS NOT NULL AND (p.id IS NULL OR e.seq IS NULL OR \
+        e.step_id<>r.forked_from_step_id))+(SELECT COUNT(*) FROM workflow_steps \
+        s LEFT JOIN workflow_steps p ON p.run_id=s.source_run_id AND \
+        p.id=s.source_step_id LEFT JOIN workflow_attempts a ON \
+        a.run_id=s.source_run_id AND a.step_id=s.source_step_id AND \
+        a.attempt=s.source_attempt WHERE s.source_run_id IS NOT NULL AND (p.id \
+        IS NULL OR (s.source_attempt>0 AND a.attempt IS NULL)))+(SELECT \
+        COUNT(*) FROM workflow_attempts a LEFT JOIN workflow_steps s ON \
+        s.run_id=a.run_id AND s.id=a.step_id WHERE s.id IS NULL)",
+            (),
+            |r| r.get(0),
+        )
+        .map_err(sql_error)?;
     if broken != 0 {
         return Err(invalid("workflow attempt/fork provenance is incomplete"));
     }
@@ -263,7 +280,25 @@ fn workflow_approval(
     connection: &Connection,
 ) -> Result<()> {
     bounded_columns(connection, "workflow_requests", &["prompt"])?;
-    let target=connection.query_row("SELECT q.run_id,q.prompt,q.status,r.workspace,s.kind FROM workflow_requests q JOIN workflow_runs r ON r.id=q.run_id JOIN workflow_steps s ON s.run_id=q.run_id AND s.id=q.step_id WHERE q.id=?1",[request.subject.id.as_str()],|r|Ok((r.get::<String>(0)?,r.get::<String>(1)?,r.get::<String>(2)?,r.get::<String>(3)?,r.get::<String>(4)?))).optional().map_err(sql_error)?.ok_or_else(||invalid("live workflow approval target is missing"))?;
+    let target = connection
+        .query_row(
+            "SELECT q.run_id,q.prompt,q.status,r.workspace,s.kind FROM \
+        workflow_requests q JOIN workflow_runs r ON r.id=q.run_id JOIN \
+        workflow_steps s ON s.run_id=q.run_id AND s.id=q.step_id WHERE q.id=?1",
+            [request.subject.id.as_str()],
+            |r| {
+                Ok((
+                    r.get::<String>(0)?,
+                    r.get::<String>(1)?,
+                    r.get::<String>(2)?,
+                    r.get::<String>(3)?,
+                    r.get::<String>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql_error)?
+        .ok_or_else(|| invalid("live workflow approval target is missing"))?;
     if target.0 != request.scope.run_id
         || target.3 != request.scope.workspace
         || target.4 != "approval"

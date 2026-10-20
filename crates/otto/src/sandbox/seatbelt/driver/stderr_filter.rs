@@ -140,20 +140,26 @@ impl std::io::Write for StderrFilter<'_> {
             return Ok(original);
         }
 
-        let mut data = data;
-        while !data.is_empty() && !self.ordinary && !self.infrastructure && !self.execvp_suppressed
+        let mut unclassified_bytes = data;
+        while !unclassified_bytes.is_empty()
+            && !self.ordinary
+            && !self.infrastructure
+            && !self.execvp_suppressed
         {
             let remaining = STDERR_DECISION_LIMIT.saturating_sub(self.pending.len());
             if remaining == 0 {
                 self.classify_pending();
                 break;
             }
-            let mut take = data.len().min(remaining);
-            if let Some(newline) = data[..take].iter().position(|byte| *byte == b'\n') {
+            let mut take = unclassified_bytes.len().min(remaining);
+            if let Some(newline) = unclassified_bytes[..take]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            {
                 take = newline + 1;
             }
-            self.pending.extend_from_slice(&data[..take]);
-            data = &data[take..];
+            self.pending.extend_from_slice(&unclassified_bytes[..take]);
+            unclassified_bytes = &unclassified_bytes[take..];
 
             if !could_begin_diagnostic(&self.pending) {
                 self.ordinary = true;
@@ -167,7 +173,7 @@ impl std::io::Write for StderrFilter<'_> {
         if self.ordinary {
             let pending = std::mem::take(&mut self.pending);
             self.write_ordinary(&pending)?;
-            self.write_ordinary(data)?;
+            self.write_ordinary(unclassified_bytes)?;
         }
         Ok(original)
     }

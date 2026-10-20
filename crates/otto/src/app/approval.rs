@@ -499,8 +499,15 @@ impl Controller {
                     if let Some(request) = pending.requests.into_iter().find(|r| r.blocking && presented.insert((r.id.clone(), r.revision, r.subject.version.clone()))) {
                         let decision = decide(ApprovalRequest {
                             approval_id: request.id.clone(),tool_call_id: request.subject.tool_call_id.clone(),
-                            command:serde_json::from_str::<serde_json::Value>(&request.subject.details).ok().and_then(|input|input["command"].as_str().map(str::to_string)).unwrap_or_else(||format!("{}\n{}",request.title,request.subject.details)),
-                            justification:request.reason.clone(),read_path:serde_json::from_str::<serde_json::Value>(&request.subject.details).ok().and_then(|v|v["read_path"].as_str().map(str::to_string)).unwrap_or_default(),
+                            command:serde_json::from_str::<serde_json::Value>(&request.subject.details)
+                                .ok()
+                                .and_then(|input|input["command"].as_str().map(str::to_string))
+                                .unwrap_or_else(||format!("{}\n{}",request.title,request.subject.details)),
+                            justification:request.reason.clone(),
+                            read_path:serde_json::from_str::<serde_json::Value>(&request.subject.details)
+                                .ok()
+                                .and_then(|v|v["read_path"].as_str().map(str::to_string))
+                                .unwrap_or_default(),
                         }).await;
                         drop(self.approval_control.lock().await);
                         if decision == ApprovalDecision::Cancelled || cancel.is_cancelled() {

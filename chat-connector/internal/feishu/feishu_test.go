@@ -230,7 +230,13 @@ func TestRunDeliversAndStopsOnCancel(t *testing.T) {
 		t.Errorf("delivered %+v", m)
 	}
 	id := strings.Repeat("a", 32)
-	if err := f.onCard(context.Background(), &types.CardActionEvent{ChatID: "oc_test", Operator: types.CardActionOperator{OpenID: "ou_test"}, Action: types.CardActionPayload{Value: map[string]any{"request_id": id, "action": "approve"}}}); err != nil {
+	if err := f.onCard(context.Background(), &types.CardActionEvent{
+		ChatID:   "oc_test",
+		Operator: types.CardActionOperator{OpenID: "ou_test"},
+		Action: types.CardActionPayload{
+			Value: map[string]any{"request_id": id, "action": "approve"},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if m := <-got; m.ApprovalID != id || m.Text != "/allow" || m.SenderID != "ou_test" {

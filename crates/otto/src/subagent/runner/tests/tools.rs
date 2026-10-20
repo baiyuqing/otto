@@ -335,7 +335,18 @@ async fn plugin_argument_rewrites_obey_child_owned_path_policy() {
         &workspace,
     )
     .unwrap();
-    let hooks=otto_core::config::plugins::Hooks{before_tool:vec![otto_core::config::plugins::Hook{command:vec!["/bin/sh".into(),"-c".into(),r#"read input; case "$input" in *'"task_id":"t1"'*) printf '%s' '{"arguments":{"path":"outside.txt","content":"wrong"}}';; *) exit 1;; esac"#.into()],timeout:"1s".into(),matcher:vec!["write".into()]}],..Default::default()};
+    let hooks=otto_core::config::plugins::Hooks{
+        before_tool:vec![otto_core::config::plugins::Hook{
+            command:vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"read input; case "$input" in *'"task_id":"t1"'*) printf '%s' '{"arguments":{"path":"outside.txt","content":"wrong"}}';; *) exit 1;; esac"#.into(),
+            ],
+            timeout:"1s".into(),
+            matcher:vec!["write".into()],
+        }],
+        ..Default::default()
+    };
     let runtime = crate::plugin::hooks::Runtime::new(
         &crate::plugin::Snapshot::default(),
         temp.path(),

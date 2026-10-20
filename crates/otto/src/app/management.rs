@@ -141,7 +141,9 @@ impl Request {
         let fields: Vec<&str> = args.split_whitespace().collect();
         let usage = match command {
             "memory" => {
-                "usage: /memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject"
+                "usage: /memory list [--scope current|user|workspace|all] [--limit N] \
+                    [--cursor CURSOR] | /memory show <id> | /memory search <query> | \
+                    /memory forget <id> | /memory review <id> accept|reject"
             }
             "remember" => "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>",
             "skill" => {

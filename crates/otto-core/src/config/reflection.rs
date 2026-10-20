@@ -249,7 +249,10 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn explicit_table_is_used() {
         let file = parse(
-            "[reflection]\nenabled = false\nmemories = false\nauto = \"on_exit\"\nmin_turns = 6\nskills = false\nskill_source = \"any\"\nskill_review = false\nmax_input_bytes = 4096\nmax_memories = 3\nmax_skills = 1\nmax_generated_skills = 5\n",
+            "[reflection]\nenabled = false\nmemories = false\nauto = \
+                \"on_exit\"\nmin_turns = 6\nskills = false\nskill_source = \
+                \"any\"\nskill_review = false\nmax_input_bytes = 4096\nmax_memories = \
+                3\nmax_skills = 1\nmax_generated_skills = 5\n",
         )
         .expect("parse");
         let runtime = resolve_reflection(&file).expect("resolve");

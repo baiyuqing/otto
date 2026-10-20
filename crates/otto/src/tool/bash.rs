@@ -394,7 +394,14 @@ fn infrastructure_result(error: &Error) -> ToolResult {
 }
 
 /// The output contract shared by sandboxed and elevated calls.
-const OUTPUT_NOTE: &str = "Return exit status and stdout/stderr previews of at most 4 KiB each (or the smaller configured cap); longer redacted output is saved temporarily under .otto/tool-output and automatically removed after the turn and its children finish. Delete individual logs after analysis when no task still needs them; never remove the shared directory. Analyze logs with scripts and print only verified summaries or relevant failures; use read with offset/limit for excerpts instead of printing complete logs.";
+const OUTPUT_NOTE: &str = "Return exit status and stdout/stderr previews of at most 4 KiB each (or \
+    the smaller configured cap); longer redacted output is saved \
+    temporarily under .otto/tool-output and automatically removed after the \
+    turn and its children finish. Delete individual logs after analysis \
+    when no task still needs them; never remove the shared directory. \
+    Analyze logs with scripts and print only verified summaries or relevant \
+    failures; use read with offset/limit for excerpts instead of printing \
+    complete logs.";
 
 /// Appended when the child's `HOME` is a private sandbox directory.
 const PRIVATE_HOME_NOTE: &str = "HOME and ~ are a private sandbox directory, not the user's home directory; use absolute paths for the user's files.";
@@ -420,7 +427,9 @@ pub fn bash_definition(private_home: bool) -> ToolDefinition {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a script that captures logs, preserves the command exit status, and prints a concise checked summary"
+                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a \
+                        script that captures logs, preserves the command exit status, and \
+                        prints a concise checked summary"
                 }
             },
             "required": ["command"]
@@ -432,7 +441,22 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
     definition(
         "bash",
         &describe(
-            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the authorized task; include a justification. AUTO reviews the exact command and bounded native script/build facts against original user evidence; missing or changed payloads require human review. A command that changes external state (git push, gh writes, curl or wget uploads, package publish, kubectl/helm/terraform changes) or deletes workspace or repository content (git reset --hard, git clean -f, rm -r, find -delete) waits for the same approval without a justification, then runs in the sandbox, or outside it when it matches [sandbox] excluded_commands. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Persistent security grants require a person in AUTO. The command runs only after authority is recorded; MANUAL asks, NEVER rejects additional authority, and YOLO bypasses review while retaining hard checks.",
+            "Execute a shell command from the workspace. Set sandbox_permissions to \
+                require_escalated only when sandboxed execution cannot complete the \
+                authorized task; include a justification. AUTO reviews the exact \
+                command and bounded native script/build facts against original user \
+                evidence; missing or changed payloads require human review. A command \
+                that changes external state (git push, gh writes, curl or wget uploads, \
+                package publish, kubectl/helm/terraform changes) or deletes workspace \
+                or repository content (git reset --hard, git clean -f, rm -r, find \
+                -delete) waits for the same approval without a justification, then runs \
+                in the sandbox, or outside it when it matches [sandbox] \
+                excluded_commands. To request persistent sandbox read access, set \
+                sandbox_read_path to one absolute existing path and include a \
+                justification; keep sandbox_permissions as use_default. Persistent \
+                security grants require a person in AUTO. The command runs only after \
+                authority is recorded; MANUAL asks, NEVER rejects additional authority, \
+                and YOLO bypasses review while retaining hard checks.",
             private_home,
         ),
         json!({
@@ -441,7 +465,9 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a script that captures logs, preserves the command exit status, and prints a concise checked summary"
+                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a \
+                        script that captures logs, preserves the command exit status, and \
+                        prints a concise checked summary"
                 },
                 "sandbox_permissions": {
                     "type": "string",

@@ -276,9 +276,9 @@ fn load_candidate(
     directory_fs: &Root,
 ) -> Result<(Skill, Option<String>), String> {
     let describe = |error: String| format!("skill {}: {error}", skill_path.display());
-    let data = read_root_file(directory_fs, Path::new("SKILL.md"))
+    let skill_file_bytes = read_root_file(directory_fs, Path::new("SKILL.md"))
         .map_err(|error| describe(error.to_string()))?;
-    let (fields, _) = frontmatter::parse(&data).map_err(describe)?;
+    let (fields, _) = frontmatter::parse(&skill_file_bytes).map_err(describe)?;
     let name = validate_skill_name(&fields, directory_name).map_err(describe)?;
     let description = validate_skill_description(&fields).map_err(describe)?;
     let (contract, warning) = validate_skill_contract(&fields);
@@ -389,8 +389,8 @@ pub fn load(skill: &Skill) -> Result<String, String> {
         )
     })?;
     let root_fs = Root::open(&skill.directory).map_err(|error| error.to_string())?;
-    let data = read_root_file(&root_fs, name).map_err(|error| error.to_string())?;
-    let (_, body) = frontmatter::parse(&data)?;
+    let skill_file_bytes = read_root_file(&root_fs, name).map_err(|error| error.to_string())?;
+    let (_, body) = frontmatter::parse(&skill_file_bytes)?;
     Ok(body)
 }
 
@@ -453,15 +453,16 @@ pub fn read_root_file(root_fs: &Root, name: &Path) -> io::Result<Vec<u8>> {
             MAX_SKILL_FILE_BYTES,
         )));
     }
-    let mut data = Vec::new();
-    file.take(MAX_SKILL_FILE_BYTES + 1).read_to_end(&mut data)?;
-    if data.len() as u64 > MAX_SKILL_FILE_BYTES {
+    let mut skill_file_bytes = Vec::new();
+    file.take(MAX_SKILL_FILE_BYTES + 1)
+        .read_to_end(&mut skill_file_bytes)?;
+    if skill_file_bytes.len() as u64 > MAX_SKILL_FILE_BYTES {
         return Err(io::Error::other(too_large(
-            data.len() as u64,
+            skill_file_bytes.len() as u64,
             MAX_SKILL_FILE_BYTES,
         )));
     }
-    Ok(data)
+    Ok(skill_file_bytes)
 }
 
 pub(crate) fn too_large(size: u64, maximum: u64) -> String {

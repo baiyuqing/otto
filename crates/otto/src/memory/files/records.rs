@@ -84,7 +84,9 @@ pub(super) fn check_standing_budget(snapshot: &Snapshot, record: &Record) -> Res
         return Err(Error::detailed(
             ErrorKind::InvalidRequest,
             format!(
-                "standing preferences are full: {used} of {MAX_STANDING_TOKENS} tokens used, this record needs {needed}; forget a user-scope preference or instruction first (/memory forget <id> or otto memory forget)"
+                "standing preferences are full: {used} of {MAX_STANDING_TOKENS} tokens \
+                    used, this record needs {needed}; forget a user-scope preference or \
+                    instruction first (/memory forget <id> or otto memory forget)"
             ),
         ));
     }

@@ -615,12 +615,12 @@ fn write_atomically_with(
         .ok_or_else(|| std::io::Error::other("path has no parent"))?;
     fs::create_dir_all(directory)?;
     let (parent, name) = fsops::open_parent(path)?;
-    let temp = format!(".reflection-file-{}", crate::auth::random_hex::<8>()?);
+    let temp_name = format!(".reflection-file-{}", crate::auth::random_hex::<8>()?);
     fsops::publish_file(
         &parent,
         &Publish {
             name,
-            temp: &temp,
+            temp: &temp_name,
             permissions: 0o644,
             mode: PublishMode::Replace,
         },

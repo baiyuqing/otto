@@ -178,10 +178,32 @@ impl Runner {
             .transpose()
             .map_err(|_| StartError::ScratchUnavailable)?;
         let report_path = self.reports.prepare(self.scratch_root.get(), &task.id);
-        let report_policy = report_path.map_or_else(String::new, |path| format!(
-            "\n<research_report>For research too detailed for the handoff, use write, when available and permitted, to save the complete report in {path}/report.md with Markdown section headings. Return a concise summary, uncertainties, the report path and a section index with line numbers within 4 KiB. This directory persists after task exit; final.md and index.md are reserved for runtime overflow capture. Do not place reports in the temporary research directory. Existing write permissions and assigned file scope still apply. If you cannot write a report, return your findings as final text; the runtime saves an oversized final answer automatically.</research_report>"));
-        let scratch_policy = scratch.as_ref().map_or_else(String::new, |scratch| format!(
-            "\n<research_workspace>Use {} for temporary source downloads and analysis scripts. Download each pinned source once, then search/analyze locally and return only conclusions with original URL or file/line evidence. Keep durable deliverables outside this directory. Otto deletes this directory when your task exits, including failure or cancellation. Do not return its temporary paths as evidence.</research_workspace>", scratch.path()));
+        let report_policy = report_path.map_or_else(String::new, |path| {
+            format!(
+                "\n<research_report>For research too detailed for the handoff, use \
+                write, when available and permitted, to save the complete report in \
+                {path}/report.md with Markdown section headings. Return a concise \
+                summary, uncertainties, the report path and a section index with line \
+                numbers within 4 KiB. This directory persists after task exit; final.md \
+                and index.md are reserved for runtime overflow capture. Do not place \
+                reports in the temporary research directory. Existing write permissions \
+                and assigned file scope still apply. If you cannot write a report, \
+                return your findings as final text; the runtime saves an oversized \
+                final answer automatically.</research_report>"
+            )
+        });
+        let scratch_policy = scratch.as_ref().map_or_else(String::new, |scratch| {
+            format!(
+                "\n<research_workspace>Use {} for temporary source downloads and \
+                analysis scripts. Download each pinned source once, then search/analyze \
+                locally and return only conclusions with original URL or file/line \
+                evidence. Keep durable deliverables outside this directory. Otto \
+                deletes this directory when your task exits, including failure or \
+                cancellation. Do not return its temporary paths as \
+                evidence.</research_workspace>",
+                scratch.path()
+            )
+        });
 
         let role_body = definition
             .as_ref()
@@ -190,7 +212,16 @@ impl Runner {
             .unwrap_or(GENERIC_SUBAGENT_INSTRUCTION);
         let redactor = self.redactor();
         let system_prompt = redactor.redact_string(&format!(
-            "{}\n<subagent_role>\n{}\n</subagent_role>{scratch_policy}{report_policy}\n<child_report_policy>Keep research process, source text and logs in your own context. Return only the verified conclusion, essential evidence references, uncertainty and decisions needed from the parent. Keep handoff summaries and agent_report messages within 4 KiB; put detailed findings in a report file when permitted. Do not include raw logs or code dumps in handoffs. The parent-facing transport caps previews; oversized final answers are saved to a persistent report when workspace storage is available. The full transcript remains local.</child_report_policy>\n</otto_system_prompt>",
+            "{}\n<subagent_role>\n{}\n</subagent_role>{scratch_policy}{report_policy}\n<child_report_policy>Keep \
+                research process, source text and logs in your own context. Return only \
+                the verified conclusion, essential evidence references, uncertainty and \
+                decisions needed from the parent. Keep handoff summaries and \
+                agent_report messages within 4 KiB; put detailed findings in a report \
+                file when permitted. Do not include raw logs or code dumps in handoffs. \
+                The parent-facing transport caps previews; oversized final answers are \
+                saved to a persistent report when workspace storage is available. The \
+                full transcript remains \
+                local.</child_report_policy>\n</otto_system_prompt>",
             (self.config.prompt_for)(&tools.definitions()),
             crate::skill::prompt::escape_html(role_body),
         ));

@@ -92,22 +92,23 @@ pub fn token_path(home: &Path, server: &str) -> PathBuf {
 /// Loads the token file at `path`. `Ok(None)` when it does not exist; every
 /// other failure (oversized, malformed) is [`McpLoginError::Persistence`].
 pub fn load_token(path: &Path) -> Result<Option<TokenFile>, McpLoginError> {
-    let data = match std::fs::read(path) {
-        Ok(data) => data,
+    let token_file_bytes = match std::fs::read(path) {
+        Ok(token_file_bytes) => token_file_bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(McpLoginError::Persistence),
     };
-    if data.len() > auth::MAX_CREDENTIAL_FILE_BYTES {
+    if token_file_bytes.len() > auth::MAX_CREDENTIAL_FILE_BYTES {
         return Err(McpLoginError::Persistence);
     }
-    serde_json::from_slice(&data)
+    serde_json::from_slice(&token_file_bytes)
         .map(Some)
         .map_err(|_| McpLoginError::Persistence)
 }
 
 fn save_token(path: &Path, file: &TokenFile) -> Result<(), McpLoginError> {
-    let data = serde_json::to_vec_pretty(file).map_err(|_| McpLoginError::Persistence)?;
-    auth::write_secret_file(path, &data).map_err(|_| McpLoginError::Persistence)
+    let token_file_json =
+        serde_json::to_vec_pretty(file).map_err(|_| McpLoginError::Persistence)?;
+    auth::write_secret_file(path, &token_file_json).map_err(|_| McpLoginError::Persistence)
 }
 
 /// Removes the token file at `path`. `Ok(false)` when it was already absent.

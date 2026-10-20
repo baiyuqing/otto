@@ -179,11 +179,11 @@ impl Runtime {
             })
             .map(|installed| {
                 let root = service.package_path(&installed.digest);
-                let data = service.ensure_data(&installed.name)?;
+                let package_data_dir = service.ensure_data(&installed.name)?;
                 Ok(Package {
                     installed: installed.clone(),
                     root,
-                    data,
+                    data: package_data_dir,
                     service: service.clone(),
                 })
             })
@@ -312,7 +312,11 @@ impl Runtime {
                     biased;
                     result=&mut run => break result,
                     _=&mut deadline => { token.cancel(); let _=run.await; return Err(CommandError::started("plugin command timed out")); },
-                    _=tokio::time::sleep(Duration::from_millis(500)) => if guard.is_some_and(|g|g.before(event).is_err()) || !self.valid(package) { token.cancel(); let _=run.await; return Err(CommandError::started("plugin source changed or project trust revoked")); },
+                    _=tokio::time::sleep(Duration::from_millis(500)) => if guard.is_some_and(|g|g.before(event).is_err()) || !self.valid(package) {
+                        token.cancel();
+                        let _=run.await;
+                        return Err(CommandError::started("plugin source changed or project trust revoked"));
+                    },
                 }
             }
         };
@@ -436,12 +440,49 @@ impl Hooks for Bound {
             if !hook.matcher.is_empty() && !hook.matcher.iter().any(|p| matches(p, name)) {
                 continue;
             }
-            let result=async {
-                let output=self.runtime.command(&hook.command,&hook.timeout,package.as_ref(),json!({"version":1,"event":event,"workspace":self.runtime.execution.workspace,"session":self.context,"data":data}),control,self.guard.as_ref()).await.map_err(|error|error.message)?;
-                let response:Response=if output.trim().is_empty(){Response::default()}else{serde_json::from_str(&self.runtime.redact_json(&output)).map_err(|_|"invalid hook JSON response")?};
-                if response.arguments.is_some() && event!="before_tool" || response.content.is_some() && event!="after_tool" || response.context.is_some() && !["session_start","before_prompt","before_compaction"].contains(&event) || (response.decision.is_some() || response.reason.is_some()) && !["session_start","before_prompt","before_tool","before_compaction"].contains(&event) { return Err("hook response field is not supported for this event".into()); }
+            let result = async {
+                let output = self
+                    .runtime
+                    .command(
+                        &hook.command,
+                        &hook.timeout,
+                        package.as_ref(),
+                        json!({
+                            "version":1,
+                            "event":event,
+                            "workspace":self.runtime.execution.workspace,
+                            "session":self.context,
+                            "data":data
+                        }),
+                        control,
+                        self.guard.as_ref(),
+                    )
+                    .await
+                    .map_err(|error| error.message)?;
+                let response: Response = if output.trim().is_empty() {
+                    Response::default()
+                } else {
+                    serde_json::from_str(&self.runtime.redact_json(&output))
+                        .map_err(|_| "invalid hook JSON response")?
+                };
+                if response.arguments.is_some() && event != "before_tool"
+                    || response.content.is_some() && event != "after_tool"
+                    || response.context.is_some()
+                        && !["session_start", "before_prompt", "before_compaction"].contains(&event)
+                    || (response.decision.is_some() || response.reason.is_some())
+                        && ![
+                            "session_start",
+                            "before_prompt",
+                            "before_tool",
+                            "before_compaction",
+                        ]
+                        .contains(&event)
+                {
+                    return Err("hook response field is not supported for this event".into());
+                }
                 Ok(response)
-            }.await;
+            }
+            .await;
             match result {
                 Err(message) if event.starts_with("before_") || event == "session_start" => {
                     return Err(message);
@@ -561,7 +602,19 @@ impl crate::tool::Tool for CommandTool {
         cancel: &CancellationToken,
         request: &otto_core::approval::Request,
     ) -> otto_core::tool::ToolResult {
-        self.invoke(call.arguments,cancel,json!({"tool_call_id":call.tool_call_id,"operation_id":call.operation_id,"attempt":call.attempt,"session_id":request.scope.session_id,"task_id":request.scope.task_id,"workspace":request.scope.workspace})).await
+        self.invoke(
+            call.arguments,
+            cancel,
+            json!({
+                "tool_call_id":call.tool_call_id,
+                "operation_id":call.operation_id,
+                "attempt":call.attempt,
+                "session_id":request.scope.session_id,
+                "task_id":request.scope.task_id,
+                "workspace":request.scope.workspace
+            }),
+        )
+        .await
     }
 }
 
@@ -576,17 +629,52 @@ impl CommandTool {
             return result;
         }
         let value: Value = serde_json::from_str(arguments.get()).expect("validated JSON");
-        match self.runtime.command(&self.spec.command,&self.spec.timeout,Some(&self.package),json!({"version":1,"event":"tool","workspace":self.runtime.execution.workspace,"tool":<Self as crate::tool::Tool>::definition(self).name,"arguments":value,"metadata":metadata}),cancel,None).await {
-            Ok(output)=> {
+        match self
+            .runtime
+            .command(
+                &self.spec.command,
+                &self.spec.timeout,
+                Some(&self.package),
+                json!({
+                    "version":1,
+                    "event":"tool",
+                    "workspace":self.runtime.execution.workspace,
+                    "tool":<Self as crate::tool::Tool>::definition(self).name,
+                    "arguments":value,
+                    "metadata":metadata
+                }),
+                cancel,
+                None,
+            )
+            .await
+        {
+            Ok(output) => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
-                struct Result {content:String, #[serde(default)] is_error:bool}
-                match serde_json::from_str::<Result>(&self.runtime.redact_json(&output)) {
-                    Ok(result)=>otto_core::tool::ToolResult{content:result.content,is_error:result.is_error,..Default::default()},
-                    Err(_)=>otto_core::tool::ToolResult::error("invalid plugin tool JSON response").transport_unknown(),
+                struct Result {
+                    content: String,
+                    #[serde(default)]
+                    is_error: bool,
                 }
-            },
-            Err(error)=>if error.started {otto_core::tool::ToolResult::error(error.message).transport_unknown()} else {otto_core::tool::ToolResult::error(error.message).not_started()},
+                match serde_json::from_str::<Result>(&self.runtime.redact_json(&output)) {
+                    Ok(result) => otto_core::tool::ToolResult {
+                        content: result.content,
+                        is_error: result.is_error,
+                        ..Default::default()
+                    },
+                    Err(_) => {
+                        otto_core::tool::ToolResult::error("invalid plugin tool JSON response")
+                            .transport_unknown()
+                    }
+                }
+            }
+            Err(error) => {
+                if error.started {
+                    otto_core::tool::ToolResult::error(error.message).transport_unknown()
+                } else {
+                    otto_core::tool::ToolResult::error(error.message).not_started()
+                }
+            }
         }
     }
 }
@@ -605,116 +693,4 @@ fn schema(spec: &Value, value: Option<&Value>) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy, direct::DirectDriver};
-    fn runtime(hooks: otto_core::config::plugins::Hooks) -> (tempfile::TempDir, Arc<Runtime>) {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = std::fs::canonicalize(temp.path()).unwrap();
-        let executor = Executor::new(
-            Arc::new(DirectDriver::new()),
-            Policy {
-                filesystem: FilesystemMode::Unconfined,
-                network: NetworkMode::Allow,
-            },
-            &workspace,
-        )
-        .unwrap();
-        let runtime = Runtime::new(
-            &super::super::Snapshot::default(),
-            temp.path(),
-            &hooks,
-            Execution {
-                executor: Some(Arc::new(executor)),
-                environment: vec!["PATH=/usr/bin:/bin".into()],
-                workspace,
-                guard: None,
-                secrets: vec!["test-private-value".into()],
-                logger: Arc::new(crate::log::Logger::discard()),
-            },
-        )
-        .unwrap();
-        (temp, runtime)
-    }
-    fn hook(script: &str) -> Hook {
-        Hook {
-            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
-            timeout: "1s".into(),
-            matcher: Vec::new(),
-        }
-    }
-    #[tokio::test]
-    async fn ordered_hooks_exchange_json_and_match_remote_mcp_names() {
-        let mut first = hook(
-            "read input; printf '%s' '{\"arguments\":{\"tool\":\"mcp__demo__read\",\"arguments\":{\"value\":2}}}'",
-        );
-        first.matcher = vec!["mcp__demo__*".into()];
-        let second = hook(
-            "read input; case \"$input\" in *'\"value\":2'*) printf '%s' '{\"decision\":\"deny\",\"reason\":\"blocked\"}';; *) exit 1;; esac",
-        );
-        let (_temp, runtime) = runtime(otto_core::config::plugins::Hooks {
-            before_tool: vec![first, second],
-            ..Default::default()
-        });
-        let response=runtime.bind("s".into(),None,String::new(),"new",None).run("before_tool",json!({"tool":"mcp_call_tool","arguments":{"tool":"mcp__demo__read","arguments":{}}}),&CancellationToken::new()).await.unwrap();
-        assert_eq!(response.decision, Some(Decision::Deny));
-        assert_eq!(response.reason.as_deref(), Some("blocked"));
-    }
-    #[tokio::test]
-    async fn invalid_timeout_failure_and_unsupported_response_fail_closed() {
-        for script in [
-            "read input; printf 'not-json'",
-            "exit 1",
-            "sleep 20",
-            "read input; printf '%s' '{\"content\":\"wrong event\"}'",
-        ] {
-            let mut entry = hook(script);
-            entry.timeout = "50ms".into();
-            let (_temp, runtime) = runtime(otto_core::config::plugins::Hooks {
-                before_tool: vec![entry],
-                ..Default::default()
-            });
-            let response = runtime
-                .bind("s".into(), None, String::new(), "new", None)
-                .run("before_tool", json!({}), &CancellationToken::new())
-                .await;
-            assert!(response.is_err(), "{script}");
-        }
-    }
-    #[tokio::test]
-    async fn input_and_output_are_redacted_and_after_failure_does_not_skip_later_hooks() {
-        let first = hook("exit 1");
-        let second = hook(
-            "read input; case \"$input\" in *test-private-value*) exit 3;; esac; printf '%s' '{\"content\":\"test-private-value\"}'",
-        );
-        let (_temp, runtime) = runtime(otto_core::config::plugins::Hooks {
-            after_tool: vec![first, second.clone()],
-            ..Default::default()
-        });
-        assert!(
-            runtime
-                .bind("s".into(), None, String::new(), "new", None)
-                .run(
-                    "after_tool",
-                    json!({"content":"test-private-value"}),
-                    &CancellationToken::new()
-                )
-                .await
-                .is_err()
-        );
-        let (_temp, runtime) = self::runtime(otto_core::config::plugins::Hooks {
-            after_tool: vec![second],
-            ..Default::default()
-        });
-        let response = runtime
-            .bind("s".into(), None, String::new(), "new", None)
-            .run(
-                "after_tool",
-                json!({"content":"test-private-value"}),
-                &CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.content.as_deref(), Some("[REDACTED]"));
-    }
-}
+mod tests;

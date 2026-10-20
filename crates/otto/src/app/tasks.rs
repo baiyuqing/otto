@@ -239,7 +239,11 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&task).expect("json"),
-            r#"{"id":"t1","agent":"reviewer","description":"check the diff","status":"running","created_at":"1970-01-01T00:00:00Z","steps":2,"tool_calls":1,"usage":{"input_tokens":0,"output_tokens":0},"usage_present":false}"#
+            concat!(
+                r#"{"id":"t1","agent":"reviewer","description":"check the diff","status":"running","#,
+                r#""created_at":"1970-01-01T00:00:00Z","steps":2,"tool_calls":1,"#,
+                r#""usage":{"input_tokens":0,"output_tokens":0},"usage_present":false}"#
+            )
         );
     }
 

@@ -22,7 +22,10 @@ async fn elevated_command_requires_an_exact_one_shot_approval() {
 Approve in Otto: /approve approval-1\n\
 Command: \"git push\"\n\
 Justification: \"push the reviewed branch\"\n\
-The command did not run. Only the user or their session approval mode can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
+The command did not run. Only the user or their session approval mode \
+            can approve it in Otto; do not run /approve in a shell. Ask the user to \
+            review the command above, then retry this exact elevated Bash command \
+            after approval."
     );
     assert_eq!(confined.calls(), 0);
     assert_eq!(elevated.calls(), 0);
@@ -41,7 +44,10 @@ The command did not run. Only the user or their session approval mode can approv
 Approve in Otto: /approve approval-3\n\
 Command: \"git push\"\n\
 Justification: \"push the reviewed branch\"\n\
-The command did not run. Only the user or their session approval mode can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
+The command did not run. Only the user or their session approval mode \
+            can approve it in Otto; do not run /approve in a shell. Ask the user to \
+            review the command above, then retry this exact elevated Bash command \
+            after approval."
     );
     approvals
         .approve("session-1", "approval-3")

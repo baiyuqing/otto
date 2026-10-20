@@ -127,30 +127,30 @@ pub(super) fn import(
     kinds: &[Kind],
     record: &Record,
 ) -> Result<NamedRecord> {
-    let data: NamedRecord = serde_json::from_slice(&record.payload).map_err(json_error)?;
+    let named_record: NamedRecord = serde_json::from_slice(&record.payload).map_err(json_error)?;
     let kind = kinds
         .iter()
-        .find(|kind| kind.name == data.kind)
+        .find(|kind| kind.name == named_record.kind)
         .ok_or_else(|| Error::Invalid("unsupported domain record kind".into()))?;
-    if data.version != 1
-        || data.fields.len() != kind.fields.len()
+    if named_record.version != 1
+        || named_record.fields.len() != kind.fields.len()
         || kind
             .fields
             .iter()
-            .any(|field| !data.fields.contains_key(*field))
+            .any(|field| !named_record.fields.contains_key(*field))
     {
         return Err(Error::Invalid(
             "incompatible domain record fields/version".into(),
         ));
     }
-    let metadata = data.metadata(kind)?;
+    let metadata = named_record.metadata(kind)?;
     if record.id != metadata.0 || record.revision != metadata.1 {
         return Err(Error::Invalid("domain identity/revision mismatch".into()));
     }
     let values = kind
         .fields
         .iter()
-        .map(|field| match &data.fields[*field] {
+        .map(|field| match &named_record.fields[*field] {
             serde_json::Value::Null => Ok(Value::Null),
             serde_json::Value::String(s) => Ok(Value::Text(s.clone())),
             serde_json::Value::Number(n) => {
@@ -176,7 +176,7 @@ pub(super) fn import(
             Params(values),
         )
         .map_err(sql_error)?;
-    Ok(data)
+    Ok(named_record)
 }
 pub(super) fn validate(
     connection: &Connection,

@@ -112,7 +112,12 @@ fn records_an_unmatched_tool_call_finished_as_its_own_item() {
 fn preserves_typed_tool_outcome_from_live_events() {
     let items = apply(&[
         r#"{"type":"tool_call_started","tool_call_id":"c1","tool_name":"bash","operation_id":"op_1","attempt":1,"tool_args":{"command":"touch marker"}}"#,
-        r#"{"type":"tool_call_finished","tool_call_id":"c1","tool_name":"bash","operation_id":"op_1","attempt":1,"result":{"content":"transport lost","is_error":true,"operation_id":"op_1","disposition":"interrupted","effect_certainty":"unknown","stop_reason":"transport_lost"}}"#,
+        concat!(
+            r#"{"type":"tool_call_finished","tool_call_id":"c1","tool_name":"bash","#,
+            r#""operation_id":"op_1","attempt":1,"result":{"content":"transport lost","#,
+            r#""is_error":true,"operation_id":"op_1","disposition":"interrupted","#,
+            r#""effect_certainty":"unknown","stop_reason":"transport_lost"}}"#,
+        ),
     ]);
     let Item::Tool {
         operation_id,
@@ -132,10 +137,14 @@ fn preserves_typed_tool_outcome_from_live_events() {
 
 #[test]
 fn reopened_history_preserves_typed_tool_outcome() {
-    let items = from_history(
-            r#"[{"role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"c1","tool_name":"read","arguments":{"path":"README.md"}}]},{"role":"tool","blocks":[{"type":"tool_result","tool_call_id":"c1","tool_name":"read","text":"ok","operation_id":"op_2","disposition":"succeeded","effect_certainty":"completed"}]}]"#,
-        )
-        .expect("history decodes");
+    let items = from_history(concat!(
+        r#"[{"role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"c1","#,
+        r#""tool_name":"read","arguments":{"path":"README.md"}}]},{"role":"tool","#,
+        r#""blocks":[{"type":"tool_result","tool_call_id":"c1","tool_name":"read","#,
+        r#""text":"ok","operation_id":"op_2","disposition":"succeeded","#,
+        r#""effect_certainty":"completed"}]}]"#,
+    ))
+    .expect("history decodes");
     let Item::Tool {
         operation_id,
         disposition,
@@ -361,7 +370,11 @@ fn format_args_matches_json_stringify_with_two_space_indent() {
 
 #[test]
 fn argument_display_decodes_strings_without_changing_json_values() {
-    let input = r#"{"\u8def\u5f84":"\u4e2d\u6587/\ud83d\ude80\u0026\u003c\u003e","literal":"\\u0026","controls":"\u001b\u000a\u0009","quote":"\u0022\\","n":123456789012345678901234567890,"exp":1e+09}"#;
+    let input = concat!(
+        r#"{"\u8def\u5f84":"\u4e2d\u6587/\ud83d\ude80\u0026\u003c\u003e","literal":"\\u0026","#,
+        r#""controls":"\u001b\u000a\u0009","quote":"\u0022\\","n":123456789012345678901234567890,"#,
+        r#""exp":1e+09}"#,
+    );
     let raw = RawValue::from_string(input.into()).unwrap();
     let expected = r#"{"路径":"中文/🚀&<>","literal":"\\u0026","controls":"\u001b\n\t","quote":"\"\\","n":123456789012345678901234567890,"exp":1e+09}"#;
     assert_eq!(format_args_compact(Some(&raw)), expected);

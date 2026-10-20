@@ -18,7 +18,15 @@ pub(super) fn check_automatic(
         )
     }) {
         let metadata = request.review.as_ref().ok_or(Error::Conflict)?;
-        let actual:Option<String>=tx.query_row("SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=''",[request.scope.workspace.as_str()],|r|r.get(0)).optional().map_err(storage_error)?;
+        let actual: Option<String> = tx
+            .query_row(
+                "SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 \
+            AND session_id=''",
+                [request.scope.workspace.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
         let actual = actual.unwrap_or_else(|| {
             crate::approval::digest(
                 &serde_json::to_string(&otto_core::config::ApprovalConfig::default())
@@ -55,7 +63,15 @@ pub(super) fn check_automatic(
         .is_some_and(|d| d.transport == "approval-rule")
     {
         let metadata = request.review.as_ref().ok_or(Error::Conflict)?;
-        let digest:Option<String>=tx.query_row("SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=''",[request.scope.workspace.as_str()],|r|r.get(0)).optional().map_err(storage_error)?;
+        let digest: Option<String> = tx
+            .query_row(
+                "SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 \
+            AND session_id=''",
+                [request.scope.workspace.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
         return if metadata.settings_revision == settings.revision
             && digest.as_deref() == Some(&metadata.policy_digest)
         {
@@ -94,7 +110,15 @@ pub(super) fn check_automatic(
     if metadata.settings_revision != settings.revision {
         return Err(Error::Conflict);
     }
-    let context: Option<(String,String)> = tx.query_row("SELECT evidence_digest,policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=?2",params![request.scope.workspace,request.scope.session_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage_error)?;
+    let context: Option<(String, String)> = tx
+        .query_row(
+            "SELECT evidence_digest,policy_digest FROM approval_review_contexts \
+        WHERE workspace=?1 AND session_id=?2",
+            params![request.scope.workspace, request.scope.session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(storage_error)?;
     if !context.is_some_and(|(e, p)| metadata.matches(settings.revision, &e, &p)) {
         return Err(Error::Conflict);
     }
@@ -142,7 +166,15 @@ pub(super) fn check_human_basis(
     if metadata.settings_revision != settings.revision {
         return Err(Error::Conflict);
     }
-    let context:Option<(String,String)>=tx.query_row("SELECT evidence_digest,policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=?2",params![request.scope.workspace,request.scope.session_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage_error)?;
+    let context: Option<(String, String)> = tx
+        .query_row(
+            "SELECT evidence_digest,policy_digest FROM approval_review_contexts \
+        WHERE workspace=?1 AND session_id=?2",
+            params![request.scope.workspace, request.scope.session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(storage_error)?;
     if let Some((evidence, policy)) = context {
         return if metadata.matches(settings.revision, &evidence, &policy) {
             Ok(())
@@ -150,7 +182,15 @@ pub(super) fn check_human_basis(
             Err(Error::Conflict)
         };
     }
-    let policy:Option<String>=tx.query_row("SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=''",[request.scope.workspace.as_str()],|r|r.get(0)).optional().map_err(storage_error)?;
+    let policy: Option<String> = tx
+        .query_row(
+            "SELECT policy_digest FROM approval_review_contexts WHERE workspace=?1 \
+        AND session_id=''",
+            [request.scope.workspace.as_str()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage_error)?;
     let policy = policy.unwrap_or_else(|| {
         crate::approval::digest(
             &serde_json::to_string(&otto_core::config::ApprovalConfig::default())

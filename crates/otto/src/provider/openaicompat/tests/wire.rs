@@ -62,7 +62,13 @@ async fn sends_the_expected_request_line_headers_and_body() {
 
 #[tokio::test]
 async fn catalog_preserves_compat_metadata_and_auth_without_required_metadata() {
-    let server = crate::faults::http::spawn(|_| crate::faults::http::json_response(r#"{"data":[{"id":"fixture-a","display_name":"Provider name","description":"catalog-compat-secret"},{"id":"fixture-b"}]}"#)).await;
+    let server = crate::faults::http::spawn(|_| {
+        crate::faults::http::json_response(concat!(
+            r#"{"data":[{"id":"fixture-a","display_name":"Provider name","#,
+            r#""description":"catalog-compat-secret"},{"id":"fixture-b"}]}"#
+        ))
+    })
+    .await;
     let client = Client::new(&server.url, "catalog-compat-secret");
     let catalog = client.catalog(&CancellationToken::new()).await.unwrap();
     assert_eq!(catalog.models.len(), 2);

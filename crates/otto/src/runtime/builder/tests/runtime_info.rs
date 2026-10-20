@@ -48,8 +48,14 @@ async fn the_system_prompt_carries_the_workspace_context_and_hides_the_api_key()
     let prompt = runner.system_prompt();
     assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
     assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, submit_verification, web_fetch, web_search, list_models, agent, agent_status, agent_yield, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, workflow_list, workflow_inspect, workflow_start, workflow_status, otto_help</available_tools>"
-        ));
+        "<available_tools>read, grep, find, ls, write, edit, \
+                submit_verification, web_fetch, web_search, list_models, agent, \
+                agent_status, agent_yield, agent_send, agent_cancel, remind, \
+                remind_status, remind_cancel, request_approval, approval_pending, \
+                approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, \
+                update_plan, workflow_list, workflow_inspect, workflow_start, \
+                workflow_status, otto_help</available_tools>"
+    ));
     assert!(prompt.contains("<task_control_policy>"));
     assert!(prompt.contains("<workspace_instructions"), "{prompt}");
     assert!(prompt.ends_with("</otto_system_prompt>"), "{prompt}");

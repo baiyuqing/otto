@@ -218,16 +218,16 @@ pub(super) fn read_all(
 ) -> Result<Vec<u8>, PiError> {
     file.seek(SeekFrom::Start(start))
         .map_err(|error| PiError::other(format!("seek session file: {error}")))?;
-    let mut data = Vec::new();
+    let mut file_bytes = Vec::new();
     match end {
         Some(end) => {
-            data.resize((end - start) as usize, 0);
-            file.read_exact(&mut data)
+            file_bytes.resize((end - start) as usize, 0);
+            file.read_exact(&mut file_bytes)
         }
-        None => file.read_to_end(&mut data).map(|_| ()),
+        None => file.read_to_end(&mut file_bytes).map(|_| ()),
     }
     .map_err(|error| PiError::other(format!("read session file: {error}")))?;
-    Ok(data)
+    Ok(file_bytes)
 }
 
 /// Decodes a session file without repairing it.

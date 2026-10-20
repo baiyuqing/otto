@@ -19,6 +19,7 @@ fn runtime(hooks: otto_core::config::plugins::Hooks) -> (tempfile::TempDir, Arc<
         Execution {
             executor: Some(Arc::new(executor)),
             environment: vec!["PATH=/usr/bin:/bin".into()],
+            package_environment: Default::default(),
             workspace,
             guard: None,
             secrets: vec!["test-private-value".into()],

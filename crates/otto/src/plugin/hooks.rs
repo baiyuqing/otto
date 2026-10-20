@@ -152,6 +152,8 @@ pub struct Runtime {
 pub struct Execution {
     pub executor: Option<Arc<dyn CommandExecutor>>,
     pub environment: Vec<String>,
+    /// Bound `NAME=VALUE` entries per installed package; sent only to that package's commands.
+    pub package_environment: std::collections::BTreeMap<String, Vec<(String, String)>>,
     pub workspace: PathBuf,
     pub guard: Option<crate::tool::project_guard::Guard>,
     pub secrets: Vec<String>,
@@ -215,6 +217,20 @@ impl Runtime {
             hooks,
             execution,
         }))
+    }
+    fn command_environment(&self, package: Option<&Package>) -> Vec<String> {
+        let mut environment = self.execution.environment.clone();
+        let Some(bound) =
+            package.and_then(|p| self.execution.package_environment.get(&p.installed.name))
+        else {
+            return environment;
+        };
+        for (name, value) in bound {
+            let prefix = format!("{name}=");
+            environment.retain(|entry| !entry.starts_with(&prefix));
+            environment.push(format!("{prefix}{value}"));
+        }
+        environment
     }
     fn valid(&self, package: Option<&Package>) -> bool {
         self.execution.guard.as_ref().is_none_or(|g| g.valid())
@@ -305,7 +321,7 @@ impl Runtime {
                     argv,
                     stdin: Some(input),
                     dir: self.execution.workspace.clone(),
-                    env: self.execution.environment.clone(),
+                    env: self.command_environment(package),
                     report_denials: false,
                 },
                 Streams {

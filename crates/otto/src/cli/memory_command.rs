@@ -192,6 +192,14 @@ pub fn run_with_storage(
     let Ok(memory_config) = resolve_memory(&config_file, &environment) else {
         return fail(stderr, CONFIG_UNAVAILABLE);
     };
+    if let Some(package) = memory_config.plugin_package() {
+        return fail(
+            stderr,
+            &format!(
+                "memory source plugin:{package} does not support otto memory; the plugin manages its records"
+            ),
+        );
+    }
     let (secret_values, complete) = boundary::boundary_secret_values(
         &BoundaryInputs {
             sandbox_secrets: &captured_auth.redaction_values,

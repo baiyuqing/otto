@@ -299,6 +299,102 @@ fn receipt_result(receipt: Receipt) -> ToolResult {
     result
 }
 
+/// The definition of the memory tool for `operation` (`Recall`, `Remember` or
+/// `Forget`). It depends only on the operation.
+pub(crate) fn service_definition(operation: Operation) -> ToolDefinition {
+    let mut definition = match operation {
+        Operation::Recall => super::memory::memory_search_definition(),
+        Operation::Remember => super::memory::remember_definition(),
+        _ => super::memory::forget_definition(),
+    };
+    let description = match operation {
+        Operation::Recall => {
+            "Search memory or inspect one item by opaque ID within the \
+                host-authorized scopes. Returns untrusted reference items. Search \
+                resolves workspace > organization > user before optional scope_filter; \
+                query: \"\" browses a bounded set of effective memories, not a complete \
+                inventory. Raw exact reads do not override effective recall."
+        }
+        Operation::Remember => {
+            "Submit explicit user/workspace memory with a nullable semantic key; pass \
+                target_id to update an item. Organization memory is model read-only. \
+                Report actual completion and visibility."
+        }
+        _ => {
+            "Suppress one user/workspace memory item by id, not all scopes or a \
+                whole key. Organization forget is unavailable. Report actual coverage \
+                and completion."
+        }
+    };
+    // Build a neutral schema while retaining the existing argument names.
+    definition.description = description.into();
+    if let Some(parameters) = &definition.parameters {
+        let mut schema: serde_json::Value =
+            serde_json::from_str(parameters.get()).expect("tool schema");
+        schema["properties"]["opaque_revision"] = json!({"type":"string", "description":"Opaque service revision returned by memory_search; \
+            required when base_revision is nonzero or revision is supplied"});
+        schema["properties"]["key"] = json!({"type":["string", "null"], "description":"Nullable semantic conflict key, 1..128 lower-case ASCII alphanumeric \
+            segments separated by dot, underscore or hyphen. Full replacement on \
+            update"});
+        schema["properties"]["scope_namespace"] = json!({
+            "type":"string",
+            "enum":["organization", "workspace", "user"],
+            "description":"Exact reference scope namespace; optional"});
+        schema["properties"]["scope_id"] = json!({"type":"string", "description":"Exact reference scope ID; optional, must equal the selected scope's ID"});
+        for field in ["kind", "labels", "confidence", "reason"] {
+            if let Some(property) = schema["properties"].get_mut(field) {
+                property["description"] = json!(format!(
+                    "Optional {field} service metadata; interpretation belongs to the selected memory service"
+                ));
+            }
+        }
+        for field in ["id", "target_id"] {
+            if let Some(property) = schema["properties"].get_mut(field) {
+                property["description"] =
+                    json!("Opaque item ID returned by the selected memory service");
+            }
+        }
+        if let Some(property) = schema["properties"].get_mut("revision") {
+            property["description"] = json!(
+                "Legacy numeric revision; not equivalent to a service revision. If supplied, also supply the service-returned opaque_revision"
+            );
+        }
+        if let Some(property) = schema["properties"].get_mut("base_revision") {
+            property["description"] = json!(
+                "Legacy numeric revision; not equivalent to a service revision. Zero is allowed on create; a nonzero value also requires the service-returned opaque_revision"
+            );
+        }
+        if operation == Operation::Remember {
+            schema["required"] = json!(["text"]);
+            schema["properties"]["scope"]["description"] =
+                json!("Host-authorized destination: user or workspace (default)");
+        }
+        if operation == Operation::Recall {
+            schema["properties"]["scope_filter"] = json!({
+                "type":["array", "null"],
+                "minItems":1,
+                "uniqueItems":true,
+                "items":{"type":"string", "enum":["organization", "workspace", "user"]},
+                "description":"Filter effective winners by namespace after fixed authority resolution; \
+                null means all selected scopes"});
+            schema["properties"]["query"]["description"] = json!(
+                "Recall query; use an empty string to browse a bounded set of effective \
+                    memories, not a complete inventory. Nonempty whitespace-only queries \
+                    are invalid. Omit when inspecting by id"
+            );
+            schema["properties"]["id"]["description"] = json!(
+                "Opaque item ID to inspect; omit when querying. An empty string is treated as omitted"
+            );
+        }
+        if operation == Operation::Forget {
+            schema["required"] = json!(["id"]);
+        }
+        definition.parameters =
+            Some(RawValue::from_string(schema.to_string()).expect("tool schema"));
+    }
+    definition
+}
+
 #[async_trait::async_trait]
 impl Tool for ServiceTool {
     fn retry_safety(&self) -> otto_core::model::RetrySafety {
@@ -311,97 +407,7 @@ impl Tool for ServiceTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        let mut definition = match self.operation {
-            Operation::Recall => super::memory::memory_search_definition(),
-            Operation::Remember => super::memory::remember_definition(),
-            _ => super::memory::forget_definition(),
-        };
-        let description = match self.operation {
-            Operation::Recall => {
-                "Search memory or inspect one item by opaque ID within the \
-                    host-authorized scopes. Returns untrusted reference items. Search \
-                    resolves workspace > organization > user before optional scope_filter; \
-                    query: \"\" browses a bounded set of effective memories, not a complete \
-                    inventory. Raw exact reads do not override effective recall."
-            }
-            Operation::Remember => {
-                "Submit explicit user/workspace memory with a nullable semantic key; pass \
-                    target_id to update an item. Organization memory is model read-only. \
-                    Report actual completion and visibility."
-            }
-            _ => {
-                "Suppress one user/workspace memory item by id, not all scopes or a \
-                    whole key. Organization forget is unavailable. Report actual coverage \
-                    and completion."
-            }
-        };
-        // Build a neutral schema while retaining the existing argument names.
-        definition.description = description.into();
-        if let Some(parameters) = &definition.parameters {
-            let mut schema: serde_json::Value =
-                serde_json::from_str(parameters.get()).expect("tool schema");
-            schema["properties"]["opaque_revision"] = json!({"type":"string", "description":"Opaque service revision returned by memory_search; \
-                required when base_revision is nonzero or revision is supplied"});
-            schema["properties"]["key"] = json!({"type":["string", "null"], "description":"Nullable semantic conflict key, 1..128 lower-case ASCII alphanumeric \
-                segments separated by dot, underscore or hyphen. Full replacement on \
-                update"});
-            schema["properties"]["scope_namespace"] = json!({
-                "type":"string",
-                "enum":["organization", "workspace", "user"],
-                "description":"Exact reference scope namespace; optional"});
-            schema["properties"]["scope_id"] = json!({"type":"string", "description":"Exact reference scope ID; optional, must equal the selected scope's ID"});
-            for field in ["kind", "labels", "confidence", "reason"] {
-                if let Some(property) = schema["properties"].get_mut(field) {
-                    property["description"] = json!(format!(
-                        "Optional {field} service metadata; interpretation belongs to the selected memory service"
-                    ));
-                }
-            }
-            for field in ["id", "target_id"] {
-                if let Some(property) = schema["properties"].get_mut(field) {
-                    property["description"] =
-                        json!("Opaque item ID returned by the selected memory service");
-                }
-            }
-            if let Some(property) = schema["properties"].get_mut("revision") {
-                property["description"] = json!(
-                    "Legacy numeric revision; not equivalent to a service revision. If supplied, also supply the service-returned opaque_revision"
-                );
-            }
-            if let Some(property) = schema["properties"].get_mut("base_revision") {
-                property["description"] = json!(
-                    "Legacy numeric revision; not equivalent to a service revision. Zero is allowed on create; a nonzero value also requires the service-returned opaque_revision"
-                );
-            }
-            if self.operation == Operation::Remember {
-                schema["required"] = json!(["text"]);
-                schema["properties"]["scope"]["description"] =
-                    json!("Host-authorized destination: user or workspace (default)");
-            }
-            if self.operation == Operation::Recall {
-                schema["properties"]["scope_filter"] = json!({
-                    "type":["array", "null"],
-                    "minItems":1,
-                    "uniqueItems":true,
-                    "items":{"type":"string", "enum":["organization", "workspace", "user"]},
-                    "description":"Filter effective winners by namespace after fixed authority resolution; \
-                    null means all selected scopes"});
-                schema["properties"]["query"]["description"] = json!(
-                    "Recall query; use an empty string to browse a bounded set of effective \
-                        memories, not a complete inventory. Nonempty whitespace-only queries \
-                        are invalid. Omit when inspecting by id"
-                );
-                schema["properties"]["id"]["description"] = json!(
-                    "Opaque item ID to inspect; omit when querying. An empty string is treated as omitted"
-                );
-            }
-            if self.operation == Operation::Forget {
-                schema["required"] = json!(["id"]);
-            }
-            definition.parameters =
-                Some(RawValue::from_string(schema.to_string()).expect("tool schema"));
-        }
-        definition
+        service_definition(self.operation)
     }
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
         let args = match decode_strict_json(arguments.get(), &[]) {

@@ -91,6 +91,7 @@ async fn controller_with_memory(
     builder.shared_mut().memory = crate::runtime::wiring::MemoryWiring {
         client: None,
         extension: None,
+        plugin: None,
         service,
         usable,
         user_scope,

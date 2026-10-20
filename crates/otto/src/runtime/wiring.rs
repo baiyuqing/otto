@@ -150,9 +150,20 @@ impl MemoryExtension {
     }
 }
 
+/// The `[memory] backend = "plugin:<package>"` selection.
+#[derive(Clone, Debug)]
+pub struct PluginMemorySelection {
+    pub package: String,
+    pub required: bool,
+    pub require_encryption: bool,
+}
+
 #[derive(Clone)]
 pub struct MemoryWiring {
     pub extension: Option<MemoryExtension>,
+    /// Set when a plugin package is the memory source. The client is built
+    /// for each runner, not at startup.
+    pub plugin: Option<PluginMemorySelection>,
     pub client: Option<Arc<crate::memory::client::Client>>,
     pub service: Arc<Service>,
     /// Whether the service is backed by a live store, and so worth exposing to
@@ -182,6 +193,8 @@ struct ServiceBinding {
 
 mod turn_observation;
 
+#[cfg(test)]
+mod plugin_memory_tests;
 #[cfg(test)]
 mod selected_memory_tests;
 #[cfg(test)]
@@ -309,10 +322,18 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
     }
 }
 
+impl MemoryWiring {
+    /// True when the memory source is not the file store.
+    pub fn external(&self) -> bool {
+        self.extension.is_some() || self.plugin.is_some()
+    }
+}
+
 impl Default for MemoryWiring {
     fn default() -> Self {
         Self {
             extension: None,
+            plugin: None,
             client: None,
             service: Arc::new(Service::null(None)),
             usable: false,
@@ -651,6 +672,7 @@ enum McpConnectResult {
 mod catalogs_and_subagents;
 mod mcp_connect;
 mod memory_binding;
+mod plugin_memory;
 
 /// Only the outcomes reachable without a real MCP server are covered: a
 /// disabled server is never dialed, and an unspawnable command reports `Failed`

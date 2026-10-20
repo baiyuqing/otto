@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
+use crate::hex::to_hex;
 use crate::{
     fsops,
     storage::migration::{
@@ -112,8 +113,8 @@ pub(super) fn identity(value: &str) -> Result<()> {
 fn journal_name(id: &str) -> Result<String> {
     identity(id)?;
     Ok(format!(
-        "migration-{:x}.json",
-        Sha256::digest(id.as_bytes())
+        "migration-{}.json",
+        to_hex(&Sha256::digest(id.as_bytes()))
     ))
 }
 
@@ -435,8 +436,10 @@ fn read_authority(dir: &fsops::Dir) -> Result<Authority> {
 
 fn route_generation(prepared: &PreparedCutover) -> Result<String> {
     Ok(format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(prepared).map_err(|_| invalid("route encoding failed"))?)
+        "sha256:{}",
+        to_hex(&Sha256::digest(
+            serde_json::to_vec(prepared).map_err(|_| invalid("route encoding failed"))?
+        ))
     ))
 }
 
@@ -460,7 +463,7 @@ fn manifest_digest(manifest: &Manifest) -> Result<String> {
     let mut input = manifest.clone();
     input.published_generation = None;
     let bytes = serde_json::to_vec(&input).map_err(|_| invalid("manifest encoding failed"))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(to_hex(&Sha256::digest(bytes)))
 }
 
 #[cfg(test)]

@@ -96,6 +96,7 @@ impl SqlDomainCodec for TaskCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hex::to_hex;
     use crate::subagent::{
         record::{Recorder, TaskContext, current_process},
         tasks::{Task, TaskStatus},
@@ -134,7 +135,7 @@ mod tests {
         let digest = DomainDigest {
             records: 1,
             blob_bytes: 0,
-            sha256: format!("{:x}", hash.finalize()),
+            sha256: to_hex(&hash.finalize()),
         };
         let chunk = Chunk {
             cursor: String::new(),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::hex::to_hex;
 use otto_core::approval::ApprovalMode;
 use std::os::unix::fs::DirBuilderExt;
 
@@ -182,8 +183,8 @@ async fn bootstrap_resumes_partial_marker_and_symlink_routes_fail_closed() {
         destination_identity: identity(&options.destination),
     };
     let bootstrap = directory.path().join(format!(
-        ".otto-transfer-{:x}",
-        Sha256::digest(serde_json::to_vec(&owner).unwrap())
+        ".otto-transfer-{}",
+        to_hex(&Sha256::digest(serde_json::to_vec(&owner).unwrap()))
     ));
     std::fs::DirBuilder::new()
         .mode(0o700)

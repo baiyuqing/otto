@@ -1,6 +1,7 @@
 //! Path validation, pinned directory access and the destination ownership marker.
 
 use super::*;
+use crate::hex::to_hex;
 
 pub(super) fn validate_id(id: &str) -> Result<()> {
     if id.is_empty()
@@ -90,8 +91,8 @@ pub(super) fn present_file(path: &Path) -> Result<bool> {
 }
 pub(super) fn identity(path: &Path) -> String {
     format!(
-        "local:{:x}",
-        Sha256::digest(path.as_os_str().as_encoded_bytes())
+        "local:{}",
+        to_hex(&Sha256::digest(path.as_os_str().as_encoded_bytes()))
     )
 }
 pub(super) fn endpoint(path: &Path) -> Result<String> {

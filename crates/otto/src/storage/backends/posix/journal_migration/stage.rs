@@ -1,6 +1,7 @@
 //! Journal staging import: envelopes, reconstruction and `StageImport`.
 
 use super::*;
+use crate::hex::to_hex;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct StageHeader {
@@ -31,9 +32,9 @@ pub(super) struct Envelope {
 
 pub(super) fn chunk_name(domain: Domain, position: &str) -> String {
     format!(
-        ".chunk-{}-{:x}.json",
+        ".chunk-{}-{}.json",
         domain.name(),
-        Sha256::digest(position.as_bytes())
+        to_hex(&Sha256::digest(position.as_bytes()))
     )
 }
 
@@ -303,7 +304,7 @@ impl Drop for PendingFile {
 pub(super) fn finish(pending: Option<PendingFile>) -> Result<()> {
     if let Some(pending) = pending {
         if pending.offset != pending.record.len
-            || format!("{:x}", pending.hash.clone().finalize()) != pending.record.sha256
+            || to_hex(&pending.hash.clone().finalize()) != pending.record.sha256
         {
             return Err(invalid("incomplete/divergent staged blob"));
         }

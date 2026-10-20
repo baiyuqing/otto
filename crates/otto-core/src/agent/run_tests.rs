@@ -53,6 +53,7 @@ mod durable_boundaries;
 mod input_delivery;
 mod manual_compaction;
 mod memory_context;
+mod memory_observation;
 mod progress_recovery;
 mod provider_tools;
 mod redaction;

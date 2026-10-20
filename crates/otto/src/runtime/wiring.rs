@@ -175,11 +175,17 @@ fn neutral_scope(scope: &Scope) -> otto_core::memory::Scope {
 struct ServiceBinding {
     client: Arc<crate::memory::client::Client>,
     context: otto_core::memory::MemoryContext,
+    /// True when the service accepts delegated-learning `observe` requests.
+    observes: bool,
     closed: AtomicBool,
 }
 
+mod turn_observation;
+
 #[cfg(test)]
 mod selected_memory_tests;
+#[cfg(test)]
+mod turn_observation_tests;
 
 #[async_trait::async_trait]
 impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
@@ -259,6 +265,42 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
             records: admitted,
             used_tokens,
         })
+    }
+
+    fn observes_turns(&self) -> bool {
+        self.observes
+    }
+
+    async fn observe_turn(
+        &self,
+        turn_id: &str,
+        turn: &serde_json::Value,
+        cancel: &CancellationToken,
+    ) -> Result<(), otto_core::agent::memory::MemoryError> {
+        use otto_core::{agent::memory as agent, memory as port};
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(agent::MemoryError(
+                port::Error::new(port::ErrorKind::Closed).to_string(),
+            ));
+        }
+        let admitted: Vec<_> = turn_observation::turn_observations(turn_id, turn)
+            .into_iter()
+            .filter(|observation| self.client.guard_admits(observation))
+            .collect();
+        for batch in turn_observation::observation_batches(admitted) {
+            let request = port::ObserveRequest {
+                context: self.context.clone(),
+                request_id: crate::memory::new_id()
+                    .map_err(|error| agent::MemoryError(error.to_string()))?,
+                observations: batch,
+                mode: port::ObserveMode::Learn,
+            };
+            self.client
+                .observe(&request, cancel)
+                .await
+                .map_err(|error| agent::MemoryError(format!("memory observe failed: {error}")))?;
+        }
+        Ok(())
     }
 
     fn close(&self) -> Result<(), otto_core::agent::memory::MemoryError> {

@@ -136,9 +136,12 @@ capability.
   children; `/agents` includes other sessions and completed tasks.
 - The footer shows model, approval mode, token totals/cache share, context,
   sandbox, effort, workspace and session ID; narrow terminals clip the tail.
-  Cached share is cached/input tokens and is omitted if any report lacks its
-  breakdown. In `GET /v1/usage`, absent cache breakdown means unknown (`null`),
-  not zero. Provider operations and actual HTTP attempts are counted separately.
+  The totals are the whole session's: a sub-agent's tokens are added to them
+  when its task finishes, and they survive resume, `--attach` and forks.
+  Cached share is cached/input tokens and is omitted if any report, including a
+  sub-agent's, lacks its breakdown. In `GET /v1/usage`, absent cache breakdown
+  means unknown (`null`), not zero. Provider operations and actual HTTP attempts
+  are counted separately.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys

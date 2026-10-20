@@ -106,6 +106,15 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Build and verification
 
+- Code files have at most 800 lines and lines at most 200 characters, and
+  files are not named `utils`, `types`, `config` or another generic name.
+  Oversized files were split into domain-named modules, longer lines were
+  wrapped, and local bindings in production code named `data`, `tmp`,
+  `temp`, `obj`, `v4` or `bar` were renamed after their content, without
+  behavior changes. `make code-limits`, `make check`, `make check-linux`,
+  `make check-fast` and the pre-commit hook enforce the limits. To update an
+  installed hook, delete `$(git rev-parse --git-path hooks)/pre-commit` and
+  run `make setup-git-hooks`. See [code limits](docs/development/workflow.md#code-limits).
 - Rust is pinned to 1.99.0. Provider TLS and connector WebSocket dependencies
   receive security updates. `otto --version` includes the checkout commit.
 - The repository has no CI. Run focused checks locally; full `make` gates are

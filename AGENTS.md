@@ -57,6 +57,19 @@ advertise other providers or planned roadmap features.
 - After implementation, `cargo fmt --all` and the focused tests, open a PR
   without asking again. Opening the PR ends the task.
 
+## Code size and naming
+
+- A code file (`.rs`, `.go`, `.js`, `.mjs`, `.py`, `.sh`) has at most 800
+  lines, tests included, and a line at most 200 characters. Before a change
+  would cross the limit, split the file into child modules named by domain.
+- Name variables and functions for `grep`: state what the value holds
+  (`agent_file_bytes`, not `data`, `tmp2` or `a1`).
+- Name files and modules after their domain (`memory_types.rs`), never a
+  generic container: `utils`, `util`, `helpers`, `helper`, `common`, `misc`,
+  `types`, `config`.
+- The pre-commit hook and `make code-limits` enforce the size and file-name
+  rules; see [code limits](docs/development/workflow.md#code-limits).
+
 ## Safety
 
 - API keys and chat secrets come only from environment variables; ChatGPT
@@ -68,10 +81,11 @@ advertise other providers or planned roadmap features.
   It always starts in the selected workspace.
 - Default tests stay offline: no live providers, real credentials or external
   services. PTY acceptance uses controlled test terminals.
-- Install the repository's secret-scanning hook once per clone with
-  `make setup-git-hooks` (it needs `gitleaks` on `PATH`). The hook is shared
-  with this clone's worktrees and blocks a commit whose staged changes hold a
-  finding or that it cannot scan.
+- Install the repository's pre-commit hook once per clone with
+  `make setup-git-hooks` (it needs `gitleaks` and `node` on `PATH`). The hook
+  is shared with this clone's worktrees and blocks a commit whose staged
+  changes hold a secret finding or break the code limits, or that it cannot
+  scan.
 
 ## Verification
 

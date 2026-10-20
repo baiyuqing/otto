@@ -210,8 +210,8 @@ fn stdout_body(content: &str) -> String {
     stdout.to_owned()
 }
 
-fn temp_workspace() -> (tempfile::TempDir, Workspace) {
+fn temp_workspace() -> (tempfile::TempDir, std::sync::Arc<Workspace>) {
     let dir = tempfile::tempdir().expect("a temporary directory is creatable");
-    let workspace = Workspace::new(dir.path()).expect("the workspace opens");
+    let workspace = std::sync::Arc::new(Workspace::new(dir.path()).expect("the workspace opens"));
     (dir, workspace)
 }

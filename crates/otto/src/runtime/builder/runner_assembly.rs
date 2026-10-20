@@ -41,7 +41,7 @@ impl Builder {
                 .clone()
                 .expect("bash_configured implies an executor");
             let mut tool = bash::BashTool::new_with_grace(
-                self.workspace,
+                &self.workspace,
                 executor,
                 &self.shell,
                 self.sandbox_environment.clone().unwrap_or_default(),
@@ -246,7 +246,7 @@ impl Builder {
             Utc::now(),
             context_executor,
             self.sandbox_environment.as_deref(),
-            self.workspace,
+            &self.workspace,
         )
         .await?;
         let prompt_tail = redactor.redact_string(&(environment.clone() + &catalogs.skill_section));
@@ -485,6 +485,7 @@ impl Builder {
         self.approvals
             .set_managed_policy(&self.workspace_path, forced)
             .map_err(|error| error.to_string())?;
+        let mut review_provider: Option<Arc<dyn crate::approval::reviewer::ReviewProvider>> = None;
         if !session.header().id.is_empty() {
             let review_runtime = match self.config.approval.reviewer_profile.as_deref() {
                 Some(profile) => {
@@ -517,16 +518,14 @@ impl Builder {
                 },
                 self.boundary_redactor(Some(&review_runtime)),
             );
+            let provider: Arc<dyn crate::approval::reviewer::ReviewProvider> = Arc::new(
+                crate::approval::reviewer::SessionReviewer::new(review_agent)
+                    .with_usage(self.usage_collector(session, &review_runtime)),
+            );
             self.approvals
-                .register_reviewer(
-                    &self.workspace_path,
-                    &session.header().id,
-                    Arc::new(
-                        crate::approval::reviewer::SessionReviewer::new(review_agent)
-                            .with_usage(self.usage_collector(session, &review_runtime)),
-                    ),
-                )
+                .register_reviewer(&self.workspace_path, &session.header().id, provider.clone())
                 .map_err(|error| error.to_string())?;
+            review_provider = Some(provider);
         }
         let mut review_context = session
             .handle()
@@ -670,6 +669,7 @@ impl Builder {
                     run_id: String::new(),
                 },
             )),
+            review_provider,
             agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
             turn_timeout: runtime.resilience.deadlines.turn_timeout,
             unattended_turn_timeout: runtime.resilience.deadlines.unattended_turn_timeout,

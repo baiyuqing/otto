@@ -237,6 +237,9 @@ pub enum Event {
         text: String,
         usage: Usage,
         present: bool,
+        /// True only when every provider report behind `usage` included the
+        /// cached-input-token breakdown; false whenever it carries no usage.
+        cached_input_tokens_present: bool,
     },
     AgentError {
         /// The `Display` text of the [`AgentError`] `run` is about to return.
@@ -491,6 +494,7 @@ mod tests {
                 text: String::new(),
                 usage: Usage::default(),
                 present: false,
+                cached_input_tokens_present: false,
             }
             .name(),
             Event::AgentError {

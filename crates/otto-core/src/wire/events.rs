@@ -314,11 +314,13 @@ pub fn to_wire(event: &Event) -> WireEvent {
             text,
             usage,
             present,
+            cached_input_tokens_present,
         } => {
             wire.task_id = task_id.clone();
             wire.text = text.clone();
             wire.usage = Some(*usage);
             wire.usage_present = Some(*present);
+            wire.cached_input_tokens_present = (*present).then_some(*cached_input_tokens_present);
         }
         Event::CompactionStarted { compaction } | Event::CompactionCompleted { compaction } => {
             wire.compaction = Some(to_wire_compaction(compaction));
@@ -496,13 +498,14 @@ mod tests {
                 text: "我发的 queued input 又看不到了".into(),
                 usage: Usage::default(),
                 present: false,
+                cached_input_tokens_present: false,
             }),
             r#"{"type":"user_message","text":"我发的 queued input 又看不到了"}"#
         );
     }
 
     #[test]
-    fn notification_carries_task_id_text_and_usage() {
+    fn notification_carries_task_id_text_usage_and_cache_breakdown_presence() {
         assert_eq!(
             json(&Event::Notification {
                 kind: None,
@@ -511,11 +514,27 @@ mod tests {
                 usage: Usage {
                     input_tokens: 5,
                     output_tokens: 2,
-                    cached_input_tokens: 0,
+                    cached_input_tokens: 4,
                 },
                 present: true,
+                cached_input_tokens_present: true,
             }),
-            r#"{"type":"notification","task_id":"t1","text":"done","usage":{"input_tokens":5,"output_tokens":2},"usage_present":true}"#
+            r#"{"type":"notification","task_id":"t1","text":"done","usage":{"input_tokens":5,"output_tokens":2,"cached_input_tokens":4},"usage_present":true,"cached_input_tokens_present":true}"#
+        );
+    }
+
+    #[test]
+    fn a_notification_without_usage_reports_no_cache_breakdown() {
+        assert_eq!(
+            json(&Event::Notification {
+                kind: None,
+                task_id: "t1".into(),
+                text: "done".into(),
+                usage: Usage::default(),
+                present: false,
+                cached_input_tokens_present: true,
+            }),
+            r#"{"type":"notification","task_id":"t1","text":"done","usage":{"input_tokens":0,"output_tokens":0},"usage_present":false}"#
         );
     }
 

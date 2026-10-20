@@ -220,17 +220,9 @@ impl Snapshot {
                     .iter()
                     .map(|d| format!("plugin {}: {d}", installed.name)),
             );
-            if !installed.trusted
-                && (!package.otto.tools.is_empty()
-                    || package
-                        .otto
-                        .hooks
-                        .entries()
-                        .iter()
-                        .any(|(_, h)| !h.is_empty()))
-            {
+            if !installed.trusted && package.otto.has_executables() {
                 snapshot.diagnostics.push(format!(
-                    "plugin {}: hooks and custom tools disabled; run otto plugin trust {}",
+                    "plugin {}: hooks, custom tools and memory disabled; run otto plugin trust {}",
                     installed.name, installed.name
                 ));
             }

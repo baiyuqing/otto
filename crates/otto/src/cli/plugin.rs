@@ -91,18 +91,10 @@ pub fn run(
                     )
                     .map_err(|_| "cannot write trust details")?;
                 }
-                if !p
-                    .package
-                    .otto
-                    .hooks
-                    .entries()
-                    .iter()
-                    .all(|(_, h)| h.is_empty())
-                    || !p.package.otto.tools.is_empty()
-                {
+                if p.package.otto.has_executables() {
                     writeln!(
                         stdout,
-                        "Otto hooks/tools: {}",
+                        "Otto hooks/tools/memory: {}",
                         serde_json::to_string(&p.package.otto)
                             .map_err(|_| "cannot encode execution details")?
                     )

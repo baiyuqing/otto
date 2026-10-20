@@ -118,6 +118,9 @@ pub(super) fn validate_components(name: &str, components: &Components) -> Result
         validate_command(&tool.command, &tool.timeout)?;
         schema(&tool.input_schema, None)?;
     }
+    if let Some(memory) = &components.memory {
+        validate_command(&memory.command, &memory.timeout)?;
+    }
     Ok(())
 }
 fn fingerprint_file(workspace: &Path, path: &Path) -> Result<String, String> {
@@ -170,16 +173,7 @@ impl Runtime {
         let packages = snapshot
             .packages
             .iter()
-            .filter(|p| {
-                p.trusted
-                    && (!p.package.otto.tools.is_empty()
-                        || p.package
-                            .otto
-                            .hooks
-                            .entries()
-                            .iter()
-                            .any(|(_, h)| !h.is_empty()))
-            })
+            .filter(|p| p.trusted && p.package.otto.has_executables())
             .map(|installed| {
                 let root = service.package_path(&installed.digest);
                 let package_data_dir = service.ensure_data(&installed.name)?;
@@ -338,11 +332,11 @@ impl Runtime {
                 tokio::select! {
                     biased;
                     result=&mut run => break result,
-                    _=&mut deadline => { token.cancel(); let _=run.await; return Err(CommandError::started("plugin command timed out")); },
+                    _=&mut deadline => { token.cancel(); let _=run.await; return Err(CommandError::interrupted("plugin command timed out")); },
                     _=tokio::time::sleep(Duration::from_millis(500)) => if guard.is_some_and(|g|g.before(event).is_err()) || !self.valid(package) {
                         token.cancel();
                         let _=run.await;
-                        return Err(CommandError::started("plugin source changed or project trust revoked"));
+                        return Err(CommandError::interrupted("plugin source changed or project trust revoked"));
                     },
                 }
             }
@@ -356,6 +350,9 @@ impl Runtime {
                 | crate::sandbox::Error::EnvironmentUnsafe
                 | crate::sandbox::Error::ChildLaunch => {
                     CommandError::from("plugin command unavailable")
+                }
+                crate::sandbox::Error::Cancelled => {
+                    CommandError::interrupted("plugin command cancelled")
                 }
                 _ => CommandError::started("plugin command failed"),
             });
@@ -412,12 +409,22 @@ impl Runtime {
 struct CommandError {
     message: String,
     started: bool,
+    /// Set where `command` cancels a running process: the outcome of the
+    /// operation inside it is unknown.
+    interrupted: bool,
 }
 impl CommandError {
     fn started(message: &str) -> Self {
         Self {
             message: message.into(),
             started: true,
+            interrupted: false,
+        }
+    }
+    fn interrupted(message: &str) -> Self {
+        Self {
+            interrupted: true,
+            ..Self::started(message)
         }
     }
 }
@@ -426,6 +433,7 @@ impl From<&str> for CommandError {
         Self {
             message: message.into(),
             started: false,
+            interrupted: false,
         }
     }
 }
@@ -434,6 +442,7 @@ impl From<String> for CommandError {
         Self {
             message,
             started: false,
+            interrupted: false,
         }
     }
 }
@@ -719,5 +728,10 @@ fn schema(spec: &Value, value: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
+mod memory_source;
+pub use memory_source::PluginMemoryService;
+
+#[cfg(test)]
+mod memory_source_tests;
 #[cfg(test)]
 mod tests;

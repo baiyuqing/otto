@@ -219,7 +219,7 @@ pub(crate) mod testutil {
         std::fs::write(path, contents).expect("test files are writable");
     }
 
-    pub(crate) fn workspace(root: &Path) -> workspace::Workspace {
-        workspace::Workspace::new(root).expect("workspace should open")
+    pub(crate) fn workspace(root: &Path) -> std::sync::Arc<workspace::Workspace> {
+        std::sync::Arc::new(workspace::Workspace::new(root).expect("workspace should open"))
     }
 }

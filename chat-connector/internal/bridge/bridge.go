@@ -64,8 +64,8 @@ type Bridge struct {
 	chats     map[string]*chat
 	bySession map[string]*chat // chats with a running prompt, by session id
 	closing   bool
-	sessLocks map[string]*sync.Mutex // one per session id; guarded by mu
-	loadMu    sync.Mutex             // serializes session/load calls
+	sessLocks map[string]*sessLock // one per session id with a holder or waiter; guarded by mu
+	loadMu    sync.Mutex           // serializes session/load calls
 }
 
 // New returns a Bridge and registers it as the agent's handler.
@@ -90,7 +90,7 @@ func New(opts Options) *Bridge {
 		platforms: map[string]Platform{},
 		chats:     map[string]*chat{},
 		bySession: map[string]*chat{},
-		sessLocks: map[string]*sync.Mutex{},
+		sessLocks: map[string]*sessLock{},
 	}
 	b.workCtx, b.stopWork = context.WithCancel(context.Background())
 	for _, p := range opts.Platforms {
@@ -523,19 +523,36 @@ func (b *Bridge) chat(p Platform, id string) *chat {
 	return c
 }
 
-// sessionLock returns the mutex that serializes prompts on session id. Two
-// chats bound to one session would otherwise overwrite each other in
-// bySession and receive each other's updates. Go mutexes are not FIFO; the
-// order of chats that wait together is not guaranteed.
-func (b *Bridge) sessionLock(id string) *sync.Mutex {
+// sessLock is a session mutex plus the number of callers holding or waiting
+// for it; the map entry is deleted when the count reaches zero.
+type sessLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockSession serializes prompts on session id and returns the unlock
+// function. Two chats bound to one session would otherwise overwrite each
+// other in bySession and receive each other's updates. Go mutexes are not
+// FIFO; the order of chats that wait together is not guaranteed.
+func (b *Bridge) lockSession(id string) (unlock func()) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	l := b.sessLocks[id]
 	if l == nil {
-		l = &sync.Mutex{}
+		l = &sessLock{}
 		b.sessLocks[id] = l
 	}
-	return l
+	l.refs++
+	b.mu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		b.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(b.sessLocks, id)
+		}
+		b.mu.Unlock()
+	}
 }
 
 // Update implements agent.Handler. It only takes a mutex.

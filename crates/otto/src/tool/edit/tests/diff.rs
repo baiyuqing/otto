@@ -8,7 +8,7 @@ async fn the_diff_renders_one_hunk_per_edit() {
     let (root, _) = sample(&format!("{}\n", lines.join("\n")));
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","edits":[{"old_text":"line 5\n","new_text":"line 5\nextra\n"},{"old_text":"line 200\n","new_text":"LAST\n"}]}"#,
         )
         .await;
@@ -38,7 +38,7 @@ async fn the_diff_merges_edits_on_one_line() {
     let (root, _) = sample("a b c\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","edits":[{"old_text":"a","new_text":"A"},{"old_text":"c","new_text":"C"}]}"#,
         )
         .await;
@@ -53,8 +53,8 @@ async fn write_and_edit_share_the_file_lock() {
     let (root, path) = sample("a\n");
     let workspace = workspace(root.path());
     let key = workspace.write_relative(Path::new("sample.txt")).unwrap();
-    let edit = EditTool::new(&workspace);
-    let write = crate::tool::write::WriteTool::new(&workspace);
+    let edit = EditTool::new(Arc::clone(&workspace));
+    let write = crate::tool::write::WriteTool::new(Arc::clone(&workspace));
     let calls: [(&str, &dyn Tool, &str); 2] = [
         ("write", &write, r#"{"path":"sample.txt","content":"b\n"}"#),
         (
@@ -83,7 +83,7 @@ async fn a_byte_order_mark_and_crlf_endings_survive() {
     let (root, path) = sample("\u{feff}a\r\nb\r\n");
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"a\nb\n","new_text":"x\ny\n"}"#,
     )
     .await;
@@ -99,7 +99,7 @@ async fn overlapping_edits_are_refused_without_touching_the_file() {
     let (root, path) = sample("abcdef\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","edits":[{"old_text":"abc","new_text":"ABC"},{"old_text":"bcd","new_text":"BCD"}]}"#,
         )
         .await;
@@ -115,7 +115,7 @@ async fn every_edit_matches_against_the_original_content() {
     let (root, path) = sample("a\n");
     let workspace = workspace(root.path());
     let result = run(
-            &EditTool::new(&workspace),
+            &EditTool::new(Arc::clone(&workspace)),
             r#"{"path":"sample.txt","edits":[{"old_text":"a","new_text":"b"},{"old_text":"b","new_text":"c"}]}"#,
         )
         .await;
@@ -132,7 +132,7 @@ async fn the_diff_is_compact_and_trims_unchanged_lines() {
     let (root, _) = sample(&format!("{}\n", lines.join("\n")));
     let workspace = workspace(root.path());
     let result = run(
-        &EditTool::new(&workspace),
+        &EditTool::new(Arc::clone(&workspace)),
         r#"{"path":"sample.txt","old_text":"line 20\n","new_text":"changed 20\n"}"#,
     )
     .await;
@@ -159,7 +159,7 @@ async fn the_diff_is_compact_and_trims_unchanged_lines() {
     let (trimmed_root, _) = sample("alpha\nbeta\ngamma\n");
     let trimmed_workspace = crate::tool::testutil::workspace(trimmed_root.path());
     let trimmed = run(
-            &EditTool::new(&trimmed_workspace),
+            &EditTool::new(Arc::clone(&trimmed_workspace)),
             r#"{"path":"sample.txt","old_text":"alpha\nbeta\ngamma\n","new_text":"alpha\nCHANGED\ngamma\n"}"#,
         )
         .await;
@@ -185,7 +185,7 @@ async fn an_oversized_diff_is_truncated_but_the_file_is_written_whole() {
         "new_text": replacement,
     })
     .to_string();
-    let result = run(&EditTool::new(&workspace), &arguments).await;
+    let result = run(&EditTool::new(Arc::clone(&workspace)), &arguments).await;
     assert!(!result.is_error, "{result:?}");
     assert!(result.content.contains("truncated"), "{result:?}");
     assert!(

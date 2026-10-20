@@ -272,6 +272,16 @@ impl Runtime {
         }
         let mut input = self.redact_json(&data.to_string()).into_bytes();
         input.push(b'\n');
+        // An oversized `turn_end` input drops the turn content so the hook still runs.
+        if input.len() > MAX_INPUT && data.pointer("/data/turn").is_some() {
+            let mut without_turn = data.clone();
+            if let Some(event_data) = without_turn.get_mut("data").and_then(Value::as_object_mut) {
+                event_data.remove("turn");
+                event_data.insert("turn_omitted".into(), "size".into());
+            }
+            input = self.redact_json(&without_turn.to_string()).into_bytes();
+            input.push(b'\n');
+        }
         if input.len() > MAX_INPUT {
             return Err("plugin input exceeds 1 MiB".into());
         }

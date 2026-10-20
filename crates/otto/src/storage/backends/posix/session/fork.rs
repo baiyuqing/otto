@@ -177,7 +177,10 @@ fn write_new(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| PiError::invalid("session file name is not a valid component"))?;
-    let temporary = format!("{file_name}.fork-tmp");
+    // A random suffix keeps a temporary left by a crashed fork, or a
+    // concurrent fork of the same id, from failing this create with EEXIST.
+    let temporary_suffix = fsops::new_pi_entry_id(&HashSet::new())?;
+    let temporary = format!("{file_name}.{temporary_suffix}.fork-tmp");
     let root = open_dir_no_follow(directory)
         .map_err(|error| PiError::other(format!("open session directory: {error}")))?;
     let mut bytes = Vec::new();

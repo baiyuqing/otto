@@ -133,6 +133,7 @@ mod tests {
         )
         .expect("schedule contract");
         let definition = otto::workflow::Definition {
+            source: String::new(),
             name: "contract".into(),
             description: String::new(),
             steps: vec![otto::workflow::Step {

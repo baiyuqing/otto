@@ -347,6 +347,7 @@ mod tests {
             .create_run(
                 "run",
                 &Definition {
+                    source: String::new(),
                     name: "flow".into(),
                     description: String::new(),
                     steps: vec![Step {

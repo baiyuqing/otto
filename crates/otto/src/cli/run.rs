@@ -1071,6 +1071,7 @@ pub async fn run_with_extensions(
         // closes, so it keeps no stale row.
         reporter.release().await;
     }
+    controller.close_workflows().await;
     let controller_error = controller.close();
     let sandbox_error = control.close().await;
     let approval_error = approval_executor

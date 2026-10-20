@@ -9,6 +9,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- Parent conversations can discover, inspect, start and check durable workflows
+  through four native tools, with conditional execution-selection guidance and
+  six prompt examples. Shared workspace ownership, receipt-backed starts and
+  saved-session lifecycle feedback preserve conservative recovery and human
+  gates. Rebuild with `make install` and restart Otto/connector processes;
+  existing workflow definitions are reused and a fresh setup example is in
+  the [automation guide](docs/manual/automation.md#choosing-workflows-from-conversation).
+  Internal child/workflow recursion is denied; authenticated external API
+  callers retain their existing authority. Structured workflow scheduling is
+  not added.
+
 - The TUI footer's token totals and cached share now count sub-agent tasks. A
   finished task's tokens travel in its completion notification, which the
   session history stores in an Otto record detail, so the totals also survive

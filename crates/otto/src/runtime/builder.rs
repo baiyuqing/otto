@@ -1219,6 +1219,7 @@ impl Runner {
             text,
             usage: Usage::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
     }
 

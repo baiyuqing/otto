@@ -125,6 +125,7 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
             text: self.redactor.redact_string(&format!("[hook] {message}")),
             usage: Default::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
     }
 

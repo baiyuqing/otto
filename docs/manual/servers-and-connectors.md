@@ -513,6 +513,10 @@ and no later request re-opens it. Use `POST /v1/sessions` with
 message the fork stops before (`entry_id` is absent for a fork of the whole
 history).
 
+`usage` totals the whole session, including the tokens a sub-agent task
+reported when it finished: the notification that carries them is part of the
+session history, so the totals survive resume, `--attach` and forks.
+
 `turn` is `null` when no turn has run yet on this session. `trigger` is
 `user` for a turn started by `POST .../turns`, `task` for one the server
 started to deliver a finished sub-agent task or another notification, and
@@ -559,6 +563,11 @@ attempt and discard unfinished buffers. `attempt` is the
 `HTTP 503`, `connection interrupted`, `request timeout`, `stream read timeout`,
 or `model output idle timeout`;
 it never contains the response body.
+
+A `notification` carries `task_id`, `text`, `usage` and `usage_present` for the
+finished task, exactly like `provider_usage`; `cached_input_tokens_present`
+says whether every provider report behind that `usage` carried the cached
+breakdown, and is absent when the notification carries no usage.
 
 ### Errors
 

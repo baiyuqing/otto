@@ -65,7 +65,7 @@ Installing or trusting a package never changes the memory source; only
   "extensions": {
     "dev.otto": {
       "version": 1,
-      "memory": {"command": ["bin/otto-mem-plugin", "memory"], "timeout": "10s"}
+      "memory": {"command": ["${PLUGIN_ROOT}/bin/otto-mem-plugin", "memory"], "timeout": "10s"}
     }
   }
 }
@@ -237,9 +237,10 @@ A separate otto-mem PR after this one merges:
   today.
 - The user scope sent to a plugin source is `user/default`. The service
   identifies the user from its own credentials.
-- The memory tool definitions of a plugin source are not part of the
-  redaction-boundary check, which runs before the runner builds the source.
-  Their text is fixed in Otto.
+- The redaction-boundary check runs before the runner builds the source, so
+  for a plugin source it includes all three memory tool definitions
+  (`memory_search`, `remember`, `forget`), whether or not the plugin declares
+  the capabilities.
 - Each call rehashes the package snapshot, as hooks do.
 - The command's stderr is not recorded (existing follow-up for hooks).
 

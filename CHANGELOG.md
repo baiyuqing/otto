@@ -115,6 +115,10 @@ commit ledger; Git and release tags retain the full history. See the
   `make check-fast` and the pre-commit hook enforce the limits. To update an
   installed hook, delete `$(git rev-parse --git-path hooks)/pre-commit` and
   run `make setup-git-hooks`. See [code limits](docs/development/workflow.md#code-limits).
+- `cargo test --workspace` no longer aborts with a stack overflow. In a debug
+  build, the `embed` tests that run a turn needed up to 2.2 MB of thread stack,
+  more than the 2 MiB default of a test thread or Tokio worker thread; they now
+  need at most 1.03 MB.
 - Rust is pinned to 1.99.0. Provider TLS and connector WebSocket dependencies
   receive security updates. `otto --version` includes the checkout commit.
 - The repository has no CI. Run focused checks locally; full `make` gates are

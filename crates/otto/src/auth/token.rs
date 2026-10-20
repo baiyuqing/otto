@@ -1,12 +1,19 @@
 //! The refreshing, disk-persisting token source.
 //!
-//! Here one `tokio::sync::Mutex` covers the whole check-refresh-store sequence,
-//! so a second caller that arrives during a refresh waits on the lock and then
-//! re-checks validity, which is the same outcome with less state. A waiter
-//! aborts on cancellation rather than blocking.
+//! One `tokio::sync::Mutex` serializes the callers of one source: a caller that
+//! arrives during a refresh waits and then re-checks validity. An exclusive
+//! `flock` on `<credential file>.lock` serializes refreshes across sources and
+//! processes. Under that lock the credential file is re-read, and a valid token
+//! written by another source is adopted instead of refreshing with a refresh
+//! token that may already be rotated. A waiter aborts on cancellation.
 
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
+use std::time::Duration;
 
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg};
 use tokio_util::sync::CancellationToken;
 
 use super::oauth::{self, Endpoint};
@@ -65,9 +72,61 @@ impl TokenSource {
         if guard.token_valid(chrono::Utc::now().fixed_offset()) {
             return Ok(guard.clone());
         }
-        let refreshed = self.refresh(&guard, cancel).await?;
+        let _credentials_lock = self.lock_credentials_file(cancel).await?;
+        let stored_credentials = super::load(&self.path);
+        let refreshed = match stored_credentials {
+            Ok(stored) if stored.account_id == guard.account_id => {
+                if stored.token_valid(chrono::Utc::now().fixed_offset()) {
+                    *guard = stored.clone();
+                    return Ok(stored);
+                }
+                self.refresh(&stored, cancel, true).await?
+            }
+            // A newer login to another account owns the file; keep it.
+            Ok(_) => self.refresh(&guard, cancel, false).await?,
+            Err(_) => self.refresh(&guard, cancel, true).await?,
+        };
         *guard = refreshed.clone();
         Ok(refreshed)
+    }
+
+    /// Takes the exclusive lock on `<credential file>.lock`, polling every
+    /// 20 ms until cancellation.
+    async fn lock_credentials_file(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<Flock<File>, AuthError> {
+        let mut lock_name = self.path.file_name().unwrap_or_default().to_owned();
+        lock_name.push(".lock");
+        let lock_path = self.path.with_file_name(lock_name);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|_| AuthError::CredentialsPersistence)?;
+        }
+        let mut lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|_| AuthError::CredentialsPersistence)?;
+        loop {
+            match Flock::lock(lock_file, FlockArg::LockExclusiveNonblock) {
+                Ok(credentials_lock) => return Ok(credentials_lock),
+                Err((returned, Errno::EWOULDBLOCK)) => lock_file = returned,
+                Err(_) => return Err(AuthError::CredentialsPersistence),
+            }
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(AuthError::Cancelled),
+                () = self.base.cancelled() => return Err(AuthError::Cancelled),
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
     }
 
     fn cancelled(&self, cancel: &CancellationToken) -> bool {
@@ -76,11 +135,13 @@ impl TokenSource {
 
     /// The rotated credentials are validated against the size bound before
     /// anything is written, and the file is only rewritten when a value
-    /// actually changed.
+    /// actually changed. `persist` is false when the file belongs to another
+    /// account.
     async fn refresh(
         &self,
         snapshot: &Credentials,
         cancel: &CancellationToken,
+        persist: bool,
     ) -> Result<Credentials, AuthError> {
         let token = match &self.refresher {
             Refresher::Endpoint(endpoint) => {
@@ -96,9 +157,6 @@ impl TokenSource {
             #[cfg(test)]
             Refresher::Stub(stub) => stub(),
         };
-        if self.cancelled(cancel) {
-            return Err(AuthError::Cancelled);
-        }
         let token = token.map_err(|()| AuthError::AccessTokenRefreshFailed)?;
 
         let mut candidate = snapshot.clone();
@@ -113,7 +171,7 @@ impl TokenSource {
         let changed = candidate.access_token != snapshot.access_token
             || candidate.refresh_token != snapshot.refresh_token
             || candidate.expiry != snapshot.expiry;
-        if changed {
+        if changed && persist {
             candidate.save(&self.path)?;
         }
         Ok(candidate)
@@ -122,6 +180,9 @@ impl TokenSource {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::auth::{MAX_CREDENTIAL_FILE_BYTES, expiry, go_time, load};
     use crate::faults::http::{
@@ -440,5 +501,120 @@ mod tests {
         assert_eq!(server.count(), 0);
         // `expiry` is only a marker here; the helper keeps the import used.
         assert!(expiry("2030-01-02T03:04:05Z") > go_time::zero());
+    }
+
+    fn rotated_token(access: &str) -> oauth::Token {
+        oauth::Token {
+            access_token: access.to_owned(),
+            refresh_token: "refresh-new".to_owned(),
+            id_token: String::new(),
+            expiry: (chrono::Utc::now() + chrono::TimeDelta::hours(1)).fixed_offset(),
+        }
+    }
+
+    fn valid_credentials(access: &str, account: &str) -> Credentials {
+        Credentials {
+            access_token: access.to_owned(),
+            refresh_token: "refresh-file".to_owned(),
+            account_id: account.to_owned(),
+            expiry: (chrono::Utc::now() + chrono::TimeDelta::hours(1)).fixed_offset(),
+            ..Credentials::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_source_adopts_a_valid_token_from_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chatgpt.json");
+        valid_credentials("access-file", "acct-1")
+            .save(&path)
+            .unwrap();
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let counted = refresh_calls.clone();
+        let source = stub_source(
+            path,
+            expired("access-old", "refresh-old", "acct-1"),
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(rotated_token("access-new"))
+            },
+        );
+        let token = source.token(&CancellationToken::new()).await.unwrap();
+        assert_eq!(token.access_token, "access-file");
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_sources_on_one_file_refresh_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chatgpt.json");
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let sources: Vec<Arc<TokenSource>> = (0..2)
+            .map(|_| {
+                let counted = refresh_calls.clone();
+                Arc::new(stub_source(
+                    path.clone(),
+                    expired("access-old", "refresh-old", "acct-1"),
+                    move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(100));
+                        Ok(rotated_token("access-new"))
+                    },
+                ))
+            })
+            .collect();
+        let handles: Vec<_> = sources
+            .into_iter()
+            .map(|source| {
+                tokio::spawn(async move { source.token(&CancellationToken::new()).await })
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.await.unwrap().unwrap().access_token, "access-new");
+        }
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_file_of_another_account_is_not_overwritten() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chatgpt.json");
+        let other = Credentials {
+            expiry: (chrono::Utc::now() - chrono::TimeDelta::minutes(1)).fixed_offset(),
+            ..valid_credentials("access-other", "acct-other")
+        };
+        other.save(&path).unwrap();
+        let source = stub_source(
+            path.clone(),
+            expired("access-old", "refresh-old", "acct-1"),
+            || Ok(rotated_token("access-new")),
+        );
+        let token = source.token(&CancellationToken::new()).await.unwrap();
+        assert_eq!(token.access_token, "access-new");
+        assert_eq!(token.account_id, "acct-1");
+        let stored = load(&path).unwrap();
+        assert_eq!(stored.account_id, "acct-other");
+        assert_eq!(stored.access_token, "access-other");
+    }
+
+    #[tokio::test]
+    async fn a_completed_refresh_is_saved_even_if_the_call_is_cancelled_afterwards() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chatgpt.json");
+        let cancel = CancellationToken::new();
+        let cancelling = cancel.clone();
+        let source = stub_source(
+            path.clone(),
+            expired("access-old", "refresh-old", "acct-1"),
+            move || {
+                cancelling.cancel();
+                Ok(rotated_token("access-new"))
+            },
+        );
+        let token = source.token(&cancel).await.unwrap();
+        assert_eq!(token.access_token, "access-new");
+        let stored = load(&path).unwrap();
+        assert_eq!(stored.access_token, "access-new");
+        assert_eq!(stored.refresh_token, "refresh-new");
     }
 }

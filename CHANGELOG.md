@@ -9,6 +9,16 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- A plugin package can be the memory source. A package declares a `memory`
+  command in `extensions.dev.otto`, and `[memory] backend = "plugin:<package>"`
+  in user or managed config selects it. Recall, `memory_search`, `remember`,
+  `forget`, `/remember` and turn observation then go to the plugin, and Otto
+  opens no file store. `[memory] enabled = false` now turns off memory for
+  either source. Downgrade warning: after a package with a `memory` component
+  is installed, older Otto binaries reject the plugin registry with "invalid
+  plugin registry"; run `otto plugin remove <package>` with the new binary
+  before downgrading. See
+  [plugin memory source](docs/manual/memory-and-extensions.md#plugin-memory-source).
 - `[memory] backend = "remote"` and `[memory.remote]` now fail startup with an
   error naming the otto-mem plugin. Builds from `main` after
   [#493](https://github.com/baiyuqing/otto/pull/493) must move to the
@@ -18,8 +28,7 @@ commit ledger; Git and release tags retain the full history. See the
   `RemoteProjection` and `MemoryView` are removed, so a `MemoryService`
   implementation must drop `remote: None`. The memory tools no longer accept
   `organization_id`.
-- Plugin hooks can now carry an external memory service, which runs as a plugin
-  such as [otto-mem](https://github.com/baiyuqing/otto-mem):
+- Plugin hooks receive turn content and package credentials:
   - `turn_end` hook data includes `turn.messages` with the user, assistant,
     tool-call and tool-result blocks appended during the run. When the input
     would exceed 1 MiB it includes `turn_omitted: "size"` instead.

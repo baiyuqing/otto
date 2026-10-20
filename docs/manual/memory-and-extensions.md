@@ -11,6 +11,11 @@ Model writes and reflection proposals use the shared approval service; neither
 can manufacture authorization from retrieved text. Memory never overrides host
 security, system rules or the user's actual task.
 
+One memory source is active at a time. `[memory] backend` selects the built-in
+file store (`files`, the default) or a plugin package (`plugin:<package>`, see
+[plugin memory source](#plugin-memory-source)). `[memory] enabled = false`
+turns off memory for either source.
+
 ### Memory files
 
 The source of truth is `~/.otto/memory/` (directory `0700`, files `0600`), not a
@@ -82,8 +87,8 @@ busy_timeout = "5s"
 
 `required = true` makes an unavailable store fatal rather than disabling memory.
 `require_encryption = true` cannot be satisfied by the files backend.
-`backend` accepts only `files`. Restart affected runtimes after configuration
-changes.
+`backend` is `files` or `plugin:<package>`. Restart affected runtimes after
+configuration changes.
 
 ### Rust memory service extensions
 
@@ -92,38 +97,138 @@ external service implementation. Keep memory contracts in `otto-core` and
 native persistence/access in `otto`. Organization scope is available only to
 embedders, through `MemoryExtension::with_organization`. Use the public
 embedding API and its tests for the current constructor/interface contract
-rather than copying a historical example.
+rather than copying a historical example. An injected extension together with
+`backend = "plugin:<package>"` fails startup.
 
-### External memory services run as plugins
+### Plugin memory source
 
-External memory services are Otto plugins. A plugin recalls with the
-`before_prompt` hook, receives finished turns through the `turn_end` hook
-(`turn.messages`) and exposes search/write/forget as package tools. It runs
-beside the built-in file memory and does not replace it. Otto ships no client
-for any service. The [otto-mem plugin](https://github.com/baiyuqing/otto-mem/blob/main/docs/otto-plugin.md)
-is one implementation; its setup is documented in the otto-mem repository.
-Bind the plugin's token to its package commands in user or managed config:
+A plugin package provides memory by declaring a `memory` command (see
+[memory command protocol](#memory-command-protocol)). User or managed
+configuration selects it; project configuration cannot set `[memory]`:
+
+```toml
+[memory]
+backend = "plugin:otto-mem"
+```
+
+Installing or trusting a package does not change the memory source; only
+`backend` does. The package must be installed, enabled and trusted. With a
+plugin source:
+
+| Consumer | Behavior |
+| --- | --- |
+| Recall before each request | `recall`; rendered as the request-local memory message within `recall_tokens`; a failure is a warning and the turn continues |
+| `memory_search` | `recall`, or `inspect` for an id |
+| `remember`, `forget` tools | Registered when the plugin's description declares delegated-learning support (`forget` also needs item targets and suppression) |
+| `/remember` | `remember` with origin `human` |
+| Finished turns | `observe`, when the description declares it with delegated-learning support; see [turn observation](#turn-observation) |
+| `/memory list\|show\|search\|forget\|review`, `otto memory` | Refused with a message naming `plugin:<package>` |
+| TUI review panel, ACP memory review, reflection, memory advice | Unavailable |
+
+Otto opens no file store under `~/.otto/memory/` and keeps no review queue.
+Selecting the plugin in configuration is the learning grant: Otto authorizes
+the user and workspace scopes, the input classes `message`, `tool_result` and
+`explicit_memory`, and background evolution, so model `remember`/`forget`
+calls and observations take effect in the service without an Otto review.
+The user scope sent to the plugin is `user/default`; the service identifies
+the user from its own credentials. `required`, `recall_tokens`,
+`max_results`, `require_encryption` and `workspace_ids` apply;
+`[memory.turso]` does not. The package's other hooks and tools run as usual.
+
+Otto builds the source for each runner (new session, resume, `/sandbox
+reload`) and runs `describe` once there. When the package is missing,
+disabled or not trusted, declares no `memory` command, `describe` fails, or
+`require_encryption = true` and the description does not declare encryption
+at rest: with `required = true` the runner build fails with that reason;
+otherwise Otto writes a warning and the runner has no memory. Revoke and
+remove take effect at the next memory call.
+
+Otto ships no client for any service. The [otto-mem plugin](https://github.com/baiyuqing/otto-mem/blob/main/docs/otto-plugin.md)
+is one implementation; its installation is documented in the otto-mem
+repository. Bind the plugin's token to its package commands in user or managed
+config:
 
 ```toml
 [plugins.bindings.otto-mem]
 env = { OTTO_MEM_TOKEN = "${OTTO_MEM_TOKEN}" }
 ```
 
-See [hooks and custom tools](#hooks-and-custom-tools) for the hook protocol
-and package bindings.
+#### Memory command protocol
+
+```json
+{"extensions":{"dev.otto":{"version":1,"memory":{"command":["${PLUGIN_ROOT}/bin/memory"],"timeout":"10s"}}}}
+```
+
+A package declares at most one `memory` object. It counts as an executable
+component: it needs trust, and `otto plugin trust` lists it. Each memory
+operation runs the command once, with the sandbox, working directory,
+bindings, redaction and limits of [package hooks](#hook-protocol-v1): timeout
+default 10 s and at most 300 s, further bounded by the operation's remaining
+time; stdin 1 MiB; stdout 64 KiB. Stdin is one JSON object:
+
+```json
+{"version":1,"operation":"recall","request":{"context":{},"query":"build","limit":12,"token_budget":2000}}
+```
+
+Stdout is one JSON object, `{"result":{...}}` or `{"error":{"kind":"unavailable"}}`.
+
+- `operation` is `describe`, which has no `request` and returns a
+  `ServiceDescription`, or an operation the description declares: `recall`,
+  `observe`, `remember`, `reflect`, `forget`, `inspect`, `feedback`,
+  `prepare`, `apply`, `operation_status`.
+- `request` and `result` are the JSON forms of the request and result types in
+  `crates/otto-core/src/memory/memory_types.rs`, for example `RecallRequest`
+  and `RecallResult`, `RememberRequest` and `Receipt`. Unknown output fields
+  fail.
+- `error.kind` is one of `invalid_input`, `unauthorized`, `unsupported`,
+  `conflict`, `rejected`, `unavailable`, `rate_limited`, `outcome_unknown`,
+  `canceled`, `closed`. Otto shows its fixed message for the kind, never plugin
+  text.
+- A non-zero exit, invalid JSON or output over the limit is `unavailable`. A
+  timeout, cancellation or revocation after the process started is
+  `outcome_unknown` for operations with effects and `unavailable` for
+  `describe`, `recall`, `inspect` and `operation_status`.
+- Results pass the scope, receipt and content checks Otto applies to every
+  memory service.
+
+#### Turn observation
+
+After the `turn_end` hook, Otto sends the turn's messages (the `turn.messages`
+set of [hook protocol v1](#hook-protocol-v1)) to `observe` with mode `learn`:
+
+- One observation per `text`, `tool_call` and `tool_result` block. Text
+  content is the text; a tool call is the JSON text `{"id","name","arguments"}`;
+  a tool result is the JSON text `{"id","name","text","is_error"}`.
+- `source.role` is `user`, `assistant`, `context`, `tool_call` or
+  `tool_result`; `source.trust` is `external` for tool results and `local`
+  otherwise.
+- Content is at most 8 KiB per observation; a longer block is split at UTF-8
+  character boundaries. `source.id` is `<turn_id>:<message>:<block>:<part>`,
+  with indexes from 0.
+- A request holds at most 64 observations and 256 KiB of content; a longer
+  turn is sent as several requests in order, and the first failure ends that
+  turn's observation with a warning.
+- Control characters other than newline, carriage return and tab are removed
+  from text blocks. An observation that fails the memory content guard, for
+  example text holding a `[REDACTED]` marker or a private key delimiter, or
+  that is blank, is left out; the others are sent.
+- The call runs before the turn returns. A failure is a warning and does not
+  change the turn result.
+
+See [hooks and custom tools](#hooks-and-custom-tools) for package bindings.
 
 #### Removed remote backend settings
 
 A `[memory.remote]` table fails startup with:
 
 ```text
-[memory.remote] was removed: run an external memory service as an Otto plugin, such as the otto-mem plugin (https://github.com/baiyuqing/otto-mem), and bind its token under [plugins.bindings.otto-mem]; delete [memory.remote] from config.toml
+[memory.remote] was removed: install the external memory service as an Otto plugin, such as otto-mem (https://github.com/baiyuqing/otto-mem), set backend = "plugin:otto-mem" in [memory], bind its token under [plugins.bindings.otto-mem], and delete [memory.remote] from config.toml
 ```
 
 `backend = "remote"` fails startup with:
 
 ```text
-memory backend "remote" was removed: run an external memory service as an Otto plugin, such as the otto-mem plugin (https://github.com/baiyuqing/otto-mem), and bind its token under [plugins.bindings.otto-mem]; remove backend = "remote" from [memory]
+memory backend "remote" was removed: install the external memory service as an Otto plugin, such as otto-mem (https://github.com/baiyuqing/otto-mem), set backend = "plugin:otto-mem" in [memory], and bind its token under [plugins.bindings.otto-mem]
 ```
 
 ### Importing an earlier database
@@ -467,7 +572,8 @@ shows bounded internal MCP IDs.
 
 ## Hooks and custom tools
 
-Installed `plugin.json` uses `extensions.dev.otto` version 1 for hooks/tools:
+Installed `plugin.json` uses `extensions.dev.otto` version 1 for hooks, tools
+and a [memory command](#memory-command-protocol):
 
 ```json
 {

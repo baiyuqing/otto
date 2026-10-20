@@ -40,7 +40,7 @@ pub fn run(
                 let p = service.install(source, None)?;
                 writeln!(
                     stdout,
-                    "Installed {} ({}). Skills enabled; MCP, hooks and custom tools require \
+                    "Installed {} ({}). Skills enabled; MCP, hooks, custom tools and memory require \
                     explicit trust. Start a new session to activate.",
                     p.name, p.digest
                 )
@@ -50,7 +50,7 @@ pub fn run(
                 let p = service.install(source, Some(rev))?;
                 writeln!(
                     stdout,
-                    "Installed {} at {}. Skills enabled; MCP, hooks and custom tools require \
+                    "Installed {} at {}. Skills enabled; MCP, hooks, custom tools and memory require \
                     explicit trust. Start a new session to activate.",
                     p.name,
                     p.commit.as_deref().unwrap_or("")
@@ -91,18 +91,10 @@ pub fn run(
                     )
                     .map_err(|_| "cannot write trust details")?;
                 }
-                if !p
-                    .package
-                    .otto
-                    .hooks
-                    .entries()
-                    .iter()
-                    .all(|(_, h)| h.is_empty())
-                    || !p.package.otto.tools.is_empty()
-                {
+                if p.package.otto.has_executables() {
                     writeln!(
                         stdout,
-                        "Otto hooks/tools: {}",
+                        "Otto hooks/tools/memory: {}",
                         serde_json::to_string(&p.package.otto)
                             .map_err(|_| "cannot encode execution details")?
                     )
@@ -111,7 +103,7 @@ pub fn run(
                 service.change(name, action)?;
                 writeln!(
                     stdout,
-                    "Trusted. Start a new session to activate MCP, hooks and custom tools."
+                    "Trusted. Start a new session to activate MCP, hooks, custom tools and memory."
                 )
                 .map_err(|_| "cannot write trust status")?;
             }

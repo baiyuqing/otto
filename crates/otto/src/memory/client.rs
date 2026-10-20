@@ -133,6 +133,11 @@ impl Client {
         self.description.capability(operation).map_err(safe)
     }
 
+    /// Whether the content guard admits `value`.
+    pub(crate) fn guard_admits(&self, value: &impl serde::Serialize) -> bool {
+        self.guarded(value).is_ok()
+    }
+
     fn guarded(&self, value: &impl serde::Serialize) -> Result<()> {
         let value = serde_json::to_value(value).map_err(|_| err(ErrorKind::InvalidInput))?;
         let mut fields = Vec::new();
@@ -548,7 +553,7 @@ fn safe(error: Error) -> Error {
 }
 fn input_class(source: &SourceRef) -> Result<&'static str> {
     match source.role.as_str() {
-        "user" | "assistant" | "system" | "message" => Ok("message"),
+        "user" | "assistant" | "system" | "message" | "tool_call" | "context" => Ok("message"),
         "tool" | "tool_result" => Ok("tool_result"),
         "task" => Ok("task"),
         _ => Err(err(ErrorKind::Unauthorized)),

@@ -200,6 +200,8 @@ impl RequestSizer for ScriptedSizer {
 }
 
 pub struct Runner {
+    /// The memory client of this runner; `/remember` uses it.
+    pub(crate) memory_client: Option<Arc<crate::memory::client::Client>>,
     workflow_binding: Option<Arc<super::workflow_notifications::Binding>>,
     output_logs: Arc<crate::tool::bash_output::Logs>,
     authorization_run: Arc<Mutex<String>>,

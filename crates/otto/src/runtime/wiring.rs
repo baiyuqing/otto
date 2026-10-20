@@ -150,9 +150,20 @@ impl MemoryExtension {
     }
 }
 
+/// The `[memory] backend = "plugin:<package>"` selection.
+#[derive(Clone, Debug)]
+pub struct PluginMemorySelection {
+    pub package: String,
+    pub required: bool,
+    pub require_encryption: bool,
+}
+
 #[derive(Clone)]
 pub struct MemoryWiring {
     pub extension: Option<MemoryExtension>,
+    /// Set when a plugin package is the memory source. The client is built
+    /// for each runner, not at startup.
+    pub plugin: Option<PluginMemorySelection>,
     pub client: Option<Arc<crate::memory::client::Client>>,
     pub service: Arc<Service>,
     /// Whether the service is backed by a live store, and so worth exposing to
@@ -175,11 +186,19 @@ fn neutral_scope(scope: &Scope) -> otto_core::memory::Scope {
 struct ServiceBinding {
     client: Arc<crate::memory::client::Client>,
     context: otto_core::memory::MemoryContext,
+    /// True when the service accepts delegated-learning `observe` requests.
+    observes: bool,
     closed: AtomicBool,
 }
 
+mod turn_observation;
+
+#[cfg(test)]
+mod plugin_memory_tests;
 #[cfg(test)]
 mod selected_memory_tests;
+#[cfg(test)]
+mod turn_observation_tests;
 
 #[async_trait::async_trait]
 impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
@@ -261,9 +280,52 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
         })
     }
 
+    fn observes_turns(&self) -> bool {
+        self.observes
+    }
+
+    async fn observe_turn(
+        &self,
+        turn_id: &str,
+        turn: &serde_json::Value,
+        cancel: &CancellationToken,
+    ) -> Result<(), otto_core::agent::memory::MemoryError> {
+        use otto_core::{agent::memory as agent, memory as port};
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(agent::MemoryError(
+                port::Error::new(port::ErrorKind::Closed).to_string(),
+            ));
+        }
+        let admitted: Vec<_> = turn_observation::turn_observations(turn_id, turn)
+            .into_iter()
+            .filter(|observation| self.client.guard_admits(observation))
+            .collect();
+        for batch in turn_observation::observation_batches(admitted) {
+            let request = port::ObserveRequest {
+                context: self.context.clone(),
+                request_id: crate::memory::new_id()
+                    .map_err(|error| agent::MemoryError(error.to_string()))?,
+                observations: batch,
+                mode: port::ObserveMode::Learn,
+            };
+            self.client
+                .observe(&request, cancel)
+                .await
+                .map_err(|error| agent::MemoryError(format!("memory observe failed: {error}")))?;
+        }
+        Ok(())
+    }
+
     fn close(&self) -> Result<(), otto_core::agent::memory::MemoryError> {
         self.closed.store(true, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+impl MemoryWiring {
+    /// True when the memory source is not the file store.
+    pub fn external(&self) -> bool {
+        self.extension.is_some() || self.plugin.is_some()
     }
 }
 
@@ -271,6 +333,7 @@ impl Default for MemoryWiring {
     fn default() -> Self {
         Self {
             extension: None,
+            plugin: None,
             client: None,
             service: Arc::new(Service::null(None)),
             usable: false,
@@ -609,6 +672,7 @@ enum McpConnectResult {
 mod catalogs_and_subagents;
 mod mcp_connect;
 mod memory_binding;
+mod plugin_memory;
 
 /// Only the outcomes reachable without a real MCP server are covered: a
 /// disabled server is never dialed, and an unspawnable command reports `Failed`

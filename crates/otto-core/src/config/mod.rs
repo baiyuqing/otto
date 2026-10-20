@@ -282,9 +282,9 @@ pub(crate) fn removed_table_error(text: &str, err: &toml::de::Error) -> Option<&
         .and_then(toml::Value::as_table)
         .is_some_and(|memory| memory.contains_key("remote"));
     (removed_memory_remote && memory_has_remote).then_some(concat!(
-        "[memory.remote] was removed: run an external memory service as an Otto plugin, ",
-        "such as the otto-mem plugin (https://github.com/baiyuqing/otto-mem), and bind its token ",
-        "under [plugins.bindings.otto-mem]; delete [memory.remote] from config.toml"
+        "[memory.remote] was removed: install the external memory service as an Otto plugin, ",
+        "such as otto-mem (https://github.com/baiyuqing/otto-mem), set backend = \"plugin:otto-mem\" ",
+        "in [memory], bind its token under [plugins.bindings.otto-mem], and delete [memory.remote] from config.toml"
     ))
 }
 

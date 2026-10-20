@@ -304,7 +304,7 @@ impl Request {
 impl Controller {
     pub(crate) fn memory_manager(&self) -> Option<(Arc<Service>, Scope, Scope)> {
         let wiring = self.memory_wiring();
-        (self.dynamic_content() && wiring.usable && wiring.extension.is_none()).then(|| {
+        (self.dynamic_content() && wiring.usable && !wiring.external()).then(|| {
             (
                 Arc::clone(&wiring.service),
                 wiring.user_scope.clone(),
@@ -334,8 +334,11 @@ impl Controller {
     ) -> Result<Reply, String> {
         use otto_core::memory::{Completion, Content, ItemState, Origin};
         let wiring = self.memory_wiring();
-        let client = match &wiring.client {
-            Some(client) if wiring.usable => Arc::clone(client),
+        let runner_client = self
+            .current_runner()
+            .and_then(|runner| runner.memory_client.clone());
+        let client = match runner_client.or_else(|| wiring.client.clone()) {
+            Some(client) if wiring.usable => client,
             _ => return Err("memory is not available".into()),
         };
         let mut context = self.memory_context(Origin::Human);
@@ -427,7 +430,7 @@ impl Controller {
 
     pub(crate) fn management(&self, request: Request) -> Result<Reply, String> {
         use Request::*;
-        if self.memory_wiring().extension.is_some() {
+        if self.memory_wiring().external() {
             if let Remember {
                 scope,
                 kind,
@@ -446,7 +449,13 @@ impl Controller {
                     | MemoryReviewList
                     | MemoryReview { .. }
             ) {
-                return Err("memory operation is unsupported by the native record management interface; the selected memory service manages its records".into());
+                return Err(match &self.memory_wiring().plugin {
+                    Some(plugin) => format!(
+                        "memory source plugin:{} does not support this command; the plugin manages its records",
+                        plugin.package
+                    ),
+                    None => "memory operation is unsupported by the native record management interface; the selected memory service manages its records".into(),
+                });
             }
         }
         match request {

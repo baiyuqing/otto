@@ -40,7 +40,7 @@ pub fn run(
                 let p = service.install(source, None)?;
                 writeln!(
                     stdout,
-                    "Installed {} ({}). Skills enabled; MCP, hooks and custom tools require \
+                    "Installed {} ({}). Skills enabled; MCP, hooks, custom tools and memory require \
                     explicit trust. Start a new session to activate.",
                     p.name, p.digest
                 )
@@ -50,7 +50,7 @@ pub fn run(
                 let p = service.install(source, Some(rev))?;
                 writeln!(
                     stdout,
-                    "Installed {} at {}. Skills enabled; MCP, hooks and custom tools require \
+                    "Installed {} at {}. Skills enabled; MCP, hooks, custom tools and memory require \
                     explicit trust. Start a new session to activate.",
                     p.name,
                     p.commit.as_deref().unwrap_or("")
@@ -103,7 +103,7 @@ pub fn run(
                 service.change(name, action)?;
                 writeln!(
                     stdout,
-                    "Trusted. Start a new session to activate MCP, hooks and custom tools."
+                    "Trusted. Start a new session to activate MCP, hooks, custom tools and memory."
                 )
                 .map_err(|_| "cannot write trust status")?;
             }

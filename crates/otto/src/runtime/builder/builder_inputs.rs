@@ -164,7 +164,7 @@ impl Builder {
         redactor: &Redactor,
     ) -> Vec<String> {
         let mut instructions = vec![redactor.redact_string(workspace_instructions)];
-        if self.memory.extension.is_none() && self.config.memory.enabled != Some(false) {
+        if !self.memory.external() && self.config.memory.enabled != Some(false) {
             match self
                 .memory
                 .service

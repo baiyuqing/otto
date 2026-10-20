@@ -124,6 +124,9 @@ commit ledger; Git and release tags retain the full history. See the
   cache scoped to endpoint/account/version; rejected model requests invalidate
   it. ChatGPT compaction handles opaque provider context without exposing it as
   model-visible text or undercounting it.
+- A stdio MCP call whose request is blocked writing to a server that stopped
+  reading stdin now times out at `call_timeout` and stops the server. Before,
+  the call and the server shutdown waited indefinitely.
 - Sub-agents can fork from an earlier prompt, yield while dependencies run,
   report verification outcomes and return persistent research reports. Delivery
   recovery distinguishes a still-running target from a completed result.

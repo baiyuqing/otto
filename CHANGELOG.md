@@ -130,6 +130,9 @@ commit ledger; Git and release tags retain the full history. See the
   is refreshed with the file's latest refresh token. A refresh that completed
   is saved even when the call was cancelled afterwards, and a file holding
   another account's login is not overwritten.
+- A stdio MCP call whose request is blocked writing to a server that stopped
+  reading stdin now times out at `call_timeout` and stops the server. Before,
+  the call and the server shutdown waited indefinitely.
 - Sub-agents can fork from an earlier prompt, yield while dependencies run,
   report verification outcomes and return persistent research reports. Delivery
   recovery distinguishes a still-running target from a completed result.

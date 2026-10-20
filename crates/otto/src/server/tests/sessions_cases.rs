@@ -379,6 +379,34 @@ async fn a_pinned_session_is_never_evicted_until_the_holder_releases_it() {
     assert_eq!(harness.server.sweep_idle_sessions().await, vec![id.clone()]);
 }
 
+/// The sweep selects victims first and removes them later; work that starts in
+/// between must keep the session open.
+#[tokio::test]
+async fn a_session_that_became_busy_after_selection_is_not_removed() {
+    let harness = Harness::with(HarnessOptions {
+        session_idle_timeout: Some(Duration::ZERO),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let session = harness.server.lookup(&id).expect("session");
+
+    session.lock().compacting = Some(CancellationToken::new());
+    assert!(!harness.server.remove_if_idle(&id, &session));
+    assert!(harness.server.lookup(&id).is_some(), "busy session removed");
+    session.lock().compacting = None;
+
+    assert!(harness.server.pin_session(&id));
+    assert!(!harness.server.remove_if_idle(&id, &session));
+    assert!(
+        harness.server.lookup(&id).is_some(),
+        "pinned session removed"
+    );
+    harness.server.unpin_session(&id);
+
+    assert!(harness.server.remove_if_idle(&id, &session));
+    assert!(harness.server.lookup(&id).is_none());
+}
+
 #[tokio::test]
 async fn the_sweep_closes_the_least_recently_active_sessions_over_the_cap() {
     const CAP: usize = 3;

@@ -19,6 +19,9 @@ pub(super) struct Script {
     /// Held after the deltas until cancelled, so the turn stays running.
     /// Cancelling the turn wins the race and yields `Cancelled`.
     pub(super) gate: Option<CancellationToken>,
+    /// Provider calls numbered up to this (1-based) skip the gate, so earlier
+    /// turns finish while a later call (a compaction) is held.
+    pub(super) gate_after_calls: usize,
     /// Runs at the top of every call with the 1-based call index. The wake
     /// tests push a notification from it.
     pub(super) on_call: Option<Box<dyn Fn(usize) + Send + Sync>>,
@@ -149,7 +152,12 @@ impl Provider for ScriptedProvider {
         }
         self.started.send_modify(|seen| *seen += 1);
 
-        if let Some(gate) = &self.script.gate {
+        if let Some(gate) = self
+            .script
+            .gate
+            .as_ref()
+            .filter(|_| call > self.script.gate_after_calls)
+        {
             tokio::select! {
                 () = gate.cancelled() => {}
                 () = cancel.cancelled() => {

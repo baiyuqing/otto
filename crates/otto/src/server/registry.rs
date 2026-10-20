@@ -91,6 +91,19 @@ impl Server {
         let Some(session) = self.lookup(id) else {
             return false;
         };
+        // Under the state lock, and only while the registry still holds this
+        // session, so a sweep that removes it ([`Self::remove_if_idle`]) either
+        // sees the pin or makes this call return `false`.
+        let _state = session.lock();
+        let still_open = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session));
+        if !still_open {
+            return false;
+        }
         session.pins.fetch_add(1, Ordering::SeqCst);
         true
     }
@@ -232,7 +245,7 @@ impl Server {
             if !aged && !over_cap {
                 break;
             }
-            if !self.idle_session(&session) {
+            if !self.idle_session(&session, &session.lock()) {
                 continue;
             }
             victims.push((idle, id, session));
@@ -241,9 +254,10 @@ impl Server {
 
         let mut evicted = Vec::with_capacity(victims.len());
         for (idle, id, session) in victims {
-            // A delete, or a request that re-opened the session while this
-            // sweep decided, already answered for this id.
-            if !self.remove_if_same(&id, &session) {
+            // A delete, a request that re-opened the session, or a turn, pin
+            // or other work that started while this sweep decided, already
+            // answered for this id.
+            if !self.remove_if_idle(&id, &session) {
                 continue;
             }
             self.metrics.sessions_open(-1);
@@ -262,15 +276,22 @@ impl Server {
         evicted
     }
 
-    /// Whether `session` has nothing to lose: no turn, compaction, reflection,
-    /// waiting approval, unfinished sub-agent task or undelivered
-    /// notification.
-    pub(super) fn idle_session(&self, session: &OpenSession) -> bool {
-        {
-            let state = session.lock();
-            if state.busy() || state.waiting.is_some() {
-                return false;
-            }
+    /// [`Self::remove_if_same`] when `session` is still idle, judged while
+    /// holding its state lock. [`Server::start_turn`] and [`Self::pin_session`]
+    /// take that lock before changing the session, so no turn or pin starts
+    /// between the check and the removal. The lock order is session state, then
+    /// the registry; nothing takes them the other way round.
+    pub(super) fn remove_if_idle(&self, id: &str, session: &Arc<OpenSession>) -> bool {
+        let state = session.lock();
+        self.idle_session(session, &state) && self.remove_if_same(id, session)
+    }
+
+    /// Whether `session`, whose locked state is `state`, has nothing to lose:
+    /// no turn, compaction, reflection, waiting approval, unfinished sub-agent
+    /// task, undelivered notification or pin.
+    pub(super) fn idle_session(&self, session: &OpenSession, state: &super::SessionState) -> bool {
+        if state.busy() || state.waiting.is_some() || session.pinned() {
+            return false;
         }
         match session.ctrl.tasks() {
             Some(tasks) => {

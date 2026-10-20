@@ -400,6 +400,7 @@ impl Runner {
             .as_ref()
             .map(|collector| collector.for_task(&task_id));
         let control = Control::new(deadline);
+        let child_inbox = self.config.tasks.child_inbox(&task_id);
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
         }
@@ -411,7 +412,20 @@ impl Runner {
                 progress.handle(event);
             };
             let sink: EventSink<'_> = &mut handle;
-            let run = child.run_with_control(&prompt, sink, &control);
+            let run = async {
+                let mut outcome = child.run_with_control(&prompt, &mut *sink, &control).await;
+                // A parent message queued while the last provider call was in
+                // flight is not delivered by that turn; an empty-text run
+                // delivers whatever is still queued.
+                while outcome.is_ok()
+                    && child_inbox.as_ref().is_some_and(|inbox| !inbox.is_empty())
+                    && control.stop_reason().is_none()
+                    && !cancel.is_cancelled()
+                {
+                    outcome = child.run_with_control("", &mut *sink, &control).await;
+                }
+                outcome
+            };
             tokio::pin!(run);
             tokio::select! {
                 biased;

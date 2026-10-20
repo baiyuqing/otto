@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS workflow_requests (
     UNIQUE (run_id, step_id),
     FOREIGN KEY (run_id, step_id) REFERENCES workflow_steps(run_id, id)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS workflow_origins (
+    workspace TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(id),
+    definition_hash TEXT NOT NULL,
+    input TEXT NOT NULL,
+    PRIMARY KEY(workspace, session_id, operation_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS workflow_events (
     seq INTEGER PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES workflow_runs(id),
@@ -87,6 +96,14 @@ CREATE TABLE IF NOT EXISTS workflow_events (
     status TEXT NOT NULL DEFAULT ''
 ) STRICT;
 CREATE INDEX IF NOT EXISTS workflow_events_run ON workflow_events(run_id, seq);
+CREATE INDEX IF NOT EXISTS workflow_origins_run ON workflow_origins(run_id);
+CREATE TABLE IF NOT EXISTS workflow_pending (
+    workspace TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL REFERENCES workflow_events(seq),
+    PRIMARY KEY(workspace, session_id, seq)
+) STRICT;
+CREATE TABLE IF NOT EXISTS workflow_delivery_schema (version INTEGER PRIMARY KEY) STRICT;
 "#;
 
 /// Run header columns, in the order every read selects them.
@@ -289,66 +306,95 @@ impl WorkflowStore for TursoWorkflowStore {
         model: &str,
         input: &str,
     ) -> Result<Run, Error> {
-        if input.len() > MAX_TEXT_BYTES {
-            return Err(Error::invalid("workflow input exceeds 65536 UTF-8 bytes"));
+        self.create_run_inner(
+            id, definition, workspace, profile, provider, model, input, None,
+        )
+        .map(|(run, _)| run)
+    }
+    fn create_origin_run(
+        &self,
+        id: &str,
+        definition: &Definition,
+        workspace: &str,
+        runtime: &RuntimeIdentity,
+        input: &str,
+        session: &str,
+        operation: &str,
+    ) -> Result<(Run, bool), Error> {
+        if session.is_empty() || operation.is_empty() {
+            return Err(Error::invalid(
+                "trusted parent session and operation identity required",
+            ));
         }
-        let definition_json = serde_json::to_string(definition).map_err(|_| op_error())?;
-        let now = timestamp();
-        let mut connection = self.connection.lock().map_err(|_| op_error())?;
-        let transaction = connection.transaction().map_err(|_| op_error())?;
-        transaction
-            .execute(
-                "INSERT INTO workflow_runs (
-                    id, workflow, definition_json, definition_hash, workspace,
-                    profile, provider, model, input, status, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?10)",
-                params![
-                    id,
-                    definition.name,
-                    definition_json,
-                    definition.hash,
-                    workspace,
-                    profile,
-                    provider,
-                    model,
-                    input,
-                    now,
-                ],
+        self.create_run_inner(
+            id,
+            definition,
+            workspace,
+            &runtime.profile,
+            &runtime.provider,
+            &runtime.model,
+            input,
+            Some((session, operation)),
+        )
+    }
+    fn origin_run(
+        &self,
+        workspace: &str,
+        session: &str,
+        operation: &str,
+    ) -> Result<Option<Run>, Error> {
+        let id: Option<String> = self.connection.lock().map_err(|_|op_error())?.query_row("SELECT run_id FROM workflow_origins WHERE workspace=?1 AND session_id=?2 AND operation_id=?3",params![workspace,session,operation],|row|row.get(0)).optional().map_err(|_|op_error())?;
+        match id {
+            Some(id) => self.get_run(&id),
+            None => Ok(None),
+        }
+    }
+    fn pending_events(
+        &self,
+        workspace: &str,
+        session: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, Error> {
+        let connection = self.connection.lock().map_err(|_| op_error())?;
+        let mut statement = connection.prepare("SELECT e.seq,e.run_id,e.occurred_at,e.kind,e.step_id,e.status FROM workflow_pending p JOIN workflow_events e ON e.seq=p.seq WHERE p.workspace=?1 AND p.session_id=?2 ORDER BY p.seq LIMIT ?3").map_err(|_| op_error())?;
+        let rows = statement
+            .query_map(
+                params![workspace, session, limit.clamp(1, 64) as i64],
+                |row| {
+                    Ok(EventRecord {
+                        seq: row.get(0)?,
+                        run_id: row.get(1)?,
+                        occurred_at: row.get(2)?,
+                        kind: row.get(3)?,
+                        step_id: row.get(4)?,
+                        status: row.get(5)?,
+                    })
+                },
             )
             .map_err(|_| op_error())?;
-        event(&transaction, id, "run_started", "", "running")?;
-        for (position, step) in definition.steps.iter().enumerate() {
-            let status = if step.needs.is_empty() {
-                StepStatus::Ready
-            } else {
-                StepStatus::Pending
-            };
-            transaction
-                .execute(
-                    "INSERT INTO workflow_steps (
-                        run_id, id, position, kind, agent, prompt, needs_json, status
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        id,
-                        step.id,
-                        position as i64,
-                        step.kind.as_str(),
-                        step.agent,
-                        step.prompt,
-                        serde_json::to_string(&step.needs).map_err(|_| op_error())?,
-                        status.as_str(),
-                    ],
-                )
-                .map_err(|_| op_error())?;
-            if status == StepStatus::Ready {
-                event(&transaction, id, "step_ready", &step.id, status.as_str())?;
-            }
-        }
-        transaction.commit().map_err(|_| op_error())?;
-        drop(connection);
-        self.get_run(id)?.ok_or_else(op_error)
+        rows.collect::<crate::storage::Result<Vec<_>>>()
+            .map_err(|_| op_error())
     }
-
+    fn acknowledge_event(&self, workspace: &str, session: &str, seq: i64) -> Result<(), Error> {
+        self.connection
+            .lock()
+            .map_err(|_| op_error())?
+            .execute(
+                "DELETE FROM workflow_pending WHERE workspace=?1 AND session_id=?2 AND seq=?3",
+                params![workspace, session, seq],
+            )
+            .map_err(|_| op_error())?;
+        Ok(())
+    }
+    fn origin_runs(&self, workspace: &str, session: &str) -> Result<Vec<String>, Error> {
+        let connection = self.connection.lock().map_err(|_| op_error())?;
+        let mut statement = connection.prepare("SELECT run_id FROM workflow_origins WHERE workspace=?1 AND session_id=?2 ORDER BY rowid").map_err(|_| op_error())?;
+        statement
+            .query_map(params![workspace, session], |row| row.get(0))
+            .map_err(|_| op_error())?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|_| op_error())
+    }
     fn get_run(&self, id: &str) -> Result<Option<Run>, Error> {
         let connection = self.connection.lock().map_err(|_| op_error())?;
         let header = connection
@@ -1260,6 +1306,14 @@ impl WorkflowStore for TursoWorkflowStore {
 }
 
 pub(super) fn migrate_schema(connection: &Connection) -> Result<(), String> {
+    // One-time legacy backfill, never repeated after acknowledgement or on reopen.
+    // Import initializes an empty target first; logical imports do not execute event writers.
+    connection.execute_batch("BEGIN IMMEDIATE;
+        INSERT OR IGNORE INTO workflow_pending(workspace,session_id,seq)
+        SELECT o.workspace,o.session_id,e.seq FROM workflow_origins o JOIN workflow_events e ON e.run_id=o.run_id
+        WHERE NOT EXISTS(SELECT 1 FROM workflow_delivery_schema WHERE version=1);
+        INSERT OR IGNORE INTO workflow_delivery_schema(version) VALUES(1);
+        COMMIT;").map_err(|_| unavailable())?;
     for (table, column, definition) in [
         ("workflow_runs", "forked_from_run_id", "TEXT"),
         ("workflow_runs", "forked_from_event_seq", "INTEGER"),
@@ -1504,6 +1558,7 @@ fn event(
             params![run_id, timestamp(), kind, step_id, status],
         )
         .map_err(|_| op_error())?;
+    transaction.execute("INSERT OR IGNORE INTO workflow_pending(workspace,session_id,seq) SELECT o.workspace,o.session_id,e.seq FROM workflow_origins o JOIN workflow_events e ON e.run_id=o.run_id WHERE e.seq=(SELECT MAX(seq) FROM workflow_events) AND e.run_id=?1", params![run_id]).map_err(|_|op_error())?;
     Ok(())
 }
 
@@ -1528,9 +1583,44 @@ mod repository_tests {
     use super::*;
     use crate::workflow::repository::WorkflowStore;
     #[test]
+    fn legacy_delivery_backfill_is_once_and_idle_plan_uses_pending_index() {
+        let store = TursoWorkflowStore::open_in_memory();
+        let connection = store.connection.lock().unwrap();
+        // Simulate old schema populated before conversational delivery ledger existed.
+        connection.execute("INSERT INTO workflow_runs(id,workflow,definition_json,definition_hash,workspace,profile,provider,model,input,status,created_at,updated_at) VALUES ('legacy','flow','{}','hash','/w','','','','','succeeded','now','now')",()).unwrap();
+        connection.execute("INSERT INTO workflow_origins(workspace,session_id,operation_id,run_id,definition_hash,input) VALUES('/w','source','op','legacy','hash','')",()).unwrap();
+        connection.execute("INSERT INTO workflow_events(seq,run_id,occurred_at,kind) VALUES(1,'legacy','now','run_succeeded')",()).unwrap();
+        connection
+            .execute("DELETE FROM workflow_delivery_schema", ())
+            .unwrap();
+        migrate_schema(&connection).unwrap();
+        drop(connection);
+        assert_eq!(store.pending_events("/w", "source", 64).unwrap()[0].seq, 1);
+        store.acknowledge_event("/w", "source", 1).unwrap();
+        let connection = store.connection.lock().unwrap();
+        migrate_schema(&connection).unwrap();
+        let mut query=connection.prepare("EXPLAIN QUERY PLAN SELECT e.seq FROM workflow_pending p JOIN workflow_events e ON e.seq=p.seq WHERE p.workspace='/w' AND p.session_id='source' ORDER BY p.seq LIMIT 64").unwrap();
+        let plan = query
+            .query_map((), |row| row.get::<String>(3))
+            .unwrap()
+            .collect::<crate::storage::Result<Vec<_>>>()
+            .unwrap()
+            .join(";");
+        assert!(plan.contains("SEARCH p USING"), "{plan}");
+        assert!(
+            !plan.contains("SCAN e") && !plan.contains("SCAN o"),
+            "idle query must not scan retained origins/events: {plan}"
+        );
+        drop(query);
+        drop(connection);
+        assert!(store.pending_events("/w", "source", 64).unwrap().is_empty());
+    }
+
+    #[test]
     fn attempt_journal_keeps_each_transcript_path() {
         let store = TursoWorkflowStore::open_in_memory();
         let definition = Definition {
+            source: String::new(),
             name: "flow".into(),
             description: String::new(),
             steps: vec![Step {
@@ -1562,5 +1652,104 @@ mod repository_tests {
             .collect::<crate::storage::Result<_>>()
             .unwrap();
         assert_eq!(paths, ["/tmp/attempt-1.jsonl", "/tmp/attempt-2.jsonl"]);
+    }
+}
+
+impl TursoWorkflowStore {
+    #[allow(clippy::too_many_arguments)]
+    fn create_run_inner(
+        &self,
+        id: &str,
+        definition: &Definition,
+        workspace: &str,
+        profile: &str,
+        provider: &str,
+        model: &str,
+        input: &str,
+        origin: Option<(&str, &str)>,
+    ) -> Result<(Run, bool), Error> {
+        if input.len() > MAX_TEXT_BYTES {
+            return Err(Error::invalid("workflow input exceeds 65536 UTF-8 bytes"));
+        }
+        let definition_json = serde_json::to_string(definition).map_err(|_| op_error())?;
+        let now = timestamp();
+        let mut connection = self.connection.lock().map_err(|_| op_error())?;
+        let transaction = connection.transaction().map_err(|_| op_error())?;
+        if let Some((session, operation)) = origin {
+            let receipt: Option<(String, String, String)> = transaction.query_row(
+                "SELECT run_id, definition_hash, input FROM workflow_origins WHERE workspace=?1 AND session_id=?2 AND operation_id=?3",
+                params![workspace, session, operation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            ).optional().map_err(|_| op_error())?;
+            if let Some((run_id, hash, previous_input)) = receipt {
+                if hash != definition.hash || previous_input != input {
+                    return Err(Error::invalid(
+                        "operation receipt conflicts with definition/input; inspect the original run, do not replay",
+                    ));
+                }
+                drop(transaction);
+                drop(connection);
+                return self
+                    .get_run(&run_id)?
+                    .map(|run| (run, false))
+                    .ok_or_else(op_error);
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO workflow_runs (
+                    id, workflow, definition_json, definition_hash, workspace,
+                    profile, provider, model, input, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?10)",
+                params![
+                    id,
+                    definition.name,
+                    definition_json,
+                    definition.hash,
+                    workspace,
+                    profile,
+                    provider,
+                    model,
+                    input,
+                    now,
+                ],
+            )
+            .map_err(|_| op_error())?;
+        event(&transaction, id, "run_started", "", "running")?;
+        for (position, step) in definition.steps.iter().enumerate() {
+            let status = if step.needs.is_empty() {
+                StepStatus::Ready
+            } else {
+                StepStatus::Pending
+            };
+            transaction
+                .execute(
+                    "INSERT INTO workflow_steps (
+                        run_id, id, position, kind, agent, prompt, needs_json, status
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        id,
+                        step.id,
+                        position as i64,
+                        step.kind.as_str(),
+                        step.agent,
+                        step.prompt,
+                        serde_json::to_string(&step.needs).map_err(|_| op_error())?,
+                        status.as_str(),
+                    ],
+                )
+                .map_err(|_| op_error())?;
+            if status == StepStatus::Ready {
+                event(&transaction, id, "step_ready", &step.id, status.as_str())?;
+            }
+        }
+        if let Some((session, operation)) = origin {
+            transaction.execute("INSERT INTO workflow_origins(workspace,session_id,operation_id,run_id,definition_hash,input) VALUES (?1,?2,?3,?4,?5,?6)", params![workspace,session,operation,id,definition.hash,input]).map_err(|_| op_error())?;
+            transaction.execute("INSERT OR IGNORE INTO workflow_pending(workspace,session_id,seq) SELECT ?1,?2,seq FROM workflow_events WHERE run_id=?3",params![workspace,session,id]).map_err(|_|op_error())?;
+        }
+        transaction.commit().map_err(|_| op_error())?;
+        drop(connection);
+        self.get_run(id)?
+            .map(|run| (run, true))
+            .ok_or_else(op_error)
     }
 }

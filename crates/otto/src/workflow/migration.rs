@@ -5,6 +5,7 @@ pub const DOMAIN: &str = "workflows";
 pub const FAMILY: &str = "otto.workflows";
 pub const VERSION: u32 = 1;
 pub const RECORDS: &[RecordSchema] = &[
+    // New schemas append below so stable existing codec indexes remain unchanged.
     RecordSchema {
         name: "workflow_run",
         fields: &[
@@ -84,5 +85,24 @@ pub const RECORDS: &[RecordSchema] = &[
         fields: &["seq", "run_id", "occurred_at", "kind", "step_id", "status"],
         keys: &["seq"],
         revision: Some("seq"),
+    },
+    RecordSchema {
+        name: "workflow_origin",
+        fields: &[
+            "workspace",
+            "session_id",
+            "operation_id",
+            "run_id",
+            "definition_hash",
+            "input",
+        ],
+        keys: &["workspace", "session_id", "operation_id"],
+        revision: None,
+    },
+    RecordSchema {
+        name: "workflow_pending",
+        fields: &["workspace", "session_id", "seq"],
+        keys: &["workspace", "session_id", "seq"],
+        revision: None,
     },
 ];

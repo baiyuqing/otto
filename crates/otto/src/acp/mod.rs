@@ -539,8 +539,8 @@ impl Connection {
                     state.active.is_none() && !state.draining && state.followups.is_empty()
                 };
                 let pending = controller
-                    .subagent_tasks()
-                    .is_some_and(|tasks| !tasks.notifications().is_empty());
+                    .notification_mailbox()
+                    .is_some_and(|mailbox| !mailbox.is_empty());
                 if idle && (!pending || *released.borrow() != start) {
                     break;
                 }
@@ -646,9 +646,10 @@ impl Connection {
         let Some(session) = local.session(session_id) else {
             return;
         };
-        let Some(tasks) = session.controller.subagent_tasks() else {
+        let Some(mailbox) = session.controller.notification_mailbox() else {
             return;
         };
+        let mut updates = crate::runtime::workflow_notifications::updates(mailbox.as_ref());
         let mut loops = self.wake_loops.lock().expect("wake loops");
         if loops.contains_key(session_id) {
             return;
@@ -657,7 +658,6 @@ impl Connection {
         loops.insert(
             session_id.to_string(),
             tokio::spawn(async move {
-                let mut updates = tasks.updates();
                 let mut released = session.prompt.released.subscribe();
                 loop {
                     if wake_turn(&session, &stop).await {
@@ -1464,8 +1464,8 @@ async fn wake_turn(session: &Session, stop: &CancellationToken) -> bool {
     // same loop again even though no notification arrived.
     if session
         .controller
-        .subagent_tasks()
-        .is_none_or(|tasks| tasks.pending() == 0)
+        .notification_mailbox()
+        .is_none_or(|mailbox| mailbox.is_empty())
     {
         return false;
     }
@@ -2382,11 +2382,12 @@ pub async fn serve(
     cancel: &CancellationToken,
 ) -> Vec<Arc<Controller>> {
     let workspace = config.workspace.clone();
+    let workflow_builder = Arc::clone(&config.builder);
     let local = Local {
         config,
         sessions: Mutex::new(HashMap::new()),
     };
-    drive(
+    let controllers = drive(
         workspace,
         Backend::Local(Box::new(local)),
         stdin,
@@ -2404,7 +2405,9 @@ pub async fn serve(
             Backend::Attach(_) => Vec::new(),
         },
     )
-    .await
+    .await;
+    crate::runtime::workflow::close(&workflow_builder).await;
+    controllers
 }
 
 /// Runs one connection until stdin ends, `cancel` fires or `lost` fires, and

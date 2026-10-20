@@ -48,7 +48,6 @@ use crate::app::Controller;
 use crate::cli::login;
 use crate::cli::repl::{Error as ReplError, is_fatal_persistence};
 use crate::cli::repl_commands;
-use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
 use selection::{DragPhase, Selection};
@@ -329,7 +328,7 @@ async fn run_app<B: Backend>(
     app.driver = Some(backend::Driver::new(backend::Connection::Local(
         Arc::clone(controller),
     )));
-    let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
+    let mut updates: Option<(Arc<dyn otto_core::mailbox::Mailbox>, watch::Receiver<u64>)> = None;
     let mut notices = controller.notices_changed();
     let mut memory_review = controller.memory_review_available_changed();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -358,13 +357,14 @@ async fn run_app<B: Backend>(
             let mut stdout = io::stdout();
             let _ = stdout.write_all(b"\x07").and_then(|()| stdout.flush());
         }
-        match controller.subagent_tasks() {
+        match controller.notification_mailbox() {
             Some(tasks)
                 if updates
                     .as_ref()
                     .is_none_or(|(held, _)| !Arc::ptr_eq(held, &tasks)) =>
             {
-                updates = Some((Arc::clone(&tasks), tasks.updates()));
+                let receiver = crate::runtime::workflow_notifications::updates(tasks.as_ref());
+                updates = Some((Arc::clone(&tasks), receiver));
             }
             None => updates = None,
             _ => {}
@@ -639,8 +639,8 @@ async fn run_restored_prompts<B: Backend>(
         return Ok(());
     }
     if controller
-        .subagent_tasks()
-        .is_some_and(|tasks| !tasks.notifications().is_empty())
+        .notification_mailbox()
+        .is_some_and(|mailbox| !mailbox.is_empty())
     {
         run_wake(app, terminal, keys, controller, cancel).await?;
     }

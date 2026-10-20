@@ -13,6 +13,32 @@ pub trait WorkflowStore: Send + Sync {
         model: &str,
         input: &str,
     ) -> Result<Run>;
+    /// Atomic operation receipt, run creation and conversational subscription.
+    #[allow(clippy::too_many_arguments)]
+    fn create_origin_run(
+        &self,
+        id: &str,
+        definition: &Definition,
+        workspace: &str,
+        runtime: &RuntimeIdentity,
+        input: &str,
+        session: &str,
+        operation: &str,
+    ) -> Result<(Run, bool)>;
+    /// Reconcile an existing receipt before consulting today's mutable catalog.
+    fn origin_run(&self, workspace: &str, session: &str, operation: &str) -> Result<Option<Run>>;
+    /// Durable origin runs for this exact source session, never a replacement session.
+    fn origin_runs(&self, workspace: &str, session: &str) -> Result<Vec<String>>;
+    /// Ordered durable pending events, capped at 64 rows, for an exact destination.
+    fn pending_events(
+        &self,
+        workspace: &str,
+        session: &str,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>>;
+    /// Advance only after durable inbox enqueue or transcript input evidence.
+    /// A sequence belonging to another source must never be acknowledged.
+    fn acknowledge_event(&self, workspace: &str, session: &str, seq: i64) -> Result<()>;
     fn get_run(&self, id: &str) -> Result<Option<Run>>;
     fn fork_run(&self, id: &str, source_run_id: &str, after_step: &str) -> Result<Run>;
     fn claim_ready(&self, run_id: &str, step_id: &str, transcript_path: &str) -> Result<u32>;

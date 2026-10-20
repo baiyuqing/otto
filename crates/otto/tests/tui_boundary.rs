@@ -9,10 +9,10 @@ fn rust_sources(path: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(path).expect("source directory is readable") {
         let path = entry.expect("source entry is readable").path();
-        if path
-            .file_name()
-            .is_some_and(|name| name == "tests" || name == "tests.rs")
-        {
+        let name = path.file_name().unwrap().to_string_lossy();
+        // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
+        let stem = name.trim_end_matches(".rs");
+        if stem == "tests" || stem.ends_with("_tests") {
             continue;
         }
         if path.is_dir() {

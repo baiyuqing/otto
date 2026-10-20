@@ -69,6 +69,12 @@ fn sources(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).expect("the reflection directory is readable") {
         let path = entry.expect("a readable entry").path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
+        let stem = name.trim_end_matches(".rs");
+        if stem == "tests" || stem.ends_with("_tests") {
+            continue;
+        }
         if path.is_dir() {
             found.extend(sources(&path));
         } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -122,11 +128,14 @@ fn reflection_only_queues_candidates() {
 
 #[test]
 fn the_guard_sees_the_propose_path() {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reflection/mod.rs"),
-    )
-    .expect("a readable source");
-    let production = non_test(&source);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reflection");
+    let production: String = sources(&dir)
+        .iter()
+        .map(|path| {
+            let source = std::fs::read_to_string(path).expect("a readable source");
+            non_test(&source).to_owned()
+        })
+        .collect();
     assert!(production.contains(".propose("), "the propose call moved");
     assert!(production.contains("Origin::Extractor"), "the origin moved");
 }

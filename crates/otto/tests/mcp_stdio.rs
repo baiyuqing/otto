@@ -12,7 +12,8 @@
 //! invalid lines and stderr output into a working `modern`-shaped session),
 //! `exit` (exits when its one tool, `die`, is called),
 //! `exit-with-descendant` (the leader exits while a stubborn process-group
-//! descendant retains its pipes), `stubborn` (ignores EOF and SIGTERM until SIGKILL).
+//! descendant retains its pipes), `stubborn` (ignores EOF and SIGTERM until SIGKILL),
+//! `stall-stdin` (`modern`, then stops reading stdin after the last tool-list page).
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -65,6 +66,7 @@ fn main() {
     run!(test_close_escalates_stubborn_child_promptly);
     run!(test_env_restriction);
     run!(test_hung_stdio_request_times_out_and_stops_the_server);
+    run!(test_stdio_call_blocked_on_a_full_stdin_pipe_times_out_and_stops_the_server);
 
     if failed {
         std::process::exit(1);
@@ -608,6 +610,58 @@ async fn test_hung_stdio_request_times_out_and_stops_the_server() -> Result<(), 
     check(
         matches!(second, Err(CallError::Stopping)),
         format!("expected Stopping, got {second:?}"),
+    )?;
+    let mut gone = false;
+    for _ in 0..50 {
+        if matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None),
+            Err(nix::errno::Errno::ESRCH)
+        ) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    check(gone, format!("pid {pid} still alive after the timeout"))?;
+    Ok(())
+}
+
+/// A request larger than the stdin pipe, sent to a server that stopped reading,
+/// blocks inside the write. The call must still time out and stop the server.
+async fn test_stdio_call_blocked_on_a_full_stdin_pipe_times_out_and_stops_the_server()
+-> Result<(), String> {
+    let grace = Duration::from_millis(100);
+    let (command, env) = fake_server_command("stall-stdin", &[]);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let transport = StdioTransport::spawn_with_grace(&command, &[], &env, &cwd, grace)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pid = transport.pid();
+    let client = Client::connect_with_grace(
+        "test-server".to_string(),
+        Box::new(transport),
+        Duration::from_secs(5),
+        Duration::from_millis(150),
+        grace,
+        &CancellationToken::new(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let large_argument = "x".repeat(1024 * 1024);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.call(
+            "echo",
+            json!({"text": large_argument}),
+            &CancellationToken::new(),
+        ),
+    )
+    .await
+    .map_err(|_| "the call blocked on a full stdin pipe did not return within 10s".to_string())?;
+    check(
+        matches!(outcome, Err(CallError::Timeout)),
+        format!("expected Timeout, got {outcome:?}"),
     )?;
     let mut gone = false;
     for _ in 0..50 {

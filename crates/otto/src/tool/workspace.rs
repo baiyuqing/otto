@@ -141,8 +141,8 @@ impl Workspace {
     /// returned by [`Workspace::write_relative`], which already resolves a
     /// final symbolic link; the lock is keyed by the parent directory's
     /// identity and the final name, so every spelling of one file shares it.
-    // ponytail: entries live for the workspace lifetime; add ref-counted
-    // cleanup if path churn matters.
+    /// Entries that no guard or waiter references are dropped here, under the
+    /// table lock, so the table holds only files with a live writer.
     pub(crate) async fn lock_path(&self, key: &Path) -> tokio::sync::OwnedMutexGuard<()> {
         let key = self.mutation_key(key);
         let lock = {
@@ -150,6 +150,7 @@ impl Workspace {
                 .mutations
                 .lock()
                 .expect("the lock table is never poisoned");
+            mutations.retain(|_, lock| Arc::strong_count(lock) > 1);
             Arc::clone(mutations.entry(key).or_default())
         };
         lock.lock_owned().await
@@ -643,6 +644,23 @@ mod tests {
             }
             drop(guard);
         }
+    }
+
+    #[tokio::test]
+    async fn released_mutation_locks_leave_the_table() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = workspace(root.path());
+        let held_key = workspace.write_relative(Path::new("held.txt")).unwrap();
+        let held = workspace.lock_path(&held_key).await;
+        for index in 0..8 {
+            let key = workspace
+                .write_relative(Path::new(&format!("file-{index}.txt")))
+                .unwrap();
+            drop(workspace.lock_path(&key).await);
+        }
+        let table_len = workspace.mutations.lock().unwrap().len();
+        assert_eq!(table_len, 2, "the held lock and the last released one");
+        drop(held);
     }
 
     #[test]

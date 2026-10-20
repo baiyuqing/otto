@@ -1203,6 +1203,7 @@ mod tests {
                 source_attempt: None,
             }],
             definition: crate::workflow::Definition {
+                source: String::new(),
                 name: "review".into(),
                 description: String::new(),
                 steps: Vec::new(),

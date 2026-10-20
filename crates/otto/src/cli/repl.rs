@@ -20,7 +20,7 @@ use otto_core::model::{EffectCertainty, OperationDisposition, OperationOutcome};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::subagent::tasks::{TaskError, Tasks};
+use crate::subagent::tasks::TaskError;
 
 use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE};
 use crate::runtime::sandbox_config::{SandboxChange, parse_exclude_entry};
@@ -116,7 +116,8 @@ impl<'a> Repl<'a> {
 
         let mut approval_queue = std::collections::VecDeque::<String>::new();
         let mut lines = spawn_reader(input);
-        let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
+        let mut updates: Option<(Arc<dyn otto_core::mailbox::Mailbox>, watch::Receiver<u64>)> =
+            None;
         let mut notices = self.controller.notices_changed();
         let mut memory_review = self.controller.memory_review_available_changed();
         let mut memory_review_notice = false;
@@ -149,13 +150,14 @@ impl<'a> Repl<'a> {
             // The receiver is kept across iterations rather than re-subscribed:
             // subscribing now would mark a signal raised during the last turn
             // as already seen.
-            match self.controller.subagent_tasks() {
+            match self.controller.notification_mailbox() {
                 Some(tasks) => {
                     if updates
                         .as_ref()
                         .is_none_or(|(held, _)| !Arc::ptr_eq(held, &tasks))
                     {
-                        let receiver = tasks.updates();
+                        let receiver =
+                            crate::runtime::workflow_notifications::updates(tasks.as_ref());
                         updates = Some((tasks, receiver));
                     }
                 }

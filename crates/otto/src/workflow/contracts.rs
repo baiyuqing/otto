@@ -7,6 +7,9 @@ pub(crate) const MAX_TEXT_BYTES: usize = 64 << 10;
 pub struct Definition {
     pub name: String,
     pub description: String,
+    /// Construction-time definition location; old snapshots have no source.
+    #[serde(default)]
+    pub source: String,
     pub steps: Vec<Step>,
     #[serde(default)]
     pub agents: Vec<AgentSnapshot>,

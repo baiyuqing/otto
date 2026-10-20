@@ -9,6 +9,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- Parent conversations can discover, inspect, start and check durable workflows
+  through four native tools, with conditional execution-selection guidance and
+  six prompt examples. Shared workspace ownership, receipt-backed starts and
+  saved-session lifecycle feedback preserve conservative recovery and human
+  gates. Rebuild with `make install` and restart Otto/connector processes;
+  existing workflow definitions are reused and a fresh setup example is in
+  the [automation guide](docs/manual/automation.md#choosing-workflows-from-conversation).
+  Internal child/workflow recursion is denied; authenticated external API
+  callers retain their existing authority. Structured workflow scheduling is
+  not added.
+
 - Compact TUI tool records show live/final locally observed execution time and
   distinguish cancellation, while preserving expandable raw details and full
   operation/provider IDs. Thinking and total-turn durations are no longer shown.

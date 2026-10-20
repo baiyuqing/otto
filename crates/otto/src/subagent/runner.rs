@@ -1781,6 +1781,10 @@ impl Runner {
                 kind: Some(NotificationKind::TaskFinished),
                 text: self.parent_text(&final_task, &completion_text(&final_task, usize::MAX)),
                 usage: final_task.usage_present.then_some(final_task.usage),
+                // The parent's footer adds this task's tokens to the session
+                // totals; it needs to know whether the cached share behind
+                // them is measured or merely unreported.
+                cached_input_tokens_present: final_task.cached_input_tokens_present,
                 ..Default::default()
             });
         }
@@ -1858,11 +1862,20 @@ impl ChildProgress {
                 interrupted_output: true,
                 ..
             } => self.text.clear(),
-            Event::ProviderUsage { usage, present, .. } => {
+            Event::ProviderUsage {
+                usage,
+                present,
+                cached_input_tokens_present,
+            } => {
                 let text = cap_last_bytes(&self.text, 500).to_string();
                 self.text.clear();
-                self.tasks
-                    .record_provider_step(&self.task_id, usage, &text, present);
+                self.tasks.record_provider_step(
+                    &self.task_id,
+                    usage,
+                    &text,
+                    present,
+                    cached_input_tokens_present,
+                );
             }
             Event::ToolCallFinished { .. } => self.tasks.record_tool_finished(&self.task_id),
             Event::ToolCallStarted {
@@ -2176,6 +2189,51 @@ mod tests {
         assert_eq!(summary.usage_events, 1);
         assert_eq!(summary.input_tokens, 20);
         assert_eq!(summary.cached_input_tokens, Some(10));
+    }
+
+    #[tokio::test]
+    async fn task_finished_notification_carries_usage_and_its_cache_breakdown_presence() {
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![assistant_text(
+                "done",
+                Usage {
+                    input_tokens: 20,
+                    output_tokens: 4,
+                    cached_input_tokens: 10,
+                },
+            )],
+        );
+
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(test_config(&provider, &tasks, Vec::new()));
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .expect("start succeeds");
+
+        wait_final(&tasks, "t1").await;
+        let notification = tasks
+            .notifications()
+            .remove("t1", NotificationKind::TaskFinished)
+            .expect("a task_finished notification");
+        assert_eq!(
+            notification.usage,
+            Some(Usage {
+                input_tokens: 20,
+                output_tokens: 4,
+                cached_input_tokens: 10,
+            }),
+            "the parent's session totals include the task's tokens"
+        );
+        assert!(
+            notification.cached_input_tokens_present,
+            "the parent must know the cached share is measured, not assumed"
+        );
     }
 
     #[tokio::test]

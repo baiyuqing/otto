@@ -50,7 +50,7 @@ fn shared(root: &Path) -> Arc<Shared> {
 }
 
 fn builder_for(shared: Arc<Shared>, root: &Path) -> Builder {
-    let workspace = leaked_workspace(root).expect("workspace");
+    let workspace = Arc::new(Workspace::new(root).expect("workspace"));
     let workspace_path = workspace.root().to_string_lossy().into_owned();
     let mut builder = Builder::for_workspace(
         shared,

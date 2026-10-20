@@ -409,3 +409,24 @@ fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
     assert_eq!(listed.skipped, 0);
     store.close().expect("close");
 }
+
+#[test]
+fn fork_succeeds_when_a_temporary_file_for_the_same_fork_id_was_left_behind() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let source = PathBuf::from(store.path());
+    let fork_id = "fedcba9876543210fedcba9876543210";
+    for stale_name in [
+        format!("{fork_id}.jsonl.fork-tmp"),
+        format!("{fork_id}.jsonl.00000000.fork-tmp"),
+    ] {
+        fs::write(source.with_file_name(stale_name), "partial").expect("stale temporary");
+    }
+    let forked = super::super::fork::fork(&PosixDriver, &source, None, fork_id)
+        .expect("a stale temporary must not block the fork id");
+    let (fork_store, _) = Store::open(&forked.path).expect("open fork");
+    assert!(fork_store.forked_from().is_some());
+    fork_store.close().expect("close fork");
+    store.close().expect("close");
+}

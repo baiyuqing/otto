@@ -263,6 +263,27 @@ fn close_of_an_owned_lease_writes_a_released_heartbeat() {
 }
 
 #[test]
+fn close_without_a_session_file_still_releases_the_owned_lease() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    let path = store.path();
+    let dir = Path::new(&path).with_extension("lease");
+    fs::create_dir_all(&dir).expect("create lease dir");
+    let lease = crate::failover::lease::Lease::for_test(&dir);
+    {
+        let mut state = store.lock().expect("lock store");
+        state.lease = Some(lease);
+        state.owns_lease = true;
+        state.file = None;
+    }
+
+    store.close().expect("close");
+
+    let heartbeat = read_lease_heartbeat(&dir);
+    assert_eq!(heartbeat["released"], true);
+}
+
+#[test]
 fn close_of_a_check_only_lease_does_not_release_it() {
     let temp = TempDir::new();
     let (store, _root) = new_store(&temp);

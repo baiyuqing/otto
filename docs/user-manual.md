@@ -12,7 +12,6 @@ for commands available in your installed version.
 | [Servers and connectors](manual/servers-and-connectors.md) | HTTP/API, ACP, browser and chat clients, diagnostics |
 | [Automation](manual/automation.md) | Durable workflows and workspace identity |
 | [Memory and extensions](manual/memory-and-extensions.md) | Memory, reflection, skills, MCP, plugins and hooks |
-| [Remote memory protocol](manual/remote-memory-protocol.md) | External memory service wire contract |
 | [Troubleshooting](manual/troubleshooting.md) | Common failures and recovery |
 
 For internals and contribution rules, see the [development guide](development.md).

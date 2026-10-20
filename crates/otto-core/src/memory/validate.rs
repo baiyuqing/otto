@@ -139,26 +139,12 @@ impl MemoryContext {
 }
 impl MemoryRef {
     pub fn validate(&self, context: &MemoryContext, service: &str) -> Result<()> {
-        self.validate_with_revision(context, service, true)
-    }
-
-    fn validate_with_revision(
-        &self,
-        context: &MemoryContext,
-        service: &str,
-        require_revision: bool,
-    ) -> Result<()> {
         id(&self.service)?;
         id(&self.id)?;
         optional_id(&self.revision)?;
         require(self.service == service)?;
         if self.organization_id != context.organization_id {
             return Err(Error::new(ErrorKind::Unauthorized));
-        }
-        if service == "remote"
-            && (self.organization_id.is_none() || (require_revision && self.revision.is_none()))
-        {
-            return Err(invalid());
         }
         context.validate_scope(&self.scope)
     }
@@ -193,15 +179,6 @@ impl RecallItem {
             reference.validate(context, service)?;
         }
         self.content.validate()?;
-        if let Some(remote) = &self.remote {
-            let reference = self.reference.as_ref().ok_or_else(invalid)?;
-            require(reference.organization_id.as_deref() == Some(remote.organization_id.as_str()))?;
-            require(reference.revision.as_deref() == Some(remote.revision.as_str()))?;
-            require(remote.key.as_deref().is_none_or(valid_memory_key))?;
-            if remote.view == MemoryView::Effective {
-                require(!remote.pinned || remote.mandatory)?;
-            }
-        }
         sources(&self.sources)?;
         projection_metadata(&self.metadata)
     }
@@ -366,9 +343,7 @@ impl InspectRequest {
     pub fn validate(&self, service: &str) -> Result<()> {
         self.context.validate()?;
         match &self.query {
-            InspectQuery::Get(reference) => {
-                reference.validate_with_revision(&self.context, service, false)
-            }
+            InspectQuery::Get(reference) => reference.validate(&self.context, service),
             InspectQuery::List {
                 scope,
                 limit,

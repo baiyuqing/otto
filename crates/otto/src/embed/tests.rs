@@ -60,7 +60,6 @@ fn environment(fixture: &Fixture) -> Vec<(String, String)> {
             fixture.home.to_string_lossy().into_owned(),
         ),
         ("ALPHA_KEY".to_string(), "sk-alpha".to_string()),
-        ("OTTO_MEM_TOKEN".to_string(), "mem-test-token".to_string()),
     ]
 }
 

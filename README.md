@@ -82,7 +82,7 @@ one-off CLI flags, the launcher script and Docker setup.
 - Approvals and sandbox permissions are separate. Approval text may be displayed
   and persisted: do not include secrets. Keep API keys and chat secrets in
   environment variables; ChatGPT credentials come from `otto login`.
-- Providers, remote memory and configured integrations may receive task content.
+- Providers, memory plugins and configured integrations may receive task content.
   Inspect their configuration before using sensitive data.
 - Commands can still have real effects within granted permissions. Review
   proposed changes and keep backups for valuable work.

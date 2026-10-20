@@ -23,7 +23,6 @@ impl port::MemoryService for RecallOnly {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(port::RecallResult {
             items: vec![port::RecallItem {
-                remote: None,
                 reference: Some(port::MemoryRef {
                     organization_id: None,
                     service: "independent-service".into(),

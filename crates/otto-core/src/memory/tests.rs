@@ -55,7 +55,6 @@ fn reference() -> MemoryRef {
 }
 fn item() -> RecallItem {
     RecallItem {
-        remote: None,
         reference: Some(reference()),
         content: Content::Text("reference material".into()),
         sources: vec![],
@@ -471,18 +470,23 @@ fn organization_references_are_bound_not_rebound_and_local_json_stays_readable()
     let mut context = context();
     context.organization_id = Some("acme".into());
     let mut reference = reference();
-    reference.service = "remote".into();
-    reference.revision = Some("opaque-r4".into());
-    assert!(reference.validate(&context, "remote").is_err());
+    assert_eq!(
+        reference
+            .validate(&context, "test-service")
+            .unwrap_err()
+            .kind,
+        ErrorKind::Unauthorized
+    );
     reference.organization_id = Some("other".into());
     assert_eq!(
-        reference.validate(&context, "remote").unwrap_err().kind,
+        reference
+            .validate(&context, "test-service")
+            .unwrap_err()
+            .kind,
         ErrorKind::Unauthorized
     );
     reference.organization_id = Some("acme".into());
-    assert!(reference.validate(&context, "remote").is_ok());
-    reference.revision = None;
-    assert!(reference.validate(&context, "remote").is_err());
+    assert!(reference.validate(&context, "test-service").is_ok());
 }
 #[test]
 fn semantic_key_and_effective_scope_filter_have_closed_contracts() {

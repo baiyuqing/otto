@@ -18,54 +18,6 @@ pub(crate) fn open_memory(
     if dynamic_content && memory_config.enabled {
         builder.workspace_scope =
             crate::runtime::wiring::workspace_memory_scope(memory_config, &workspace_path)?;
-        if let Some(remote) = &memory_config.remote {
-            if builder.memory.extension.is_some() {
-                return Err(
-                    "an injected memory extension cannot be combined with backend = \"remote\""
-                        .into(),
-                );
-            }
-            let token = builder
-                .environment
-                .get(&remote.token_env)
-                .cloned()
-                .unwrap_or_default();
-            if token.is_empty() {
-                let message = format!(
-                    "memory service token variable {} is unset or empty",
-                    remote.token_env
-                );
-                if memory_config.required {
-                    return Err(message);
-                }
-                let _ = writeln!(stderr, "warning: {message}; continuing without memory");
-            } else {
-                let service = Arc::new(crate::memory::remote::RemoteService::new(
-                    crate::memory::remote::Config {
-                        url: remote.url.clone(),
-                        token,
-                        recall_timeout: remote.recall_timeout,
-                        logger: builder.logger.clone(),
-                    },
-                )?);
-                let user_scope = otto_core::memory::Scope {
-                    namespace: "user".into(),
-                    id: remote.user.clone(),
-                };
-                let grant = remote_learning_grant(user_scope.clone(), &builder.workspace_scope);
-                let turns = crate::memory::remote::upload::Uploader::new(
-                    service.clone(),
-                    builder.logger.clone(),
-                );
-                let shared = builder.shared_mut();
-                shared.memory.turns = Some(turns);
-                shared.memory.extension = Some(
-                    crate::runtime::wiring::MemoryExtension::owned(service, user_scope)
-                        .with_organization(remote.organization.clone())
-                        .with_learning(grant),
-                );
-            }
-        }
         if let Some(extension) = builder.memory.extension.clone() {
             extension
                 .user_scope
@@ -95,7 +47,7 @@ pub(crate) fn open_memory(
             let shared = builder.shared_mut();
             shared.memory.client = Some(Arc::new(client));
             shared.memory.usable = true;
-        } else if memory_config.remote.is_none() {
+        } else {
             let secrets = builder.secret_values(Some(resolved));
             match crate::runtime::wiring::open_memory_service_with_storage(
                 &builder.storage,
@@ -149,26 +101,6 @@ pub(crate) fn open_memory(
         shared.memory.advice_audit = advice_audit;
     }
     Ok(())
-}
-
-/// The remote backend's grant: explicit writes to the user scope and one
-/// workspace scope. The client checks every request's scopes against it, so
-/// each workspace `otto serve` loads needs its own (`load_workspace`).
-pub(super) fn remote_learning_grant(
-    user_scope: otto_core::memory::Scope,
-    workspace_scope: &crate::memory::Scope,
-) -> otto_core::memory::LearningGrant {
-    otto_core::memory::LearningGrant {
-        scopes: vec![
-            user_scope,
-            otto_core::memory::Scope {
-                namespace: workspace_scope.namespace.clone(),
-                id: workspace_scope.id.clone(),
-            },
-        ],
-        input_classes: vec!["explicit_memory".into()],
-        background: false,
-    }
 }
 
 // ---- straight-through start ----

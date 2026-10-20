@@ -81,163 +81,50 @@ busy_timeout = "5s"
 ```
 
 `required = true` makes an unavailable store fatal rather than disabling memory.
-`require_encryption = true` cannot be satisfied by the files or remote backend.
-Restart affected runtimes after configuration changes. Switching backends does
-not synchronize or import memory between them.
+`require_encryption = true` cannot be satisfied by the files backend.
+`backend` accepts only `files`. Restart affected runtimes after configuration
+changes.
 
 ### Rust memory service extensions
 
 Embedders may inject a `MemoryExtension`; this is not a CLI plugin or an
 external service implementation. Keep memory contracts in `otto-core` and
-native persistence/access in `otto`. Selecting remote while injecting an
-extension fails startup. Use the public embedding API and its tests for the
-current constructor/interface contract rather than copying a historical example.
+native persistence/access in `otto`. Organization scope is available only to
+embedders, through `MemoryExtension::with_organization`. Use the public
+embedding API and its tests for the current constructor/interface contract
+rather than copying a historical example.
 
-### Remote memory service
+### External memory services run as plugins
 
-`backend = "remote"` selects an **external service**. Otto implements only its
-client: provision service storage, memberships, delegation and ACLs separately.
-No extra Otto plugin/daemon is needed. Otto keeps no local copy, does not probe
-the service on startup and automatically enables recall and best-effort finished
-turn uploads when remote is selected. [Remote memory protocol](remote-memory-protocol.md)
-is the authoritative wire/API reference.
-
-#### Configure and start
-
-Put host authority in the **user** config, not project overlays:
+External memory services are Otto plugins. A plugin recalls with the
+`before_prompt` hook, receives finished turns through the `turn_end` hook
+(`turn.messages`) and exposes search/write/forget as package tools. It runs
+beside the built-in file memory and does not replace it. Otto ships no client
+for any service. The [otto-mem plugin](https://github.com/baiyuqing/otto-mem/blob/main/docs/otto-plugin.md)
+is one implementation; its setup is documented in the otto-mem repository.
+Bind the plugin's token to its package commands in user or managed config:
 
 ```toml
-[memory]
-backend = "remote"
-recall_tokens = 8192
-max_results = 12
-
-[memory.remote]
-url = "https://memory.example.internal"
-organization = "acme"
-user = "alice"
-token_env = "MEMORY_SERVICE_TOKEN"
-recall_timeout = "3s"
-
-[memory.workspace_ids]
-"/canonical/path/to/project" = "project-a"
+[plugins.bindings.otto-mem]
+env = { OTTO_MEM_TOKEN = "${OTTO_MEM_TOKEN}" }
 ```
 
-Set the chosen token variable privately in the environment of the process
-performing requests (`otto serve`/ACP when attached), then restart it. The
-example explicitly chooses `MEMORY_SERVICE_TOKEN`; it is not a default claim.
-Never put its value in TOML, prompts, source files or shell history.
+See [hooks and custom tools](#hooks-and-custom-tools) for the hook protocol
+and package bindings.
 
-| Setting | Requirement |
-| --- | --- |
-| `url` | Required HTTPS origin; loopback HTTP allowed. No URL credentials, non-root path, query, fragment or redirects. Trailing slash is removed. |
-| `organization` | Required tenant ID: 1..128 printable ASCII bytes, at least one non-space; ordinary spaces allowed. |
-| `user` | Required selected subject: 1..128 printable non-space ASCII bytes. |
-| `token_env` | Environment-variable name, at most 128 bytes, letters/digits/underscore and not starting with a digit. |
-| `recall_timeout` | Positive Go duration, default 3 s, maximum 10 s, for recall/get. Writes/uploads use 30 s. |
+#### Removed remote backend settings
 
-Organization/user/token and grants are host-only. IDs do not grant membership;
-the service validates principal delegation, organization membership and project
-write/read ACLs. An unauthorized selected scope fails the whole request, not a
-silently narrowed read. Tokens are redacted from model-visible text and withheld
-from Bash. Missing/empty token disables memory with a warning unless `required`
-is true. Malformed configuration always fails startup; startup success does
-not establish service readiness or credential validity.
-
-Remote `recall_tokens` is actually a **rendered UTF-8 byte bound** (default and
-maximum 8192), including preamble, escaping and newlines. `max_results` includes
-mandatory winners. Workspace scope uses the stable marker/override, not a path.
-
-#### Recall and writes
-
-One request selects one organization, one user and optionally one project.
-Personal memory is shared across that user's projects **within that tenant**,
-not across organizations. Keyed conflicts resolve **workspace > organization >
-user** (without project: organization > user). Null-key contradictions have no
-guaranteed semantic resolution. Pinning mandates the effective winner's
-inclusion, not greater authority; if mandatory winners cannot fit, all recall
-is discarded.
-
-- `memory_search` accepts `query` **or** exact `id`. Empty query browses a
-  bounded effective set, not a complete inventory; whitespace-only is invalid.
-  Optional `scope_filter` is a nonempty unique subset of `organization`,
-  `workspace`, `user`, applied **after** resolution. It cannot expose a
-  shadowed value; workspace filters need a selected project.
-- Exact-ID reads are labeled **raw** and can show shadowed items. Optional
-  organization/scope bindings narrow the read, never select another tenant.
-  Get returns the current revision, not a historical version.
-- `remember` creates with `text`, nullable `key` and destination `scope`.
-  Model destinations are user/workspace, defaulting to workspace if selected.
-  Duplicate active keys are not silent upserts. Remote updates require
-  `target_id`, `opaque_revision`, `organization_id`; supplied `scope_id` binds
-  the reference. Key/text are full replacements. A create may use
-  `base_revision = 0`; nonzero needs an opaque revision.
-- Remote `forget` needs ID, organization, opaque revision and scope binding.
-  Numeric local revisions do not substitute for remote opaque revisions.
-  Opaque revisions are sent as wire `revision` and never numerically compared.
-  Forget suppresses one item, not its key across scopes or a physical-erasure
-  promise; forgetting a project override can restore a lower baseline.
-- Metadata cannot set authority, identity or pinning. Ordinary model tools
-  cannot write organization memory. Human `/remember --scope organization`
-  may request it, subject to service ACLs. Organization forget and pin
-  management require external administration.
-
-Smoke-test after restarting with a normal prompt, then:
+A `[memory.remote]` table fails startup with:
 
 ```text
-/remember --scope user --key response.language Reply in Chinese.
+[memory.remote] was removed: run an external memory service as an Otto plugin, such as the otto-mem plugin (https://github.com/baiyuqing/otto-mem), and bind its token under [plugins.bindings.otto-mem]; delete [memory.remote] from config.toml
 ```
 
-Ask Otto to search it. A pending receipt is not proof of persistence. For
-updates/forget, obtain fresh tenant-bound references rather than reusing old
-unbound ones. See the protocol for receipt identity and exact outcomes.
+`backend = "remote"` fails startup with:
 
-#### Failure recovery and uploads
-
-Requests are never automatically retried, including 429. A write whose response
-is lost/malformed after possible delivery has **unknown outcome**: re-read exact
-state or consult the service before another write. No durable local write
-outbox exists. An explicit replay must keep the same request ID/body within
-retention (while it can commit and at least 24 h after terminal resolution).
-Deferred commits recheck ACLs, revisions and key uniqueness.
-
-| Failure | Recovery |
-| --- | --- |
-| Missing token | Set the named variable in the runtime environment; restart. |
-| 401 | Check token and principal/subject mapping. |
-| 403 | Check membership, delegation and project/write ACLs. |
-| 409 | Re-read revision/key/request identity; do not blindly overwrite. |
-| 400/version | Correct input/configuration or coordinate client/service deployment. |
-| 413 | Reduce input; oversized uploads are dropped. |
-| 429, unavailable, timeout | Check service/network; explicitly retry later only after considering unknown effects. |
-
-Finished parent turns upload user text, assistant replies and tool calls/results,
-not images/reasoning or separate child sessions (child final reports can appear
-in parent results). Service extraction may write only authorized project or
-selected personal memory, never organization memory. Acceptance is not completed
-extraction. Whole turns over 4 MiB or containing redaction/credential shapes are
-dropped. One worker, queue 8, per-session order, no retry/spool/replay: failures
-and full queues lose turns. Shutdown drains at most 30 s; restart cannot recover
-lost uploads.
-
-Remote does not support local review/advice, `otto memory` management, `/memory
-list|show|search|forget|review`, or reflection. Those commands do not fall back
-to local files. `/remember` remains supported with human origin.
-
-#### Coordinated v1 cutover
-
-Current tenant-aware bodies still use `/v1/` and protocol `1.0`; old bodies are
-incompatible. Stop old clients, deploy the service's current schema/ACLs,
-configure required organization, upgrade/restart Otto and smoke-test. There is
-no default tenant, old-wire fallback, automatic service migration or backend
-synchronization. The repository does not migrate external service storage.
-
-#### Remote memory log lines
-
-Failures log endpoint/status/code and at most 512 bytes of diagnostic message,
-not tokens, queries, memory text or uploaded bodies. Users/models see fixed
-safe errors, not untrusted service text. Inspect runtime stderr for service
-failures; see [logging](servers-and-connectors.md#logs-metrics-and-request-correlation).
+```text
+memory backend "remote" was removed: run an external memory service as an Otto plugin, such as the otto-mem plugin (https://github.com/baiyuqing/otto-mem), and bind its token under [plugins.bindings.otto-mem]; remove backend = "remote" from [memory]
+```
 
 ### Importing an earlier database
 

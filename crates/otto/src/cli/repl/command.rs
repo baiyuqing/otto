@@ -21,7 +21,7 @@ impl<'a> Repl<'a> {
                     let _ = write!(self.stdout, "{HELP}");
                     let _ = writeln!(
                         self.stdout,
-                        "/permissions [policy on_request|never | reviewer user|auto_review] inspect or set approval controls"
+                        "/permissions [manual|auto|yolo | policy on_request|never | reviewer user|auto_review] show or set approval controls"
                     );
                     Some(false)
                 }
@@ -117,17 +117,7 @@ impl<'a> Repl<'a> {
                     self.thinking(args).await?;
                     Some(false)
                 }
-                "auto" => {
-                    let line = self.controller.auto_mode_command(args).map_err(|message| {
-                        Error::Command {
-                            command: "/auto".into(),
-                            message,
-                        }
-                    })?;
-                    let _ = writeln!(self.stdout, "{line}");
-                    Some(false)
-                }
-                "permissions" => {
+                "auto" | "permissions" => {
                     let line = self
                         .controller
                         .permissions_command(args)

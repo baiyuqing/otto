@@ -60,6 +60,8 @@ impl Catalog {
             name = "/task";
         } else if name == "/quit" {
             name = "/exit";
+        } else if name == "/auto" {
+            name = "/permissions";
         }
         let entry = self
             .entries
@@ -96,15 +98,9 @@ macro_rules! entry {
 const ENTRIES: &[Entry] = &[
     entry!(
         "/permissions",
-        "inspect or set approval policy and reviewer",
+        "show or set the approval mode, policy and reviewer",
         false,
         permissions
-    ),
-    entry!(
-        "/auto",
-        "show or set the approval mode: manual, auto or yolo",
-        false,
-        auto
     ),
     entry!("/help", "show commands", false, help),
     entry!("/init", "create a repository AGENTS.md guide", false, init),
@@ -210,14 +206,10 @@ fn clear_session(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String
     Ok(Transition::Request(Request::Command(Command::NewSession)))
 }
 fn permissions(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    crate::app::permissions_update(args, otto_core::approval::ApprovalSettings::default())?;
-    command("Approval permissions", Command::Permissions(args.into()))
+    crate::app::parse_permissions_command(args, otto_core::approval::ApprovalSettings::default())?;
+    command("Approval mode", Command::Permissions(args.into()))
 }
 
-fn auto(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    crate::app::parse_auto_mode(args)?;
-    command("Approval mode", Command::AutoMode(args.into()))
-}
 fn session(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
     push(Document {

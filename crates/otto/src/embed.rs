@@ -585,7 +585,7 @@ impl Session {
     /// a plan review, a sandbox escalation and a durable grant; a
     /// workspace-wide request and another session's request still reach
     /// `decide`. The mode is stored in `~/.otto/approvals.db` per workspace
-    /// and session, as `/auto` and ACP `_otto/approval_mode/set` store it.
+    /// and session, as `/permissions` and ACP `_otto/approval_mode/set` store it.
     /// [`Info::approval_mode`] reports the mode in effect.
     pub fn set_approval_mode(&self, mode: ApprovalMode) -> Result<(), Error> {
         let controller = &self.controller;

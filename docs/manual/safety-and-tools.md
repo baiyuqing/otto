@@ -92,10 +92,10 @@ still apply, and permission to execute does not authorize automatic replay.
 **YOLO** is the deliberate answer to "stop asking me": the session decides
 every request that carries its id, including plan reviews, sandbox
 escalations and durable grants, and including requests made
-by its own child tasks. Choose it with `/auto yolo` or `--yolo`. It is a
+by its own child tasks. Choose it with `/permissions yolo` or `--yolo`. It is a
 blanket consent: a request you would have refused is approved anyway, so the
 recorded decision names `YOLO`, the frontends always show the mode, and one
-command (`/auto off`, `/auto manual` or a mode button) takes it back — including
+command (`/permissions manual` or a mode button) takes it back — including
 for requests that are already waiting.
 
 What no mode changes:
@@ -108,22 +108,25 @@ What no mode changes:
   outcome, the sandbox boundary and recovery rules are unchanged. Approval is
   still not execution: a failed or unknown application is reported as such.
 
-Use `/auto` to inspect the mode, `/auto manual` (or `/auto off`) to require
-manual approval, `/auto auto` (or `/auto on`) for the default, and `/auto yolo`
-to decide everything. These commands reset both policy and reviewer to the
-selected preset. `/permissions` inspects both controls;
-`/permissions policy on_request|never` changes the policy, and
-`/permissions reviewer user|auto_review` changes the reviewer. `never` rejects
+`/permissions` shows the mode, the policy, the reviewer and pending approval
+counts. `/permissions manual` requires manual approval, `/permissions auto`
+selects the default, and `/permissions yolo` decides everything. These presets
+reset both policy and reviewer. `/permissions policy on_request|never` changes
+only the policy, and `/permissions reviewer user|auto_review` changes only the
+reviewer. `/auto [args]` is an unlisted alias of `/permissions [args]` and also
+accepts the older `on` (AUTO) and `off` (MANUAL). `never` rejects
 requests needing additional authority without prompting, while confined work
 continues and the sandbox stays enabled. The reviewer is inactive under `never`.
 The preference survives session loading and process
 restarts in `approvals.db`; new sessions start in AUTO. TUI and Web footers show
-MANUAL, AUTO or YOLO. The same commands work in ACP, Telegram and Feishu.
-Telegram's command menu includes `/auto`, and its AUTO/MANUAL buttons apply to
-the session shown on the message; a YOLO session reports YOLO in the message
-and `/auto off` leaves it. After a successful selection, the message shows the
-resulting mode and removes the buttons. Send `/auto` again to open fresh
-controls. Clicking a mode button updates that message instead of sending
+MANUAL, AUTO or YOLO. The same commands work in ACP. Telegram and Feishu
+accept `/permissions`, `/permissions manual|auto` and the `policy`/`reviewer`
+forms; they reject `/permissions yolo`, so a chat participant cannot select
+YOLO. In Telegram, `/permissions` without arguments shows AUTO/MANUAL buttons
+that apply to the session shown on the message; a YOLO session reports YOLO in
+the message and `/permissions manual` leaves it. After a successful selection,
+the message shows the resulting mode and removes the buttons. Send
+`/permissions` again to open fresh controls. Clicking a mode button updates that message instead of sending
 another card.
 
 The session API exposes `GET /v1/sessions/{id}/approval-mode` and `PUT` with
@@ -146,7 +149,8 @@ Before database upgrades, stop all Otto/server/connector writers, install with
 schema upgrades back up the database beside the source; old pending requests
 remain human-required. Downgrades need a compatible pre-migration backup with
 all writers stopped. Preserve the newer journal separately: restoring a backup
-loses later decisions. `/auto manual` disables automatic review without a restore.
+loses later decisions. `/permissions manual` disables automatic review without a
+restore.
 
 
 Otto uses one approval service for tool permissions, memory review, workflow

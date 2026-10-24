@@ -36,6 +36,15 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- `/permissions` is the single approval command. `/permissions
+  manual|auto|yolo` applies the presets that `/auto` applied, and
+  `/permissions` without arguments also shows the approval mode. `/auto`
+  remains an unlisted alias with the same arguments, including `on`/`off`; it
+  is removed from `/help`, TUI completion, ACP `available_commands` and the
+  chat command menu. Chat clients reject `/permissions yolo`. HTTP and ACP
+  approval APIs are unchanged. See
+  [approval modes](docs/manual/safety-and-tools.md).
+
 - A plugin package can be the memory source. A package declares a `memory`
   command in `extensions.dev.otto`, and `[memory] backend = "plugin:<package>"`
   in user or managed config selects it. Recall, `memory_search`, `remember`,

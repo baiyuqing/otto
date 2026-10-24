@@ -243,7 +243,7 @@ Turns:
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
-`/context`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
+`/context`, `/agents`, `/permissions`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/steer`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/memory`, `/remember`, `/skill`,

@@ -21,7 +21,6 @@ fn catalog_lists_commands_by_workflow_group() {
             "/logout",
             "/mcp",
             "/skill",
-            "/plan",
             "/model",
             "/thinking",
             "/context",
@@ -46,7 +45,7 @@ fn catalog_lists_commands_by_workflow_group() {
         ]
     );
     assert_eq!(entries[0].group, CommandGroup::Help);
-    assert_eq!(entries[27].group, CommandGroup::Exit);
+    assert_eq!(entries[26].group, CommandGroup::Exit);
 }
 
 #[test]
@@ -83,8 +82,7 @@ fn help_prints_group_headings_in_order_with_blank_line_separators() {
         "{help}"
     );
     let position = |name: &str| help.find(&format!("\n{name}  ")).unwrap();
-    assert!(position("/init") < position("/plan"));
-    assert!(position("/plan") < position("/permissions"));
+    assert!(position("/init") < position("/permissions"));
     assert!(position("/permissions") < position("/memory"));
     assert!(position("/memory") < position("/task"));
     assert!(position("/task") < position("/new"));

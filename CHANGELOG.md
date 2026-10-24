@@ -150,6 +150,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Features and reliability
 
+- OpenAI-compatible requests now send `prompt_cache_key` set to the session id
+  (a sub-agent uses its own transcript id), as ChatGPT requests already do.
+  An endpoint that answers HTTP 400 or 422 naming `prompt_cache_key` gets the
+  request resent once without the field, and later requests from the same
+  provider client omit it.
+
 - OpenAI-compatible requests that receive HTTP 429 or 503 before any output
   are retried within the existing four-attempt and deadline budget, waiting
   1/2/4 seconds or a numeric `Retry-After` capped at 30 seconds. HTTP 500, 502,

@@ -305,19 +305,13 @@ async fn steering_commands_reach_the_controller_for_the_active_run() {
             .unwrap(),
         Reply::Steering(messages) if messages.is_empty()
     ));
-    // Both writes reach their controller calls and report the runtime's own
-    // reason, never a fallback that would start a turn instead.
+    // The withdrawal reaches its controller call and reports the runtime's own
+    // reason.
     assert_eq!(
-        local_command(controller.clone(), Command::WithdrawSteer(1))
+        local_command(controller, Command::WithdrawSteer(1))
             .await
             .unwrap_err(),
         "steering message is not queued for the active task"
-    );
-    assert_eq!(
-        local_command(controller, Command::Steer("go left".into()))
-            .await
-            .unwrap_err(),
-        "there is no active task accepting guidance"
     );
 }
 
@@ -352,14 +346,6 @@ async fn attach_steering_commands_route_to_the_client_transport() {
     .unwrap_err();
     assert!(withdraw.contains("/tasks/steer/7"), "{withdraw}");
     assert!(withdraw.contains("outcome unknown"), "{withdraw}");
-    let steer = remote_request(
-        remote,
-        &ticket,
-        Request::Command(Command::Steer("go left".into())),
-    )
-    .await
-    .unwrap_err();
-    assert!(steer.contains("/tasks/steer"), "{steer}");
 }
 
 /// The TUI reads the run's guidance right after admitting or withdrawing it,
@@ -382,16 +368,13 @@ async fn a_guidance_read_follows_the_command_it_observes() {
         generation: 1,
     };
     let mut driver = Driver::new(Connection::Local(controller));
-    // The idle session refuses the guidance, and the read that follows still
+    // The idle session refuses the withdrawal, and the read that follows still
     // completes second: the failed change cannot be observed out of order.
-    driver.submit(
-        ticket.clone(),
-        Request::Command(Command::Steer("go left".into())),
-    );
+    driver.submit(ticket.clone(), Request::Command(Command::WithdrawSteer(1)));
     driver.submit(ticket, Request::Command(Command::SteeringState));
 
     let first = driver.next().await;
-    assert!(matches!(first.result, Err(ref error) if error.contains("no active task")));
+    assert!(matches!(first.result, Err(ref error) if error.contains("not queued")));
     assert!(first.mutation);
     let second = driver.next().await;
     assert!(matches!(second.result, Ok(Reply::Steering(_))));

@@ -166,7 +166,6 @@ const ENTRIES: &[Entry] = &[
     ),
     entry!(DuringTask, "/context", "inspect context", false, context),
     entry!(DuringTask, "/compact", "compact context", false, compact),
-    entry!(DuringTask, "/steer", "guide the active task", false, steer),
     entry!(
         ApprovalsAndSandbox,
         "/permissions",
@@ -391,16 +390,6 @@ fn approve(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
         ),
         _ => Err("usage: /approve [<id> [always]]".into()),
     }
-}
-
-/// `/steer <guidance>` is the explicit form of the text an active turn accepts.
-/// Unlike ordinary text it never becomes a prompt: when nothing runs there is no
-/// turn to guide, and silently starting one would hide the mistake.
-fn steer(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    if args.is_empty() {
-        return Err("usage: /steer <guidance>".into());
-    }
-    command("Guidance", Command::Steer(args.into()))
 }
 
 fn context(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {

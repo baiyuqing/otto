@@ -98,8 +98,6 @@ pub(crate) enum Command {
     },
     /// Admit ordinary input to the active turn rather than creating a queued turn.
     AdmitInput(String),
-    /// Explicit guidance for the active task, never a start of a new turn.
-    Steer(String),
     /// The active run's guidance items; the caller repaints the queued one
     /// from this read rather than from what it sent.
     SteeringState,

@@ -11,6 +11,7 @@
 //! pending, matching [`crate::cli::repl::Repl`]. There is no second scheduler.
 
 mod app;
+mod approval_display;
 pub(crate) mod attach;
 mod backend;
 mod commands;

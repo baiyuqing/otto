@@ -215,42 +215,8 @@ impl App {
             }
             "approval_changed" => {
                 if let Some(request) = &event.approval {
-                    if request
-                        .decision
-                        .as_ref()
-                        .is_some_and(|d| d.transport == "auto-mode")
-                    {
-                        self.push_system(format!(
-                            "[approval] {} ({}): automatically approved · application {:?}\n{}{}",
-                            request.title,
-                            request.id,
-                            request.application,
-                            request.subject.details,
-                            if request.application_error.is_empty() {
-                                String::new()
-                            } else {
-                                format!("\n{}", request.application_error)
-                            }
-                        ));
-                    }
-                    if let Some(decision) = &request.decision {
-                        self.push_system(format!(
-                            "[approval] {} ({}) {:?} · {}\n{}",
-                            request.title,
-                            request.id,
-                            request.state,
-                            decision.transport,
-                            decision.feedback
-                        ));
-                    }
-                    if request.state == otto_core::approval::State::Pending
-                        && !request.is_human_pending()
-                    {
-                        self.push_system(format!(
-                            "[approval] reviewing: {} ({})\n{}\nReason: {}",
-                            request.title, request.id, request.subject.details, request.reason
-                        ));
-                    }
+                    crate::tui::approval_display::upsert(&mut self.entries, request);
+                    self.scroll = None;
                     if request.is_human_pending()
                         && !self.hidden_approvals.contains(&request.id)
                         && !self

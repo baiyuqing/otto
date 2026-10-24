@@ -145,6 +145,9 @@ impl App {
                 true
             });
         }
+        if same_session {
+            crate::tui::approval_display::retain(&mut entries, &self.entries);
+        }
         self.entries = entries;
         self.usage = usage;
         self.info = info;

@@ -36,6 +36,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Usage and compatibility
 
+- Slash commands are listed in workflow-stage groups: help, setup, during a
+  task, approvals and sandbox, memory, tasks, sessions, exit. TUI `/help`
+  prints a heading per group; TUI completion, REPL `/help`, ACP
+  `available_commands` and the chat command menu use the same group order.
+  Command names, arguments and behavior are unchanged.
+
 - `/permissions` is the single approval command. `/permissions
   manual|auto|yolo` applies the presets that `/auto` applied, and
   `/permissions` without arguments also shows the approval mode. `/auto`

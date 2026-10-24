@@ -53,9 +53,11 @@ async fn permissions_controls_preserve_sandbox_and_report_disabled_reviewer() {
             .unwrap()
             .contains("Reviewer: auto_review (disabled)")
     );
-    assert_eq!(
-        controller.auto_mode_command("").unwrap(),
-        "Approval mode: NEVER (reviewer disabled)"
+    assert!(
+        controller
+            .permissions_command("")
+            .unwrap()
+            .starts_with("Approval mode: NEVER (reviewer disabled)\n")
     );
     controller.permissions_command("reviewer user").unwrap();
     let settings = controller.info().approval_settings;
@@ -66,7 +68,7 @@ async fn permissions_controls_preserve_sandbox_and_report_disabled_reviewer() {
     );
     assert_eq!(controller.info().sandbox, sandbox);
     assert!(controller.permissions_command("reviewer bypass").is_err());
-    controller.auto_mode_command("auto").unwrap();
+    controller.permissions_command("auto").unwrap();
     let settings = controller.info().approval_settings;
     assert_eq!(
         settings.policy,
@@ -91,23 +93,28 @@ async fn session_mode_commands_keep_new_sessions_independent_and_resume_preferen
         .unwrap();
     let first = controller.info();
     assert_eq!(first.approval_mode, ApprovalMode::Auto);
-    assert_eq!(
-        controller.auto_mode_command("off").unwrap(),
-        "Approval mode: MANUAL"
+    assert!(
+        controller
+            .permissions_command("off")
+            .unwrap()
+            .starts_with("Approval mode: MANUAL\n")
     );
     assert_eq!(controller.info().approval_mode, ApprovalMode::Manual);
     // The mode name is the command's own value, and YOLO is one of them.
-    assert_eq!(
-        controller.auto_mode_command("yolo").unwrap(),
-        "Approval mode: YOLO"
+    let yolo_report = controller.permissions_command("yolo").unwrap();
+    assert!(
+        yolo_report.starts_with("Approval mode: YOLO\nApproval policy: "),
+        "{yolo_report}"
     );
     assert_eq!(controller.info().approval_mode, ApprovalMode::Yolo);
-    assert_eq!(
-        controller.auto_mode_command("").unwrap(),
-        "Approval mode: YOLO"
+    assert!(
+        controller
+            .permissions_command("")
+            .unwrap()
+            .starts_with("Approval mode: YOLO\n")
     );
-    assert!(controller.auto_mode_command("invalid").is_err());
-    controller.auto_mode_command("off").unwrap();
+    assert!(controller.permissions_command("invalid").is_err());
+    controller.permissions_command("off").unwrap();
     controller.new_session().await.unwrap();
     assert_eq!(controller.info().approval_mode, ApprovalMode::Auto);
     controller

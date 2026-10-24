@@ -240,14 +240,14 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     }
     if options.yolo && options.attach {
         return Err(reject(
-            "otto: --yolo applies to the session this process opens; with --attach run /auto yolo instead",
+            "otto: --yolo applies to the session this process opens; with --attach run /permissions yolo instead",
         ));
     }
     if options.yolo && (options.serve || options.acp) {
         // A server or an agent opens its sessions on a client's request, so
         // the mode belongs to that client's call, not to this startup.
         return Err(reject(
-            "otto: --yolo requires a frontend that opens one session; use /auto yolo, _otto/approval_mode/set or PUT /v1/sessions/{id}/approval-mode instead",
+            "otto: --yolo requires a frontend that opens one session; use /permissions yolo, _otto/approval_mode/set or PUT /v1/sessions/{id}/approval-mode instead",
         ));
     }
     if !options.acp_listen.is_empty() && !options.serve {

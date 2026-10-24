@@ -288,8 +288,7 @@ type Command struct {
 // dispatch in deliver and cmdManage, and with the commands `otto acp`
 // advertises; TestMenuCommandsAreHandled checks it.
 var Commands = []Command{
-	{"auto", "Session approval mode: /auto [on|off]", false},
-	{"permissions", "Inspect approval policy or choose policy/reviewer", false},
+	{"permissions", "Approval mode and policy: /permissions [manual|auto]", false},
 	{"new", "Start a new session on the next message", false},
 	{"stop", "Cancel the running turn and clear the queue", false},
 	{"steer", "Guide the active task: /steer <guidance>", false},

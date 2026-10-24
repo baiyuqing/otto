@@ -30,11 +30,23 @@ func policySummary(sid string, policy *agent.ApprovalPolicy) string {
 
 func (c *chat) cmdPermissions(m Message, arg string) {
 	fields := strings.Fields(arg)
-	if len(fields) != 0 && (len(fields) != 2 ||
+	if len(fields) == 0 {
+		c.cmdAuto(m, "")
+		return
+	}
+	if len(fields) == 1 && (fields[0] == "manual" || fields[0] == "auto") {
+		if fields[0] == "auto" {
+			c.cmdAuto(m, "on")
+		} else {
+			c.cmdAuto(m, "off")
+		}
+		return
+	}
+	if len(fields) != 2 ||
 		(fields[0] != "policy" && fields[0] != "reviewer") ||
 		(fields[0] == "policy" && fields[1] != "on_request" && fields[1] != "never") ||
-		(fields[0] == "reviewer" && fields[1] != "user" && fields[1] != "auto_review")) {
-		c.notify(m.MessageID, "Usage: /permissions [policy on_request|never | reviewer user|auto_review]")
+		(fields[0] == "reviewer" && fields[1] != "user" && fields[1] != "auto_review") {
+		c.notify(m.MessageID, "Usage: /permissions [manual|auto | policy on_request|never | reviewer user|auto_review]")
 		return
 	}
 	go func() {
@@ -52,7 +64,7 @@ func (c *chat) cmdPermissions(m Message, arg string) {
 			return
 		}
 		policy, err := c.b.opts.Agent.ApprovalPolicy(ctx, sid)
-		if err == nil && len(fields) != 0 {
+		if err == nil {
 			if policy.Legacy {
 				err = agent.ErrApprovalPolicyUnsupported
 			} else {

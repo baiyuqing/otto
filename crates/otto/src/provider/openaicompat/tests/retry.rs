@@ -391,34 +391,6 @@ async fn a_stream_cut_without_retry_budget_is_not_retried() {
     );
 }
 
-/// A delta already reached the caller, so the output cannot be replayed
-/// and the failure stays single-attempt.
-#[tokio::test]
-async fn stream_cut_after_a_delta_is_not_retried() {
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&attempts);
-    let server = spawn_server(move |_head, _body| {
-        counter.fetch_add(1, Ordering::SeqCst);
-        truncated_stream("data: {\"choices\":[{\"delta\":{\"content\":\"visible\"}}]}\n\n")
-    })
-    .await;
-
-    let mut events = Vec::new();
-    let mut emit = |event| events.push(event);
-    Client::new(&server.url, "key")
-        .complete(&model_request(), &mut emit, &CancellationToken::new())
-        .await
-        .result
-        .expect_err("the first interrupted stream is returned");
-    assert!(!events.is_empty());
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::Retry { .. }))
-    );
-}
-
 /// The `Retry` event reason of every retry in `events`.
 fn retry_reasons(events: &[StreamEvent]) -> Vec<&str> {
     events

@@ -353,6 +353,32 @@ fn clear_starts_a_new_session_without_opening_a_command_panel() {
 }
 
 #[test]
+fn auto_is_a_hidden_alias_of_permissions() {
+    let catalog = Catalog::default();
+    assert!(catalog.entries().iter().all(|entry| entry.name != "/auto"));
+    assert!(
+        catalog
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "/permissions")
+    );
+    for line in ["/auto yolo", "/permissions yolo"] {
+        match catalog.open(line, &Info::default(), false).unwrap() {
+            Transition::Request(BackendRequest::Command(Command::Permissions(args))) => {
+                assert_eq!(args, "yolo")
+            }
+            Transition::Push(_) => {}
+            _ => panic!("{line}"),
+        }
+    }
+    assert!(
+        catalog
+            .open("/auto bogus", &Info::default(), false)
+            .is_err()
+    );
+}
+
+#[test]
 fn rename_with_a_name_runs_without_opening_a_result_panel() {
     let catalog = Catalog::default();
     assert!(matches!(

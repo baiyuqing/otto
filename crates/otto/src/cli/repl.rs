@@ -39,7 +39,7 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/auto [manual|auto|yolo] show or set session approval mode\n/help     \
+const HELP: &str = "/help     \
     show commands\n/init     create a repository AGENTS.md guide\n/exit     \
     exit Otto\n/new      start a new session\n/clear    start a new \
     session\n/session  show session details\n/rename <name> rename current \

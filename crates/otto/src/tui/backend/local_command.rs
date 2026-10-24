@@ -73,7 +73,6 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             })
             .await?
         }
-        Command::AutoMode(args) => blocking(c.clone(), move |c| c.auto_mode_command(&args)).await?,
         Command::Permissions(args) => {
             blocking(c.clone(), move |c| c.permissions_command(&args)).await?
         }

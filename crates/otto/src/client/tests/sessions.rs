@@ -158,25 +158,32 @@ async fn status_yields_each_snapshot_then_none() {
 }
 
 #[tokio::test]
-async fn legacy_mode_command_labels_actual_never_and_supports_old_boolean_servers() {
-    let (client, seen, _dir) = stub(move |_, _| {
-        json_body(
-            StatusCode::OK,
-            r#"{"mode":"auto","automatic":true,"policy":"never"}"#,
-        )
+async fn permissions_preset_puts_the_mode_then_reports_the_rereads_settings() {
+    let (client, seen, _dir) = stub(move |_, target| {
+        if target.contains("approval-mode") {
+            json_body(StatusCode::OK, r#"{"mode":"yolo","automatic":true}"#)
+        } else if target.contains("approval-policy") {
+            json_body(
+                StatusCode::OK,
+                r#"{"policy":"on_request","reviewer":"bypass","revision":4}"#,
+            )
+        } else {
+            json_body(StatusCode::OK, r#"{"requests":[],"cursor":1}"#)
+        }
     });
-    assert_eq!(
-        client.auto_mode_command("session", "").await.unwrap(),
-        "Approval mode: NEVER (reviewer disabled)"
+    let report = client.permissions_command("session", "yolo").await.unwrap();
+    assert!(
+        report.starts_with("Approval mode: YOLO\nApproval policy: on_request\nReviewer: bypass"),
+        "{report}"
     );
-    assert_eq!(
-        request(&seen, 0).0,
-        "GET /v1/sessions/session/approval-mode"
-    );
-    let (client, _, _dir) = stub(move |_, _| json_body(StatusCode::OK, r#"{"automatic":false}"#));
-    assert_eq!(
-        client.auto_mode_command("session", "").await.unwrap(),
-        "Approval mode: MANUAL"
+    let (path, body) = request(&seen, 1);
+    assert_eq!(path, "PUT /v1/sessions/session/approval-mode");
+    assert_eq!(body, json!({"mode":"yolo"}));
+    assert!(
+        client
+            .permissions_command("session", "bogus")
+            .await
+            .is_err()
     );
 }
 

@@ -95,10 +95,14 @@ pub(crate) struct App {
     /// Every queued guidance item, in admission order; transient display only.
     pub pending_steers: Vec<otto_core::agent::steering::Message>,
     steering_generation: Option<u64>,
+    /// IDs already represented by a delivery notification in this lifecycle.
+    delivered_steers: HashSet<u64>,
+    pub new_messages: bool,
     /// Guidance Ctrl+U asked the runtime to withdraw. Its text returns to an
     /// empty composer only after the runtime reports it as withdrawn.
     recalling_steer: Option<otto_core::agent::steering::Message>,
     awaiting_user_echo: Option<String>,
+    optimistic_user_echo: Option<String>,
     pub scroll: Option<u16>,
     pub max_scroll: std::cell::Cell<u16>,
     pub selection: Option<Selection>,
@@ -175,8 +179,11 @@ impl App {
             queued_steer: None,
             pending_steers: Vec::new(),
             steering_generation: None,
+            delivered_steers: HashSet::new(),
+            new_messages: false,
             recalling_steer: None,
             awaiting_user_echo: None,
+            optimistic_user_echo: None,
             scroll: None,
             max_scroll: Default::default(),
             selection: None,

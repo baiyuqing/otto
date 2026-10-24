@@ -62,6 +62,9 @@ impl Client {
 
     /// Reads a sent request's response: an error status, or the whole stream.
     ///
+    /// Status 429 and 503 are [`AttemptError::RetryableStatus`] with the
+    /// `Retry-After` seconds read from the headers before the body; every
+    /// other non-2xx status, and an overflow body, is [`AttemptError::Sent`].
     /// A transport failure that happens before any event reached `emit` is
     /// [`AttemptError::Interrupted`], so the retry policy may repeat the
     /// attempt. Once a reasoning, text or tool-call delta has been handed to
@@ -81,10 +84,25 @@ impl Client {
             Some(status.as_u16()),
         );
         if !status.is_success() {
-            return Err(AttemptError::Sent(
-                self.error_response(status.as_u16(), response, control)
-                    .await,
-            ));
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(crate::retry::parse_retry_after_seconds);
+            let error = self
+                .error_response(status.as_u16(), response, control)
+                .await;
+            let reason = match status.as_u16() {
+                429 => Some("HTTP 429"),
+                503 => Some("HTTP 503"),
+                _ => None,
+            };
+            return Err(match (reason, error) {
+                (Some(reason), error @ ProviderError::Other(_)) => {
+                    AttemptError::RetryableStatus(error, reason, retry_after)
+                }
+                (_, error) => AttemptError::Sent(error),
+            });
         }
 
         let mut assembler = StreamAssembler::new();

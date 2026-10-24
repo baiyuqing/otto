@@ -382,8 +382,7 @@ fn transient_http_retry(status: u16, headers: &reqwest::header::HeaderMap) -> Op
     let retry_after = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs);
+        .and_then(crate::retry::parse_retry_after_seconds);
     Some(Retry {
         reason,
         retry_after,

@@ -150,6 +150,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Features and reliability
 
+- OpenAI-compatible requests that receive HTTP 429 or 503 before any output
+  are retried within the existing four-attempt and deadline budget, waiting
+  1/2/4 seconds or a numeric `Retry-After` capped at 30 seconds. HTTP 500, 502,
+  504 and other statuses still end the turn after one request. Retries appear
+  as `retry A/M after HTTP 429` (or `HTTP 503`) and as `provider_retry` events.
+
 - Keep queued guidance visible in local and attached terminals, including text
   admitted by other clients, and retain its body through delivery. Sending text
   resumes follow-bottom; external messages preserve historical reading position

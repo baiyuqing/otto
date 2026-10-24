@@ -204,7 +204,14 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let pending = app
         .pending_steers
         .iter()
-        .map(|message| format!("[Queued for current turn] {}", message.text))
+        .map(|message| {
+            let label = if message.status == otto_core::agent::steering::Status::Delivered {
+                "Sent to current turn"
+            } else {
+                "Queued for current turn"
+            };
+            format!("[{label}] {}", message.text)
+        })
         .chain(
             app.queued_input
                 .iter()
@@ -233,7 +240,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     // could keep a gutter marker on each one, and re-wrapping here would
     // split those rows again and lose the alignment.
     let paragraph = Paragraph::new(Text::from(lines));
-    let total_lines = paragraph.line_count(area.width) as u16;
+    let total_lines = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
     let bottom = total_lines.saturating_sub(area.height);
     // The scroll keys need the bottom this layout produced to turn
     // "following" into an absolute offset; nothing outside the renderer
@@ -389,7 +396,8 @@ pub(super) fn queued_banner_style() -> Style {
 
 fn composer_banner_lines(app: &App) -> Vec<Line<'static>> {
     let style = queued_banner_style();
-    app.composer_notices
+    let mut lines: Vec<_> = app
+        .composer_notices
         .iter()
         .map(|text| ("◆ UPDATED  ", text))
         .chain(
@@ -409,7 +417,14 @@ fn composer_banner_lines(app: &App) -> Vec<Line<'static>> {
             ])
             .style(style)
         })
-        .collect()
+        .collect();
+    if app.new_messages && app.scroll.is_some() {
+        lines.insert(
+            0,
+            Line::styled("◆ NEW MESSAGES BELOW · Ctrl+End to jump to bottom", style),
+        );
+    }
+    lines
 }
 
 /// Draws operation feedback and queued text in a fixed, high-contrast band

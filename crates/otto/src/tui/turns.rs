@@ -48,7 +48,7 @@ pub(super) async fn drive_turn<B: Backend, T, E>(
             Some(event)=events.recv()=>apply(app,&event),
             Some(event)=keys.recv()=>apply_turn_key(app,terminal,event,turn,backend),
             completion=app.next_completion()=>app.apply_completion(completion),
-            _=refresh.tick()=>{app.tick_features();app.request_approvals();}
+            _=refresh.tick()=>{app.tick_features();app.request_approvals();app.poll_steering();}
             _=frames.tick()=>{}
         }
         app.refresh_tasks(backend);

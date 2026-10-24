@@ -25,7 +25,6 @@ pub mod model_limits;
 mod paths;
 pub mod plugins;
 pub mod projects;
-pub mod reflection;
 pub mod resolve;
 pub mod sandbox;
 pub mod sandbox_setup;
@@ -46,7 +45,6 @@ pub use memory::{Memory, MemoryRuntime, MemoryTurso, resolve_memory};
 pub use model_limits::ModelLimits;
 pub use plugins::{PluginBindings, Plugins};
 pub use projects::{Project, TrustLevel};
-pub use reflection::{Auto, Reflection, ReflectionRuntime, SkillSource, resolve_reflection};
 pub use resolve::{
     CompactionRuntime, DeadlineRuntime, Overrides, ResilienceRuntime, Runtime, SessionDefaults,
     resolve,
@@ -121,8 +119,6 @@ pub struct File {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub failover: Failover,
-    #[serde(default, skip_serializing_if = "Reflection::is_default")]
-    pub reflection: Reflection,
     #[serde(default, skip_serializing_if = "Web::is_default")]
     pub web: Web,
     #[serde(default)]

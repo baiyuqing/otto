@@ -1,4 +1,4 @@
-//! Prompt turns, follow-ups, compaction and reflection entry points.
+//! Prompt turns, follow-ups, compaction entry points.
 
 use super::*;
 
@@ -53,7 +53,6 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        let observation = auto_reflection::RunObservation::default();
         let reporter = self.herdr_reporter();
         let session = match &reporter {
             Some(_) => self.herdr_session(),
@@ -62,16 +61,14 @@ impl Controller {
                 path: String::new(),
             },
         };
-        let mut observed = auto_reflection::observing_prompt(&mut *emit, &observation);
         let result = runner
             .run_with_system_context(
                 text,
                 system_context,
-                &mut crate::herdr::observing(&mut observed, reporter.as_deref(), &session),
+                &mut crate::herdr::observing(emit, reporter.as_deref(), &session),
                 cancel,
             )
             .await;
-        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result
     }
 
@@ -256,16 +253,9 @@ impl Controller {
         emit(otto_core::agent::Event::TextDelta {
             text: "\n\n".into(),
         });
-        let observation = auto_reflection::RunObservation::default();
         let result = runner
-            .run_followup_with_system_context(
-                text,
-                system_context,
-                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
-                cancel,
-            )
+            .run_followup_with_system_context(text, system_context, emit, cancel)
             .await;
-        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result
     }
 
@@ -306,17 +296,9 @@ impl Controller {
             .map_err(AgentError::Other)?;
         self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
             .await?;
-        let observation = auto_reflection::RunObservation::default();
         let result = runner
-            .run_with_image_system_context(
-                text,
-                image,
-                system_context,
-                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
-                cancel,
-            )
+            .run_with_image_system_context(text, image, system_context, emit, cancel)
             .await;
-        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result?;
         self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
             .await
@@ -330,86 +312,7 @@ impl Controller {
     ) -> Result<CompactionResult, AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        let compacted = std::sync::atomic::AtomicBool::new(false);
-        let result = runner
-            .compact(
-                focus,
-                &mut auto_reflection::observing(emit, &compacted),
-                cancel,
-            )
-            .await;
-        self.after_operation(&compacted);
+        let result = runner.compact(focus, emit, cancel).await;
         result
     }
-
-    /// Starts background reflection when the operation just ended compacted
-    /// the transcript.
-    pub(crate) fn after_operation(&self, compacted: &std::sync::atomic::AtomicBool) {
-        if compacted.load(std::sync::atomic::Ordering::SeqCst) {
-            self.start_auto_reflection(crate::reflection::Trigger::OnCompaction);
-        }
-    }
-
-    /// Runs compaction reflection as before, then considers a task-end run
-    /// only for a successful completed prompt with enough successful tools.
-    pub(super) fn after_prompt(
-        &self,
-        observation: &auto_reflection::RunObservation,
-        completed: bool,
-    ) {
-        if observation.compacted() {
-            self.start_auto_reflection(crate::reflection::Trigger::OnCompaction);
-        }
-        if observation.eligible_work(completed) {
-            self.start_auto_reflection(crate::reflection::Trigger::OnWork);
-        }
-    }
-
-    /// Reflects on the part of the current session no earlier run covered and
-    /// queues what it finds as memory candidates for human review.
-    ///
-    /// Takes the same admission as a turn or a compaction, so it never runs
-    /// beside either. Appends nothing to the session.
-    pub async fn reflect(
-        &self,
-        focus: &str,
-        cancel: &CancellationToken,
-    ) -> Result<crate::reflection::Report, crate::reflection::Error> {
-        self.reflect_as(crate::reflection::Trigger::Manual, focus, cancel)
-            .await
-    }
-
-    /// The newest reflection run logs, newest first. Reads files only, so it
-    /// needs no admission and may run beside a turn.
-    pub fn reflection_runs(
-        &self,
-    ) -> Result<Vec<crate::reflection::runlog::Summary>, crate::reflection::Error> {
-        self.builder
-            .reflector
-            .runs(crate::reflection::runlog::MAXIMUM_LISTED)
-    }
-
-    /// One reflection run log by the id [`Self::reflection_runs`] shows.
-    pub fn reflection_run(
-        &self,
-        id: &str,
-    ) -> Result<Option<(PathBuf, String)>, crate::reflection::Error> {
-        self.builder.reflector.run_log(id)
-    }
-
-    /// Where reflection writes and looks up skills, or `None` when skills are
-    /// disabled in `[skills]` or there is no home directory.
-    pub fn reflection_skill_roots(&self) -> Option<crate::reflection::skillwrite::Roots> {
-        let skills = otto_core::config::resolve_skills(
-            &self.builder.config,
-            &self.builder.environment,
-            &self.builder.workspace_path,
-        );
-        skills
-            .enabled
-            .then(|| crate::reflection::skill_roots(&self.builder.home, &skills.roots))
-            .flatten()
-    }
-
-    // ---- profiles ----
 }

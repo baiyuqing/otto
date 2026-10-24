@@ -144,7 +144,7 @@ or `{"error": {"kind": "unavailable"}}`.
 | `/remember` | `remember` with origin `human` (`app/management.rs:328-426`) |
 | Turn content | `observe` after `turn_end`; see [turn observation](#turn-observation) |
 | File memory model tools (`tool/memory.rs`) | Not registered |
-| `/memory list\|show\|search\|forget\|review`, TUI review panel, ACP `_otto/memory/pending\|review`, `otto memory`, reflection, advice, session memory notices | Report that the memory source `plugin:<package>` does not support the command; the built-in store is not opened |
+| `/memory list\|show\|search\|forget\|review`, TUI review panel, ACP `_otto/memory/pending\|review`, `otto memory`, advice, session memory notices | Report that the memory source `plugin:<package>` does not support the command; the built-in store is not opened |
 | Sub-agents | No memory (unchanged) |
 
 The refusals reuse the paths that already refuse for an injected service

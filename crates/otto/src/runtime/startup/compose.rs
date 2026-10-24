@@ -20,7 +20,7 @@ pub(crate) struct Composed {
 }
 
 /// Resolves the shell and the sandbox settings, opens MCP configuration, the
-/// usage, task, schedule, skill-check and reflection stores and the approval
+/// usage, task, schedule, skill-check stores and the approval
 /// service, then builds `Shared` and the workspace `Builder`. Warnings go to
 /// `stderr` as each store fails to open; errors are already redacted.
 #[allow(clippy::too_many_arguments)]
@@ -100,43 +100,6 @@ pub(crate) fn compose(
         open_schedule(storage, home, &mut *stderr)
     };
     let skill_checker = skill_checker(storage, config_file, environment, home, &mut *stderr);
-    let reflection_config = match resolve_reflection(config_file) {
-        Ok(config) => config,
-        Err(error) => return Err(error.to_string()),
-    };
-    let reflection_store = if reflection_config.enabled {
-        match storage.reflection(&Path::new(home).join(".otto/reflection.db")) {
-            Ok(store) => Some(store),
-            Err(_) => {
-                let _ = writeln!(
-                    stderr,
-                    "warning: reflection store unavailable, continuing without reflection history"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let mut reflector =
-        crate::reflection::Reflector::with_store(reflection_config, reflection_store);
-    if !home.is_empty() {
-        reflector = reflector.with_log_dir(Path::new(home).join(".otto/reflection/runs"));
-    }
-    if let Some(key) = environment
-        .get("TYPESAFE_API_KEY")
-        .filter(|key| !key.is_empty())
-    {
-        reflector = reflector.with_decision_backend(
-            Arc::new(crate::decision::jev::Jev::new(
-                crate::typesafe::BASE_URL,
-                key,
-            )),
-            Arc::clone(&options.logger),
-        );
-    }
-    let reflector = Arc::new(reflector);
-
     let approvals = match storage
         .approvals(&Path::new(home).join(".otto/approvals.db"))
         .and_then(crate::approval::Service::from_store)
@@ -174,7 +137,6 @@ pub(crate) fn compose(
             extension: options.memory_extension,
             ..Default::default()
         },
-        reflector,
         logger: options.logger,
         parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     });

@@ -59,11 +59,6 @@ async fn subagents_off_removes_the_subagent_tools() {
 }
 
 #[tokio::test]
-async fn reflection_off_removes_the_tool_and_the_store() {
-    switch(Component::Reflection, "", &["reflect"], &["reflection.db"]).await;
-}
-
-#[tokio::test]
 async fn schedule_off_does_not_create_the_store_and_keeps_the_tools() {
     switch(Component::Schedule, "", &[], &["schedule.db"]).await;
     let _serial = LOCK.lock().await;

@@ -467,9 +467,8 @@ func (c *chat) turn(m Message) {
 	}
 }
 
-// sendBackground sends a reflection notice (plain text) or a wake reply
-// (Markdown) after the chat's current turn has replied, and only while the
-// chat is still bound to sessionID.
+// sendBackground sends a session notice (plain text) or wake reply (Markdown)
+// after the current turn replies, only while the chat remains bound to sessionID.
 func (c *chat) sendBackground(sessionID, text string, markdown bool) {
 	c.mu.Lock()
 	turnDone := c.turnDone

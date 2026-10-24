@@ -192,29 +192,6 @@ mod tests {
             },
         )
         .expect("usage contract");
-        conformance::reflection(
-            native
-                .reflection(&temp.path().join("reflection.db"))
-                .unwrap()
-                .as_ref(),
-            &otto::reflection::store::RunRow {
-                id: "run".into(),
-                session_id: "memory:contract".into(),
-                trigger: "manual".into(),
-                started_at: now.to_rfc3339(),
-                finished_at: now.to_rfc3339(),
-                status: otto::reflection::store::Status::Ok,
-                from_entry: String::new(),
-                to_entry: "entry".into(),
-                input_bytes: 0,
-                truncated: false,
-                memories_proposed: 0,
-                memories_dropped: 0,
-                skills_written: 0,
-                detail: String::new(),
-            },
-        )
-        .expect("reflection contract");
         let result = otto::skill::check_repository::ResultJson::Rules { rules: Vec::new() };
         conformance::skill_checks(
             native

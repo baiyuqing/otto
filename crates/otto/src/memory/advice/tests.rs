@@ -455,7 +455,7 @@ fn advice_line_is_none_without_advice_or_with_malformed_advice() {
     assert_eq!(advice_line(&record), None);
     record.metadata.insert("advice.model".into(), "x".into());
     assert_eq!(advice_line(&record), None);
-    record.metadata.insert("reflection.run".into(), "r".into());
+    record.metadata.insert("custom.run".into(), "r".into());
     assert_eq!(advice_line(&record), None);
 }
 

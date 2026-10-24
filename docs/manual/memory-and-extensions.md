@@ -7,9 +7,9 @@ Previous: [Automation](automation.md) · [Documentation index](../README.md) · 
 Local per-user/per-workspace memory is enabled by default. Use `/remember` to
 write a human instruction, `memory_search` to inspect memory, `/memory` for
 local management, and `/memory review` for candidates needing a human decision.
-Model writes and reflection proposals use the shared approval service; neither
-can manufacture authorization from retrieved text. Memory never overrides host
-security, system rules or the user's actual task.
+Model writes use the shared approval service and cannot manufacture
+authorization from retrieved text. Memory never overrides host security,
+system rules or the user's actual task.
 
 One memory source is active at a time. `[memory] backend` selects the built-in
 file store (`files`, the default) or a plugin package (`plugin:<package>`, see
@@ -63,7 +63,7 @@ checks compare numbers only: a hand edit without a revision increment can be
 overwritten by a previously read model update. Two-file operations are not
 atomic: a crash may leave a candidate pending after its record was written;
 reaccepting can duplicate text (recall deduplicates it). A tombstone left beside
-a record still suppresses it. Reflection batches can be partially written.
+a record still suppresses it.
 
 Every recall scans the records; text is limited to 8192 bytes per record.
 Files are **not encrypted at rest**. File tools and the default Bash sandbox
@@ -123,7 +123,7 @@ plugin source:
 | `/remember` | `remember` with origin `human` |
 | Finished turns | `observe`, when the description declares it with delegated-learning support; see [turn observation](#turn-observation) |
 | `/memory list\|show\|search\|forget\|review`, `otto memory` | Refused with a message naming `plugin:<package>` |
-| TUI review panel, ACP memory review, reflection, memory advice | Unavailable |
+| TUI review panel, ACP memory review, memory advice | Unavailable |
 
 Otto opens no file store under `~/.otto/memory/` and keeps no review queue.
 Selecting the plugin in configuration is the learning grant: Otto authorizes
@@ -174,8 +174,9 @@ Stdout is one JSON object, `{"result":{...}}` or `{"error":{"kind":"unavailable"
 
 - `operation` is `describe`, which has no `request` and returns a
   `ServiceDescription`, or an operation the description declares: `recall`,
-  `observe`, `remember`, `reflect`, `forget`, `inspect`, `feedback`,
-  `prepare`, `apply`, `operation_status`.
+  `observe`, `remember`, `forget`, `inspect`, `feedback`, `prepare`, `apply`,
+  `operation_status`, or `reflect`. The `reflect` operation name is part of the
+  plugin protocol only; Otto's removed reflection feature does not invoke it.
 - `request` and `result` are the JSON forms of the request and result types in
   `crates/otto-core/src/memory/memory_types.rs`, for example `RecallRequest`
   and `RecallResult`, `RememberRequest` and `Receipt`. Unknown output fields
@@ -247,8 +248,8 @@ before upgrading. There is no current one-command conversion for those formats.
 
 ### Storage operations
 
-Storage routes cover approvals, workflows, schedule, usage, tasks, reflection,
-skill checks and memory advice; **not** `~/.otto/memory/`. The ordinary binary
+Storage routes cover approvals, workflows, schedule, usage, tasks, skill checks
+and memory advice; **not** `~/.otto/memory/`. The ordinary binary
 provides local Turso/POSIX storage, not cloud/MySQL/PostgreSQL drivers. Linked
 extensions can register domain factories, configured only in user/managed
 sources. Secrets use endpoint environment bindings, never inline DSNs/options.
@@ -320,8 +321,8 @@ For habits that apply in every workspace, use user scope, `preference` or
 /remember --scope user --kind preference --key plan-first Explain the plan before executing a task.
 ```
 
-Human `/remember` writes immediately; model writes/reflection queue candidates
-for shared approval. Unkeyed user preferences/instructions are rejected.
+Human `/remember` writes immediately; model writes queue candidates for shared
+approval. Unkeyed user preferences/instructions are rejected.
 Standing records are recalled every turn within a 2000-estimated-token budget.
 An over-budget write/accept fails; the candidate stays pending. Forget an old
 record with `/memory forget <id>`, then accept again. `otto memory status` shows
@@ -329,98 +330,6 @@ usage; `/context` shows the actual previous-turn injection. Existing oversized
 sets inject oldest first until the first record that does not fit and warn
 about omitted records.
 
-### Reflection
-
-`/reflect [focus]` or the model's `reflect` tool reviews uncovered persisted
-session entries using the session model, without tools. It returns a
-retrospective plus memory/skill proposals; it does not append the retrospective
-to the session or directly accept memory. `--no-session` cannot reflect.
-Completed runs advance the session watermark; failed/cancelled runs do not.
-
-Memory candidates require verbatim transcript evidence; preferences must cite
-a user message. External MCP/network-tool output is withheld and cannot be
-cited. Network detection examines command text, so a script can hide network
-access. Connector-forwarded prompts count as user messages, including admitted
-group senders. Secret redaction and a closed dynamic-content boundary stop
-unsafe exposure; duplicate pending candidates are skipped.
-
-Runs have content-free metadata in `~/.otto/reflection.db` and private Markdown
-logs under `~/.otto/reflection/runs/`. Logs include the retrospective, proposals,
-evidence and outcomes, and may contain a redacted raw malformed model answer.
-Fields are redacted/bounded but logs still contain sensitive task content;
-Otto does not delete them. Use `/reflect list` (50 newest) and `/reflect show
-<id>` across terminal, Web, ACP and connector frontends. Only exact `list` and
-`show <id>` invoke these commands; other text is focus.
-
-#### Generated skills
-
-A skill is written to `~/.otto/skills/<name>/SKILL.md` **only after approval** of
-its exact path/content/scripts. On approval, evidence and unchanged existing
-files are checked again. Without approval service it is dropped. Checks include:
-
-1. Default source isolation: slices containing external entries produce no
-   skills. `skill_source = "any"` relaxes this, but still withholds that text.
-2. Verbatim user and execution evidence for an asked-for/approved successful
-   procedure.
-3. Valid name/description, 40-character to 16 KiB body, at most four Python
-   scripts of 16 KiB each, and scans for known secret, instruction override,
-   concealment, permission tampering, destructive/egress, uncited URL,
-   invisible-Unicode and encoded-blob patterns.
-4. No collision with an existing skill. Only unchanged reflection-owned file
-   sets can be revised; hand-written or subsequently edited skills are untouched.
-5. Isolated `python3` syntax checking, without executing/importing scripts.
-   Missing Python, invalid source or timeout drops the proposal.
-6. Default second tool-less model review of the proposed skill, not transcript.
-
-These are tripwires, **not proof of safety**. Review generated instructions and
-scripts. Use `/skill generated` and `/skill revert <name>` to inspect/undo.
-Set `skills = false` below to stop generation.
-
-```toml
-[reflection]
-enabled = true
-auto = "on_work"
-min_turns = 4
-memories = true
-skills = true
-skill_source = "untainted"
-skill_review = true
-max_input_bytes = 204800
-max_memories = 8
-max_skills = 2
-max_generated_skills = 30
-```
-
-`max_input_bytes` accepts 1024..4194304; oldest entries are cut. Proposal limits
-are 1..8, generated ownership cap 1..200, and `min_turns` 1..1000. Disabling
-both memory and skills makes no model call; disabling reflection avoids opening
-its database.
-
-#### Automatic reflection
-
-- `on_work` (default): completed turns with at least ten distinct successful
-  tool operations, plus successful compaction. Failed, cancelled and
-  approval-pending turns do not qualify.
-- `on_compaction`: only successful manual/automatic compaction.
-- `on_exit`: normal TUI/REPL/headless exit after `min_turns`; delays exit up
-  to 60 s, Ctrl+C skips. Not killed/Ctrl+C exits, serve or ACP.
-- `off`: explicit reflection only.
-
-Background runs are single-flight and do not delay task replies. Work and
-compaction triggers share a ten-minute per-session cooldown, including failures;
-explicit reflection bypasses it. Notices report running/result/log path.
-Memory candidates still require approval; skills still require exact-content
-approval. Web/HTTP cannot review local memory candidates; use terminal
-`/memory review`. `Binding.Observe` is not wired: reflection reads session files.
-
-With nonempty `TYPESAFE_API_KEY`, automatic scheduling additionally sends bounded,
-redacted session evidence to the auxiliary backend for `immediate`/`defer` advice
-(no standing memory or skill contents). Defer does not advance the watermark or
-schedule a timer. Timeout (20 s), unavailable service or invalid reply falls back
-to normal reflection; cancellation still cancels. Manual/model-requested runs
-bypass the hint. Confidence never grants authority. Content-free decision events
-are logged, not exchanges/transcript/backend error text. Use `/reflect` for an
-immediate review, or remove the key and restart to disable the auxiliary path.
 
 ## Skills
 

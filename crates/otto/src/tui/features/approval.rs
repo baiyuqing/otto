@@ -71,7 +71,7 @@ impl Approval {
                     format!("\n{}", request.application_error)
                 }
             ),
-            review: matches!(request.subject.source.as_str(), "memory" | "reflection"),
+            review: matches!(request.subject.source.as_str(), "memory"),
         }
     }
 

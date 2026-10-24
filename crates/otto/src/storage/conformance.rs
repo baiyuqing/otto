@@ -259,21 +259,6 @@ pub fn usage(
     )
 }
 
-pub fn reflection(
-    store: &dyn crate::reflection::repository::ReflectionStore,
-    row: &crate::reflection::store::RunRow,
-) -> Result<()> {
-    store.record(row).map_err(unavailable)?;
-    ensure(
-        store
-            .watermark(&row.session_id)
-            .map_err(unavailable)?
-            .as_deref()
-            == Some(row.to_entry.as_str()),
-        "reflection watermark differs",
-    )
-}
-
 pub fn skill_checks(
     store: &dyn crate::skill::check_repository::CheckStore,
     row: &crate::skill::check_repository::NewRow<'_>,

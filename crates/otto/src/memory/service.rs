@@ -11,9 +11,8 @@
 //! Deliberate absences:
 //!
 //! - `Observe` and the per-binding content guard are absent, because
-//!   automatic extraction through a binding is out of scope. The `reflection`
-//!   module queues extractor candidates on demand through [`Service::propose`];
-//!   the store still guards written content.
+//!   automatic extraction through a binding is out of scope.
+//!   The store still guards written content.
 //! - The policy is a function, so it cannot fail.
 //! - `close` rejects later service operations; each adapter owns its in-flight
 //!   operation lifecycle.

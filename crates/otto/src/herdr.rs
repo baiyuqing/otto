@@ -297,7 +297,7 @@ fn now_nanos() -> u64 {
 }
 
 /// Decorates an event sink with the report, exactly like
-/// [`crate::app::auto_reflection`] does for its observation. A frontend that
+/// other event observers do. A frontend that
 /// runs a turn therefore reports without knowing about Herdr.
 pub fn observing<'a>(
     emit: otto_core::agent::EventSink<'a>,

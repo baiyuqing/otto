@@ -170,9 +170,6 @@ fn import(reader: impl BufRead, connection: &mut Connection) -> Result<(), ()> {
             "workflow_requests",
             "workflow_events",
         ],
-        "reflection" if matches!(version, 1 | 2) => {
-            &["runs", "watermarks", "generated_skills", "skill_versions"]
-        }
         "skill-checks" if version == 1 => &["skill_checks"],
         _ => return Err(()),
     };

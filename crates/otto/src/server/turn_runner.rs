@@ -521,7 +521,7 @@ impl Server {
     pub(super) fn start_next(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let next = {
             let mut state = session.lock();
-            if state.turn_running() || state.compacting.is_some() || state.reflecting.is_some() {
+            if state.turn_running() || state.compacting.is_some() {
                 return;
             }
             if self.cancel.is_cancelled() || session.closed.is_cancelled() {

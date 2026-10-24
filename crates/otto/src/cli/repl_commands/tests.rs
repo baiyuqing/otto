@@ -5,7 +5,7 @@ use otto_core::config::memory::MemoryRuntime;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 mod mcp_commands;
-mod skill_reflection_commands;
+mod skill_commands;
 mod task_commands;
 
 fn standalone_service() -> (tempfile::TempDir, crate::memory::Service) {

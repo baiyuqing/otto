@@ -40,12 +40,9 @@ def main():
         "usage": {"usage_events"},
         "tasks": {"tasks"},
         "workflow": {"workflow_runs", "workflow_steps", "workflow_attempts", "workflow_requests", "workflow_events"},
-        "reflection": {"runs", "watermarks", "generated_skills", "skill_versions"},
         "skill-checks": {"skill_checks"},
     }
     family = next((kind for kind, names in known.items() if set(tables) == names), None)
-    if family is None and set(tables) == {"runs", "watermarks"}:
-        family = "reflection"
     if family is None:
         raise ValueError("unrecognized legacy database")
     if any(kind not in ("table", "index") for kind, _, _, _ in objects):

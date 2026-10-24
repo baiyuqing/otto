@@ -11,7 +11,7 @@ from a terminal, [otto-plus](https://github.com/baiyuqing/otto-plus) browser cli
 or Telegram and Feishu through `otto-connect`. Connecting to `otto serve` lets
 clients share server-side sessions.
 
-- **Keep context:** persistent sessions, memory, reusable skills and reflection.
+- **Keep context:** persistent sessions, memory and reusable skills.
 - **Delegate and automate:** sub-agents, scheduled tasks and recoverable workflows.
 - **Control access:** workspace-confined file tools, approvals and macOS shell sandboxing.
 

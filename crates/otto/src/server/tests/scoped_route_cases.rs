@@ -8,7 +8,7 @@ async fn wake_replies_are_listed_after_the_cursor_and_unknown_sessions_are_404()
     let id = harness.create().await;
     let path = format!("/v1/sessions/{id}/wake-replies");
     let session = harness.server.lookup(&id).expect("session");
-    session.ctrl.push_notice("reflection: not a wake reply");
+    session.ctrl.push_notice("notice: not a wake reply");
     session.ctrl.push_wake_reply("first");
     session.ctrl.push_wake_reply("second");
 

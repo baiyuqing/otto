@@ -54,6 +54,9 @@ pub(crate) fn lines(entries: &[Entry], details: bool, width: usize) -> Vec<Line<
 /// typed and keeps its own line breaks; assistant and system text is
 /// markdown; a tool call is a header plus its result.
 fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> {
+    if let Some(request) = &entry.approval {
+        return super::approval_display::lines(request, width);
+    }
     if entry.kind == Some(EntryKind::Tool) {
         return tool_lines(entry, details, width);
     }

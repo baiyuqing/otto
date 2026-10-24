@@ -157,7 +157,10 @@ impl App {
                 self.session_changes.remove(&tag);
                 self.writes.remove(&tag);
             }
-            let (entries, usage) = entries::entries_from_history(&history);
+            let (mut entries, usage) = entries::entries_from_history(&history);
+            if old == (self.info.workspace.clone(), self.info.session_id.clone()) {
+                crate::tui::approval_display::retain(&mut entries, &self.entries);
+            }
             self.entries = entries;
             self.usage = usage;
         }

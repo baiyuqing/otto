@@ -271,8 +271,7 @@ keeps it.
 Where it appears:
 
 - **TUI:** one line above the status line, `Plan 2/5 · <step in progress>`,
-  dropped first when the terminal is short; `/plan` shows the whole checklist.
-  Both work with `--attach`.
+  dropped first when the terminal is short. It works with `--attach`.
 - **ACP:** a `plan` `session/update` after every change, with every entry at
   priority `medium`; `session/load` sends the current plan after the history.
 - **HTTP:** a `plan_updated` SSE event (see [Events](servers-and-connectors.md#events)) and the session

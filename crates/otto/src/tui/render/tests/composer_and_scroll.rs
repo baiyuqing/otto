@@ -61,7 +61,7 @@ async fn the_selected_suggestion_row_is_highlighted() {
 
     assert_eq!(highlighted.len(), 1, "{highlighted:?}");
     assert!(
-        highlighted[0].trim_start().starts_with("/sandbox"),
+        highlighted[0].trim_start().starts_with("/steer"),
         "{highlighted:?}"
     );
 }

@@ -72,22 +72,22 @@ pub(super) fn parse(text: &str) -> Option<Command<'_>> {
 pub(super) fn available_commands() -> SessionUpdate {
     SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
         AvailableCommand::new(
-            "compact",
-            "Summarize earlier messages to free context; optional focus text",
+            "model",
+            "Show the session's profile and model, or switch the session to another configured profile",
         )
         .input(AvailableCommandInput::Unstructured(
-            UnstructuredCommandInput::new("optional focus"),
+            UnstructuredCommandInput::new("optional profile"),
         )),
         AvailableCommand::new(
             "context",
             "Show what the next request sends, with token counts per part",
         ),
         AvailableCommand::new(
-            "model",
-            "Show the session's profile and model, or switch the session to another configured profile",
+            "compact",
+            "Summarize earlier messages to free context; optional focus text",
         )
         .input(AvailableCommandInput::Unstructured(
-            UnstructuredCommandInput::new("optional profile"),
+            UnstructuredCommandInput::new("optional focus"),
         )),
         AvailableCommand::new("steer", "Guide the active task at its next safe boundary").input(
             AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("guidance")),
@@ -281,12 +281,12 @@ mod tests {
         let value = serde_json::to_value(available_commands()).expect("serializes");
         assert_eq!(value["sessionUpdate"], "available_commands_update");
         let commands = value["availableCommands"].as_array().expect("array");
-        assert_eq!(commands[0]["name"], "compact");
-        assert_eq!(commands[0]["input"]["hint"], "optional focus");
+        assert_eq!(commands[0]["name"], "model");
+        assert_eq!(commands[0]["input"]["hint"], "optional profile");
         assert_eq!(commands[1]["name"], "context");
         assert!(commands[1].get("input").is_none());
-        assert_eq!(commands[2]["name"], "model");
-        assert_eq!(commands[2]["input"]["hint"], "optional profile");
+        assert_eq!(commands[2]["name"], "compact");
+        assert_eq!(commands[2]["input"]["hint"], "optional focus");
         assert_eq!(commands[3]["name"], "steer");
         assert_eq!(commands[4]["name"], "queue");
         assert_eq!(commands[5]["name"], "permissions");

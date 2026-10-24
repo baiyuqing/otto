@@ -101,8 +101,9 @@ capability.
   total-turn duration. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL` (raw arguments
   stay in the expanded record). During a provider transport retry — a ChatGPT
-  retry, or an OpenAI-compatible one whose reason is `connection failed` or
-  `connection interrupted` — it shows
+  retry, or an OpenAI-compatible one whose reason is `connection failed`,
+  `connection interrupted`, `model output idle timeout`, `HTTP 429` or
+  `HTTP 503` — it shows
   `retry A/M after REASON, waiting Ns`, with a live countdown, followed by
   `requesting` once the delay ends. `A/M` counts retries (1/3 through 3/3);
   the retry countdown keeps updating. Esc or Ctrl+C cancels the retry,

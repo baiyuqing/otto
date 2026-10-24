@@ -108,21 +108,40 @@ async fn openai_refused_three_times_then_success_takes_four_attempts_and_one_req
 }
 
 #[tokio::test]
-async fn openai_http_429_500_and_503_are_terminal_after_one_request() {
-    for status in [429, 500, 503] {
-        let server = http::spawn_repeating(Script::status(status, "try again")).await;
-        let (settlement, events) = complete_plain(&openai(&server)).await;
-        let error = settlement.result.expect_err("an error status is returned");
-        assert!(error.to_string().contains(&status.to_string()), "{error}");
-        assert_eq!(settlement.attempts, 1, "status {status}");
-        assert_eq!(server.count(), 1, "status {status}");
-        assert_eq!(
-            settlement.outcome.effect_certainty,
-            EffectCertainty::Completed,
-            "status {status}"
-        );
-        assert!(retries(&events).is_empty(), "status {status}");
-    }
+async fn openai_http_500_is_terminal_after_one_request() {
+    let server = http::spawn_repeating(Script::status(500, "try again")).await;
+    let (settlement, events) = complete_plain(&openai(&server)).await;
+    let error = settlement.result.expect_err("an error status is returned");
+    assert!(error.to_string().contains("500"), "{error}");
+    assert_eq!(settlement.attempts, 1);
+    assert_eq!(server.count(), 1);
+    assert_eq!(
+        settlement.outcome.effect_certainty,
+        EffectCertainty::Completed
+    );
+    assert!(retries(&events).is_empty());
+}
+
+#[tokio::test]
+async fn openai_repeating_http_429_is_retried_with_backoff_then_completed() {
+    let server = http::spawn_repeating(Script::status(429, "slow down")).await;
+    let (settlement, events) = complete_plain(&openai(&server)).await;
+    let error = settlement.result.expect_err("the last status is returned");
+    assert!(error.to_string().contains("429"), "{error}");
+    assert_eq!(settlement.attempts, 4);
+    assert_eq!(server.count(), 4);
+    assert_eq!(
+        retries(&events),
+        [
+            (2, Duration::from_secs(1), "HTTP 429"),
+            (3, Duration::from_secs(2), "HTTP 429"),
+            (4, Duration::from_secs(4), "HTTP 429"),
+        ]
+    );
+    assert_eq!(
+        settlement.outcome.effect_certainty,
+        EffectCertainty::Completed
+    );
 }
 
 #[tokio::test]

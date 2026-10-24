@@ -544,6 +544,7 @@ pub(super) const ROUTES: &[&str] = &[
     "/v1/sessions/{id}/approvals/{approval_id}",
     "/v1/sessions/{id}/inputs",
     "/v1/sessions/{id}/tasks/steer",
+    "/v1/sessions/{id}/tasks/steer/interrupt",
     "/v1/sessions/{id}/tasks/control",
     "/v1/sessions/{id}/turns",
     "/v1/sessions/{id}/turns/{turn_id}",

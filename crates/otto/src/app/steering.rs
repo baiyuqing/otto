@@ -2,6 +2,45 @@
 
 use super::*;
 
+/// Why [`Controller::interrupt_step`] did not interrupt the running step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterruptRefusal {
+    /// An approval is waiting; guidance is not delivered until it is decided.
+    ApprovalPending,
+    /// The active run has no queued guidance, or no run is active.
+    NoGuidance,
+    /// The controller is closed or has no runner.
+    Unavailable(String),
+}
+
+impl InterruptRefusal {
+    /// The stable machine-readable code the HTTP error carries.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ApprovalPending => "approval_pending",
+            Self::NoGuidance => "no_queued_guidance",
+            Self::Unavailable(_) => "task_control_unavailable",
+        }
+    }
+
+    /// The user-facing reason.
+    pub fn message(&self) -> String {
+        match self {
+            Self::ApprovalPending => {
+                "The task is waiting for approval; Ctrl+C cancels the turn.".into()
+            }
+            Self::NoGuidance => "No queued guidance; Esc again cancels the turn.".into(),
+            Self::Unavailable(reason) => reason.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for InterruptRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 impl Controller {
     /// The current runner's task registry, or `None` when it tracks none or the
     /// controller is closed.
@@ -58,6 +97,20 @@ impl Controller {
             .steering()
             .withdraw(id)
             .ok_or_else(|| "steering message is not queued for the active task".to_string())
+    }
+
+    /// Stops the running provider call or tool call so the queued guidance is
+    /// delivered inside the current turn. Returns the number of queued
+    /// messages that will be delivered.
+    pub fn interrupt_step(&self) -> Result<usize, InterruptRefusal> {
+        if self.pending_approval().is_some() {
+            return Err(InterruptRefusal::ApprovalPending);
+        }
+        let runner = self.runner().map_err(InterruptRefusal::Unavailable)?;
+        runner
+            .steering()
+            .interrupt_step()
+            .map_err(|_| InterruptRefusal::NoGuidance)
     }
 
     /// Deterministically admits ordinary human text while this session is

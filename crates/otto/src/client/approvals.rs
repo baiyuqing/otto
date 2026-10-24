@@ -281,6 +281,21 @@ impl Client {
         .await
     }
 
+    /// `POST /v1/sessions/{id}/tasks/steer/interrupt`: the number of queued
+    /// guidance messages the run will deliver.
+    pub async fn interrupt_steering(&self, session_id: &str) -> Result<u32, Error> {
+        #[derive(Deserialize)]
+        struct Interrupted {
+            queued_guidance: u32,
+        }
+        let response = self
+            .send(self.http.post(format!(
+                "{BASE}/v1/sessions/{session_id}/tasks/steer/interrupt"
+            )))
+            .await?;
+        Ok(decode::<Interrupted>(response).await?.queued_guidance)
+    }
+
     /// `POST /v1/sessions/{id}/tasks/control`. `None` means the caller should
     /// route the message as an ordinary prompt.
     pub async fn control_message_with_channel(

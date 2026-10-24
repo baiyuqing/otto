@@ -64,6 +64,24 @@ func TestChatPromptSendsAgentCommandsAsTyped(t *testing.T) {
 	}
 }
 
+func TestMenuCommandOrder(t *testing.T) {
+	t.Parallel()
+	want := []string{
+		"config", "models", // setup
+		"model", "context", "compact", "steer", "queue", "stop", // during a task
+		"permissions", "allow", "deny", // approvals
+		"memory",                 // memory
+		"new", "sessions", "use", // sessions
+	}
+	var got []string
+	for _, c := range Commands {
+		got = append(got, c.Name)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("menu order = %v, want %v", got, want)
+	}
+}
+
 func TestMenuCommandsAreHandled(t *testing.T) {
 	t.Parallel()
 	name := regexp.MustCompile(`^[a-z0-9_]{1,32}$`)

@@ -397,6 +397,7 @@ are served at the root. Request and error bodies are JSON.
 | `POST /v1/sessions/{id}/tasks/steer` | Explicit steering endpoint. It returns `{id,text,status:"queued",input_id}` immediately, so clients display the exact guidance while it waits for the next safe boundary. An optional `input_id` returns the same message for a retry while it is queued and `409 duplicate_input` after delivery; `503 input_not_persisted` when it could not be saved. |
 | `GET /v1/sessions/{id}/tasks/steer` | Lists transient steering items and their `queued`, `delivered`, `withdrawn`, or `discarded` status for the active run. |
 | `DELETE /v1/sessions/{id}/tasks/steer/{message_id}` | Withdraws exactly one still-`queued` steer. Delivered guidance is append-only session history and cannot be removed; a non-queued or unknown item returns `409 task_steer_withdraw_failed`. |
+| `POST /v1/sessions/{id}/tasks/steer/interrupt` | Stops the running provider or tool call and delivers every `queued` steer inside the current turn, which then continues with the next model call. No body. Returns `{"queued_guidance": N}`, the number of messages delivered. The stopped tool call is recorded `cancelled`; the remaining tool calls of that response are settled `not_started`; a stopped model call appends no assistant message. The stream carries `step_interrupted` before the delivered `user_message` frames. `409 no_queued_guidance` when the active run has nothing queued or no turn runs; `409 approval_pending` while an approval waits. |
 | `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/trace` | Return the session's turns, provider requests, tool calls, compactions and sub-agent tasks as nested spans with start and end times, status, provider timing and token usage. The JSON holds no message or result text; tool labels carry an argument preview of at most 60 characters and sub-agent labels the first 40 characters of the task description. `404` for an unknown session; `409 trace_unavailable` when the redaction boundary is closed, the session has no file (`--no-session`), or the session file cannot be read. |
@@ -546,9 +547,12 @@ payload. Event names are the `agent.Event` type names: `agent_started`,
 `text_delta`, `reasoning_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
 `provider_retry`, `compaction_planned`, `compaction_started`, `compaction_completed`,
 `compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`,
-plus `notification` when a sub-agent task finishes, and `plan_updated` after a
+plus `notification` when a sub-agent task finishes, `plan_updated` after a
 tool call changes the [session plan](servers-and-connectors.md#session-plan), carrying the whole plan as
-`steps: [{text, status}]` (empty when it was cleared). `reasoning_delta` carries
+`steps: [{text, status}]` (empty when it was cleared), and `step_interrupted`
+when `POST .../tasks/steer/interrupt` stopped the running step, carrying
+`queued_guidance: N`, the number of `user_message` frames that follow before
+the turn continues. `reasoning_delta` carries
 `text` like `text_delta`. `provider_retry` carries
 `retry: {attempt, max_attempts, delay_ms, reason, interrupted_output}`.
 `interrupted_output` defaults to false for older events; true marks the preceding

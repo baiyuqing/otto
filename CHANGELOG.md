@@ -7,6 +7,18 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Features
+
+- In the terminal, `Esc` while guidance is queued for the running turn now
+  delivers it at once instead of cancelling the turn: the running model or tool
+  call is stopped, the guidance is appended, and the same turn continues. `Esc`
+  with nothing queued and `Ctrl+C` still cancel the turn. `otto serve` exposes
+  it as `POST /v1/sessions/{id}/tasks/steer/interrupt` and streams a
+  `step_interrupted` event; see
+  [Interactive use](docs/manual/interactive-use.md) and the
+  [HTTP API](docs/manual/servers-and-connectors.md#http-api). Reinstall Otto
+  and restart terminal sessions.
+
 ### Fixes
 
 - Local and attached TUI approval notices now show labeled states, reasons,

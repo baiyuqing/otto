@@ -150,6 +150,12 @@ impl App {
             || self.queued_steer.is_some()
         {
             if self.busy() && key.code == KeyCode::Esc {
+                // Guidance is queued: deliver it inside this turn. A refusal
+                // is shown to the user and never becomes a turn cancel.
+                if self.queued_steer.is_some() {
+                    self.enqueue(0, Request::Command(backend::Command::InterruptStep));
+                    return None;
+                }
                 return Some(Action::CancelTurn);
             }
             if key.code == KeyCode::Char('u')

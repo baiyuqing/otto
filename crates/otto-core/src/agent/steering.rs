@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::agent::inbox::{MailboxError, Notification, NotificationKind};
 use crate::mailbox::Mailbox;
@@ -24,6 +25,15 @@ pub enum SubmitError {
     Full,
     /// The durable copy could not be saved; the guidance was not accepted.
     NotPersisted,
+}
+
+/// Why [`Steering::interrupt_step`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptError {
+    /// No run is active.
+    Inactive,
+    /// The active run has no queued guidance to deliver.
+    NoGuidance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -62,6 +72,12 @@ struct State {
     turn: String,
     /// The interrupted turn whose journaled guidance this run restored.
     restored: Option<String>,
+    /// The cancellation token of the step the active run is executing, while
+    /// one is registered ([`Run::arm`]).
+    step: Option<CancellationToken>,
+    /// A step interrupt was requested and its guidance is still queued, so the
+    /// next registered step token is cancelled at once.
+    interrupt_pending: bool,
 }
 
 /// Transient FIFO for messages bound to one active run. Messages remain
@@ -220,6 +236,25 @@ impl Steering {
             .collect()
     }
 
+    /// Requests that the active run stop its current step and deliver the
+    /// queued guidance inside the same turn. Cancels the registered step token
+    /// if one is registered; otherwise the next [`Run::arm`] cancels its token
+    /// at once. Returns the number of queued messages.
+    pub fn interrupt_step(&self) -> Result<usize, InterruptError> {
+        let mut state = self.lock();
+        if !state.active {
+            return Err(InterruptError::Inactive);
+        }
+        if state.messages.is_empty() {
+            return Err(InterruptError::NoGuidance);
+        }
+        state.interrupt_pending = true;
+        if let Some(step) = &state.step {
+            step.cancel();
+        }
+        Ok(state.messages.len())
+    }
+
     /// Removes and returns the guidance the last run end discarded, oldest
     /// first. The frontend that owns the run reports each loss exactly once,
     /// which is why this drains instead of reading: a discard that no one
@@ -238,6 +273,11 @@ impl Steering {
         let mut message = state.messages.remove(index)?;
         message.status = Status::Withdrawn;
         push_history(&mut state.history, message.clone());
+        if state.messages.is_empty() {
+            // Nothing is left to deliver, so a requested interrupt has no
+            // purpose; the next step runs.
+            state.interrupt_pending = false;
+        }
         drop(state);
         self.forget(&message.input_id);
         Some(message)
@@ -261,6 +301,8 @@ impl Steering {
         state.history.clear();
         state.turn = turn.to_owned();
         state.restored = resumes.map(str::to_owned);
+        state.step = None;
+        state.interrupt_pending = false;
         if let Some(journal) = self.journal.get() {
             for entry in journal.queued() {
                 let scope = entry.notification.scope.as_str();
@@ -301,11 +343,39 @@ pub(super) struct Run {
 }
 
 impl Run {
+    /// Registers the cancellation token of the step about to run, so a step
+    /// interrupt can cancel it. An interrupt requested earlier whose guidance
+    /// is still queued cancels `token` at once.
+    pub(super) fn arm(&self, token: &CancellationToken) {
+        let mut state = self.steering.lock();
+        if !state.active || state.generation != self.ticket {
+            return;
+        }
+        if state.interrupt_pending {
+            if state.messages.is_empty() {
+                state.interrupt_pending = false;
+            } else {
+                token.cancel();
+            }
+        }
+        state.step = Some(token.clone());
+    }
+
+    /// Unregisters the step token; a later interrupt waits for the next
+    /// [`Self::arm`].
+    pub(super) fn disarm(&self) {
+        let mut state = self.steering.lock();
+        if state.generation == self.ticket {
+            state.step = None;
+        }
+    }
+
     pub(super) fn drain(&self) -> Vec<Message> {
         let mut state = self.steering.lock();
         if !state.active || state.generation != self.ticket {
             return Vec::new();
         }
+        state.interrupt_pending = false;
         let drained: Vec<_> = state.messages.drain(..).collect();
         for message in &drained {
             let mut delivered = message.clone();
@@ -321,6 +391,7 @@ impl Run {
         if !state.active || state.generation != self.ticket {
             return None;
         }
+        state.interrupt_pending = false;
         if state.messages.is_empty() {
             state.accepting = false;
             None
@@ -356,6 +427,8 @@ impl Drop for Run {
             }
             state.active = false;
             state.accepting = false;
+            state.step = None;
+            state.interrupt_pending = false;
         }
         drop(state);
         // Every way a run ends discards its undelivered guidance, journal
@@ -609,5 +682,91 @@ mod tests {
         assert_eq!(first, again);
         assert_eq!(first.input_id, "req-1");
         assert_eq!(steering.messages().len(), 1);
+    }
+
+    #[test]
+    fn interrupt_step_needs_an_active_run_and_queued_guidance() {
+        let steering = Arc::new(Steering::default());
+        assert_eq!(steering.interrupt_step(), Err(InterruptError::Inactive));
+        let run = steering.begin();
+        let token = CancellationToken::new();
+        run.arm(&token);
+        // Without queued guidance nothing is cancelled and nothing is pending.
+        assert_eq!(steering.interrupt_step(), Err(InterruptError::NoGuidance));
+        assert!(!token.is_cancelled());
+        let later = CancellationToken::new();
+        run.arm(&later);
+        assert!(!later.is_cancelled());
+
+        steering.submit("one").expect("accepted");
+        steering.submit("two").expect("accepted");
+        assert_eq!(steering.interrupt_step(), Ok(2));
+        assert!(later.is_cancelled(), "the registered token is cancelled");
+        drop(run);
+        assert_eq!(steering.interrupt_step(), Err(InterruptError::Inactive));
+    }
+
+    #[test]
+    fn an_interrupt_without_a_registered_step_cancels_the_next_armed_token() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin();
+        steering.submit("go").expect("accepted");
+        let first = CancellationToken::new();
+        run.arm(&first);
+        run.disarm();
+        assert_eq!(steering.interrupt_step(), Ok(1));
+        assert!(!first.is_cancelled(), "a disarmed token is not cancelled");
+        let next = CancellationToken::new();
+        run.arm(&next);
+        assert!(next.is_cancelled());
+        // The request stays pending until delivery, so a second arm is cut too.
+        run.disarm();
+        let after = CancellationToken::new();
+        run.arm(&after);
+        assert!(after.is_cancelled());
+    }
+
+    #[test]
+    fn delivery_clears_a_pending_interrupt() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin();
+        steering.submit("go").expect("accepted");
+        steering.interrupt_step().expect("accepted");
+        assert_eq!(run.drain().len(), 1);
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled());
+
+        run.disarm();
+        steering.submit("again").expect("accepted");
+        steering.interrupt_step().expect("accepted");
+        assert!(run.take_or_close().is_some());
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn withdrawing_the_last_message_clears_a_pending_interrupt() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin();
+        let first = steering.submit("one").expect("accepted");
+        let second = steering.submit("two").expect("accepted");
+        steering.interrupt_step().expect("accepted");
+        steering.withdraw(first.id).expect("withdrawn");
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(token.is_cancelled(), "guidance is still queued");
+
+        run.disarm();
+        steering.withdraw(second.id).expect("withdrawn");
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled(), "nothing is left to deliver");
+        // A message accepted later is not covered by the cleared request.
+        steering.submit("three").expect("accepted");
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled());
     }
 }

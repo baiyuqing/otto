@@ -204,6 +204,10 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             c.withdraw_steering(id)?;
             "Queued input withdrawn.".into()
         }
+        Command::InterruptStep => {
+            c.interrupt_step().map_err(|refusal| refusal.message())?;
+            String::new()
+        }
         Command::Management(request) => {
             return blocking(c, move |c| c.management(request).map(Reply::Management)).await;
         }

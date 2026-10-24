@@ -133,7 +133,7 @@ async fn queued_guidance_draws_in_the_banner_and_the_composer_title() {
         "{screen}"
     );
     assert!(
-        screen.contains("Queued for current turn · Ctrl+U recall to edit · Esc cancels turn"),
+        screen.contains("Queued for current turn · Ctrl+U recall to edit · Esc delivers now"),
         "{screen}"
     );
     assert!(

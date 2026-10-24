@@ -84,19 +84,28 @@ capability.
   viewport: `NEW MESSAGES BELOW` above the composer offers `Ctrl+End` to jump
   to the bottom (with no feature screen open). Ordinary guidance uses
   `◆ QUEUED FOR CURRENT TURN` and changes the title to `Queued for current turn · Ctrl+U recall to
-  edit · Esc cancels turn`. `Ctrl+U` waits for the runtime to confirm that the
+  edit · Esc delivers now`. `Ctrl+U` waits for the runtime to confirm that the
   guidance was not delivered, then returns its exact text to an empty composer
   for editing; a draft typed while recall is pending is never overwritten. A
   queued slash command uses `◆ QUEUED NEXT INPUT` and the
   title `Queued next input · Ctrl+U withdraw`, because it remains local until
   the active turn succeeds. Ordinary input is
   delivered within the same turn after the current provider response or tool
-  call finishes. Sub-agent delegation never adds a blocking wait tool; child
+  call finishes. `Esc` while guidance is queued delivers it sooner: the
+  running provider response or tool call is stopped, every queued message is
+  appended, and the same turn continues with the next model call. A stopped
+  tool call is recorded as `cancelled`; the tool calls after it in the same
+  response are not started. Reply text streamed by a stopped model call stays
+  on screen but is not saved in history, and the transcript shows `Step
+  interrupted; delivering N queued message(s).` While an approval is pending,
+  `Esc` does neither; the transcript names `Ctrl+C`, which cancels the turn.
+  Sub-agent delegation never adds a blocking wait tool; child
   results arrive through a runtime-owned wake turn. Slash commands still wait
-  until the turn finishes. If the turn ends before that delivery — `Esc`, a
-  provider failure, or the turn deadline — the guidance is not delivered and
-  Otto says so, quoting the message; when the composer was empty, the text is
-  put back there to send again. The status line reads
+  until the turn finishes. If the turn ends before that delivery — `Ctrl+C`,
+  `Esc` with nothing queued, a provider failure, or the turn deadline — the
+  guidance is not delivered and Otto says so, quoting the message; when the
+  composer was empty, the text is put back there to send again. The status
+  line reads
   an animated spinner and the current phase, without thinking/reasoning or
   total-turn duration. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL` (raw arguments
@@ -178,8 +187,8 @@ capability.
 | `Home` / `End` | Move the cursor to the start or end of the composer |
 | `Ctrl+End` | Jump to the transcript bottom and resume following new messages (with no feature screen open) |
 | `Ctrl+A` / `Ctrl+E` | Move the cursor to the start or end of the current composer line |
-| `Esc` | Return or dismiss the active screen; at the composer, cancel the active turn |
-| `Ctrl+C` | Cancel; a second press within one second clears and quits |
+| `Esc` | Return or dismiss the active screen; at the composer, deliver queued guidance now, or cancel the active turn when nothing is queued |
+| `Ctrl+C` | Cancel the active turn; when idle, a second press within one second clears and quits |
 
 ### The TUI attached to `otto serve`
 
@@ -218,7 +227,10 @@ Turns:
 - Ordinary text submitted while a turn runs steers that active task. Otto
   accepts it for the next safe provider boundary without interrupting a tool or
   silently creating a later turn. The pinned banner above the composer then
-  shows `◆ QUEUED FOR CURRENT TURN …`. `Ctrl+U` recalls undelivered guidance
+  shows `◆ QUEUED FOR CURRENT TURN …`. `Esc` then delivers the guidance now
+  through `POST /v1/sessions/{id}/tasks/steer/interrupt`: serve stops the
+  running provider or tool call and continues the same turn with the guidance
+  appended. `Ctrl+U` recalls undelivered guidance
   into an empty composer for editing after the runtime confirms withdrawal.
   Guidance that wins the race and is
   delivered is not restored, and a new draft is never overwritten. Delivered
@@ -234,8 +246,8 @@ Turns:
   another terminal) is shown while it runs: the transcript is reloaded up to
   that turn, then its prompt and events follow. A turn that started and
   finished between two status updates is shown by reloading the history.
-- `Esc` cancels the turn being shown, including a turn another client
-  started.
+- `Esc` with no guidance queued, and `Ctrl+C` at any time, cancel the turn
+  being shown, including a turn another client started.
 - An elevated `bash` command opens the approval dialog when serve reports it
   (see [Approvals inside a turn](servers-and-connectors.md#approvals-inside-a-turn)). **Allow** allows
   it and **Deny** denies it. `Esc` dismisses without deciding. If another client decides first, the dialog

@@ -2003,6 +2003,35 @@ paths:
           description: Unknown session
         "409":
           description: Guidance is no longer queued for the active task
+  /v1/sessions/{id}/tasks/steer/interrupt:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Interrupt the running step and deliver queued guidance
+      description: >
+        Stops the running provider call or tool call and delivers every queued
+        guidance message inside the current turn. The turn continues with the
+        next provider call. No request body.
+      responses:
+        "200":
+          description: Interrupt requested
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queued_guidance]
+                properties:
+                  queued_guidance:
+                    type: integer
+                    minimum: 1
+                    description: Number of queued messages that will be delivered
+        "404":
+          description: Unknown session
+        "409":
+          description: >
+            The active run has no queued guidance (no_queued_guidance), an
+            approval is pending (approval_pending), or the session has no
+            runner (task_control_unavailable)
   /v1/sessions/{id}/tasks/control:
     parameters:
       - $ref: "#/components/parameters/sessionID"

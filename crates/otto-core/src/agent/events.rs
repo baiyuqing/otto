@@ -250,6 +250,11 @@ pub enum Event {
     PlanUpdated {
         steps: Vec<crate::session::PlanStep>,
     },
+    /// A step interrupt stopped the running provider or tool call; `guidance`
+    /// queued user messages are appended next and the same turn continues.
+    StepInterrupted {
+        guidance: usize,
+    },
 }
 
 impl Event {
@@ -275,6 +280,7 @@ impl Event {
             Self::Notification { .. } => "notification",
             Self::AgentError { .. } => "agent_error",
             Self::PlanUpdated { .. } => "plan_updated",
+            Self::StepInterrupted { .. } => "step_interrupted",
         }
     }
 }
@@ -501,6 +507,7 @@ mod tests {
                 message: String::new(),
             }
             .name(),
+            Event::StepInterrupted { guidance: 1 }.name(),
         ];
         assert_eq!(
             names,
@@ -519,6 +526,7 @@ mod tests {
                 "memory_warning",
                 "notification",
                 "agent_error",
+                "step_interrupted",
             ]
         );
     }

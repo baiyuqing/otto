@@ -308,10 +308,18 @@ async fn steering_commands_reach_the_controller_for_the_active_run() {
     // The withdrawal reaches its controller call and reports the runtime's own
     // reason.
     assert_eq!(
-        local_command(controller, Command::WithdrawSteer(1))
+        local_command(controller.clone(), Command::WithdrawSteer(1))
             .await
             .unwrap_err(),
         "steering message is not queued for the active task"
+    );
+    // The interrupt reaches `Controller::interrupt_step`; an idle session has
+    // no queued guidance, so the reply is that refusal's message.
+    assert_eq!(
+        local_command(controller, Command::InterruptStep)
+            .await
+            .unwrap_err(),
+        "No queued guidance; Esc again cancels the turn."
     );
 }
 
@@ -346,6 +354,10 @@ async fn attach_steering_commands_route_to_the_client_transport() {
     .unwrap_err();
     assert!(withdraw.contains("/tasks/steer/7"), "{withdraw}");
     assert!(withdraw.contains("outcome unknown"), "{withdraw}");
+    let interrupt = remote_request(remote, &ticket, Request::Command(Command::InterruptStep))
+        .await
+        .unwrap_err();
+    assert!(interrupt.contains("/tasks/steer/interrupt"), "{interrupt}");
 }
 
 /// The TUI reads the run's guidance right after admitting or withdrawing it,

@@ -221,7 +221,10 @@ Turns:
   shows `◆ QUEUED FOR CURRENT TURN …`. `Ctrl+U` recalls undelivered guidance
   into an empty composer for editing after the runtime confirms withdrawal.
   Guidance that wins the race and is
-  delivered is not restored, and a new draft is never overwritten. An
+  delivered is not restored, and a new draft is never overwritten. Delivered
+  guidance is session history and cannot be withdrawn. The guidance state is
+  also available over HTTP (see [HTTP API](servers-and-connectors.md#http-api))
+  as `GET /v1/sessions/{id}/tasks/steer`. An
   interrupted turn that never delivered it is
   reported with the text. If the turn has just ended, the text becomes
   a new turn; when an approval is pending, resolve that approval first. Use an
@@ -245,7 +248,7 @@ Turns:
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/rename`, `/compact`,
 `/context`, `/agents`, `/permissions`, `/sandbox`, `/sandbox reload`,
-`/approve [<id>]`, `/steer`, and `/exit`. Every other command prints
+`/approve [<id>]`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/memory`, `/remember`, `/skill`,
 `/tasks`, `/task`, `/timers`, `/mcp`, `/login`, `/logout`,
@@ -431,17 +434,6 @@ Shared commands:
 
 TUI-only commands:
 
-- `/steer <guidance>` delivers guidance to the active task at its next safe
-  boundary, exactly like typing it as an ordinary message while the turn runs,
-  but as an explicit command that never starts a turn: with no active task it
-  answers `there is no active task accepting guidance`, and while an approval is
-  pending it refuses. The pinned banner above the composer then shows `◆ QUEUED
-  FOR CURRENT TURN …`.
-  `Ctrl+U` recalls the newest still-queued guidance into an empty composer after
-  withdrawal is confirmed. Delivered guidance is session history and cannot be
-  withdrawn. Guidance state remains available over HTTP (see
-  [HTTP API](servers-and-connectors.md#http-api)) as
-  `GET /v1/sessions/{id}/tasks/steer`.
 - `/context` opens a centered panel that lists what the next provider request contains:
   the system prompt parts (base, environment, workspace instructions, skills,
   agents), built-in and MCP tool definitions, the compaction summary, the
@@ -586,8 +578,8 @@ Notes:
   unreadable file is renamed to `<session-id>.inbox.json.corrupt-<seconds>`
   with a warning on standard error. `--no-session` keeps notifications in
   memory only.
-- **Guidance for a running turn** (steering from the TUI, `/steer`,
-  `/tasks/steer`, or ACP) is also written to `<session-id>.inputs.json`
+- **Guidance for a running turn** (steering from the TUI, chat `/steer`,
+  HTTP `/tasks/steer`, or ACP) is also written to `<session-id>.inputs.json`
   until it is delivered. Delivery, withdrawal, and every way a turn ends
   remove it. When the Otto process stops during the turn, the turn that
   resumes it after the session is reopened delivers that guidance first;

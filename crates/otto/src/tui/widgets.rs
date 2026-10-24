@@ -10,7 +10,7 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use super::input::hints;
-use super::interaction::{Bar, Focus, SegmentKind, State, Timeline, View};
+use super::interaction::{Focus, State, View};
 use super::layout::{escape_plain_text, escape_single_line_text};
 use super::render::queued_banner_style;
 
@@ -20,90 +20,6 @@ const ERROR: Color = Color::LightRed;
 const SELECTED: Style = Style::new()
     .bg(Color::DarkGray)
     .add_modifier(Modifier::BOLD);
-
-/// Narrowest panel, border included, that draws the timeline bars.
-const TIMELINE_MIN_PANEL: u16 = 80;
-
-/// Truncates `text` to `width` display columns with an ellipsis, or pads it.
-fn fit(text: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0;
-    let overflow = UnicodeWidthStr::width(text) > width;
-    let limit = if overflow {
-        width.saturating_sub(1)
-    } else {
-        width
-    };
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > limit {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    if overflow {
-        out.push('…');
-        used += 1;
-    }
-    out.push_str(&" ".repeat(width.saturating_sub(used)));
-    out
-}
-
-/// Second marks along the time axis, one every `step` seconds, where the step
-/// is the smallest of a fixed set that leaves 8 columns between marks.
-fn axis_line(timeline: &Timeline, width: usize) -> String {
-    let total = (timeline.end_ms - timeline.start_ms).max(1) as f64;
-    let mut line = vec![' '; width];
-    let step = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600]
-        .into_iter()
-        .find(|step| (*step as f64 * 1000.0 / total) * width as f64 >= 8.0)
-        .unwrap_or(3600);
-    let mut second = 0;
-    while (second * 1000) as f64 <= total {
-        let column = ((second * 1000) as f64 / total * width as f64) as usize;
-        for (i, ch) in format!("{second}s").chars().enumerate() {
-            if let Some(cell) = line.get_mut(column + i) {
-                *cell = ch;
-            }
-        }
-        second += step;
-    }
-    line.into_iter().collect()
-}
-
-/// One bar of `width` cells; a later segment overwrites an earlier one, and
-/// a segment shorter than a cell still fills one.
-fn bar_spans(timeline: &Timeline, bar: &Bar, width: usize) -> Vec<Span<'static>> {
-    let total = (timeline.end_ms - timeline.start_ms).max(1) as f64;
-    let base = if bar.failed {
-        Style::default().fg(Color::Red)
-    } else if bar.estimated {
-        Style::default().add_modifier(Modifier::DIM)
-    } else {
-        Style::default()
-    };
-    (0..width)
-        .map(|cell| {
-            let from = timeline.start_ms as f64 + total * cell as f64 / width as f64;
-            let to = timeline.start_ms as f64 + total * (cell + 1) as f64 / width as f64;
-            let kind = bar
-                .segments
-                .iter()
-                .rev()
-                .find(|s| (s.start_ms as f64) < to && (s.end_ms as f64) > from)
-                .map(|s| s.kind);
-            let (glyph, style) = match kind {
-                None => (' ', base),
-                Some(SegmentKind::Waiting) => ('░', base),
-                Some(SegmentKind::RetryWait) => ('▒', base),
-                Some(SegmentKind::ApprovalWait) => ('◇', base.fg(Color::Yellow)),
-                Some(SegmentKind::Output) => ('█', base),
-            };
-            Span::styled(glyph.to_string(), style)
-        })
-        .collect()
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Geometry {
@@ -193,20 +109,10 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
     let has_detail = !document.is_empty() || !view.fields.is_empty();
     let mut geometry = Geometry::default();
 
-    // A timeline needs every row and its axis visible; the detail takes the rest.
-    let rows_constraint = if view.timeline.is_some() {
-        Constraint::Length(
-            (view.rows.len() as u16 + 1)
-                .min(body.height.saturating_sub(5))
-                .max(1),
-        )
-    } else {
-        Constraint::Percentage(35)
-    };
     let (rows_area, detail_area) = if has_rows && has_detail && body.height >= 5 {
         let parts = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([rows_constraint, Constraint::Min(1)])
+            .constraints([Constraint::Percentage(35), Constraint::Min(1)])
             .split(body);
         (Some(parts[0]), Some(parts[1]))
     } else if has_rows || (view.collection && !has_detail) {
@@ -248,35 +154,6 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
                 &mut TableState::default().with_selected(selected),
             );
         } else {
-            // Bars need a panel of at least TIMELINE_MIN_PANEL columns and a
-            // row for the axis; narrower panels show the tree only.
-            let wide = view
-                .timeline
-                .as_ref()
-                .filter(|_| rect.width + 2 >= TIMELINE_MIN_PANEL && rect.height > 1);
-            let label_width = usize::from(rect.width.saturating_sub(2)) * 2 / 5;
-            let bar_width =
-                usize::from(rect.width.saturating_sub(2)).saturating_sub(label_width + 1);
-            let rect = match wide {
-                Some(timeline) => {
-                    let axis = format!(
-                        "  {} {}",
-                        " ".repeat(label_width),
-                        axis_line(timeline, bar_width)
-                    );
-                    frame.render_widget(
-                        Paragraph::new(axis).style(Style::default().fg(MUTED)),
-                        Rect { height: 1, ..rect },
-                    );
-                    Rect {
-                        y: rect.y + 1,
-                        height: rect.height - 1,
-                        ..rect
-                    }
-                }
-                None => rect,
-            };
-            geometry.rows = Some(rect);
             let items: Vec<ListItem> = view
                 .rows
                 .iter()
@@ -291,20 +168,11 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
                             Style::default()
                         },
                     )];
-                    if let Some(timeline) = wide {
-                        let label = row.cells.first().map_or("", String::as_str);
-                        spans.push(Span::raw(fit(&escape_single_line_text(label), label_width)));
-                        spans.push(Span::raw(" "));
-                        if let Some(bar) = timeline.bars.get(&row.id) {
-                            spans.extend(bar_spans(timeline, bar, bar_width));
+                    for (i, cell) in row.cells.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(Span::styled("  ", Style::default().fg(MUTED)));
                         }
-                    } else {
-                        for (i, cell) in row.cells.iter().enumerate() {
-                            if i > 0 {
-                                spans.push(Span::styled("  ", Style::default().fg(MUTED)));
-                            }
-                            spans.push(Span::raw(escape_single_line_text(cell)));
-                        }
+                        spans.push(Span::raw(escape_single_line_text(cell)));
                     }
                     let mut lines = vec![Line::from(spans)];
                     if selected && !row.detail.is_empty() && view.document != row.detail {

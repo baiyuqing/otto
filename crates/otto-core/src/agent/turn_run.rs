@@ -1,5 +1,6 @@
 //! `Agent` entry points and the body of one admitted turn.
 
+use super::step_control::StepControl;
 use super::*;
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
@@ -480,11 +481,24 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         loop {
             state.yield_after_batch = false;
             state.batch_has_errors = false;
-            let response = match self
-                .dispatch_normal_provider_step(emit, &mut state, &system_context, control)
-                .await
-            {
+            let step = StepControl::new(control);
+            steering.arm(step.cancellation_token());
+            let provider_step = self
+                .dispatch_normal_provider_step(emit, &mut state, &system_context, &step)
+                .await;
+            steering.disarm();
+            let response = match provider_step {
                 Ok(response) => response,
+                Err(AgentError::Provider(ProviderError::Cancelled)) if step.interrupted() => {
+                    // Only the step token is cancelled: a step interrupt stopped
+                    // the provider call or an automatic compaction around it,
+                    // and the turn continues with the guidance appended.
+                    if let Err(error) = self.deliver_steering_after_interrupt(&steering, emit).await
+                    {
+                        return Err(self.fail(emit, error));
+                    }
+                    continue;
+                }
                 Err(error) => return Err(self.fail(emit, error)),
             };
 
@@ -530,9 +544,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             // delivery for the terminal event of the single active call.
             let mut replan = false;
             for block in tool_calls {
+                steering.arm(step.cancellation_token());
                 let batch = self
-                    .run_tool_call(emit, &mut state, control, &block, None, replan)
-                    .await?;
+                    .run_tool_call(emit, &mut state, &step, &block, None, replan)
+                    .await;
+                steering.disarm();
+                let batch = batch?;
                 replan |= batch == crate::approval::BatchControl::Replan;
             }
             // The whole batch ran before the guard is read, so a stopped turn
@@ -541,7 +558,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 return Err(self.fail(emit, AgentError::NoProgress(stall)));
             }
 
-            if !had_tool_call || (state.yield_after_batch && !state.batch_has_errors && !replan) {
+            // An interrupted batch always delivers its guidance with the event
+            // below instead of ending or yielding the turn.
+            let batch_interrupted = had_tool_call && step.interrupted();
+            if !had_tool_call
+                || (state.yield_after_batch
+                    && !state.batch_has_errors
+                    && !replan
+                    && !batch_interrupted)
+            {
                 if let Some(error) = stopped_provider_error(control) {
                     return Err(self.fail(emit, AgentError::Provider(error)));
                 }
@@ -566,7 +591,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             if let Some(error) = stopped_provider_error(control) {
                 return Err(self.fail(emit, AgentError::Provider(error)));
             }
-            if let Err(error) = self.deliver_steering(&steering, emit).await {
+            let delivered = if batch_interrupted {
+                self.deliver_steering_after_interrupt(&steering, emit).await
+            } else {
+                self.deliver_steering(&steering, emit).await
+            };
+            if let Err(error) = delivered {
                 return Err(self.fail(emit, error));
             }
             if let Err(error) = self.deliver_notifications(emit).await {

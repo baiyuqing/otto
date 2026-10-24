@@ -20,6 +20,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Breaking changes
 
+- Remove the terminal `/plan` command, including in attached sessions. The
+  status line still shows `Plan n/m · <step in progress>`; the `update_plan`
+  tool, ACP plan updates and HTTP plan output are unchanged. Reinstall Otto and
+  restart terminal sessions.
+
 - Remove the terminal `/image` and `/trace` commands, pending terminal image
   attachments and the trace timeline panel, including in attached sessions.
   Terminal prompts are text-only; image messages through supported APIs and

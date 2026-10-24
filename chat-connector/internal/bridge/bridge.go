@@ -297,8 +297,6 @@ var Commands = []Command{
 	{"compact", "Compact the session context: /compact [focus]", true},
 	{"context", "Show what the next request sends, with token counts", true},
 	{"model", "Choose the conversation's profile: /model, or /model <profile>", true},
-	{"reflect", "Retrospective and proposals: /reflect [focus], list, show <id>", true},
-	{"skill", "List generated skills or undo one: /skill generated | /skill revert <name>", true},
 	{"sessions", "List the newest sessions", false},
 	{"use", "Switch to a session: /use <id>", false},
 	{"memory", "List or review pending memory candidates", false},
@@ -557,7 +555,7 @@ func (b *Bridge) lockSession(id string) (unlock func()) {
 
 // Update implements agent.Handler. It only takes a mutex.
 func (b *Bridge) Update(sid string, u acp.SessionUpdate) {
-	if text, origin, ok := agent.ReflectionNotice(u); ok {
+	if text, origin, ok := agent.SessionNotice(u); ok {
 		if origin == "" {
 			return
 		}

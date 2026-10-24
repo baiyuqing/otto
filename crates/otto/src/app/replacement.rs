@@ -71,7 +71,6 @@ impl Controller {
         if deferred {
             return Err(CLOSED.to_string());
         }
-        self.bind_reflection();
         self.notify_memory_state();
         match close_error {
             Some(error) => Err(self.builder.redact_error(&error, None)),
@@ -151,17 +150,15 @@ impl Controller {
                 ..State::default()
             }),
             close_signal: Condvar::new(),
-            notices: Arc::new(auto_reflection::Notices::new()),
-            wake_replies: auto_reflection::Notices::new(),
-            auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            auto_cancel: CancellationToken::new(),
+            close_cancel: CancellationToken::new(),
+            notices: Arc::new(notices::Notices::new()),
+            wake_replies: notices::Notices::new(),
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
             herdr: std::sync::RwLock::new(None),
             trace_cache: trace::TraceCache::default(),
         };
         controller.notify_memory_state();
-        controller.bind_reflection();
         controller
     }
 }

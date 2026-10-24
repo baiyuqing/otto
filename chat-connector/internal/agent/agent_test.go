@@ -76,7 +76,7 @@ func TestDeliveryMetadataPreservesExactAndEmptyDeclarations(t *testing.T) {
 	}
 }
 
-func TestSessionUpdateSuppressesLoadReplayExceptReflectionNotice(t *testing.T) {
+func TestSessionUpdateSuppressesLoadReplay(t *testing.T) {
 	rec := &recorder{}
 	p := &process{loading: map[string]bool{"s1": true}}
 	c := &client{p: p, handler: rec}
@@ -92,28 +92,6 @@ func TestSessionUpdateSuppressesLoadReplayExceptReflectionNotice(t *testing.T) {
 	send(acp.UpdateAgentMessageText("history"))
 	if rec.count() != 0 {
 		t.Fatalf("ordinary load replay was delivered")
-	}
-
-	for _, noticeID := range []float64{0, 1.5} {
-		invalid := acp.UpdateAgentMessageText("invalid notice")
-		invalid.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{
-			"reflectionNotice": true,
-			"noticeId":         noticeID,
-		}}
-		send(invalid)
-		if rec.count() != 0 {
-			t.Fatalf("invalid reflection notice %v was delivered", noticeID)
-		}
-	}
-
-	notice := acp.UpdateAgentMessageText("new notice")
-	notice.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{
-		"reflectionNotice": true,
-		"noticeId":         float64(1),
-	}}
-	send(notice)
-	if rec.count() != 1 {
-		t.Fatalf("valid reflection notice count = %d, want 1", rec.count())
 	}
 }
 
@@ -482,15 +460,14 @@ func TestWakeReplyShape(t *testing.T) {
 		t.Fatalf("valid wake reply = %q, %v", text, ok)
 	}
 	for name, u := range map[string]acp.SessionUpdate{
-		"missing flag":    wakeChunk(otto(map[string]any{"replyId": float64(1)}), acp.TextBlock("x")),
-		"false flag":      wakeChunk(otto(map[string]any{"wakeReply": false, "replyId": float64(1)}), acp.TextBlock("x")),
-		"missing id":      wakeChunk(otto(map[string]any{"wakeReply": true}), acp.TextBlock("x")),
-		"string id":       wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": "1"}), acp.TextBlock("x")),
-		"zero id":         wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": float64(0)}), acp.TextBlock("x")),
-		"fractional id":   wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": 1.5}), acp.TextBlock("x")),
-		"non-text":        wakeChunk(valid, acp.ImageBlock("", "image/png")),
-		"reflection only": wakeChunk(otto(map[string]any{"reflectionNotice": true, "noticeId": float64(1)}), acp.TextBlock("x")),
-		"no meta":         acp.UpdateAgentMessageText("x"),
+		"missing flag":  wakeChunk(otto(map[string]any{"replyId": float64(1)}), acp.TextBlock("x")),
+		"false flag":    wakeChunk(otto(map[string]any{"wakeReply": false, "replyId": float64(1)}), acp.TextBlock("x")),
+		"missing id":    wakeChunk(otto(map[string]any{"wakeReply": true}), acp.TextBlock("x")),
+		"string id":     wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": "1"}), acp.TextBlock("x")),
+		"zero id":       wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": float64(0)}), acp.TextBlock("x")),
+		"fractional id": wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": 1.5}), acp.TextBlock("x")),
+		"non-text":      wakeChunk(valid, acp.ImageBlock("", "image/png")),
+		"no meta":       acp.UpdateAgentMessageText("x"),
 	} {
 		if _, ok := WakeReply(u); ok {
 			t.Errorf("%s was accepted", name)

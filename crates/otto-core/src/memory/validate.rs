@@ -319,16 +319,6 @@ impl RememberRequest {
         metadata(&self.metadata)
     }
 }
-impl ReflectRequest {
-    pub fn validate(&self) -> Result<()> {
-        request(&self.context, &self.request_id)?;
-        require(!self.evidence.is_empty() || !self.sources.is_empty())?;
-        require(self.context.write_scope.is_some())?;
-        observations(&self.evidence)?;
-        sources(&self.sources)?;
-        text(&self.focus, MAX_QUERY_BYTES, true)
-    }
-}
 impl ForgetRequest {
     pub fn validate(&self, service: &str) -> Result<()> {
         request(&self.context, &self.request_id)?;
@@ -407,7 +397,6 @@ impl MutatingRequest {
         match self {
             Self::Observe(r) => &r.context,
             Self::Remember(r) => &r.context,
-            Self::Reflect(r) => &r.context,
             Self::Forget(r) => &r.context,
             Self::Feedback(r) => &r.context,
         }
@@ -416,7 +405,6 @@ impl MutatingRequest {
         match self {
             Self::Observe(_) => Operation::Observe,
             Self::Remember(_) => Operation::Remember,
-            Self::Reflect(_) => Operation::Reflect,
             Self::Forget(_) => Operation::Forget,
             Self::Feedback(_) => Operation::Feedback,
         }
@@ -425,7 +413,6 @@ impl MutatingRequest {
         match self {
             Self::Observe(r) => r.validate(),
             Self::Remember(r) => r.validate(service),
-            Self::Reflect(r) => r.validate(),
             Self::Forget(r) => r.validate(service),
             Self::Feedback(r) => r.validate(service),
         }

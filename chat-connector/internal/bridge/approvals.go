@@ -69,7 +69,7 @@ func (b *Bridge) restoreApprovalWatches() {
 }
 
 // The native journal owns state; cards are disposable views. The watcher remains
-// active between turns so reflection and other background requests are visible.
+// active between turns so background requests are visible.
 func (c *chat) startApprovalWatch(sid string) {
 	c.mu.Lock()
 	if c.approvalWatchSID == sid {

@@ -33,12 +33,6 @@ pub struct SkillInfo {
 const SEARCH_LIMIT: usize = 20;
 const SEARCH_TOKEN_BUDGET: usize = 4000;
 
-#[derive(Debug, Clone)]
-pub(crate) struct GeneratedSkillStatus {
-    pub skill: crate::reflection::store::GeneratedSkill,
-    pub still_owned: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopeSelector {
     Current,
@@ -82,16 +76,12 @@ pub(crate) enum Request {
         name: String,
         enabled: bool,
     },
-    SkillGenerated,
-    SkillRevert(String),
     McpStatus,
     Timers,
     TimerCancel(String),
     Tasks,
     Task(String),
     TaskCancel(String),
-    ReflectList,
-    ReflectShow(String),
 }
 
 #[derive(Debug, Clone)]
@@ -113,25 +103,14 @@ pub(crate) enum Reply {
         skill: skill::Skill,
         body: String,
         contract_check: Option<String>,
-        generated: Option<crate::reflection::store::GeneratedSkill>,
     },
     SkillSet(String),
-    SkillGenerated(Vec<GeneratedSkillStatus>),
-    SkillReverted {
-        name: String,
-        result: crate::reflection::skillwrite::Reverted,
-    },
     McpStatus(Vec<crate::mcp::ServerStatus>),
     Timers(Vec<crate::tool::remind::StoredReminder>),
     TimerCancelled(crate::tool::remind::StoredReminder),
     Tasks(Vec<crate::app::Task>),
     Task(crate::app::Task),
     TaskCancelled(String),
-    ReflectList(Vec<crate::reflection::runlog::Summary>),
-    ReflectShow {
-        id: String,
-        log: Option<(std::path::PathBuf, String)>,
-    },
     Notice(String),
     Usage(String),
 }
@@ -146,14 +125,11 @@ impl Request {
                     /memory forget <id> | /memory review <id> accept|reject"
             }
             "remember" => "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>",
-            "skill" => {
-                "usage: /skill | /skill <name> | /skill set <name> enabled|disabled | /skill generated | /skill revert <name>"
-            }
+            "skill" => "usage: /skill | /skill <name> | /skill set <name> enabled|disabled",
             "mcp" => "usage: /mcp",
             "timers" => "usage: /timers [cancel <id>]",
             "tasks" => "usage: /tasks",
             "task" => "usage: /task [<id|name> | cancel <id|name>]",
-            "reflect" => "usage: /reflect list | /reflect show <id>",
             _ => return Err(format!("unknown management command: {command}")),
         };
         let invalid = || usage.to_string();
@@ -262,8 +238,6 @@ impl Request {
                     },
                     _ => return Err(invalid()),
                 },
-                ["generated"] => Request::SkillGenerated,
-                ["revert", name] => Request::SkillRevert((*name).into()),
                 [name] => Request::SkillDetail((*name).into()),
                 _ => return Err(invalid()),
             },
@@ -289,11 +263,6 @@ impl Request {
                 [] => Request::Tasks,
                 ["cancel", id] => Request::TaskCancel((*id).into()),
                 [id] if *id != "cancel" => Request::Task((*id).into()),
-                _ => return Err(invalid()),
-            },
-            "reflect" => match fields.as_slice() {
-                ["list"] => Request::ReflectList,
-                ["show", id] => Request::ReflectShow((*id).into()),
                 _ => return Err(invalid()),
             },
             _ => unreachable!(),
@@ -664,20 +633,10 @@ impl Controller {
                     self.skill_checker()
                         .map(|c| format!("Contract check: {}", c.display(found)))
                 });
-                let generated = self
-                    .builder()
-                    .reflector
-                    .generated_skill(&name)
-                    .filter(|row| {
-                        self.reflection_skill_roots().is_some_and(|roots| {
-                            crate::reflection::skillwrite::still_owned(&roots, row)
-                        })
-                    });
                 Ok(Reply::SkillDetail {
                     skill: found.clone(),
                     body,
                     contract_check,
-                    generated,
                 })
             }
             SkillSet { name, enabled } => {
@@ -691,35 +650,6 @@ impl Controller {
                     "skill {name} preference is {}; restart Otto to apply the active catalog (activation also requires [skills].enabled = true)",
                     if enabled { "enabled" } else { "disabled" }
                 )))
-            }
-            SkillGenerated => {
-                let roots = self.reflection_skill_roots();
-                let rows = self
-                    .builder()
-                    .reflector
-                    .generated_skills()
-                    .map_err(|e| format!("skill generated: {e}"))?;
-                Ok(Reply::SkillGenerated(
-                    rows.into_iter()
-                        .map(|skill| GeneratedSkillStatus {
-                            still_owned: roots.as_ref().is_some_and(|roots| {
-                                crate::reflection::skillwrite::still_owned(roots, &skill)
-                            }),
-                            skill,
-                        })
-                        .collect(),
-                ))
-            }
-            SkillRevert(name) => {
-                let roots = self.reflection_skill_roots().ok_or_else(|| {
-                    "skill revert: skills are not available (check [skills].enabled)".to_string()
-                })?;
-                let result = self
-                    .builder()
-                    .reflector
-                    .revert_skill(&roots, &name)
-                    .map_err(|e| format!("skill revert: {e}"))?;
-                Ok(Reply::SkillReverted { name, result })
             }
             Tasks => Ok(Reply::Tasks(
                 self.tasks().map(|t| t.list()).unwrap_or_default(),
@@ -748,16 +678,6 @@ impl Controller {
                     .ok_or_else(|| "timers are not available".to_string())?;
                 Ok(Reply::TimerCancelled(reminders.cancel(&id)?))
             }
-            ReflectList => Ok(Reply::ReflectList(
-                self.reflection_runs()
-                    .map_err(|e| format!("/reflect list: {e}"))?,
-            )),
-            ReflectShow(id) => Ok(Reply::ReflectShow {
-                id: id.clone(),
-                log: self
-                    .reflection_run(&id)
-                    .map_err(|e| format!("/reflect show: {e}"))?,
-            }),
         }
     }
 }

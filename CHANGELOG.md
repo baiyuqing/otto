@@ -7,6 +7,16 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Breaking changes
+
+- Remove reflection completely: `/reflect`, the model-callable tool, automatic
+  triggers, configuration, run reports and generated-skill management are no
+  longer available. No compatibility or data migration is provided. Remove
+  `[reflection]` from existing configuration, reinstall Otto and restart Otto
+  and connector processes. Reflection data is disposable, not retained by the
+  feature; remove old `~/.otto/reflection/` and `~/.otto/reflection.db*` artifacts
+  when upgrading. Ordinary memory, hand-written skills and compaction remain.
+
 ### Usage and compatibility
 
 - A plugin package can be the memory source. A package declares a `memory`

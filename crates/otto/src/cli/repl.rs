@@ -46,9 +46,7 @@ const HELP: &str = "/auto [manual|auto|yolo] show or set session approval mode\n
     session\n/archive  archive current session and start a new one\n/model \
     [profile] [--thinking LEVEL] [--save] show current model, or switch \
     profiles\n/thinking [LEVEL] [--save] show or set reasoning \
-    effort\n/compact [focus] compact context\n/reflect [focus] write a \
-    retrospective and queue memory and skill proposals for review\n/reflect \
-    list | /reflect show <id> past reflection runs\n/sandbox [reload] show \
+    effort\n/compact [focus] compact context\n/sandbox [reload] show \
     sandbox state, or apply the current [sandbox] configuration\n/sandbox \
     allow <path> let sandboxed commands read a path\n/sandbox network \
     allow|deny set sandboxed network access\n/sandbox exclude <entry> run \
@@ -59,8 +57,7 @@ const HELP: &str = "/auto [manual|auto|yolo] show or set session approval mode\n
     show <id> | /memory search <query> | /memory forget <id> | /memory \
     review <id> accept|reject\n/remember [--scope user|workspace] [--kind \
     K] [--key K] <text>\n/skill [name] show skills or one skill; /skill set \
-    <name> enabled|disabled change a skill state\n/skill generated list \
-    skills reflection wrote; /skill revert <name> undo one\n/task     list \
+    <name> enabled|disabled change a skill state\n/task     list \
     sub-agent tasks\n/task <id> show a task's steps and result\n/task \
     cancel <id> cancel a queued or running task\n/agents   list the latest \
     50 recorded sub-agent tasks, any session\n/timers   list this session's \
@@ -178,7 +175,7 @@ impl<'a> Repl<'a> {
                 let _ = writeln!(self.stdout, "{}", crate::app::MEMORY_REVIEW_AVAILABLE);
                 memory_review_notice = false;
             }
-            // Lines background reflection queued while a turn or command ran.
+            // Lines background operations queued while a turn or command ran.
             for line in self.controller.take_notices() {
                 let _ = writeln!(self.stdout, "{line}");
             }

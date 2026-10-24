@@ -164,3 +164,10 @@ fn remember_parser_preserves_text_and_defaults() {
         Ok(Request::Remember { scope, kind, .. }) if scope == "workspace" && kind == "note"
     ));
 }
+
+#[test]
+fn removed_reflection_commands_are_unavailable() {
+    assert!(Request::parse("reflect", "list").is_err());
+    assert!(Request::parse("reflect", "show run-1").is_err());
+    assert!(Request::parse("skill", "revert example").is_err());
+}

@@ -305,37 +305,12 @@ async fn remote_management(
                 skill: info.skill,
                 body: info.body,
                 contract_check: info.contract_check,
-                generated: None,
             }
         }
         Request::SkillSet { name, enabled } => ManagementReply::SkillSet(
             remote
                 .client
                 .set_skill_enabled(session, &name, enabled)
-                .await
-                .map_err(mutation_error)?,
-        ),
-        Request::ReflectList => ManagementReply::ReflectList(
-            remote
-                .client
-                .reflection_runs(session)
-                .await
-                .map_err(|e| e.to_string())?
-                .runs,
-        ),
-        Request::ReflectShow(id) => ManagementReply::ReflectShow {
-            log: remote
-                .client
-                .reflection_run(session, &id)
-                .await
-                .map_err(|e| e.to_string())?
-                .map(|log| (log.path, log.content)),
-            id,
-        },
-        Request::SkillRevert(name) => ManagementReply::Notice(
-            remote
-                .client
-                .revert_generated_skill(session, &name)
                 .await
                 .map_err(mutation_error)?,
         ),

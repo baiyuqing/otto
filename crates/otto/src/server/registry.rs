@@ -212,7 +212,7 @@ impl Server {
     /// A session closed here keeps its files and its saved queued turns, and a
     /// request that names it re-opens it ([`Self::session_for_route`]), so a
     /// client never notices. Busy work -- a running or queued turn, a
-    /// compaction, a reflection, a waiting approval, an unfinished sub-agent
+    /// compaction, a waiting approval, an unfinished sub-agent
     /// task or an undelivered notification -- keeps a session whatever its age,
     /// so an idle sweeper never truncates real work. Pinned sessions are
     /// skipped: a live frontend connection holds them.
@@ -287,7 +287,7 @@ impl Server {
     }
 
     /// Whether `session`, whose locked state is `state`, has nothing to lose:
-    /// no turn, compaction, reflection, waiting approval, unfinished sub-agent
+    /// no turn, compaction, waiting approval, unfinished sub-agent
     /// task, undelivered notification or pin.
     pub(super) fn idle_session(&self, session: &OpenSession, state: &super::SessionState) -> bool {
         if state.busy() || state.waiting.is_some() || session.pinned() {

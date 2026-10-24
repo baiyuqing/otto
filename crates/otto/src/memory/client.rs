@@ -87,7 +87,7 @@ impl Client {
         if grant.input_classes.iter().any(|class| {
             !matches!(
                 class.as_str(),
-                "message" | "tool_result" | "task" | "explicit_memory" | "reflection" | "feedback"
+                "message" | "tool_result" | "task" | "explicit_memory" | "feedback"
             )
         }) {
             return Err(err(ErrorKind::InvalidInput));
@@ -436,45 +436,6 @@ impl Client {
             &request.context,
             &request.request_id,
             self.service.observe(request, control).await.map_err(safe)?,
-        )
-    }
-
-    pub async fn reflect(
-        &self,
-        request: &ReflectRequest,
-        control: &dyn OperationControl,
-    ) -> Result<Receipt> {
-        request.validate().map_err(safe)?;
-        let capability = self.admit(Operation::Reflect, control)?;
-        let scopes = if request.evidence.is_empty() {
-            request.context.scopes.clone()
-        } else {
-            vec![Self::write_scope(&request.context)?]
-        };
-        let mut effective = request.clone();
-        effective.context = self.effective_context(&request.context, scopes)?;
-        let request = &effective;
-        let mut classes = vec!["reflection"];
-        classes.extend(
-            request
-                .evidence
-                .iter()
-                .map(|observation| input_class(&observation.source))
-                .collect::<Result<Vec<_>>>()?,
-        );
-        classes.extend(
-            request
-                .sources
-                .iter()
-                .map(input_class)
-                .collect::<Result<Vec<_>>>()?,
-        );
-        self.grant(&request.context, &classes, capability)?;
-        self.guarded(request)?;
-        self.checked_receipt(
-            &request.context,
-            &request.request_id,
-            self.service.reflect(request, control).await.map_err(safe)?,
         )
     }
 

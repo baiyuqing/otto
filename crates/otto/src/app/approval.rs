@@ -332,23 +332,15 @@ impl Controller {
                                     .begin_runner_operation(runner)
                                     .map_err(AgentError::Other)?,
                             };
-                            let observation = super::auto_reflection::RunObservation::default();
                             let result = runner
                                 .run_with_image_system_context(
                                     text,
                                     image,
                                     system_context,
-                                    &mut super::auto_reflection::observing_prompt(
-                                        &mut send,
-                                        &observation,
-                                    ),
+                                    &mut send,
                                     cancel,
                                 )
                                 .await;
-                            self.after_prompt(
-                                &observation,
-                                result.is_ok() && !cancel.is_cancelled(),
-                            );
                             result
                         }
                         Some(Step::Followup(text)) => {

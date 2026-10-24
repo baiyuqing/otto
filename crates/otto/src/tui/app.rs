@@ -73,7 +73,6 @@ pub(crate) enum Action {
     Exit,
     Prompt(String),
     Compact(String),
-    Reflect(String),
     Login(String),
     McpLogin(String),
     CancelTurn,

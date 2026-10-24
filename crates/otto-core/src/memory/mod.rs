@@ -40,13 +40,6 @@ pub trait MemoryService: Send + Sync {
     ) -> Result<Receipt> {
         Err(Error::new(ErrorKind::Unsupported))
     }
-    async fn reflect(
-        &self,
-        _request: &ReflectRequest,
-        _control: &dyn OperationControl,
-    ) -> Result<Receipt> {
-        Err(Error::new(ErrorKind::Unsupported))
-    }
     async fn forget(
         &self,
         _request: &ForgetRequest,

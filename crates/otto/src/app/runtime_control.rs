@@ -52,7 +52,6 @@ impl Controller {
         match decision {
             Decision::Installed(old) => {
                 old.close();
-                self.bind_reflection();
                 Ok(true)
             }
             Decision::Busy => {

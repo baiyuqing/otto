@@ -82,7 +82,6 @@ impl Controller {
             let old = std::mem::replace(&mut current.runner, runner);
             old.close();
         }
-        self.bind_reflection();
         drop(admission);
         Ok(ResumeResult {
             session_path: path,

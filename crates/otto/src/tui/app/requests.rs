@@ -190,7 +190,6 @@ impl App {
             Transition::Run(run) => self.actions.push(match run {
                 Run::Prompt(s) => Action::Prompt(s),
                 Run::Compact(s) => Action::Compact(s),
-                Run::Reflect(s) => Action::Reflect(s),
                 Run::Login(s) => Action::Login(s),
                 Run::McpLogin(s) => Action::McpLogin(s),
                 Run::Exit => Action::Exit,

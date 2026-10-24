@@ -202,7 +202,6 @@ pub async fn initialize(
             home.join(".otto/schedule.db"),
             home.join(".otto/usage.db"),
             home.join(".otto/tasks.db"),
-            home.join(".otto/reflection.db"),
             home.join(".otto/skill-checks.db"),
             home.join(".otto/memory-advice.db"),
             home.join(".otto/sessions"),

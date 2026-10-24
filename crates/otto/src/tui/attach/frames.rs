@@ -132,7 +132,7 @@ impl<'a> Ui<'a> {
             if matches!(action, Action::Exit) {
                 return true;
             }
-            if self.app.busy() && matches!(action, Action::Compact(_) | Action::Reflect(_)) {
+            if self.app.busy() && matches!(action, Action::Compact(_)) {
                 self.actions.push_front(action);
                 break;
             }
@@ -203,7 +203,7 @@ impl<'a> Ui<'a> {
             }
             Action::CancelTurn => self.cancel_followed(),
             Action::Exit => {}
-            Action::Reflect(_) | Action::Login(_) | Action::McpLogin(_) => {
+            Action::Login(_) | Action::McpLogin(_) => {
                 self.app.push_system("not available with --attach")
             }
         }

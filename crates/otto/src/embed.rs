@@ -168,9 +168,6 @@ pub enum Component {
     Plugins,
     /// No subagent tool (`[agents].enabled = false`).
     Subagents,
-    /// No reflect tool and no automatic reflection (`[reflection].enabled =
-    /// false`).
-    Reflection,
     /// `schedule.db` is not opened. The schedule tools stay registered and
     /// report that scheduled delivery is unavailable, as they do when the
     /// store fails to open.
@@ -194,7 +191,6 @@ impl Component {
             Self::Skills => disabled.skills = true,
             Self::Plugins => disabled.plugins = true,
             Self::Subagents => disabled.subagents = true,
-            Self::Reflection => disabled.reflection = true,
             Self::Schedule => disabled.schedule = true,
             Self::SessionPersistence => disabled.session_persistence = true,
             Self::Usage => disabled.usage = true,

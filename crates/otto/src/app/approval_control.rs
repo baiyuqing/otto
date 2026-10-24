@@ -78,7 +78,7 @@ impl Controller {
         let _serial = tokio::select! {
             guard = self.approval_control.lock() => guard,
             () = cancel.cancelled() => return Err("context canceled".into()),
-            () = self.auto_cancel.cancelled() => return Err(super::CLOSED.into()),
+            () = self.close_cancel.cancelled() => return Err(super::CLOSED.into()),
         };
         if self.info().session_id != info.session_id
             || approvals
@@ -129,7 +129,7 @@ impl Controller {
         let work = runner.approval_dialogue(text, tools, &runtime, prompt, &secret_values, cancel);
         let result = tokio::select! {
             result = work => result,
-            () = self.auto_cancel.cancelled() => return Err(super::CLOSED.into()),
+            () = self.close_cancel.cancelled() => return Err(super::CLOSED.into()),
         };
         let answer = match result {
             Ok(answer) => answer,

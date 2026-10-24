@@ -125,7 +125,7 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
-  `reflection/`, `typesafe/`, `storage/` (drivers, backend repositories, and migration ports),
+  `typesafe/`, `storage/` (drivers, backend repositories, and migration ports),
   `usage/`, `failover/`, `workflow/`, and `schedule/` (typed store port, tools, worker).
 - **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
   package validation and Skills/MCP adaptation with content-bound trust.
@@ -166,7 +166,7 @@ audits); approval envelopes also belong to their domains. Backend packages retai
 | Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `storage/backends/turso/memory_advice.rs` (advice audit) |
 | Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `storage/backends/posix/session/` |
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/turso/{schedule,workflow}.rs` |
-| Tasks, reflection, usage, skill checks | Their domain repository modules | `storage/backends/turso/{tasks,reflection,usage,skill_checks}.rs` |
+| Tasks, usage, skill checks | Their domain repository modules | `storage/backends/turso/{tasks,usage,skill_checks}.rs` |
 
 The default registry uses the local Turso-compatible SQL driver for SQL-backed
 state and the confined POSIX file driver for sessions. The repository registry
@@ -216,9 +216,7 @@ guards these dependency directions.
 | Agent self-help and pending approval dialogue | `tool/otto.rs`, `app/approval_control.rs` | `runtime/builder.rs`, ACP, HTTP, chat and TUI input paths |
 | Active-task guidance and model follow-ups | `otto-core/src/agent/steering.rs`, `app/task_control.rs`, `tool/task_control.rs` | runtime tool/prompt wiring, HTTP/ACP and connector routing |
 | Per-turn chat channel context | `app/channel.rs`, then ACP prompt parsing | Core per-run system context, HTTP turn queue, `client/`, and `chat-connector/` |
-| Reflection commands and background notices | `app/auto_reflection.rs`, `reflection/` | HTTP reflection routes, ACP commands, and chat updates |
-| Model-requested reflection (`reflect` tool) and run logs | `tool/reflect.rs` (port), `app/requested_reflection.rs` (binding), `reflection/runlog.rs` (`/reflect list|show`) | `cli/repl_commands/reflect_reports.rs` (`reflect_runs_report`) |
-| Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | `runtime/builder/runner_entry.rs` (`web_tools`), `reflection/taint.rs` |
+| Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | `runtime/builder/runner_entry.rs` (`web_tools`) |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Bash command parsing for approval rules, review facts and effect classification | `crates/otto/src/tool/shell.rs` | `tool/bash.rs`, `approval/policy.rs`, `otto-core/src/approval/rules.rs` |
 | Web API or browser behavior | `crates/otto/src/server/` or external otto-plus | `otto-core` for shared wire codecs |

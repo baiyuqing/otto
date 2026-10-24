@@ -288,43 +288,6 @@ impl Connection {
                             }
                         }
                     }
-                    command::Command::Reflect { focus } => {
-                        if let Some(text) = crate::cli::repl_commands::reflect_runs_report(
-                            &session.controller,
-                            focus,
-                        ) {
-                            self.say(session_id, &local.redact(&text));
-                            return end_turn();
-                        }
-                        match session.controller.reflect(focus, cancel).await {
-                            Ok(report) => {
-                                self.say(session_id, &report.summary());
-                                end_turn()
-                            }
-                            Err(_) if cancel.is_cancelled() => {
-                                result(PromptResponse::new(StopReason::Cancelled))
-                            }
-                            Err(failure) => {
-                                Err(error(INTERNAL_ERROR, local.redact(&failure.to_string())))
-                            }
-                        }
-                    }
-                    command::Command::Skill { args } => {
-                        let words: Vec<_> = args.split_whitespace().collect();
-                        let text = match words.as_slice() {
-                            ["generated"] => crate::cli::repl_commands::skill_report(
-                                &session.controller,
-                                "generated",
-                            ),
-                            ["revert", name] => crate::cli::repl_commands::skill_report(
-                                &session.controller,
-                                &format!("revert {name}"),
-                            ),
-                            _ => "Usage: /skill generated | /skill revert <name>".to_string(),
-                        };
-                        self.say(session_id, &text);
-                        end_turn()
-                    }
                     command::Command::Steer { guidance } => {
                         match session.controller.steer(guidance) {
                             Ok(message) => {

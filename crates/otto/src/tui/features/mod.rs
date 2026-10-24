@@ -65,7 +65,6 @@ pub(crate) enum Transition {
 pub(crate) enum Run {
     Prompt(String),
     Compact(String),
-    Reflect(String),
     Login(String),
     McpLogin(String),
     Exit,

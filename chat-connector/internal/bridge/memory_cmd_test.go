@@ -45,7 +45,7 @@ func TestMemoryListsPendingCandidates(t *testing.T) {
 	}
 	h.say("/memory review")
 	if got := h.waitSent(3)[2]; !strings.Contains(got, "2 pending memory candidates") {
-		t.Fatalf("reflection review hint did not list candidates: %q", got)
+		t.Fatalf("memory review command did not list candidates: %q", got)
 	}
 	if len(h.calls("review:")) != 0 {
 		t.Fatal("listing must not review anything")

@@ -50,14 +50,7 @@ impl<'a> WakeOperation<'a> {
         // follow-ups and runs them itself.
         let resumes =
             self.controller.resumable_interrupted_turn() && !runner.task_control().is_active();
-        let compacted = std::sync::atomic::AtomicBool::new(false);
-        let mut result = runner
-            .run(
-                "",
-                &mut super::auto_reflection::observing(&mut *emit, &compacted),
-                cancel,
-            )
-            .await;
+        let mut result = runner.run("", &mut *emit, cancel).await;
         // A wake turn that resumed an interrupted task runs the follow-ups
         // that task had scheduled and not yet started.
         if result.is_ok() && resumes && !cancel.is_cancelled() {
@@ -67,7 +60,6 @@ impl<'a> WakeOperation<'a> {
                 .await;
         }
         drop(admission);
-        self.controller.after_operation(&compacted);
         result
     }
 

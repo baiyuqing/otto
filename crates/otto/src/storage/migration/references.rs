@@ -25,7 +25,6 @@ pub fn schemas(domain: &str) -> Result<&'static [RecordSchema]> {
         "schedule" => crate::schedule::migration::RECORDS,
         "usage" => crate::usage::migration::RECORDS,
         "tasks" => crate::subagent::migration::RECORDS,
-        "reflection" => crate::reflection::migration::RECORDS,
         "skill_checks" => crate::skill::check_migration::RECORDS,
         "memory_advice" => crate::memory::advice::migration::RECORDS,
         _ => return Err(invalid("unsupported logical record family")),
@@ -270,7 +269,6 @@ pub fn validate_records(
                     return Err(invalid("task migration retained live process authority"));
                 }
             }
-            "reflection_watermark" => session(text(record, "session_id")?, journals)?,
             "schedule_occurrence" if matches!(text(record, "state")?, "waiting" | "ready") => {
                 session(text(record, "session_id")?, journals)?
             }

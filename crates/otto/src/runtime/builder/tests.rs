@@ -43,7 +43,6 @@ fn shared(root: &Path) -> Arc<Shared> {
         schedule: None,
         skill_checker: None,
         memory: Default::default(),
-        reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
         logger: Arc::new(crate::log::Logger::discard()),
         parent_tool_factory: ParentToolSlot::default(),
     })

@@ -76,7 +76,6 @@ pub fn validate_reference_closure(
                 | "schedule"
                 | "usage"
                 | "tasks"
-                | "reflection"
                 | "skill_checks"
                 | "memory_advice"
         ) {
@@ -99,9 +98,6 @@ pub fn validate_reference_closure(
     }
     if let Some(tasks) = connections.get("tasks") {
         task_references(tasks, aliases, session_ids)?;
-    }
-    if let Some(reflection) = connections.get("reflection") {
-        session_column(reflection, "watermarks", "session_id", "1=1", session_ids)?;
     }
     if let Some(schedule) = connections.get("schedule") {
         session_column(

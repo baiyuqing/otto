@@ -8,12 +8,9 @@ mod review;
 pub(super) mod skills;
 #[cfg(test)]
 mod tests;
-mod trace;
 
 pub(crate) use approval::Approval;
 pub(crate) use commands::Catalog;
-#[cfg(test)]
-pub(crate) use trace::{TraceView, sample_trace};
 
 use super::backend::{Reply, Request};
 use super::interaction::{Activation, View};

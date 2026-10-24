@@ -61,8 +61,14 @@ capability.
   transcript, and the composer title reads `Working — Enter queues for this
   turn · Esc cancels turn`. Once input is queued, a yellow `◆ QUEUED …` banner
   on a shaded background stays pinned immediately above the composer, even
-  while the transcript scrolls. Ordinary guidance uses `◆ QUEUED FOR CURRENT
-  TURN` and changes the title to `Queued for current turn · Ctrl+U recall to
+  while the transcript scrolls. All accepted pending guidance also appears in
+  the main conversation as temporary `[Queued for current turn]` user rows;
+  queued-next input uses `[Queued next input]`. These rows are not written to
+  history: delivery replaces a pending row with the actual user message rather
+  than duplicating it, and withdrawal removes it. Startup, session switching
+  and attached reconnect reload the current turn's pending guidance; a local
+  queued-next input stays scoped to its original session. Ordinary guidance uses
+  `◆ QUEUED FOR CURRENT TURN` and changes the title to `Queued for current turn · Ctrl+U recall to
   edit · Esc cancels turn`. `Ctrl+U` waits for the runtime to confirm that the
   guidance was not delivered, then returns its exact text to an empty composer
   for editing; a draft typed while recall is pending is never overwritten. A
@@ -126,9 +132,6 @@ capability.
 - The composer shows at least 3 input rows even when empty or short, and
   grows with wrapped input up to 12 rows before it scrolls instead of
   growing further.
-- `/image <path>` attaches one PNG, JPEG, or WebP image to the next ordinary
-  prompt. The path may contain spaces. A later `/image` replaces the pending
-  image.
 - Mouse wheel scrolls; left-drag copies visible transcript text on release,
   without gutters/padding but preserving code indentation. Any key/wheel clears
   the highlight. Clipboard support requires a host helper.
@@ -194,8 +197,7 @@ Turns:
 - A prompt is sent with `POST .../turns` and `"queue": true`, so it waits in
   serve's [turn queue](servers-and-connectors.md#turn-queue) while another client's turn runs. The
   prompt appears in the transcript when serve's `user_message` frame for the
-  turn arrives. An image attached with `/image` is sent with the prompt; the
-  transcript shows only the prompt text.
+  turn arrives. Terminal prompts contain text only.
 - Ordinary text submitted while a turn runs steers that active task. Otto
   accepts it for the next safe provider boundary without interrupting a tool or
   silently creating a later turn. The pinned banner above the composer then
@@ -225,7 +227,7 @@ Turns:
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
-`/image`, `/context`, `/trace`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
+`/context`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/steer`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/memory`, `/remember`, `/skill`,
@@ -435,45 +437,6 @@ TUI-only commands:
   scroll it), and `Esc` returns from details or closes the collection. The report is taken when the panel
   opens. The memory section is the previous turn's recall; the next turn
   recalls again with its own prompt.
-- `/trace` opens a centered panel with the timeline of one turn. The title shows
-  the turn number out of the total, its trigger (`user`, `wake` or `recovery`),
-  its duration, and the provider input and output tokens summed over the turn,
-  its compactions and its sub-agents.
-  The selected turn is the last one; the other turns are collapsed rows
-  (`▸ turn N`), and `Enter` on one selects it. `[` and `]` select the previous
-  or next turn (`←`/`→` move between the footer actions and are not used).
-  Under the turn, a tree lists the provider requests (`model #N`), tool calls,
-  compactions and sub-agents in start order, each with its duration; a span
-  that did not end normally shows `error`, `cancelled`, `interrupted` or
-  `running`. A sub-agent row (`▸`/`▾`) is collapsed when finished and expanded
-  while running; `Enter` toggles it. `Enter` on any other row opens that
-  span's text: a turn's user input and delivered task notifications, a
-  provider request's input messages, token estimates and reply, tool
-  arguments and result, a compaction's summary, or a sub-agent's prompt and
-  result (`↑`/`↓`/`PgUp`/`PgDn` scroll it; `Esc` goes back). The detail box
-  shows the selected span's duration and status; for a provider request or a
-  compaction it adds, where recorded, the attempts, each retry with its reason and wait, time
-  to first output, input (cached) and output tokens, finish reason, and the
-  estimated tokens of its system prompt, tools, messages and memory with the
-  recalled memory record ids.
-  Beside the rows, a bar column on the time axis of the selected turn shows
-  a finished provider request as `░` until its first output, `█` after it,
-  and `▒` for a wait before a retry. A request still running, compactions and
-  tool calls are `█`; a tool call waiting for approval shows `◇` from the
-  time the request was created until the decision. A failed span is red; a
-  span whose times were estimated (sessions written before provider timing
-  was recorded) is dim and drawn `░`. A running span extends to the current
-  time at every redraw. A panel narrower than 80
-  columns (a terminal narrower than 84) shows the tree and durations without
-  bars. The trace is re-read every 2 seconds while the panel is open,
-  including while a turn is running; Otto does not start a model request for
-  it. With `--no-session` there is no session file and the panel shows an
-  error.
-  An approval request that arrives while `/trace` is on top is not shown over
-  it. The panel shows `N approval pending · a open` under the title, with the
-  time left when the request expires; `a` opens the oldest one over the panel
-  and the panel returns after the decision. Closing the panel presents a
-  pending approval at once.
 - `/agents` opens a centered panel of recorded sub-agent tasks, newest first, with
   status, agent (`default` when none), description, workspace, parent
   session, created time, duration, steps, tool calls, and tokens. It starts
@@ -489,9 +452,6 @@ TUI-only commands:
   `Esc` closes the panel (or leaves its detail pane) without cancelling the
   turn; a second `Esc`, with the panel closed, cancels the turn as it always
   does.
-- `/image <path>` attaches one image to the next prompt. The image is stored
-  inline in the session; the selected model and provider endpoint must support
-  image input. Otto sends images with `detail: high`.
 
 - `/resume` opens a centered panel of the up to 50 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,

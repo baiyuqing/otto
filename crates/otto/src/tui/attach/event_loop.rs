@@ -15,6 +15,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
     app.driver = Some(super::super::backend::Driver::new(
         super::super::backend::Connection::Attach(Arc::clone(remote)),
     ));
+    app.refresh_steering();
     let mut ui = Ui {
         remote,
         app,
@@ -37,7 +38,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
     let mut retry = tokio::time::interval(RETRY_INTERVAL);
     let mut agents = tokio::time::interval(Duration::from_secs(2));
     let mut approvals = tokio::time::interval(Duration::from_millis(500));
-    let mut frames = tokio::time::interval(render::SPINNER_FRAME);
+    let mut frames = render::spinner_interval();
     draw(terminal, &mut ui.app)?;
     loop {
         let event = {
@@ -134,7 +135,6 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                     ui.last_done = None;
                     ui.last_row = None;
                     ui.fresh = true;
-                    ui.app.pending_image = None;
                     ui.app.finish_turn(false, true);
                 }
             }
@@ -142,10 +142,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
             Ev::ApprovalsTick => ui.app.request_approvals(),
             Ev::Tick => {
                 // Idle frames need no redraw unless something on screen moves.
-                if !ui.app.busy()
-                    && !ui.app.has_surface()
-                    && !render::needs_task_clock(&ui.app.tasks)
-                {
+                if !render::needs_animation(&ui.app) {
                     continue;
                 }
             }

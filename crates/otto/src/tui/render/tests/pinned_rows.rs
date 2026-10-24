@@ -104,7 +104,7 @@ async fn queued_input_is_pinned_in_a_banded_row_above_the_composer() {
 /// the composer, so the frame says both that it waits and how to take it back.
 #[tokio::test]
 async fn queued_guidance_draws_in_the_banner_and_the_composer_title() {
-    use crate::tui::backend::{Completion, Reply, Ticket};
+    use crate::tui::backend::{Completion, Reply};
     use otto_core::agent::steering::{Message, Status};
 
     let (_workspace, _sessions, mut app) = app_fixture().await;
@@ -116,19 +116,16 @@ async fn queued_guidance_draws_in_the_banner_and_the_composer_title() {
     };
     // The run's own read is what paints the queued guidance; the frame test
     // goes through it rather than setting the field directly.
-    let (workspace, session) = (app.info.workspace.clone(), app.info.session_id.clone());
-    let read = |messages| Completion {
-        mutation: true,
-        ticket: Ticket {
-            workspace: workspace.clone(),
-            session: session.clone(),
-            surface: 0,
-            generation: 1,
-        },
-        result: Ok(Reply::Steering(messages)),
+    let read = |app: &mut App, messages| {
+        let ticket = app.refresh_steering();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket,
+            result: Ok(Reply::Steering(messages)),
+        });
     };
     app.start_turn();
-    app.apply_completion(read(vec![message(Status::Queued)]));
+    read(&mut app, vec![message(Status::Queued)]);
 
     let screen = rendered(&app, 72, 12);
     assert!(
@@ -145,12 +142,12 @@ async fn queued_guidance_draws_in_the_banner_and_the_composer_title() {
     );
 
     // A withdrawal, then a delivery, each leave nothing to draw.
-    app.apply_completion(read(vec![message(Status::Withdrawn)]));
+    read(&mut app, vec![message(Status::Withdrawn)]);
     let screen = rendered(&app, 72, 12);
     assert!(!screen.contains("Queued for current turn"), "{screen}");
     assert!(!screen.contains("Ctrl+U withdraw"), "{screen}");
 
-    app.apply_completion(read(vec![message(Status::Queued)]));
+    read(&mut app, vec![message(Status::Queued)]);
     assert!(rendered(&app, 72, 12).contains("◆ QUEUED FOR CURRENT TURN  use the other branch"));
     app.apply_event(&otto_core::wire::events::WireEvent {
         event_type: otto_core::wire::events::USER_MESSAGE.into(),

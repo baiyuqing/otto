@@ -237,17 +237,11 @@ pub struct Runner {
     /// `Runner::close_mcp` (awaited, bounded) shut its clients down.
     pub(crate) mcp: Arc<crate::mcp::Servers>,
     pub(crate) task_control: Arc<crate::app::task_control::TaskControl>,
-    /// Adds advisory hints to memory candidates, absent when memory is off.
-    /// Reflection reads it from the active runner.
-    pub(crate) advisor: Option<Arc<crate::memory::advice::Advisor>>,
     /// The origin of the current user turn, read by the schedule tools.
     pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
     /// Exact passive-presentation origin for the current logical user turn.
     /// Unlike scheduling, a wake turn clears this instead of inheriting it.
     pub(crate) presentation_origin: Arc<crate::schedule::tools::TurnOrigin>,
-    /// Where the controller binds the `reflect` tool's port. Present whether
-    /// or not the tool is registered.
-    pub(crate) reflection: Arc<crate::tool::reflect::Handle>,
 }
 
 /// The tool-less agent behind the session-model advice backend.
@@ -327,9 +321,6 @@ pub struct Shared {
     /// loaded workspace. Each workspace's `Builder` keeps only its own
     /// `workspace_scope`.
     pub memory: super::wiring::MemoryWiring,
-    /// The reflection use case: resolved `[reflection]` settings and, when
-    /// enabled, the `~/.otto/reflection.db` store.
-    pub reflector: Arc<crate::reflection::Reflector>,
     /// The process log, built once at the composition root. Interactive
     /// frontends get `Logger::discard()` because stderr would overwrite the
     /// screen.

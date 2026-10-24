@@ -3,13 +3,11 @@ package bridge
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 	"github.com/baiyuqing/otto/chat-connector/internal/state"
@@ -217,99 +215,5 @@ func TestEndToEndModelInitiatedApproval(t *testing.T) {
 				return false
 			}, "plan continuation")
 		})
-	}
-}
-
-func TestEndToEndReflectionCommands(t *testing.T) {
-	bin := ottoBin(t)
-	for _, mode := range []string{"local", "attach", "tcp"} {
-		t.Run(mode, func(t *testing.T) {
-			provider := newScriptedFakeProvider(t, nil, func(body []byte, _ int) string {
-				if strings.Contains(string(body), "You are a reflection assistant") {
-					return chatTextReply(`{"memories":[],"skills":[]}`)
-				}
-				return ""
-			})
-			home := ottoHome(t, provider.URL)
-			workspace, err := filepath.EvalSymlinks(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
-			if mode == "attach" {
-				sock, _ := startOttoServer(t, bin, home, workspace)
-				options.Command = []string{bin, "acp", "--attach", "--socket", sock}
-			}
-			if mode == "tcp" {
-				_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
-				options = tcpAgentOptions(t, diagnostics, workspace)
-			}
-			h := newHarness(t, setup{platform: "telegram", agent: options})
-			h.say("do useful work")
-			h.waitSent(1)
-			for i, command := range []string{"/skill", "/skill generated", "/reflect"} {
-				h.say(command)
-				got := h.waitSent(i + 2)[i+1]
-				want := []string{"Usage: /skill generated", "No skills generated", "reflection:"}[i]
-				if !strings.Contains(got, want) {
-					t.Fatalf("%s: reply = %q, want %q", command, got, want)
-				}
-			}
-			provider.mu.Lock()
-			bodies := slices.Clone(provider.bodies)
-			provider.mu.Unlock()
-			if len(bodies) != 2 || !strings.Contains(bodies[1], "You are a reflection assistant") {
-				t.Fatalf("commands did not use the reflection pipeline: %v", bodies)
-			}
-			if err := h.shutdown(); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestEndToEndCompletedWorkAutomaticallyReflects(t *testing.T) {
-	bin := ottoBin(t)
-	provider := newScriptedFakeProvider(t, nil, func(body []byte, request int) string {
-		if strings.Contains(string(body), "You are a reflection assistant") {
-			return chatTextReply(`{"memories":[],"skills":[]}`)
-		}
-		if request < 10 {
-			// A distinct limit per call keeps the no-progress guard, which
-			// stops a turn after 8 identical calls in a row, from ending it.
-			arguments := fmt.Sprintf(`{"path":"notes.txt","limit":%d}`, request+1)
-			return chatToolCallReply(fmt.Sprintf("read-%d", request), "read", arguments)
-		}
-		return chatTextReply("work complete")
-	})
-	home := ottoHome(t, provider.URL)
-	workspace, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte("verified local procedure\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
-	h := newHarness(t, setup{platform: "telegram", agent: tcpAgentOptions(t, diagnostics, workspace)})
-	h.say("complete a complex local task")
-	if got := h.waitSent(1)[0]; got != "work complete" {
-		t.Fatalf("task reply = %q", got)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		provider.mu.Lock()
-		bodies := slices.Clone(provider.bodies)
-		provider.mu.Unlock()
-		if len(bodies) == 12 && strings.Contains(bodies[11], "You are a reflection assistant") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("successful work did not automatically reflect: %d requests", len(bodies))
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err := h.shutdown(); err != nil {
-		t.Fatal(err)
 	}
 }

@@ -129,10 +129,6 @@ impl MemoryService for External {
         self.called(Operation::Observe, &request.context);
         Ok(self.receipt(&request.request_id))
     }
-    async fn reflect(&self, request: &ReflectRequest, _: &dyn OperationControl) -> Result<Receipt> {
-        self.called(Operation::Reflect, &request.context);
-        Ok(self.receipt(&request.request_id))
-    }
     async fn forget(&self, request: &ForgetRequest, _: &dyn OperationControl) -> Result<Receipt> {
         self.called(Operation::Forget, &request.context);
         let mut receipt = self.receipt(&request.request_id);
@@ -230,11 +226,7 @@ fn observation() -> Observation {
 fn grant(background: bool) -> LearningGrant {
     LearningGrant {
         scopes: context().scopes,
-        input_classes: vec![
-            "message".into(),
-            "explicit_memory".into(),
-            "reflection".into(),
-        ],
+        input_classes: vec!["message".into(), "explicit_memory".into()],
         background,
     }
 }
@@ -295,7 +287,7 @@ async fn recall_only_admits_reads_and_never_submits_unsupported_writes() {
 
 #[tokio::test]
 async fn direct_learning_requires_matching_host_grant_and_keeps_partial_receipts() {
-    let mut service = External::new(&[Operation::Remember, Operation::Observe, Operation::Reflect]);
+    let mut service = External::new(&[Operation::Remember, Operation::Observe]);
     service.completion = Completion::Partial;
     for capability in &mut service.description.capabilities[1..] {
         capability.effects.push(Effect::BackgroundEvolution);
@@ -317,19 +309,8 @@ async fn direct_learning_requires_matching_host_grant_and_keeps_partial_receipts
         observations: vec![observation()],
         mode: ObserveMode::Learn,
     };
-    let reflect = ReflectRequest {
-        context: context(),
-        request_id: "reflect-1".into(),
-        evidence: vec![observation()],
-        sources: vec![],
-        focus: "facts".into(),
-    };
     assert_eq!(
         reviewed.observe(&observe, &control).await.unwrap_err().kind,
-        ErrorKind::Unauthorized
-    );
-    assert_eq!(
-        reviewed.reflect(&reflect, &control).await.unwrap_err().kind,
         ErrorKind::Unauthorized
     );
     let no_background = Client::with_learning(service.clone(), grant(false)).unwrap();
@@ -360,13 +341,12 @@ async fn direct_learning_requires_matching_host_grant_and_keeps_partial_receipts
     for receipt in [
         client.remember(&remember(), &control).await.unwrap(),
         client.observe(&observe, &control).await.unwrap(),
-        client.reflect(&reflect, &control).await.unwrap(),
     ] {
         assert_eq!(receipt.completion, Completion::Partial);
         assert_eq!(receipt.visibility, Visibility::Pending);
         assert_eq!(receipt.items[0].state, ItemState::Skipped);
     }
-    for op in [Operation::Remember, Operation::Observe, Operation::Reflect] {
+    for op in [Operation::Remember, Operation::Observe] {
         assert_eq!(service.count(op), 1);
     }
     let mut archive = observe;

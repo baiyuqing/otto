@@ -89,7 +89,7 @@ async fn per_run_system_context_is_sent_for_one_turn_only() {
     );
     let cancel = CancellationToken::new();
     agent
-        .run_with_system_context("first", "transient reflection notes", &mut |_| {}, &cancel)
+        .run_with_system_context("first", "transient task notes", &mut |_| {}, &cancel)
         .await
         .expect("first run");
     agent
@@ -101,16 +101,16 @@ async fn per_run_system_context_is_sent_for_one_turn_only() {
     assert_eq!(requests.len(), 3);
     assert_eq!(
         requests[0].system_prompt,
-        "be brief\n\ntransient reflection notes"
+        "be brief\n\ntransient task notes"
     );
     assert_eq!(
         requests[1].system_prompt,
-        "be brief\n\ntransient reflection notes"
+        "be brief\n\ntransient task notes"
     );
     assert_eq!(requests[2].system_prompt, "be brief");
     for message in agent.session().messages() {
         assert!(
-            !message.text().contains("transient reflection notes"),
+            !message.text().contains("transient task notes"),
             "per-run system context was persisted"
         );
     }

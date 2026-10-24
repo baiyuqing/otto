@@ -259,33 +259,6 @@ impl Log {
             }
         }
     }
-    pub(super) fn reflection_decision(&self, fields: &[(&str, String)]) {
-        self.fixed(
-            "reflection_decision",
-            &[
-                "backend",
-                "trigger",
-                "outcome",
-                "reason",
-                "latency_ms",
-                "input_bytes",
-                "confidence",
-            ],
-            fields,
-        );
-    }
-
-    /// Writes `event` with only the `allowed` fields.
-    fn fixed(&self, event: &str, allowed: &[&str], fields: &[(&str, String)]) {
-        let mut record = json!({"event": event, "schema_version": 1});
-        for (key, value) in fields {
-            if allowed.contains(key) {
-                record[*key] = Value::String(value.clone());
-            }
-        }
-        self.write(record);
-    }
-
     pub(super) fn scope(
         self: &Arc<Self>,
         session: &str,

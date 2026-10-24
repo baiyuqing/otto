@@ -74,16 +74,15 @@ fn project_invocation_identity(
 
 pub mod approval;
 pub mod approval_control;
-pub mod auto_reflection;
 pub mod channel;
 pub(crate) mod management;
-mod requested_reflection;
 pub(crate) mod task_control;
 pub(crate) mod turn_queue;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 mod inspection;
+pub(crate) mod notices;
 mod profile;
 mod prompt;
 mod replacement;
@@ -371,14 +370,12 @@ pub struct Controller {
     sandbox: Option<Arc<dyn SandboxControl>>,
     state: Mutex<State>,
     close_signal: Condvar,
-    /// Lines from background reflection for a frontend to show.
-    notices: Arc<auto_reflection::Notices>,
+    /// Cancels pending controller operations during close.
+    close_cancel: CancellationToken,
+    /// Lines from background operations for a frontend to show.
+    notices: Arc<notices::Notices>,
     /// Model-written texts of finished wake turns, for ACP clients.
-    wake_replies: auto_reflection::Notices,
-    /// Whether a background reflection run is in flight; one at a time.
-    auto_running: Arc<std::sync::atomic::AtomicBool>,
-    /// Cancelled by `request_close`, which stops a background run.
-    auto_cancel: CancellationToken,
+    wake_replies: notices::Notices,
     approval_control: tokio::sync::Mutex<()>,
     /// Set by [`Controller::push_scheduled`]; the TUI rings the terminal bell
     /// once per [`Controller::take_bell`].
@@ -452,17 +449,15 @@ impl Controller {
                 ..State::default()
             }),
             close_signal: Condvar::new(),
-            notices: Arc::new(auto_reflection::Notices::new()),
-            wake_replies: auto_reflection::Notices::new(),
-            auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            auto_cancel: CancellationToken::new(),
+            close_cancel: CancellationToken::new(),
+            notices: Arc::new(notices::Notices::new()),
+            wake_replies: notices::Notices::new(),
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
             herdr: std::sync::RwLock::new(None),
             trace_cache: trace::TraceCache::default(),
         };
         controller.notify_memory_state();
-        controller.bind_reflection();
         controller
     }
 
@@ -556,7 +551,7 @@ impl Controller {
     /// flight. Never waits and never closes, so a callback running inside an
     /// operation may call it.
     pub fn request_close(&self) {
-        self.auto_cancel.cancel();
+        self.close_cancel.cancel();
         let mut state = self.lock();
         state.closed = true;
         if state.busy {

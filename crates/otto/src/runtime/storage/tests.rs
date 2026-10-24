@@ -31,13 +31,6 @@ impl RepositoryFactory for RegisteredFactory {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.inner.tasks(endpoint)
     }
-    fn reflection(
-        &self,
-        endpoint: Endpoint<'_>,
-    ) -> crate::reflection::store::Result<Arc<dyn ReflectionStore>> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.inner.reflection(endpoint)
-    }
     fn skill_checks(
         &self,
         endpoint: Endpoint<'_>,
@@ -163,7 +156,7 @@ fn registered_backend_composes_with_unchanged_approval_service() {
 }
 
 #[test]
-fn registered_backend_composes_telemetry_and_reflection_repositories() {
+fn registered_backend_composes_telemetry_repositories() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut storage = Storage::default();
     storage
@@ -175,11 +168,6 @@ fn registered_backend_composes_telemetry_and_reflection_repositories() {
     drop(defaults.tasks(&directory.path().join("tasks.db")).unwrap());
     drop(
         defaults
-            .reflection(&directory.path().join("reflection.db"))
-            .unwrap(),
-    );
-    drop(
-        defaults
             .skill_checks(&directory.path().join("skill_checks.db"))
             .unwrap(),
     );
@@ -188,30 +176,24 @@ fn registered_backend_composes_telemetry_and_reflection_repositories() {
             .memory_advice(&directory.path().join("memory_advice.db"))
             .unwrap(),
     );
-    let routes = [
-        "usage",
-        "tasks",
-        "reflection",
-        "skill_checks",
-        "memory_advice",
-    ]
-    .into_iter()
-    .map(|domain| {
-        (
-            domain.to_owned(),
-            StorageRoute {
-                backend: "extension".into(),
-                endpoint: directory
-                    .path()
-                    .join(format!("{domain}.db"))
-                    .to_str()
-                    .unwrap()
-                    .into(),
-                namespace_identity: None,
-            },
-        )
-    })
-    .collect();
+    let routes = ["usage", "tasks", "skill_checks", "memory_advice"]
+        .into_iter()
+        .map(|domain| {
+            (
+                domain.to_owned(),
+                StorageRoute {
+                    backend: "extension".into(),
+                    endpoint: directory
+                        .path()
+                        .join(format!("{domain}.db"))
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    namespace_identity: None,
+                },
+            )
+        })
+        .collect();
     let storage = storage.with_routes(routes).unwrap();
 
     assert_eq!(
@@ -232,17 +214,9 @@ fn registered_backend_composes_telemetry_and_reflection_repositories() {
             .tasks
             .is_empty()
     );
-    assert_eq!(
-        storage
-            .reflection(Path::new("unused"))
-            .unwrap()
-            .watermark("session")
-            .unwrap(),
-        None
-    );
     assert!(storage.skill_checks(Path::new("unused")).is_ok());
     assert!(storage.memory_advice(Path::new("unused")).is_ok());
-    assert_eq!(calls.load(Ordering::Relaxed), 5);
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
 }
 
 struct IncapableDriver {

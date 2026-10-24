@@ -129,25 +129,6 @@ pub(crate) fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     1
 }
 
-/// Runs `on_exit` reflection before the controller closes, for at most
-/// [`crate::app::auto_reflection::EXIT_TIMEOUT`]. Ctrl+C skips it. The wait is the cost of
-/// the feature: a process that is exiting cannot finish it in the background.
-/// Returns the line to show, or `Err` when it timed out. It takes no writers, so the
-/// future stays `Send`.
-async fn reflect_on_exit(
-    controller: &Controller,
-    cancel: &CancellationToken,
-) -> Result<Option<String>, ()> {
-    let token = cancel.child_token();
-    let outcome = tokio::time::timeout(
-        crate::app::auto_reflection::EXIT_TIMEOUT,
-        controller.reflect_on_exit(&token),
-    )
-    .await;
-    token.cancel();
-    outcome.map_err(|_| ())
-}
-
 /// Runs one `otto` invocation and returns its exit code.
 ///
 /// `environment_entries` is the raw process environment (`KEY=VALUE` byte

@@ -173,7 +173,6 @@ pub enum Operation {
     Recall,
     Observe,
     Remember,
-    Reflect,
     Forget,
     Inspect,
     Feedback,
@@ -291,14 +290,6 @@ pub struct RememberRequest {
     pub target: Option<MemoryRef>,
     pub metadata: BTreeMap<String, String>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReflectRequest {
-    pub context: MemoryContext,
-    pub request_id: String,
-    pub evidence: Vec<Observation>,
-    pub sources: Vec<SourceRef>,
-    pub focus: String,
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForgetLevel {
@@ -379,7 +370,6 @@ pub struct FeedbackRequest {
 pub enum MutatingRequest {
     Observe(ObserveRequest),
     Remember(RememberRequest),
-    Reflect(ReflectRequest),
     Forget(ForgetRequest),
     Feedback(FeedbackRequest),
 }

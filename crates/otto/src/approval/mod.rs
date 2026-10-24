@@ -6,7 +6,6 @@ pub mod memory;
 pub mod migration;
 mod policy;
 pub mod profile_change;
-pub mod reflection;
 pub mod repository;
 pub mod reviewer;
 mod service;

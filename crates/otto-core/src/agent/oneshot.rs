@@ -1,6 +1,6 @@
 //! A tool-less, single-request text completion.
 //!
-//! Features that need one model answer outside the turn loop (reflection
+//! Features that need one model answer outside the turn loop (advice
 //! today) call [`Agent::complete_text`], so they use the agent's own provider,
 //! model, thinking setting, and redactor instead of duplicating them.
 //!

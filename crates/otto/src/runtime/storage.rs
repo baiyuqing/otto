@@ -8,7 +8,6 @@ use std::sync::Arc;
 use crate::approval::repository::ApprovalStore;
 use crate::hex::to_hex;
 use crate::memory::advice::audit::AuditStore;
-use crate::reflection::repository::ReflectionStore;
 use crate::schedule::ScheduleStore;
 use crate::session::SessionRepository;
 use crate::skill::check_repository::CheckStore;
@@ -120,12 +119,6 @@ pub trait RepositoryFactory: Send + Sync {
         _endpoint: Endpoint<'_>,
     ) -> crate::subagent::record::Result<Arc<dyn TaskRepository>> {
         Err(crate::subagent::record::Error)
-    }
-    fn reflection(
-        &self,
-        _endpoint: Endpoint<'_>,
-    ) -> crate::reflection::store::Result<Arc<dyn ReflectionStore>> {
-        Err(crate::reflection::store::Error::Io)
     }
     fn skill_checks(
         &self,
@@ -240,20 +233,6 @@ impl RepositoryFactory for SqlRepositories {
             .map_err(|_| crate::subagent::record::Error)?;
         Ok(Arc::new(
             crate::storage::backends::turso::tasks::Store::from_connection(connection)?,
-        ))
-    }
-    fn reflection(
-        &self,
-        endpoint: Endpoint<'_>,
-    ) -> crate::reflection::store::Result<Arc<dyn ReflectionStore>> {
-        let connection = self
-            .connection(
-                endpoint,
-                &crate::storage::backends::turso::migration::reflection::ReflectionCodec,
-            )
-            .map_err(|_| crate::reflection::store::Error::Io)?;
-        Ok(Arc::new(
-            crate::storage::backends::turso::reflection::Store::from_connection(connection)?,
         ))
     }
     fn skill_checks(
@@ -489,7 +468,6 @@ impl Storage {
                     | "schedule"
                     | "usage"
                     | "tasks"
-                    | "reflection"
                     | "skill_checks"
                     | "memory_advice"
                     | "sessions"
@@ -623,16 +601,6 @@ impl Storage {
             .route("tasks", default)
             .map_err(|_| crate::subagent::record::Error)?;
         factory.tasks(endpoint)
-    }
-
-    pub fn reflection(
-        &self,
-        default: &Path,
-    ) -> crate::reflection::store::Result<Arc<dyn ReflectionStore>> {
-        let (factory, endpoint) = self
-            .route("reflection", default)
-            .map_err(|_| crate::reflection::store::Error::Io)?;
-        factory.reflection(endpoint)
     }
 
     pub fn skill_checks(

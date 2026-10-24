@@ -284,13 +284,6 @@ async fn run_app<B: Backend>(
                         propagate_turn_error(error)?;
                     }
                 }
-                Action::Reflect(focus) => {
-                    if let Err(error) =
-                        run_reflect(&mut app, terminal, keys, controller, cancel, focus).await
-                    {
-                        propagate_turn_error(error)?;
-                    }
-                }
                 Action::Login(args) => {
                     login_dispatch(&mut app, terminal, keys, controller, &args, cancel).await
                 }

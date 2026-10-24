@@ -45,7 +45,7 @@ use crate::schedule::Origin;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 mod approvals;
-mod reflection;
+mod session_operations;
 mod sessions;
 mod tasks;
 
@@ -134,52 +134,14 @@ pub struct SessionRow {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ReflectionResult {
-    pub line: String,
-    /// Empty from a serve that has none, or predates the field.
-    #[serde(default)]
-    pub retrospective: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GeneratedSkill {
-    pub name: String,
-    pub run_id: String,
-    pub session_id: String,
-    pub reason: String,
-    pub updated_at: String,
-    pub owned: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GeneratedSkillList {
-    pub enabled: bool,
-    pub skills: Vec<GeneratedSkill>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReflectionRunList {
-    pub enabled: bool,
-    pub runs: Vec<crate::reflection::runlog::Summary>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReflectionRunLog {
-    pub path: std::path::PathBuf,
-    pub content: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReflectionNotice {
+pub struct WakeReply {
     pub id: u64,
     pub text: String,
-    #[serde(default)]
-    pub presentation_origin: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ReflectionNotices {
-    pub notices: Vec<ReflectionNotice>,
+pub struct WakeReplies {
+    pub notices: Vec<WakeReply>,
     pub last: u64,
 }
 

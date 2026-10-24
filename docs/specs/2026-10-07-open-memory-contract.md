@@ -1,10 +1,11 @@
 # Open Memory service contract
 
-Status: Rust contracts, host admission, built-in projection and runtime injection
-implemented on 2026-10-07. External transports and a semantic-search upgrade are
-not included in that implementation. The original comparative research records
-are available in Git history; examples below describe consumer boundaries, not
-supported third-party provider integrations.
+Status: Rust service contracts and runtime injection were implemented on
+2026-10-07. This document specifies the independent memory-service protocol,
+not a user-facing Otto reflection feature or model-callable capability. External
+transports and a semantic-search upgrade are not included. The original
+comparative research records are available in Git history; examples below
+describe consumer boundaries, not supported third-party provider integrations.
 
 ## Objective and decisions
 
@@ -14,8 +15,8 @@ require changing the agent, model tools or frontend use cases.
 
 Decisions confirmed by the user on 2026-10-07:
 
-- Design the service contract first; the interface is not limited to the
-  initial examples `recall`, `remember`, `reflection` and `forget`.
+- Design a service contract with explicit operation capabilities and declared
+  guarantees; do not infer unsupported behavior from a service implementation.
 - Rust extensions may adapt independent services such as Mem0. Do not require
   an external service to implement Otto's repository schema or algorithms.
 - Deliver behavior contracts and Rust interfaces first; adapters call native
@@ -49,10 +50,10 @@ service and from an unverified deployment guarantee.
 | `apply` | Apply an approved preparation | Execution receipt | No |
 | `operation_status` | Follow a service operation reference | Updated receipt | No |
 
-These are service operations, not necessarily model-callable tools. The
-existing `remember`, `forget`, `memory_search` and `reflect` tools remain Otto
-facade operations; their presence and behavior follow authorization and actual
-capabilities. A capability declaration never makes a new model tool appear.
+These are service operations, not necessarily model-callable tools. Otto's
+current memory facade does not expose a reflection command or model tool; a
+service declaring `reflect` does not make one available. Capability declarations
+alone never create a user-facing or model-callable capability.
 
 `observe`, `remember` and `reflect` have different meanings:
 
@@ -240,7 +241,7 @@ credentials or live provider calls. It covers:
 
 - A recall-only service works; unsupported writes make no service call.
 - Scope admission and prompt trust are enforced independently of service data.
-- Observe, explicit content and reflection keep distinct effects and inputs.
+- Observe, explicit content and service-declared processing keep distinct effects and inputs.
 - Strict review rejects changed targets, expanded effects and unknown ongoing
   learning; delegated mode needs an explicit grant.
 - Duplicate events and writes respect the actual idempotency guarantee.
@@ -255,8 +256,8 @@ credentials or live provider calls. It covers:
 
 The default agent recall and tools keep the native path, including the standing
 set's independent limit/budget and existing review UI. The built-in Rust
-projection declares only implemented capabilities; service-neutral `observe`,
-`reflect`, feedback and jobs are not wired to the existing reflection subsystem.
+projection declares only implemented capabilities. Service operations beyond
+those declared by a particular implementation remain unavailable through it.
 
 Injected services use the neutral port for agent recall. Their context is
 always reference material; metadata cannot promote a standing rule. An external

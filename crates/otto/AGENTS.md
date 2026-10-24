@@ -18,9 +18,7 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
 - Use `fsops` and workspace directory handles for confined/atomic operations.
   Keep native session storage append-only and Pi-compatible.
 - Memory callers use `memory::Service` for the built-in domain or
-  `memory::client::Client` for the neutral service, not a store directly. Reflection
-  queues human-reviewed candidates; its vetted skill writer and boundary
-  tests remain the authority for filesystem mutation.
+  `memory::client::Client` for the neutral service, not a store directly.
 - Bash uses `sandbox`. macOS Seatbelt is the supported confined driver;
   Linux has no confined driver and bash stays unavailable unless the user
   explicitly selects `--sandbox off`. Keep platform code behind `cfg`, and
@@ -30,6 +28,6 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
 - Add or update adjacent behavioral tests and architecture guards. macOS-only
   acceptance cannot be validated by a Linux run that discovers zero tests.
 
-Detailed reflection, memory, ACP, task and storage contracts live in the
-linked development guide; keep one canonical contract rather than copying
-inventories into agent instructions.
+Detailed memory, ACP, task and storage contracts live in the linked development
+guide; keep one canonical contract rather than copying inventories into agent
+instructions.

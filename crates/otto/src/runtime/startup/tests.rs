@@ -78,13 +78,11 @@ fn disabled_applies_only_the_chosen_switches() {
     Disabled {
         skills: true,
         subagents: true,
-        reflection: true,
         ..Disabled::default()
     }
     .apply(&mut file);
     assert_eq!(file.skills.enabled, Some(false));
     assert_eq!(file.agents.enabled, Some(false));
-    assert!(!file.reflection.enabled);
     assert_eq!(file.mcp.enabled, None);
     assert_eq!(file.memory.enabled, None);
     assert_eq!(file.plugins.enabled, None);

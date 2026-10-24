@@ -59,19 +59,18 @@ impl Write for Buffer {
 }
 
 #[tokio::test]
-async fn notices_from_background_reflection_print_before_the_prompt() {
+async fn background_notices_print_before_the_prompt() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
-    controller
-        .push_notice("reflection: 1 candidate(s) queued for review (/memory review), 0 dropped");
+    controller.push_notice("memory: 1 candidate(s) queued for review (/memory review), 0 dropped");
 
     let (stdout, stderr, result) = session("/exit\n", &controller).await;
 
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(stderr, "");
     let notice = stdout
-        .find("reflection: 1 candidate(s) queued")
+        .find("memory: 1 candidate(s) queued")
         .expect("the notice is printed");
     let prompt = stdout
         .find(crate::tui::gutter::USER_MARK)

@@ -10,27 +10,11 @@
 use std::path::{Path, PathBuf};
 
 const DOMAIN_MODULES: &[&str] = &[
-    "approval",
-    "memory",
-    "reflection",
-    "session",
-    "schedule",
-    "workflow",
-    "skill",
-    "usage",
-    "subagent",
+    "approval", "memory", "session", "schedule", "workflow", "skill", "usage", "subagent",
 ];
 const FRONTENDS: &[&str] = &["cli", "tui", "acp", "server", "client"];
 const DOMAINS: &[&str] = &[
-    "approval",
-    "memory",
-    "reflection",
-    "session",
-    "schedule",
-    "workflow",
-    "skill",
-    "usage",
-    "subagent",
+    "approval", "memory", "session", "schedule", "workflow", "skill", "usage", "subagent",
 ];
 
 fn sources(path: &Path) -> Vec<PathBuf> {
@@ -197,11 +181,7 @@ fn is_named_legacy_facade(path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")).join("src")) else {
         return false;
     };
-    [
-        Path::new("reflection/store.rs"),
-        Path::new("subagent/record.rs"),
-    ]
-    .contains(&relative)
+    [Path::new("subagent/record.rs")].contains(&relative)
 }
 
 fn is_pure_legacy_facade(path: &Path, source: &str) -> bool {
@@ -426,7 +406,6 @@ fn backend_violations(source: &str) -> Vec<String> {
         || [
             "crate::approval::Service",
             "crate::memory::Service",
-            "crate::reflection::Service",
             "crate::workflow::Controller",
         ]
         .iter()
@@ -626,21 +605,6 @@ fn fixtures_prove_forbidden_edges_are_detected() {
         )
         .is_empty()
     );
-    let reflection_store = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reflection/store.rs");
-    assert!(
-        domain_violations(
-            &reflection_store,
-            "pub use crate::storage::backends::turso::reflection::Store;"
-        )
-        .is_empty()
-    );
-    let facade_with_preceding_imports = "//! legacy facade\nuse std::fmt;\n\npub use crate::storage::backends::turso::reflection::Store;";
-    assert!(domain_violations(&reflection_store, facade_with_preceding_imports).is_empty());
-
-    assert!(!domain_violations(
-        &reflection_store,
-        "pub use crate::storage::backends::turso::reflection::Store;\nfn open() { Store::open(); }"
-    ).is_empty());
     let task_record = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/subagent/record.rs");
     assert!(
         domain_violations(

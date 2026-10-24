@@ -1,4 +1,4 @@
-//! Wake, compact, reflect and login turns driven from the terminal UI.
+//! Wake, compact and login turns driven from the terminal UI.
 
 use super::*;
 
@@ -158,46 +158,6 @@ pub(super) async fn run_compact<B: Backend>(
             })
         }
     }
-}
-
-/// Runs one `/reflect`: one model call with no tool events, then a one-line
-/// report as system text.
-pub(super) async fn run_reflect<B: Backend>(
-    app: &mut App,
-    terminal: &mut Terminal<B>,
-    keys: &mut mpsc::Receiver<TuiEvent>,
-    controller: &Controller,
-    cancel: &CancellationToken,
-    focus: String,
-) -> Result<(), ReplError> {
-    app.start_turn();
-    let turn = cancel.child_token();
-    let result = {
-        let (_events, mut received) = mpsc::unbounded_channel::<WireEvent>();
-        drive_turn(
-            app,
-            terminal,
-            keys,
-            &mut received,
-            &turn,
-            &app::Backend::Local(controller),
-            controller.reflect(&focus, &turn),
-            |_app, _event| {},
-        )
-        .await
-    };
-    let cancelled =
-        cancel.is_cancelled() || matches!(&result, Err(crate::reflection::Error::Cancelled));
-    app.finish_turn(result.is_ok(), cancelled);
-    if cancel.is_cancelled() {
-        return Err(ReplError::Cancelled);
-    }
-    match result {
-        Ok(report) => app.push_system(report.summary()),
-        Err(crate::reflection::Error::Cancelled) => {}
-        Err(error) => app.push_system(format!("/reflect: {error}")),
-    }
-    Ok(())
 }
 
 /// Streams ordinary command output through the same event/render loop as turns.

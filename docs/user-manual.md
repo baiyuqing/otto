@@ -11,7 +11,7 @@ for commands available in your installed version.
 | [Safety and tools](manual/safety-and-tools.md) | Approvals, sandbox, tools and sub-agents |
 | [Servers and connectors](manual/servers-and-connectors.md) | HTTP/API, ACP, browser and chat clients, diagnostics |
 | [Automation](manual/automation.md) | Durable workflows and workspace identity |
-| [Memory and extensions](manual/memory-and-extensions.md) | Memory, reflection, skills, MCP, plugins and hooks |
+| [Memory and extensions](manual/memory-and-extensions.md) | Memory, skills, MCP, plugins and hooks |
 | [Troubleshooting](manual/troubleshooting.md) | Common failures and recovery |
 
 For internals and contribution rules, see the [development guide](development.md).

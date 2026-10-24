@@ -106,7 +106,6 @@ pub(crate) struct Disabled {
     pub(crate) skills: bool,
     pub(crate) plugins: bool,
     pub(crate) subagents: bool,
-    pub(crate) reflection: bool,
     pub(crate) schedule: bool,
     pub(crate) session_persistence: bool,
     pub(crate) usage: bool,
@@ -115,7 +114,7 @@ pub(crate) struct Disabled {
 
 impl Disabled {
     /// Sets `[mcp]`, `[memory]`, `[skills]`, `[plugins]`, `[agents]` and
-    /// `[reflection]` `enabled = false` in memory for each disabled one.
+    /// `enabled = false` in memory for each disabled one.
     pub(crate) fn apply(&self, file: &mut File) {
         if self.mcp {
             file.mcp.enabled = Some(false);
@@ -131,9 +130,6 @@ impl Disabled {
         }
         if self.subagents {
             file.agents.enabled = Some(false);
-        }
-        if self.reflection {
-            file.reflection.enabled = false;
         }
     }
 }

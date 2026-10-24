@@ -204,10 +204,6 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             c.withdraw_steering(id)?;
             "Queued input withdrawn.".into()
         }
-        Command::Steer(text) => {
-            c.steer(&text)?;
-            format!("Guidance queued: {text}")
-        }
         Command::Management(request) => {
             return blocking(c, move |c| c.management(request).map(Reply::Management)).await;
         }

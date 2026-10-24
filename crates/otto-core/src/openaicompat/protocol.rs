@@ -34,6 +34,9 @@ pub struct WireRequest {
     pub tools: Vec<WireTool>,
     pub stream: bool,
     pub stream_options: StreamOptions,
+    /// The request's cache key, written only when non-empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub prompt_cache_key: String,
 }
 
 /// Streaming options. Otto sets `include_usage` so the last chunk carries the
@@ -216,7 +219,8 @@ pub struct PromptTokensDetails {
 /// User and context messages become `user` messages carrying the concatenated
 /// text of their text blocks. An assistant message carries its text plus one
 /// wire tool call per tool-call block. A tool message expands into one `tool`
-/// message per tool-result block; its other blocks are dropped.
+/// message per tool-result block; its other blocks are dropped. A non-empty
+/// cache key becomes `prompt_cache_key`.
 pub fn build_request(request: &Request) -> WireRequest {
     let mut messages: Vec<WireMessage> = Vec::new();
     if !request.system_prompt.is_empty() {
@@ -284,6 +288,7 @@ pub fn build_request(request: &Request) -> WireRequest {
         stream_options: StreamOptions {
             include_usage: true,
         },
+        prompt_cache_key: request.cache_key.clone(),
     }
 }
 
@@ -408,13 +413,15 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn cache_key_is_not_serialized() {
-        let request = Request {
+    fn cache_key_is_sent_only_when_non_empty() {
+        let keyed = Request {
             cache_key: "s1".into(),
             ..Request::default()
         };
-        let body = serde_json::to_string(&build_request(&request)).unwrap();
-        assert!(!body.contains("s1") && !body.contains("cache"), "{body}");
+        let body = encode(&keyed);
+        assert!(body.ends_with(r#","prompt_cache_key":"s1"}"#), "{body}");
+        let body = encode(&Request::default());
+        assert!(!body.contains("prompt_cache_key"), "{body}");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

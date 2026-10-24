@@ -83,3 +83,50 @@ func TestAutoShortcutUpdatesClickedCardAndSessionMode(t *testing.T) {
 		t.Fatalf("unexpected extra messages: %v", got)
 	}
 }
+
+func TestPermissionsPresetsChangeModeLikeAutoAlias(t *testing.T) {
+	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	sentTexts := func() string { return strings.Join(h.plat.texts(), "\n") }
+	h.say("/permissions manual")
+	h.waitFor(func() bool { return strings.Contains(sentTexts(), "Approval mode: MANUAL") }, "manual preset")
+	sid := h.b.opts.Store.Session("fake:c1")
+	if mode, err := h.agent.ApprovalMode(context.Background(), sid, nil); err != nil || mode != "manual" {
+		t.Fatalf("mode = %q, err = %v", mode, err)
+	}
+	h.say("/permissions")
+	h.waitFor(func() bool { return strings.Contains(sentTexts(), "/permissions auto · /permissions manual") }, "mode summary")
+	h.say("/permissions auto")
+	h.waitFor(func() bool { return strings.Contains(sentTexts(), "Approval mode: AUTO") }, "auto preset")
+	if mode, err := h.agent.ApprovalMode(context.Background(), sid, nil); err != nil || mode != "auto" {
+		t.Fatalf("mode = %q, err = %v", mode, err)
+	}
+}
+
+func TestPermissionsYoloIsRejectedWithoutAgentCall(t *testing.T) {
+	h := newHarness(t, setup{})
+	h.say("/permissions yolo")
+	if text := h.waitSent(1)[0]; !strings.Contains(text, "Usage: /permissions [manual|auto |") {
+		t.Fatal(text)
+	}
+	if calls := h.calls("auto:"); len(calls) != 0 {
+		t.Fatalf("yolo changed the mode: %v", calls)
+	}
+	if h.store.Session("fake:c1") != "" {
+		t.Fatal("rejected preset created a session")
+	}
+}
+
+func TestAutoIsHiddenAliasNotInMenu(t *testing.T) {
+	for _, command := range Commands {
+		if command.Name == "auto" {
+			t.Fatal("/auto is advertised in the menu")
+		}
+	}
+	h := newHarness(t, setup{})
+	h.say("/auto off")
+	if text := h.waitSent(1)[0]; !strings.Contains(text, "Approval mode: MANUAL") {
+		t.Fatal(text)
+	}
+}

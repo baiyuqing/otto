@@ -34,9 +34,9 @@ policy and human checkpoints remain enforced. Non-approval secret protections
 are unchanged; `Service::protect_secrets` is a compatibility no-op, not a toggle.
 
 `ApprovalSettings { policy, reviewer, revision }` separates sandbox permissions
-from policy. `/auto manual|auto|yolo` applies presets; `/permissions` and
-revision-checked APIs expose separate controls. Only admitted user actions may
-change settings/rules. Children inherit their root's live settings; unrelated
+from policy. `/permissions manual|auto|yolo` applies presets; `/permissions
+policy|reviewer` and revision-checked APIs expose separate controls. Only
+admitted user actions may change settings/rules. Children inherit their root's live settings; unrelated
 workspace requests cannot borrow them.
 
 - Confined operations execute directly. `never` rejects additional authority.

@@ -86,6 +86,7 @@ mod admission;
 mod approvals;
 mod memory_notice;
 mod migrate;
+mod permissions_command;
 mod resume_and_archive;
 mod sandbox_amendment;
 mod session_creation;

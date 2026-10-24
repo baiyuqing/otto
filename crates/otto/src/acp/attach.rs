@@ -282,11 +282,6 @@ impl Relay {
                     .permissions_command(session_id, args)
                     .await
                     .map(Some),
-                Command::Auto { args } => self
-                    .client
-                    .auto_mode_command(session_id, args)
-                    .await
-                    .map(Some),
                 Command::Context => self
                     .client
                     .context(session_id)

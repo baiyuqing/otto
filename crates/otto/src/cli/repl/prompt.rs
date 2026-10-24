@@ -191,12 +191,7 @@ impl<'a> Repl<'a> {
                         }
                     };
                     let trimmed = input.trim_end();
-                    if let Some(args) = trimmed.strip_prefix("/auto").filter(|args|args.is_empty() || args.starts_with(char::is_whitespace)) {
-                        let line = self.controller.auto_mode_command(args).unwrap_or_else(|e|e);
-                        let _ = writeln!(self.stdout,"{line}");
-                        continue;
-                    }
-                    if let Some(args) = trimmed.strip_prefix("/permissions").filter(|args|args.is_empty() || args.starts_with(char::is_whitespace)) {
+                    if let Some(args) = trimmed.strip_prefix("/permissions").or_else(|| trimmed.strip_prefix("/auto")).filter(|args|args.is_empty() || args.starts_with(char::is_whitespace)) {
                         let line = self.controller.permissions_command(args).unwrap_or_else(|e|e);
                         let _ = writeln!(self.stdout,"{line}");
                         continue;

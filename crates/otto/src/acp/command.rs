@@ -18,7 +18,6 @@ use otto_core::wire::events::WireCompaction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Command<'a> {
     Context,
-    Auto { args: &'a str },
     Permissions { args: &'a str },
     Compact { focus: &'a str },
     Model { profile: &'a str },
@@ -29,15 +28,13 @@ pub(super) enum Command<'a> {
 /// `Some` when the whole prompt is one of the supported slash commands.
 pub(super) fn parse(text: &str) -> Option<Command<'_>> {
     let text = text.trim_end();
-    if let Some(rest) = text.strip_prefix("/permissions")
+    // `/auto` is a hidden alias of `/permissions`.
+    if let Some(rest) = text
+        .strip_prefix("/permissions")
+        .or_else(|| text.strip_prefix("/auto"))
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
         return Some(Command::Permissions { args: rest.trim() });
-    }
-    if let Some(rest) = text.strip_prefix("/auto")
-        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-    {
-        return Some(Command::Auto { args: rest.trim() });
     }
     if text == "/context" {
         return Some(Command::Context);
@@ -102,11 +99,7 @@ pub(super) fn available_commands() -> SessionUpdate {
         .input(AvailableCommandInput::Unstructured(
             UnstructuredCommandInput::new("prompt"),
         )),
-        AvailableCommand::new(
-            "auto",
-            "Show the approval mode or set /auto manual|auto|yolo for this session",
-        ),
-        AvailableCommand::new("permissions", "Inspect approval policy and reviewer, or set policy on_request|never or reviewer user|auto_review"),
+        AvailableCommand::new("permissions", "Show the approval mode, or set manual|auto|yolo, policy on_request|never or reviewer user|auto_review"),
     ]))
 }
 
@@ -296,8 +289,20 @@ mod tests {
         assert_eq!(commands[2]["input"]["hint"], "optional profile");
         assert_eq!(commands[3]["name"], "steer");
         assert_eq!(commands[4]["name"], "queue");
-        assert_eq!(commands[5]["name"], "auto");
-        assert_eq!(commands[6]["name"], "permissions");
+        assert_eq!(commands[5]["name"], "permissions");
+        assert_eq!(commands.len(), 6);
+        assert!(commands.iter().all(|command| command["name"] != "auto"));
+        for alias in ["/auto off", "/auto", "/permissions off"] {
+            assert!(
+                matches!(parse(alias), Some(Command::Permissions { .. })),
+                "{alias}"
+            );
+        }
+        assert_eq!(
+            parse("/auto off"),
+            Some(Command::Permissions { args: "off" })
+        );
+        assert_eq!(parse("/autox"), None);
         assert_eq!(
             parse("/permissions policy never"),
             Some(Command::Permissions {

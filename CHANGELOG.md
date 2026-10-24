@@ -124,6 +124,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Features and reliability
 
+- Keep queued guidance visible in local and attached terminals, including text
+  admitted by other clients, and retain its body through delivery. Sending text
+  resumes follow-bottom; external messages preserve historical reading position
+  with a `Ctrl+End` jump-to-bottom hint above the composer. Rebuild or reinstall
+  Otto and restart terminal sessions to use the updated display.
+
 - Show all pending TUI inputs in the main conversation, not only the newest
   composer banner. Pending rows remain transient, become a single delivered
   message, and disappear on withdrawal. Reload active guidance on session

@@ -67,7 +67,13 @@ capability.
   history: delivery replaces a pending row with the actual user message rather
   than duplicating it, and withdrawal removes it. Startup, session switching
   and attached reconnect reload the current turn's pending guidance; a local
-  queued-next input stays scoped to its original session. Ordinary guidance uses
+  queued-next input stays scoped to its original session. Local and attached
+  terminals periodically refresh current-session guidance, including full text
+  submitted by other clients. A delivered pending row remains visible until its
+  actual user-message row arrives. Sending your own text returns the transcript
+  to follow-bottom. Other clients' messages do not move a scrolled historical
+  viewport: `NEW MESSAGES BELOW` above the composer offers `Ctrl+End` to jump
+  to the bottom (with no feature screen open). Ordinary guidance uses
   `◆ QUEUED FOR CURRENT TURN` and changes the title to `Queued for current turn · Ctrl+U recall to
   edit · Esc cancels turn`. `Ctrl+U` waits for the runtime to confirm that the
   guidance was not delivered, then returns its exact text to an empty composer
@@ -160,6 +166,7 @@ capability.
 | Left-button drag | Select visible text and copy it to the clipboard on release |
 | Mouse wheel, `PgUp` / `PgDn` | Navigate the focused screen control, or scroll the transcript |
 | `Home` / `End` | Move the cursor to the start or end of the composer |
+| `Ctrl+End` | Jump to the transcript bottom and resume following new messages (with no feature screen open) |
 | `Ctrl+A` / `Ctrl+E` | Move the cursor to the start or end of the current composer line |
 | `Esc` | Return or dismiss the active screen; at the composer, cancel the active turn |
 | `Ctrl+C` | Cancel; a second press within one second clears and quits |

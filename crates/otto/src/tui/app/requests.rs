@@ -78,6 +78,14 @@ impl App {
         }
     }
 
+    /// Periodic reads are bounded to one outstanding steering request. Explicit
+    /// post-write reads may supersede it to preserve admission ordering.
+    pub(crate) fn poll_steering(&mut self) {
+        if self.connected && self.session_changes.is_empty() && self.steering_generation.is_none() {
+            self.refresh_steering();
+        }
+    }
+
     /// Asks the back end for the active run's guidance. The only source of
     /// [`App::queued_steer`]: an empty answer means nothing is queued any more.
     pub(crate) fn refresh_steering(&mut self) -> Ticket {
@@ -118,11 +126,69 @@ impl App {
                 }
             }
         }
-        self.pending_steers = messages
-            .into_iter()
-            .filter(|message| message.status == Status::Queued)
+        self.delivered_steers
+            .retain(|id| messages.iter().any(|message| message.id == *id));
+        let previous_ids: HashSet<_> = self
+            .pending_steers
+            .iter()
+            .map(|message| message.id)
             .collect();
-        let queued = self.pending_steers.last().cloned();
+        // A first-observed delivery may already be in history, or may have
+        // arrived entirely between polls. Match rows by occurrence, reserving
+        // rows represented by known IDs so repeated text is not collapsed.
+        let mut unmatched_rows: HashMap<&str, usize> = HashMap::new();
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == Some(EntryKind::User))
+        {
+            *unmatched_rows.entry(entry.raw.as_str()).or_default() += 1;
+        }
+        for message in &messages {
+            if self.delivered_steers.contains(&message.id)
+                && let Some(count) = unmatched_rows.get_mut(message.text.as_str())
+            {
+                *count = count.saturating_sub(1);
+            }
+        }
+        let mut pending = Vec::new();
+        for message in messages {
+            if self.delivered_steers.contains(&message.id) {
+                continue;
+            }
+            if message.status == Status::Delivered
+                && !previous_ids.contains(&message.id)
+                && let Some(count) = unmatched_rows.get_mut(message.text.as_str())
+                && *count > 0
+            {
+                *count -= 1;
+                self.delivered_steers.insert(message.id);
+                continue;
+            }
+            if matches!(message.status, Status::Queued | Status::Delivered) {
+                if self.scroll.is_some() && !previous_ids.contains(&message.id) {
+                    self.new_messages = true;
+                }
+                pending.push(message);
+            }
+        }
+        // A lifecycle can clear at turn end before its final notification is
+        // painted. Keep already-observed deliveries until that notification.
+        for previous in &self.pending_steers {
+            if previous.status == Status::Delivered
+                && !self.delivered_steers.contains(&previous.id)
+                && !pending.iter().any(|message| message.id == previous.id)
+            {
+                pending.push(previous.clone());
+            }
+        }
+        self.pending_steers = pending;
+        let queued = self
+            .pending_steers
+            .iter()
+            .rev()
+            .find(|message| message.status == Status::Queued)
+            .cloned();
         if let Some(previous) = self.queued_steer.take()
             && queued
                 .as_ref()

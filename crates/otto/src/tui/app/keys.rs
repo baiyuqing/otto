@@ -104,6 +104,15 @@ impl App {
         if super::super::input::is_help(key) && self.composer.input.is_empty() {
             return self.dispatch_line("/help", backend, cancel);
         }
+        if key.code == KeyCode::End
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            self.scroll = None;
+            self.new_messages = false;
+            return None;
+        }
         if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
             self.handle_scroll_key(&key);
             return None;
@@ -194,7 +203,10 @@ impl App {
                 })
         } else if let Some(x) = self.scroll {
             let next = x.saturating_add(1);
-            self.scroll = (next < self.max_scroll.get()).then_some(next)
+            self.scroll = (next < self.max_scroll.get()).then_some(next);
+        }
+        if self.scroll.is_none() {
+            self.new_messages = false;
         }
     }
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -213,7 +225,10 @@ impl App {
             self.scroll = Some(top.saturating_sub(amount))
         } else if let Some(top) = self.scroll {
             let next = top.saturating_add(amount);
-            self.scroll = (next < self.max_scroll.get()).then_some(next)
+            self.scroll = (next < self.max_scroll.get()).then_some(next);
+        }
+        if self.scroll.is_none() {
+            self.new_messages = false;
         }
         true
     }

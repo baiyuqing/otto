@@ -78,7 +78,6 @@ pub(crate) enum Command {
         save: bool,
     },
     Rename(String),
-    AutoMode(String),
     Permissions(String),
     SandboxReload,
     SandboxAllow(String),

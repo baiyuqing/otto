@@ -134,9 +134,6 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                         .map_err(mutation_error)?;
                     format!("Session name: {name}")
                 }
-                Command::AutoMode(args) => {
-                    client.auto_mode_command(session, &args).await.map_err(mutation_error)?
-                }
                 Command::Permissions(args) => {
                     client.permissions_command(session, &args).await.map_err(mutation_error)?
                 }

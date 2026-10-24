@@ -137,37 +137,24 @@ impl Controller {
         warnings
     }
 
-    /// Reads the session's approval mode, or sets it when `args` selects one:
-    /// `manual`, `auto`, `yolo`, and the older `on` (AUTO) and `off` (MANUAL).
-    pub fn auto_mode_command(&self, args: &str) -> Result<String, String> {
-        let selected = parse_auto_mode(args)?;
-        if let Some(mode) = selected {
-            self.approval_service()
-                .set_mode(&self.approval_scope(), mode)
-                .map_err(|e| e.to_string())?;
-        }
-        let settings = self
-            .approval_service()
-            .settings(&self.approval_scope())
-            .map_err(|e| e.to_string())?;
-        Ok(format!(
-            "Approval mode: {}",
-            if settings.policy == otto_core::approval::ApprovalPolicy::Never {
-                "NEVER (reviewer disabled)"
-            } else {
-                settings.mode().label()
-            }
-        ))
-    }
-
+    /// `/permissions [args]` and its `/auto` alias: applies a preset or a
+    /// policy/reviewer change, then returns the approval report.
     pub fn permissions_command(&self, args: &str) -> Result<String, String> {
         let scope = self.approval_scope();
         let current = self
             .approval_service()
             .settings(&scope)
             .map_err(|e| e.to_string())?;
-        let settings = match permissions_update(args, current)? {
-            Some((policy, reviewer)) => self
+        let settings = match parse_permissions_command(args, current)? {
+            Some(PermissionsChange::Preset(mode)) => {
+                self.approval_service()
+                    .set_mode(&scope, mode)
+                    .map_err(|e| e.to_string())?;
+                self.approval_service()
+                    .settings(&scope)
+                    .map_err(|e| e.to_string())?
+            }
+            Some(PermissionsChange::Settings(policy, reviewer)) => self
                 .approval_service()
                 .set_settings(&scope, current.revision, policy, reviewer)
                 .map_err(|e| e.to_string())?,

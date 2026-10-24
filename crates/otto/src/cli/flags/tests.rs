@@ -40,8 +40,8 @@ fn yolo_applies_only_to_a_single_session_frontend() {
     assert!(!options(&[]).yolo);
     assert!(options(&["--yolo"]).yolo);
     assert!(rejection(&["--yolo", "--attach"]).contains("--attach"));
-    assert!(rejection(&["serve", "--yolo"]).contains("/auto yolo"));
-    assert!(rejection(&["acp", "--yolo"]).contains("/auto yolo"));
+    assert!(rejection(&["serve", "--yolo"]).contains("/permissions yolo"));
+    assert!(rejection(&["acp", "--yolo"]).contains("/permissions yolo"));
     // The flag is documented in the usage text.
     let mut usage = Vec::new();
     print_usage(&mut usage);

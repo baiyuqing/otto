@@ -203,14 +203,6 @@ impl Connection {
                         self.say(session_id, &text);
                         end_turn()
                     }
-                    command::Command::Auto { args } => {
-                        let text = session
-                            .controller
-                            .auto_mode_command(args)
-                            .map_err(|e| invalid_params(&e))?;
-                        self.say(session_id, &text);
-                        end_turn()
-                    }
                     command::Command::Model { profile } => {
                         if profile.is_empty() {
                             let info = session.controller.info();

@@ -398,3 +398,8 @@ fn repl_buffers<'a>(controller: &'a Controller) -> (Repl<'a>, Buffer, Buffer) {
     );
     (repl, stdout, stderr)
 }
+
+#[test]
+fn help_text_hides_the_auto_alias() {
+    assert!(!super::HELP.contains("/auto"));
+}

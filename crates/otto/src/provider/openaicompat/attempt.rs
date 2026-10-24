@@ -89,9 +89,12 @@ impl Client {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(crate::retry::parse_retry_after_seconds);
-            let error = self
+            let (error, names_cache_key) = self
                 .error_response(status.as_u16(), response, control)
                 .await;
+            if names_cache_key {
+                return Err(AttemptError::CacheKeyRejected(error));
+            }
             let reason = match status.as_u16() {
                 429 => Some("HTTP 429"),
                 503 => Some("HTTP 503"),
@@ -189,34 +192,48 @@ impl Client {
     }
 
     /// Turns a non-2xx response into a failure, reading a bounded prefix of
-    /// the body so a hostile endpoint cannot stream an unbounded error.
+    /// the body so a hostile endpoint cannot stream an unbounded error. The
+    /// flag is true for an HTTP 400 or 422 whose redacted body names
+    /// `prompt_cache_key`; it is checked before overflow classification.
     async fn error_response(
         &self,
         status: u16,
         response: reqwest::Response,
         control: &dyn OperationControl,
-    ) -> ProviderError {
+    ) -> (ProviderError, bool) {
         let body = match read_error_body(response, control).await {
             ErrorBody::Stopped(_) => {
-                return ProviderError::Other(format!(
-                    "OpenAI-compatible HTTP {status} (error body unavailable)"
-                ));
+                return (
+                    ProviderError::Other(format!(
+                        "OpenAI-compatible HTTP {status} (error body unavailable)"
+                    )),
+                    false,
+                );
             }
             ErrorBody::Unreadable => {
-                return ProviderError::Other(format!(
-                    "OpenAI-compatible HTTP {status} (error body unreadable)"
-                ));
+                return (
+                    ProviderError::Other(format!(
+                        "OpenAI-compatible HTTP {status} (error body unreadable)"
+                    )),
+                    false,
+                );
             }
             ErrorBody::Body(body) => body,
         };
         let safe = self.redact(&body);
-        if let Some(overflow) = classify_overflow(status, &safe) {
-            return ProviderError::Overflow(overflow);
+        let text = String::from_utf8_lossy(&safe);
+        if matches!(status, 400 | 422) && text.contains("prompt_cache_key") {
+            let error =
+                ProviderError::Other(format!("OpenAI-compatible HTTP {status}: {}", text.trim()));
+            return (error, true);
         }
-        ProviderError::Other(format!(
-            "OpenAI-compatible HTTP {status}: {}",
-            String::from_utf8_lossy(&safe).trim()
-        ))
+        if let Some(overflow) = classify_overflow(status, &safe) {
+            return (ProviderError::Overflow(overflow), false);
+        }
+        (
+            ProviderError::Other(format!("OpenAI-compatible HTTP {status}: {}", text.trim())),
+            false,
+        )
     }
 
     /// Redacts the API key from text that is about to leave the module.

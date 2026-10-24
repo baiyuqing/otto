@@ -683,4 +683,90 @@ mod tests {
         assert_eq!(first.input_id, "req-1");
         assert_eq!(steering.messages().len(), 1);
     }
+
+    #[test]
+    fn interrupt_step_needs_an_active_run_and_queued_guidance() {
+        let steering = Arc::new(Steering::default());
+        assert_eq!(steering.interrupt_step(), Err(InterruptError::Inactive));
+        let run = steering.begin();
+        let token = CancellationToken::new();
+        run.arm(&token);
+        // Without queued guidance nothing is cancelled and nothing is pending.
+        assert_eq!(steering.interrupt_step(), Err(InterruptError::NoGuidance));
+        assert!(!token.is_cancelled());
+        let later = CancellationToken::new();
+        run.arm(&later);
+        assert!(!later.is_cancelled());
+
+        steering.submit("one").expect("accepted");
+        steering.submit("two").expect("accepted");
+        assert_eq!(steering.interrupt_step(), Ok(2));
+        assert!(later.is_cancelled(), "the registered token is cancelled");
+        drop(run);
+        assert_eq!(steering.interrupt_step(), Err(InterruptError::Inactive));
+    }
+
+    #[test]
+    fn an_interrupt_without_a_registered_step_cancels_the_next_armed_token() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin();
+        steering.submit("go").expect("accepted");
+        let first = CancellationToken::new();
+        run.arm(&first);
+        run.disarm();
+        assert_eq!(steering.interrupt_step(), Ok(1));
+        assert!(!first.is_cancelled(), "a disarmed token is not cancelled");
+        let next = CancellationToken::new();
+        run.arm(&next);
+        assert!(next.is_cancelled());
+        // The request stays pending until delivery, so a second arm is cut too.
+        run.disarm();
+        let after = CancellationToken::new();
+        run.arm(&after);
+        assert!(after.is_cancelled());
+    }
+
+    #[test]
+    fn delivery_clears_a_pending_interrupt() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin();
+        steering.submit("go").expect("accepted");
+        steering.interrupt_step().expect("accepted");
+        assert_eq!(run.drain().len(), 1);
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled());
+
+        run.disarm();
+        steering.submit("again").expect("accepted");
+        steering.interrupt_step().expect("accepted");
+        assert!(run.take_or_close().is_some());
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn withdrawing_the_last_message_clears_a_pending_interrupt() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin();
+        let first = steering.submit("one").expect("accepted");
+        let second = steering.submit("two").expect("accepted");
+        steering.interrupt_step().expect("accepted");
+        steering.withdraw(first.id).expect("withdrawn");
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(token.is_cancelled(), "guidance is still queued");
+
+        run.disarm();
+        steering.withdraw(second.id).expect("withdrawn");
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled(), "nothing is left to deliver");
+        // A message accepted later is not covered by the cleared request.
+        steering.submit("three").expect("accepted");
+        let token = CancellationToken::new();
+        run.arm(&token);
+        assert!(!token.is_cancelled());
+    }
 }

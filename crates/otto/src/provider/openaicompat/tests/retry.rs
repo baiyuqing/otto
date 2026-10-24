@@ -27,8 +27,55 @@ async fn a_deadline_stopped_call_reports_deadline_exceeded() {
 
 // --- transport retry -------------------------------------------------
 
+fn retry_events(events: &[StreamEvent]) -> Vec<(u32, Duration, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Retry {
+                attempt,
+                delay,
+                reason,
+                ..
+            } => Some((*attempt, *delay, reason.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn rate_limits_and_server_errors_are_not_retried() {
+async fn http_429_and_503_with_retry_after_zero_are_retried_once_and_succeed() {
+    for status in [429u16, 503] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let server = spawn_server(move |_head, _body| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                http_response(status, &[("Retry-After", "0")], "try again")
+            } else {
+                http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
+            }
+        })
+        .await;
+        let client = Client::new(&server.url, "key");
+        let mut events = Vec::new();
+        let settlement = client
+            .complete(
+                &model_request(),
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert_eq!(settlement.attempts, 2, "status {status}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "status {status}");
+        assert_eq!(
+            retry_events(&events),
+            [(2, Duration::ZERO, format!("HTTP {status}"))]
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_500_502_and_504_are_terminal_after_one_request() {
     #[derive(Default)]
     struct Statuses(std::sync::Mutex<Vec<u16>>);
     impl otto_core::diagnostics::Observer for Statuses {
@@ -38,7 +85,7 @@ async fn rate_limits_and_server_errors_are_not_retried() {
             }
         }
     }
-    for status in [429u16, 503] {
+    for status in [500u16, 502, 504] {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
         let server = spawn_server(move |_head, _body| {
@@ -68,13 +115,91 @@ async fn rate_limits_and_server_errors_are_not_retried() {
         let error = settlement.result.expect_err("the first status is returned");
         assert!(error.to_string().contains(&status.to_string()));
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "status {status}");
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, StreamEvent::Retry { .. })),
-            "status {status} emitted a retry"
-        );
+        assert!(retry_events(&events).is_empty(), "status {status}");
     }
+}
+
+#[tokio::test]
+async fn repeated_http_429_stops_after_four_requests_as_completed() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let server = spawn_server(move |_head, _body| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        http_response(429, &[("Retry-After", "0")], "slow down")
+    })
+    .await;
+    let client = Client::new(&server.url, "key");
+    let mut events = Vec::new();
+    let settlement = client
+        .complete(
+            &model_request(),
+            &mut |event| events.push(event),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(settlement.attempts, 4);
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        settlement.outcome.effect_certainty,
+        EffectCertainty::Completed
+    );
+    let error = settlement.result.expect_err("the last status is returned");
+    assert!(error.to_string().contains("429"), "{error}");
+    assert_eq!(
+        retry_events(&events),
+        (2..=4)
+            .map(|attempt| (attempt, Duration::ZERO, "HTTP 429".to_owned()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `classify_overflow` accepts only 400, 413 and 422, so an overflow-shaped
+/// body on a 503 is an ordinary status error and follows the 503 retry.
+#[tokio::test]
+async fn http_503_with_an_overflow_shaped_body_is_retried_as_a_plain_error() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let server = spawn_server(move |_head, _body| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        http_response(
+            503,
+            &[("Retry-After", "0")],
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        )
+    })
+    .await;
+    let client = Client::new(&server.url, "key");
+    let settlement = client
+        .complete(&model_request(), &mut |_| {}, &CancellationToken::new())
+        .await;
+    assert_eq!(settlement.attempts, 4);
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+    let error = settlement.result.expect_err("the last status is returned");
+    assert!(matches!(error, ProviderError::Other(_)), "{error:?}");
+}
+
+/// A 400 overflow body stays a terminal typed overflow after one request.
+#[tokio::test]
+async fn http_400_with_an_overflow_body_is_not_retried() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let server = spawn_server(move |_head, _body| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        http_response(
+            400,
+            &[("Retry-After", "0")],
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        )
+    })
+    .await;
+    let client = Client::new(&server.url, "key");
+    let settlement = client
+        .complete(&model_request(), &mut |_| {}, &CancellationToken::new())
+        .await;
+    assert_eq!(settlement.attempts, 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let error = settlement.result.expect_err("overflow is terminal");
+    assert!(matches!(error, ProviderError::Overflow(_)), "{error:?}");
 }
 
 /// A connection that is refused never reached the endpoint: it is tried

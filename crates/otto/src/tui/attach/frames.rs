@@ -159,7 +159,6 @@ impl<'a> Ui<'a> {
         let session = remote.session();
         match action {
             Action::Prompt(line) => {
-                let image = self.app.pending_image.take();
                 self.pending = None;
                 if self.followed.is_none() && self.compacting.is_none() {
                     self.app.start_turn();
@@ -168,9 +167,8 @@ impl<'a> Ui<'a> {
                     true,
                     Box::pin(async move {
                         let mut reply = None;
-                        if image.is_none()
-                            && let Some(control) =
-                                within(remote.client.approval_message(&session, &line)).await?
+                        if let Some(control) =
+                            within(remote.client.approval_message(&session, &line)).await?
                         {
                             reply = Some(control.text);
                             if !control.queued {
@@ -181,8 +179,7 @@ impl<'a> Ui<'a> {
                             }
                         }
                         let stream =
-                            within(remote.client.start_turn(&session, &line, image.as_ref()))
-                                .await?;
+                            within(remote.client.start_turn(&session, &line, None)).await?;
                         Ok(TransportResult::Prompt {
                             reply,
                             stream: Some(stream),

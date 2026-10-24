@@ -119,7 +119,6 @@ const ENTRIES: &[Entry] = &[
     entry!("/archive", "archive a session", true, archive),
     entry!("/rename", "rename the current session", false, rename),
     entry!("/compact", "compact context", false, compact),
-    entry!("/image", "attach an image to the next prompt", false, image),
     entry!(
         "/sandbox",
         "inspect or change sandbox settings",
@@ -146,7 +145,6 @@ const ENTRIES: &[Entry] = &[
     entry!("/task", "list, inspect or cancel tasks", true, task),
     entry!("/agents", "browse recorded agents", false, agents),
     entry!("/context", "inspect context", false, context),
-    entry!("/trace", "show the turn timeline", false, trace),
     entry!("/timers", "list or cancel reminders", true, timers),
     entry!(
         "/skill",
@@ -321,13 +319,6 @@ fn rename(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
 fn compact(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     Ok(Transition::Run(Run::Compact(args.into())))
 }
-fn image(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    if args.is_empty() {
-        Err("usage: /image <path>".into())
-    } else {
-        command("Attach image", Command::Image(args.into()))
-    }
-}
 fn approve(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     match args.split_whitespace().collect::<Vec<_>>().as_slice() {
         [] => push(Approvals::default()),
@@ -353,10 +344,6 @@ fn steer(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
 fn context(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
     push(Context::new())
-}
-fn trace(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    empty(args)?;
-    push(super::trace::TraceView::new())
 }
 fn agents(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
@@ -487,7 +474,6 @@ impl Presenter for RequestPresenter {
     fn receive(&mut self, reply: Reply) -> Transition {
         self.loaded = true;
         self.text = match reply {
-            Reply::Image { path, .. } => format!("Attached image: {path}"),
             Reply::Operation { message, .. } => message,
             Reply::Management(reply) => crate::cli::repl_commands::format_management_reply(&reply),
             Reply::AgentDetail {

@@ -286,6 +286,7 @@ impl<'a> Ui<'a> {
             error_rendered: false,
         });
         self.app.start_turn();
+        self.app.refresh_steering();
     }
 
     pub(super) async fn drain_transport(&mut self) {

@@ -85,10 +85,6 @@ impl App {
             self.queued_input = Some(line);
             return None;
         }
-        if self.busy() && self.pending_image.is_some() && !line.starts_with('/') {
-            self.queued_input = Some(line);
-            return None;
-        }
         if self.busy() && !line.starts_with('/') {
             // Natural language submitted during an active turn is guidance for
             // that exact turn, never an implicit later queued prompt. The

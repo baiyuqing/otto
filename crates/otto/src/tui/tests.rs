@@ -227,22 +227,6 @@ fn terminal_input_drop_restores_mouse_capture_only_if_it_was_enabled() {
     assert!(String::from_utf8_lossy(&enabled).contains("\u{1b}[?1000l"));
 }
 
-#[test]
-fn image_path_becomes_a_valid_image_block() {
-    use std::io::Write as _;
-
-    let directory = tempfile::tempdir().expect("tempdir");
-    let path = directory.path().join("shot.png");
-    std::fs::File::create(&path)
-        .expect("create")
-        .write_all(b"\x89PNG\r\n\x1a\n")
-        .expect("write");
-
-    let image = image_block_from_path(path.to_str().expect("utf8 path")).expect("image");
-    assert_eq!(image.mime_type, "image/png");
-    assert_eq!(image.data, "iVBORw0KGgo=");
-}
-
 /// The wheel must not reach the composer's keys: Up/Down there recall
 /// prompt history, so a wheel notch mapped onto them would scroll the
 /// history instead of the transcript.

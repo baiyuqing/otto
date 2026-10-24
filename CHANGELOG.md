@@ -9,6 +9,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Breaking changes
 
+- Remove the terminal `/image` and `/trace` commands, pending terminal image
+  attachments and the trace timeline panel, including in attached sessions.
+  Terminal prompts are text-only; image messages through supported APIs and
+  stored tracing, logs and trace APIs remain available. Reinstall Otto and
+  restart terminal sessions.
+
 - Remove reflection completely: `/reflect`, the model-callable tool, automatic
   triggers, configuration, run reports and generated-skill management are no
   longer available. No compatibility or data migration is provided. Remove
@@ -118,9 +124,18 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Features and reliability
 
-- The TUI adds compact tool summaries (`Ctrl+O` for details), inline edit diffs,
-  searchable skill management and `/trace` turn diagnostics. Queue banners keep
-  pending guidance visible without replacing the conversation.
+- Show all pending TUI inputs in the main conversation, not only the newest
+  composer banner. Pending rows remain transient, become a single delivered
+  message, and disappear on withdrawal. Reload active guidance on session
+  switches and attached reconnects; reject stale queue reads from earlier
+  sessions or turns. Visible-buffer and reconnect tests cover this lifecycle.
+- Keep TUI loading animation on its frame cadence while sub-agents run even
+  when the main turn is idle, and skip overdue animation ticks instead of
+  replaying them in a burst. Approval polling retains its existing cadence.
+
+- The TUI adds compact tool summaries (`Ctrl+O` for details), inline edit diffs
+  and searchable skill management. Queue banners keep pending guidance visible
+  without replacing the conversation.
 - HTTP session creation and fork accept `request_id` for retries after a lost
   response, including after restart. Conflicting fork arguments return
   `409 request_id_conflict`.

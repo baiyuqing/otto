@@ -199,6 +199,29 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|line| Line::from(line.to_string())),
         );
     }
+    // Pending input is a projection, never a persisted transcript entry. Keep
+    // every accepted item visible rather than only the newest recall target.
+    let pending = app
+        .pending_steers
+        .iter()
+        .map(|message| format!("[Queued for current turn] {}", message.text))
+        .chain(
+            app.queued_input
+                .iter()
+                .map(|text| format!("[Queued next input] {text}")),
+        );
+    for text in pending {
+        lines.push(Line::default());
+        lines.extend(transcript::lines(
+            &[super::entries::Entry {
+                kind: Some(super::entries::EntryKind::User),
+                raw: text,
+                ..Default::default()
+            }],
+            false,
+            area.width as usize,
+        ));
+    }
     if let Some(status) = app.thinking() {
         if !lines.is_empty() {
             lines.push(Line::default());
@@ -223,21 +246,32 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
 /// Spinner frames, in order.
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// How long one [`SPINNER_FRAMES`] frame is held. [`super::drive_turn`]
-/// redraws on this interval for as long as a turn runs.
+/// How long one [`SPINNER_FRAMES`] frame is held in both TUI modes.
 pub(super) const SPINNER_FRAME: Duration = Duration::from_millis(100);
+
+/// Refresh against time, without replaying stale frames after a slow operation.
+pub(super) fn spinner_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(SPINNER_FRAME);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
+fn spinner_frame(elapsed: Duration) -> &'static str {
+    let frame = elapsed.as_millis() / SPINNER_FRAME.as_millis();
+    SPINNER_FRAMES[(frame % SPINNER_FRAMES.len() as u128) as usize]
+}
+
+/// Only animated or time-dependent surfaces need timer-driven redraws.
+pub(super) fn needs_animation(app: &App) -> bool {
+    app.busy() || app.has_surface() || needs_task_clock(&app.tasks)
+}
 
 /// The line shown under the transcript while a turn is in flight: the phase
 /// (waiting for the model, reasoning, running a tool, a provider retry).
 /// The spinner stays animated, but only tool records display execution time.
 fn thinking_line(status: &TurnStatus) -> Line<'static> {
-    let frame = status.turn_elapsed.as_millis() / SPINNER_FRAME.as_millis();
     Line::styled(
-        format!(
-            "{} {}",
-            SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()],
-            status.phase
-        ),
+        format!("{} {}", spinner_frame(status.turn_elapsed), status.phase),
         Style::default().fg(Color::Magenta),
     )
 }
@@ -522,9 +556,8 @@ fn panel_row_count(visible_count: usize) -> u16 {
 }
 
 /// Whether the sub-agent panel needs a periodic redraw to keep its elapsed
-/// times current: true iff at least one task is queued or running. Drives
-/// the idle-loop 1-second timer in [`super::run_app`]; with nothing queued
-/// or running, no timer runs.
+/// times current: true iff at least one task is queued or running. Both
+/// event loops use this to redraw on the spinner cadence while tasks remain.
 pub(crate) fn needs_task_clock(tasks: &[Task]) -> bool {
     !visible_panel_tasks(tasks).is_empty()
 }
@@ -635,9 +668,11 @@ fn panel_row_line(
 fn panel_marker(task: &Task, now: chrono::DateTime<chrono::Utc>) -> &'static str {
     match (task.status, task.started_at) {
         (TaskStatus::Running, Some(started)) => {
-            let elapsed_ms = now.signed_duration_since(started).num_milliseconds().max(0) as u128;
-            let frame = (elapsed_ms / SPINNER_FRAME.as_millis()) as usize;
-            SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
+            let elapsed = now
+                .signed_duration_since(started)
+                .to_std()
+                .unwrap_or_default();
+            spinner_frame(elapsed)
         }
         (TaskStatus::Running, None) => SPINNER_FRAMES[0],
         _ => "○",
@@ -683,5 +718,7 @@ fn fit_column(value: &str, width: usize, alignment: Alignment) -> String {
     }
 }
 
+#[cfg(test)]
+mod spinner_tests;
 #[cfg(test)]
 mod tests;

@@ -104,16 +104,3 @@ fn skill_manager_renders_selection_preview_and_scrolling_in_small_terminals() {
         assert_eq!(rows.len(), height as usize);
     }
 }
-
-#[test]
-fn trace_bars_are_drawn_only_when_the_panel_is_wide_enough() {
-    let app = trace_app();
-    let wide = screen_rows(&app, 100, 30).join("\n");
-    assert!(wide.contains("model #1"), "{wide}");
-    assert!(wide.contains('░') && wide.contains('█'), "{wide}");
-    assert!(wide.contains("10s"), "axis marks: {wide}");
-
-    let narrow = screen_rows(&app, 79, 30).join("\n");
-    assert!(narrow.contains("model #1"), "{narrow}");
-    assert!(!narrow.contains(BAR_GLYPHS), "{narrow}");
-}

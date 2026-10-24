@@ -107,6 +107,8 @@ fn commands(app: &App) -> Vec<Request> {
 }
 
 mod input_queue;
+mod message_visibility;
+mod message_visibility_review;
 mod mutations_and_commands;
 mod reads_and_sessions;
 mod steering;

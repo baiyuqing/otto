@@ -24,6 +24,7 @@
 //! allowlisted code, and two token counts, never provider text.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
@@ -113,6 +114,10 @@ enum AttemptError {
     /// No retry: output was already visible, or the failure is not a
     /// transport failure or a 429/503 status.
     Sent(ProviderError),
+    /// HTTP 400 or 422 whose body names `prompt_cache_key`. The endpoint
+    /// rejects the field; the error is reported when the request did not
+    /// carry it.
+    CacheKeyRejected(ProviderError),
 }
 
 /// A usable client: the base URL passed validation and the HTTP client built.
@@ -132,6 +137,8 @@ pub struct Client {
     state: Result<Ready, String>,
     /// Longest time between model-output events on a response body.
     model_idle_timeout: Duration,
+    /// Set when the endpoint rejected `prompt_cache_key`; later requests omit it.
+    prompt_cache_key_rejected: AtomicBool,
 }
 
 impl Client {
@@ -149,6 +156,7 @@ impl Client {
             api_key: api_key.to_string(),
             state,
             model_idle_timeout: MODEL_IDLE_TIMEOUT,
+            prompt_cache_key_rejected: AtomicBool::new(false),
         }
     }
 
@@ -162,6 +170,7 @@ impl Client {
             api_key: api_key.to_string(),
             state: Self::ready(base_url, http),
             model_idle_timeout: MODEL_IDLE_TIMEOUT,
+            prompt_cache_key_rejected: AtomicBool::new(false),
         }
     }
 
@@ -310,6 +319,11 @@ impl Provider for Client {
     /// seconds replaces the delay, capped at 30 s. A failure after any
     /// reasoning, text or tool-call delta, any other HTTP status (including
     /// 500, 502 and 504), and a stream-codec error are never retried.
+    ///
+    /// A request with a cache key sends `prompt_cache_key`. If the endpoint
+    /// answers HTTP 400 or 422 naming that field, the request is sent again
+    /// at once without it, with no `Retry` event and without using the retry
+    /// attempts; the client then omits the field from every later request.
     async fn complete(
         &self,
         request: &Request,
@@ -341,7 +355,11 @@ impl Provider for Client {
                     );
                 }
             };
-            let payload = match serde_json::to_vec(&build_request(request)) {
+            let mut wire = build_request(request);
+            if self.prompt_cache_key_rejected.load(Ordering::Relaxed) {
+                wire.prompt_cache_key.clear();
+            }
+            let mut payload = match serde_json::to_vec(&wire) {
                 Ok(payload) => payload,
                 Err(error) => {
                     return ProviderSettlement::failed(
@@ -356,7 +374,10 @@ impl Provider for Client {
             if let Err(error) = check_running(control) {
                 return provider_failure(error, 0, EffectCertainty::NotStarted, control);
             }
+            // HTTP requests sent, the cache-key resend included.
             let mut attempts = 0;
+            // Failed attempts counted against `RETRY_POLICY`.
+            let mut failures = 0;
             // Set once any attempt was a dispatched transport interruption.
             let mut interrupted_seen = false;
             let result = loop {
@@ -369,6 +390,19 @@ impl Provider for Client {
                 {
                     Ok(response) => break Ok(response),
                     Err(AttemptError::Sent(error)) => break Err(error),
+                    Err(AttemptError::CacheKeyRejected(error)) => {
+                        if wire.prompt_cache_key.is_empty() {
+                            break Err(error);
+                        }
+                        self.prompt_cache_key_rejected
+                            .store(true, Ordering::Relaxed);
+                        wire.prompt_cache_key.clear();
+                        payload = match serde_json::to_vec(&wire) {
+                            Ok(payload) => payload,
+                            Err(_) => break Err(error),
+                        };
+                        continue;
+                    }
                     Err(AttemptError::NotSent(error)) => {
                         (error, CONNECT_RETRY_REASON, false, None, false)
                     }
@@ -382,9 +416,10 @@ impl Provider for Client {
                         (error, reason, interrupted_seen, retry_after, true)
                     }
                 };
+                failures += 1;
                 let Some(delay) = crate::retry::next_delay(
                     RETRY_POLICY,
-                    attempts,
+                    failures,
                     retry_after,
                     control.remaining().unwrap_or(Duration::MAX),
                     Duration::from_secs(1),
@@ -400,7 +435,7 @@ impl Provider for Client {
                     };
                 };
                 emit(StreamEvent::Retry {
-                    attempt: attempts + 1,
+                    attempt: failures + 1,
                     max_attempts: RETRY_POLICY.max_attempts,
                     delay,
                     reason: reason.to_owned(),

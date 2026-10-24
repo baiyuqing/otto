@@ -17,6 +17,7 @@ type ModePlatform interface {
 	SendApprovalMode(ctx context.Context, chatID, messageID, session, mode string) error
 }
 
+// cmdAuto serves the hidden /auto alias and the /permissions manual|auto|no-argument forms.
 func (c *chat) cmdAuto(m Message, arg string) {
 	var automatic *bool
 	switch arg {
@@ -33,7 +34,7 @@ func (c *chat) cmdAuto(m Message, arg string) {
 		defer stop()
 		sid := c.b.opts.Store.Session(c.key)
 		if m.ModeSession != "" && m.ModeSession != sid {
-			c.send(ctx, m.MessageID, "This mode shortcut belongs to another session. Send /auto for current controls.")
+			c.send(ctx, m.MessageID, "This mode shortcut belongs to another session. Send /permissions for current controls.")
 			return
 		}
 		var err error
@@ -49,7 +50,7 @@ func (c *chat) cmdAuto(m Message, arg string) {
 		c.startApprovalWatch(sid)
 		if automatic != nil {
 			if c.b.opts.Store.Session(c.key) != sid {
-				c.send(ctx, m.MessageID, "This mode shortcut belongs to another session. Send /auto for current controls.")
+				c.send(ctx, m.MessageID, "This mode shortcut belongs to another session. Send /permissions for current controls.")
 				return
 			}
 			_, err = c.b.opts.Agent.ApprovalMode(ctx, sid, automatic)
@@ -87,13 +88,13 @@ func (c *chat) cmdAuto(m Message, arg string) {
 		}
 		name := agent.ApprovalModeLabel(mode)
 		if !policy.Legacy {
-			c.send(ctx, m.MessageID, policySummary(sid, policy)+"\n/auto on · /auto off")
+			c.send(ctx, m.MessageID, policySummary(sid, policy)+c.approvalCounts(sid)+"\n/permissions auto · /permissions manual")
 			return
 		}
-		note := "/auto on · /auto off"
+		note := "/permissions auto · /permissions manual"
 		if mode == "yolo" {
-			note = "This session approves every request without asking. /auto off requires manual approval again."
+			note = "This session approves every request without asking. /permissions manual requires manual approval again."
 		}
-		c.send(ctx, m.MessageID, fmt.Sprintf("Approval mode: %s\nSession: %s\n%s", name, sid, note))
+		c.send(ctx, m.MessageID, fmt.Sprintf("Approval mode: %s\nSession: %s\n%s\nLegacy agent; advanced policy changes require an Otto upgrade.", name, sid, note))
 	}()
 }

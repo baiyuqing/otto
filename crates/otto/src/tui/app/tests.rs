@@ -112,5 +112,6 @@ mod message_visibility_review;
 mod mutations_and_commands;
 mod reads_and_sessions;
 mod steering;
+mod structured_approvals;
 mod surfaces_and_approvals;
 mod usage_and_tool_timing;

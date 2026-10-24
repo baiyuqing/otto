@@ -7,6 +7,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Fixes
+
+- Local and attached TUI approval notices now show labeled states, reasons,
+  feedback and literal request details. Serialized JSON detail values display
+  readable newlines/indentation without decoding literal command backslashes or
+  allowing terminal control sequences. Updates replace one notice per approval;
+  same-session refreshes retain live notices. Stored history and approval behavior
+  are unchanged; structured notices are not reconstructed after restart/resume.
+  Reinstall Otto and restart the terminal TUI to use the fix; no configuration
+  changes are needed.
+
 ### Breaking changes
 
 - Remove the terminal `/image` and `/trace` commands, pending terminal image

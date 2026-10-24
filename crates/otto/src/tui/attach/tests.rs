@@ -1,5 +1,7 @@
 use super::*;
 
+mod structured_approvals;
+
 #[tokio::test]
 async fn delayed_session_snapshot_keeps_input_and_stream_live_and_cannot_erase_deltas() {
     use axum::response::IntoResponse;

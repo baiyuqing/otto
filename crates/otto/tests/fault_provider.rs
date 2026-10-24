@@ -173,19 +173,22 @@ async fn openai_reset_before_the_first_event_is_retried_then_stops_as_transport_
 }
 
 #[tokio::test]
-async fn openai_reset_after_one_content_delta_is_not_retried() {
-    let server = http::spawn_repeating(Script::sse_cut_after(&[DELTA, STOP], 1)).await;
+async fn openai_reset_after_one_content_delta_is_retried_and_marks_partial_output() {
+    let server = http::spawn_scripted(vec![
+        Script::sse_cut_after(&[DELTA, STOP], 1),
+        Script::sse_done(&[DELTA, STOP]),
+    ])
+    .await;
     let (settlement, events) = complete_plain(&openai(&server)).await;
-    assert!(settlement.result.is_err());
-    assert_eq!(settlement.attempts, 1);
-    assert_eq!(server.count(), 1);
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::TextDelta { .. })),
-        "the delta reached the caller: {events:?}"
-    );
-    assert!(retries(&events).is_empty());
+    assert_one_retry_then_success(&settlement, &events, &server);
+    assert_eq!(settlement.result.unwrap().message.text(), "visible");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Retry {
+            interrupted_output: true,
+            ..
+        }
+    )));
 }
 
 #[tokio::test]
@@ -339,26 +342,21 @@ async fn openai_stall_after_the_head_before_any_event_is_retried() {
 }
 
 #[tokio::test]
-async fn openai_stall_after_one_content_delta_is_terminal_with_unknown_effect() {
-    let server = http::spawn_repeating(Script::stall_after_events(&[DELTA])).await;
+async fn openai_stall_after_one_content_delta_is_retried_and_marks_partial_output() {
+    let server = http::spawn_scripted(vec![
+        Script::stall_after_events(&[DELTA]),
+        Script::sse_done(&[DELTA, STOP]),
+    ])
+    .await;
     let (settlement, events) = complete_plain(&openai_short(&server)).await;
-    assert!(
-        settlement.result.is_err(),
-        "a stalled stream is not a complete response"
-    );
-    assert_eq!(settlement.attempts, 1);
-    assert_eq!(server.count(), 1);
-    assert_eq!(
-        settlement.outcome.effect_certainty,
-        EffectCertainty::Unknown
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::TextDelta { .. })),
-        "the delta reached the caller: {events:?}"
-    );
-    assert!(retries(&events).is_empty());
+    assert_one_retry_then_success(&settlement, &events, &server);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Retry {
+            interrupted_output: true,
+            ..
+        }
+    )));
 }
 
 mod agent {
@@ -756,18 +754,24 @@ async fn compat_keepalive_before_output_is_retried() {
 }
 
 #[tokio::test]
-async fn compat_keepalive_after_output_fails_without_retry() {
+async fn compat_keepalive_after_output_is_retried_and_marks_partial_output() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let server = http::spawn_repeating(keepalive_script(&[DELTA])).await;
+        let server = http::spawn_scripted(vec![
+            keepalive_script(&[DELTA]),
+            Script::sse_done(&[DELTA, STOP]),
+        ])
+        .await;
         let (settlement, events) = complete_plain(&openai_idle(&server)).await;
-        let error = format!("{:?}", settlement.result.err());
-        assert!(error.contains("no model output"), "{error}");
-        assert_eq!(
-            settlement.outcome.effect_certainty,
-            EffectCertainty::Unknown
-        );
-        assert!(retries(&events).is_empty());
-        assert_eq!(server.count(), 1);
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert_eq!(server.count(), 2);
+        assert_eq!(retries(&events), [(2, Duration::from_secs(1), IDLE_REASON)]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Retry {
+                interrupted_output: true,
+                ..
+            }
+        )));
     })
     .await
     .expect("the idle bound must end the keepalive-only stream");

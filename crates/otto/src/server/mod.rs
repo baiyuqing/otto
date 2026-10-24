@@ -542,6 +542,10 @@ impl Server {
                 get(task_control::steering_messages).post(task_control::steer),
             )
             .route(
+                "/v1/sessions/{id}/tasks/steer/interrupt",
+                post(task_control::interrupt_steering),
+            )
+            .route(
                 "/v1/sessions/{id}/tasks/steer/{message_id}",
                 delete(task_control::withdraw_steering),
             )

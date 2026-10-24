@@ -138,6 +138,24 @@ async fn task_control_client_uses_session_routes_and_transient_channel() {
     );
 }
 
+/// Fails without the client method: nothing posts the interrupt route or
+/// decodes `queued_guidance`.
+#[tokio::test]
+async fn interrupt_steering_posts_the_route_and_decodes_the_count() {
+    let (client, seen, _dir) = stub(|_, path| match path {
+        "/v1/sessions/s1/tasks/steer/interrupt" => {
+            json_body(StatusCode::OK, r#"{"queued_guidance":2}"#)
+        }
+        _ => json_body(StatusCode::NOT_FOUND, ""),
+    });
+
+    assert_eq!(client.interrupt_steering("s1").await.unwrap(), 2);
+    assert_eq!(
+        request(&seen, 0).0,
+        "POST /v1/sessions/s1/tasks/steer/interrupt"
+    );
+}
+
 #[tokio::test]
 async fn context_decodes_the_report() {
     let report = ContextReport {

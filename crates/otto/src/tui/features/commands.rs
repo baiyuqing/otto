@@ -156,7 +156,6 @@ const ENTRIES: &[Entry] = &[
         false,
         skill
     ),
-    entry!(DuringTask, "/plan", "show the session plan", false, plan),
     entry!(DuringTask, "/model", "switch profiles", true, model),
     entry!(
         DuringTask,
@@ -316,22 +315,6 @@ fn session(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
                 .map(|origin| format!("\nForked from: {}", origin.session_id))
                 .unwrap_or_default()
         ),
-    })
-}
-fn plan(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
-    empty(args)?;
-    push(Document {
-        key: "plan".into(),
-        title: "Plan".into(),
-        text: if info.plan.is_empty() {
-            "No plan. The agent keeps one with update_plan for work of three or more steps.".into()
-        } else {
-            format!(
-                "{}\n\n{}",
-                otto_core::session::plan_summary(&info.plan),
-                otto_core::session::plan_checklist(&info.plan)
-            )
-        },
     })
 }
 fn resume(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {

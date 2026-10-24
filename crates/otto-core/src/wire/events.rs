@@ -161,6 +161,10 @@ pub struct WireEvent {
     /// `approval_decided`: `allow`, `deny` or `timeout`.
     #[serde(default, skip_serializing_if = "is_empty")]
     pub decision: String,
+    /// `step_interrupted`: the number of queued guidance messages delivered
+    /// after the interrupted step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_guidance: Option<u32>,
 }
 
 impl WireEvent {
@@ -242,6 +246,7 @@ impl PartialEq for WireEvent {
             && self.command == other.command
             && self.justification == other.justification
             && self.decision == other.decision
+            && self.queued_guidance == other.queued_guidance
     }
 }
 
@@ -327,6 +332,9 @@ pub fn to_wire(event: &Event) -> WireEvent {
         }
         Event::CompactionPlanned { plan } => wire.plan = Some(to_wire_plan(plan)),
         Event::PlanUpdated { steps } => wire.steps = Some(steps.clone()),
+        Event::StepInterrupted { guidance } => {
+            wire.queued_guidance = Some(u32::try_from(*guidance).unwrap_or(u32::MAX));
+        }
         Event::ProviderRetry {
             operation_id,
             attempt,

@@ -9,9 +9,38 @@ use crate::app::Info;
 
 type Factory = fn(&str, &Info, &Catalog) -> Result<Transition, String>;
 
+/// Workflow stage a command belongs to; variants are in display order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum CommandGroup {
+    Help,
+    Setup,
+    DuringTask,
+    ApprovalsAndSandbox,
+    Memory,
+    Tasks,
+    Sessions,
+    Exit,
+}
+
+impl CommandGroup {
+    pub const fn heading(self) -> &'static str {
+        match self {
+            Self::Help => "Help",
+            Self::Setup => "Setup",
+            Self::DuringTask => "During a task",
+            Self::ApprovalsAndSandbox => "Approvals and sandbox",
+            Self::Memory => "Memory",
+            Self::Tasks => "Tasks",
+            Self::Sessions => "Sessions",
+            Self::Exit => "Exit",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Entry {
     pub name: &'static str,
+    pub group: CommandGroup,
     pub description: &'static str,
     pub local_only: bool,
     pub factory: Factory,
@@ -85,9 +114,10 @@ impl Catalog {
 }
 
 macro_rules! entry {
-    ($name:literal,$desc:literal,$local:expr,$factory:expr) => {
+    ($group:ident,$name:literal,$desc:literal,$local:expr,$factory:expr) => {
         Entry {
             name: $name,
+            group: CommandGroup::$group,
             description: $desc,
             local_only: $local,
             factory: $factory,
@@ -96,59 +126,106 @@ macro_rules! entry {
 }
 
 const ENTRIES: &[Entry] = &[
+    entry!(Help, "/help", "show commands", false, help),
     entry!(
+        Setup,
+        "/init",
+        "create a repository AGENTS.md guide",
+        false,
+        init
+    ),
+    entry!(Setup, "/login", "authenticate a provider", true, login),
+    entry!(
+        Setup,
+        "/logout",
+        "remove provider credentials",
+        true,
+        logout
+    ),
+    entry!(
+        Setup,
+        "/mcp",
+        "inspect MCP servers or authenticate one",
+        true,
+        mcp
+    ),
+    entry!(
+        Setup,
+        "/skill",
+        "browse or configure skills (Space toggles)",
+        false,
+        skill
+    ),
+    entry!(DuringTask, "/plan", "show the session plan", false, plan),
+    entry!(DuringTask, "/model", "switch profiles", true, model),
+    entry!(
+        DuringTask,
+        "/thinking",
+        "set reasoning effort",
+        true,
+        thinking
+    ),
+    entry!(DuringTask, "/context", "inspect context", false, context),
+    entry!(DuringTask, "/compact", "compact context", false, compact),
+    entry!(DuringTask, "/steer", "guide the active task", false, steer),
+    entry!(
+        ApprovalsAndSandbox,
         "/permissions",
         "show or set the approval mode, policy and reviewer",
         false,
         permissions
     ),
-    entry!("/help", "show commands", false, help),
-    entry!("/init", "create a repository AGENTS.md guide", false, init),
-    entry!("/session", "show session details", false, session),
-    entry!("/plan", "show the session plan", false, plan),
-    entry!("/new", "start a new session", false, new_session),
-    entry!("/clear", "start a new session", false, clear_session),
-    entry!("/model", "switch profiles", true, model),
-    entry!("/thinking", "set reasoning effort", true, thinking),
-    entry!("/resume", "resume a session", false, resume),
-    entry!("/fork", "fork the session before a prompt", false, fork),
-    entry!("/archive", "archive a session", true, archive),
-    entry!("/rename", "rename the current session", false, rename),
-    entry!("/compact", "compact context", false, compact),
     entry!(
+        ApprovalsAndSandbox,
+        "/approve",
+        "open approvals, or allow one exact request",
+        false,
+        approve
+    ),
+    entry!(
+        ApprovalsAndSandbox,
         "/sandbox",
         "inspect or change sandbox settings",
         false,
         sandbox
     ),
     entry!(
-        "/approve",
-        "open approvals, or allow one exact request",
-        false,
-        approve
-    ),
-    entry!("/steer", "guide the active task", false, steer),
-    entry!(
+        Memory,
         "/memory",
         "search, inspect, forget or review memories",
         true,
         memory
     ),
-    entry!("/remember", "remember a record", true, remember),
-    entry!("/login", "authenticate a provider", true, login),
-    entry!("/logout", "remove provider credentials", true, logout),
-    entry!("/exit", "exit Otto", false, exit),
-    entry!("/task", "list, inspect or cancel tasks", true, task),
-    entry!("/agents", "browse recorded agents", false, agents),
-    entry!("/context", "inspect context", false, context),
-    entry!("/timers", "list or cancel reminders", true, timers),
+    entry!(Memory, "/remember", "remember a record", true, remember),
+    entry!(Tasks, "/task", "list, inspect or cancel tasks", true, task),
+    entry!(Tasks, "/agents", "browse recorded agents", false, agents),
+    entry!(Tasks, "/timers", "list or cancel reminders", true, timers),
+    entry!(Sessions, "/new", "start a new session", false, new_session),
     entry!(
-        "/skill",
-        "browse or configure skills (Space toggles)",
+        Sessions,
+        "/clear",
+        "start a new session",
         false,
-        skill
+        clear_session
     ),
-    entry!("/mcp", "inspect MCP servers or authenticate one", true, mcp),
+    entry!(Sessions, "/resume", "resume a session", false, resume),
+    entry!(
+        Sessions,
+        "/fork",
+        "fork the session before a prompt",
+        false,
+        fork
+    ),
+    entry!(
+        Sessions,
+        "/rename",
+        "rename the current session",
+        false,
+        rename
+    ),
+    entry!(Sessions, "/archive", "archive a session", true, archive),
+    entry!(Sessions, "/session", "show session details", false, session),
+    entry!(Exit, "/exit", "exit Otto", false, exit),
 ];
 
 fn push(p: impl Presenter + 'static) -> Result<Transition, String> {
@@ -179,13 +256,23 @@ fn help(args: &str, _: &Info, catalog: &Catalog) -> Result<Transition, String> {
     push(Document {
         key: "help".into(),
         title: "Commands".into(),
-        text: catalog
-            .entries()
-            .iter()
-            .map(|e| format!("{}  {}", e.name, e.description))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        text: help_text(catalog.entries()),
     })
+}
+/// One heading per group followed by its `name  description` lines; groups are
+/// separated by a blank line. Entries keep catalog order within a group.
+fn help_text(entries: &[Entry]) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    let mut current: Option<CommandGroup> = None;
+    for entry in entries {
+        if current != Some(entry.group) {
+            current = Some(entry.group);
+            sections.push(entry.group.heading().to_string());
+        }
+        let section = sections.last_mut().expect("heading pushed above");
+        section.push_str(&format!("\n{}  {}", entry.name, entry.description));
+    }
+    sections.join("\n\n")
 }
 fn init(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;

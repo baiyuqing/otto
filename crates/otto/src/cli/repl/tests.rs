@@ -403,3 +403,39 @@ fn repl_buffers<'a>(controller: &'a Controller) -> (Repl<'a>, Buffer, Buffer) {
 fn help_text_hides_the_auto_alias() {
     assert!(!super::HELP.contains("/auto"));
 }
+
+#[test]
+fn help_groups_and_command_order_follow_the_tui_catalog() {
+    let headings: Vec<&str> = super::HELP
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('/'))
+        .collect();
+    assert_eq!(
+        headings,
+        [
+            "Help",
+            "Setup",
+            "During a task",
+            "Approvals and sandbox",
+            "Memory",
+            "Tasks",
+            "Sessions",
+            "Exit"
+        ]
+    );
+    let mut repl_order: Vec<&str> = Vec::new();
+    for line in super::HELP.lines().filter(|line| line.starts_with('/')) {
+        let name = line.split_whitespace().next().unwrap();
+        if !repl_order.contains(&name) {
+            repl_order.push(name);
+        }
+    }
+    let tui_order = crate::tui::catalog_command_names();
+    let tui_order_of_repl: Vec<&str> = tui_order
+        .iter()
+        .copied()
+        .filter(|name| repl_order.contains(name))
+        .collect();
+    assert_eq!(repl_order, tui_order_of_repl);
+    assert!(repl_order.len() > 15, "{repl_order:?}");
+}

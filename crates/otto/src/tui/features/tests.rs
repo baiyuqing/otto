@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::approval::{Approval, Approvals};
 use super::choice::{Choice, ChoiceKind};
 use super::collection::Agents;
-use super::commands::Entry;
+use super::commands::{CommandGroup, Entry};
 use super::review::Reviews;
 use super::{Catalog, Document, Presenter, Run, Transition};
 use crate::app::Info;
@@ -705,6 +705,7 @@ fn registered_commands_extend_help_completion_and_dispatch() {
     catalog
         .register(Entry {
             name: "/extra",
+            group: CommandGroup::Exit,
             description: "run an extension command",
             local_only: false,
             factory: custom_command,

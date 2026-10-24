@@ -19,10 +19,6 @@ impl<'a> Repl<'a> {
                         break 'dispatch None;
                     }
                     let _ = write!(self.stdout, "{HELP}");
-                    let _ = writeln!(
-                        self.stdout,
-                        "/permissions [manual|auto|yolo | policy on_request|never | reviewer user|auto_review] show or set approval controls"
-                    );
                     Some(false)
                 }
                 "init" => {

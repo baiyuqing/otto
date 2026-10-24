@@ -3,6 +3,8 @@
 mod approval;
 mod choice;
 mod collection;
+#[cfg(test)]
+mod command_order_tests;
 mod commands;
 mod review;
 pub(super) mod skills;

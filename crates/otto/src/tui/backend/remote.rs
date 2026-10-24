@@ -210,6 +210,13 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                         .map_err(mutation_error)?;
                     "Queued input withdrawn.".into()
                 }
+                Command::InterruptStep => {
+                    client
+                        .interrupt_steering(session)
+                        .await
+                        .map_err(mutation_error)?;
+                    String::new()
+                }
                 // Reads rather than reports: the caller paints the queued
                 // guidance from this list. An unreachable serve changed
                 // nothing here, so the error carries no unknown outcome.

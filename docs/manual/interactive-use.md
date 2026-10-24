@@ -52,6 +52,15 @@ capability.
   focus, but arrows/Page keys scroll it. There is no feedback field. Successful
   decisions close the panel and advance to the next request in creation order;
   errors keep it open. Esc leaves a request pending; `/approve` reopens it.
+- Live approval notices in local and attached TUI sessions show labeled title,
+  state, application status, reason/feedback and request details, omitting empty
+  fields. Updates replace the same approval's display instead of repeating the
+  request. Commands and code remain literal, with multiline JSON request values
+  decoded once; terminal control sequences remain visibly escaped. This is enabled
+  by default, with no extra configuration or permissions. Same-session history
+  refreshes retain notices observed by this TUI, but restarting/resuming a session
+  does not reconstruct structured notices from stored messages; approval discovery
+  and decisions are unchanged.
 - Runs inline and preserves the terminal scrollback; completed transcript rows remain
   available through normal terminal scrolling.
 - Transcript markers distinguish submitted prompts (`❯`), replies/tool calls

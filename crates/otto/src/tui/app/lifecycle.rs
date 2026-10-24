@@ -51,6 +51,8 @@ impl App {
     /// runtime's own `agent_steering` notice: the TUI adds no claim of its own
     /// that could contradict it.
     fn finish_steering(&mut self) {
+        self.pending_steers.clear();
+        self.steering_generation = None;
         let Some(steer) = self.queued_steer.take() else {
             self.recalling_steer = None;
             return;
@@ -83,7 +85,7 @@ impl App {
             turn_elapsed: self.busy_since?.elapsed(),
         })
     }
-    pub fn refresh(&mut self, backend: &Backend<'_>) {
+    pub fn refresh(&mut self, backend: &Backend<'_>) -> Ticket {
         let old = (self.info.workspace.clone(), self.info.session_id.clone());
         let (mut entries, usage) = entries::entries_from_history(&backend.history());
         let info = backend.info();
@@ -108,11 +110,15 @@ impl App {
             self.surfaces.clear();
             // The run that owned the tracked guidance ended with the session.
             self.queued_steer = None;
+            self.queued_input = None;
+            self.pending_steers.clear();
             self.recalling_steer = None;
             self.composer.reseed(prompt_history(&self.entries));
         }
+        self.refresh_steering()
     }
     pub(crate) fn invalidate_reads(&mut self) {
+        self.steering_generation = None;
         self.pending.clear();
         for generation in self.generations.values_mut() {
             *generation = generation.wrapping_add(1);

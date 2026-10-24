@@ -421,36 +421,3 @@ fn session_scope_rejects_a_previous_session_and_workspace() {
     info.workspace = "/other".into();
     assert!(check_scope(&info, &ticket).is_err());
 }
-#[tokio::test]
-async fn attached_image_loading_uses_the_client_file_and_retains_scope() {
-    let file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(file.path(), b"\x89PNG\r\n\x1a\n").unwrap();
-    let remote = Arc::new(Remote::offline(Vec::new()));
-    let info = remote.info();
-    let ticket = Ticket {
-        workspace: info.workspace,
-        session: info.session_id,
-        surface: 71,
-        generation: 1,
-    };
-    let mut driver = Driver::new(Connection::Attach(remote));
-    driver.submit(
-        ticket.clone(),
-        Request::Command(Command::Image(file.path().to_string_lossy().into_owned())),
-    );
-    let completion = driver.next().await;
-    assert_eq!(completion.ticket, ticket);
-    assert!(
-        matches!(completion.result,Ok(Reply::Image{image,..}) if image.mime_type=="image/png"&&image.block_type==otto_core::model::BlockType::Image)
-    );
-    let dir = tempfile::tempdir().unwrap();
-    assert!(super::super::image_block_from_path(dir.path().to_str().unwrap()).is_err());
-    file.as_file()
-        .set_len(otto_core::model::MAX_IMAGE_BYTES as u64 + 1)
-        .unwrap();
-    assert!(
-        super::super::image_block_from_path(file.path().to_str().unwrap())
-            .unwrap_err()
-            .contains("exceeds")
-    );
-}

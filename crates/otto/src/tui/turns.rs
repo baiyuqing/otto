@@ -1,4 +1,4 @@
-//! Turn execution, restored prompts and image attachment loading.
+//! Turn execution and restored prompts.
 
 use super::*;
 
@@ -37,7 +37,7 @@ pub(super) async fn drive_turn<B: Backend, T, E>(
     mut apply: impl FnMut(&mut App, &WireEvent),
 ) -> Result<T, E> {
     tokio::pin!(future);
-    let mut frames = tokio::time::interval(render::SPINNER_FRAME);
+    let mut frames = render::spinner_interval();
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         tokio::select! {
@@ -104,7 +104,7 @@ pub(super) async fn run_restored_prompts<B: Backend>(
     let journal = controller.turn_queue();
     for prompt in prompts {
         controller.set_next_input_id(Some(prompt.input_id.clone()));
-        let result = run_turn(app, terminal, keys, controller, cancel, prompt.text, None).await;
+        let result = run_turn(app, terminal, keys, controller, cancel, prompt.text).await;
         controller.set_next_input_id(None);
         if let Some(journal) = &journal {
             journal.forget(&prompt.input_id);
@@ -121,22 +121,19 @@ pub(super) async fn run_turn<B: Backend>(
     controller: &Controller,
     cancel: &CancellationToken,
     line: String,
-    image: Option<Block>,
 ) -> Result<(), ReplError> {
-    if image.is_none() {
-        match controller.approval_message(&line, cancel).await {
-            Ok(Some(reply)) => {
-                app.push_system(reply.text);
-                if reply.queued {
-                    app.queued_input = Some(line);
-                }
-                return Ok(());
+    match controller.approval_message(&line, cancel).await {
+        Ok(Some(reply)) => {
+            app.push_system(reply.text);
+            if reply.queued {
+                app.queued_input = Some(line);
             }
-            Ok(None) => {}
-            Err(message) => {
-                app.push_system(message);
-                return Ok(());
-            }
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(message) => {
+            app.push_system(message);
+            return Ok(());
         }
     }
     app.start_turn();
@@ -154,16 +151,7 @@ pub(super) async fn run_turn<B: Backend>(
             &mut received,
             &turn,
             &app::Backend::Local(controller),
-            async {
-                match image {
-                    Some(image) => {
-                        controller
-                            .prompt_with_image(&line, image, &mut sink, &turn)
-                            .await
-                    }
-                    None => controller.prompt(&line, &mut sink, &turn).await,
-                }
-            },
+            controller.prompt(&line, &mut sink, &turn),
             |app, event| {
                 if app.apply_event(event) {
                     error_rendered = true;
@@ -194,42 +182,4 @@ pub(super) async fn run_turn<B: Backend>(
 /// reach [`App::apply_event`] as the same frames, including delivered guidance.
 pub(super) fn wire_frame(event: &Event) -> WireEvent {
     to_wire(event)
-}
-
-pub(super) fn image_block_from_path(path: &str) -> Result<Block, String> {
-    use std::io::Read as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(|error| error.to_string())?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Err("image must be a regular file".into());
-    }
-    if metadata.len() > MAX_IMAGE_BYTES as u64 {
-        return Err(format!("image exceeds {MAX_IMAGE_BYTES} bytes"));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_IMAGE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err(format!("image exceeds {MAX_IMAGE_BYTES} bytes"));
-    }
-    let mime_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        "image/jpeg"
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else {
-        return Err("unsupported image; use PNG, JPEG, or WebP".into());
-    };
-    let image = Block::image(BASE64.encode(bytes), mime_type);
-    image.validate().map_err(|error| error.to_string())?;
-    Ok(image)
 }

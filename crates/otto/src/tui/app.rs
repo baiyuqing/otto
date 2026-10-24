@@ -83,7 +83,6 @@ pub(crate) struct App {
     pub usage: Usage,
     /// Whether every accumulated usage report included a cache breakdown.
     pub cache_breakdown_complete: Option<bool>,
-    pub pending_image: Option<otto_core::model::Block>,
     pub info: Info,
     pub composer: Composer,
     pub queued_input: Option<String>,
@@ -93,6 +92,9 @@ pub(crate) struct App {
     /// The newest guidance the active run has queued, painted only from a
     /// back-end read: the TUI never guesses what the run accepted.
     pub queued_steer: Option<otto_core::agent::steering::Message>,
+    /// Every queued guidance item, in admission order; transient display only.
+    pub pending_steers: Vec<otto_core::agent::steering::Message>,
+    steering_generation: Option<u64>,
     /// Guidance Ctrl+U asked the runtime to withdraw. Its text returns to an
     /// empty composer only after the runtime reports it as withdrawn.
     recalling_steer: Option<otto_core::agent::steering::Message>,
@@ -166,12 +168,13 @@ impl App {
             entries,
             usage,
             cache_breakdown_complete,
-            pending_image: None,
             info: backend.info(),
             composer,
             queued_input: None,
             composer_notices: Vec::new(),
             queued_steer: None,
+            pending_steers: Vec::new(),
+            steering_generation: None,
             recalling_steer: None,
             awaiting_user_echo: None,
             scroll: None,

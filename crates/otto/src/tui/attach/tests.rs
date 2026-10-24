@@ -136,6 +136,102 @@ async fn the_channel_sink_forwards_text_and_fails_when_the_ui_is_gone() {
     assert!(sink.deliver(&Origin::terminal(), "x").await.is_err());
 }
 
+#[tokio::test]
+async fn reconnect_restores_pending_input_in_visible_main_conversation() {
+    use axum::response::IntoResponse;
+    let router = axum::Router::new().fallback(|uri: axum::http::Uri| async move {
+        match uri.path() {
+            "/v1/status" => axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from("data: []\n\n"))
+                .unwrap(),
+            "/v1/sessions" | "/v1/sessions/s1" =>
+                axum::Json(serde_json::json!({"id":"s1", "workspace":"/work"})).into_response(),
+            "/v1/sessions/s1/history" => axum::Json(serde_json::json!([])).into_response(),
+            "/v1/sessions/s1/tasks" => axum::Json(serde_json::json!({"tasks":[]})).into_response(),
+            "/v1/sessions/s1/tasks/steer" => axum::Json(serde_json::json!([{
+                "id": 1, "text": "reconnected pending guidance", "status": "queued", "input_id": "input-1"
+            }])).into_response(),
+            _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+        }
+    });
+    let remote = Arc::new(Remote::new(Client::in_process(router), "/work"));
+    {
+        let mut state = remote.state();
+        state.session = "s1".into();
+        state.info = Info {
+            session_id: "s1".into(),
+            workspace: "/work".into(),
+            ..Default::default()
+        };
+    }
+    let cancel = CancellationToken::new();
+    let mut app = App::new(&Backend::Attach(&remote));
+    app.driver = Some(super::super::backend::Driver::new(
+        super::super::backend::Connection::Attach(Arc::clone(&remote)),
+    ));
+    let mut ui = Ui {
+        remote: &remote,
+        app,
+        cancel: &cancel,
+        followed: None,
+        status: None,
+        rows: Vec::new(),
+        last_row: None,
+        last_done: None,
+        fresh: false,
+        compacting: None,
+        connected: false,
+        pending: None,
+        epoch: 0,
+        transcript: 0,
+        needs_sync: false,
+        cancel_after_send: false,
+        actions: VecDeque::new(),
+    };
+    ui.reconnect();
+    let result = ui
+        .pending
+        .as_mut()
+        .expect("reconnect call")
+        .call
+        .as_mut()
+        .await;
+    ui.on_transport(result);
+    assert!(ui.connected, "authoritative reconnect succeeds");
+    let completion = tokio::time::timeout(Duration::from_secs(1), ui.app.next_completion())
+        .await
+        .expect("reconnect must schedule a queue read");
+    ui.app.apply_completion(completion);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+    terminal.draw(|frame| render::draw(frame, &ui.app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..32)
+        .map(|y| {
+            (0..100)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect()
+        })
+        .collect();
+    let main = rows
+        .into_iter()
+        .take_while(|row| !row.contains("◆ QUEUED") && !row.contains('╭'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        main.contains("[Queued for current turn] reconnected pending guidance"),
+        "reconnect must restore pending text in main conversation, not only a banner: {main}"
+    );
+    assert!(
+        !ui.app
+            .entries
+            .iter()
+            .any(|entry| entry.raw.contains("pending guidance")),
+        "reconnect cannot persist pending input as delivered history"
+    );
+}
+
 fn row(turn: Option<&str>, turn_id: Option<&str>) -> StatusRow {
     StatusRow {
         id: "s1".into(),

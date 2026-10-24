@@ -80,8 +80,11 @@ impl App {
 
     /// Asks the back end for the active run's guidance. The only source of
     /// [`App::queued_steer`]: an empty answer means nothing is queued any more.
-    pub(super) fn refresh_steering(&mut self) {
+    pub(crate) fn refresh_steering(&mut self) -> Ticket {
         self.enqueue(0, Request::Command(backend::Command::SteeringState));
+        let generation = self.generations[&0];
+        self.steering_generation = Some(generation);
+        self.ticket(0, generation)
     }
 
     /// Paints the tracked guidance from a read. `messages` is the active run's
@@ -115,10 +118,11 @@ impl App {
                 }
             }
         }
-        let queued = messages
+        self.pending_steers = messages
             .into_iter()
-            .rev()
-            .find(|message| message.status == Status::Queued);
+            .filter(|message| message.status == Status::Queued)
+            .collect();
+        let queued = self.pending_steers.last().cloned();
         if let Some(previous) = self.queued_steer.take()
             && queued
                 .as_ref()

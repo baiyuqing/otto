@@ -242,7 +242,10 @@ async fn run_app<B: Backend>(
                 }
             }
             IdleEvent::Completion(completion) => app.apply_completion(*completion),
-            IdleEvent::Tick => app.request_approvals(),
+            IdleEvent::Tick => {
+                app.request_approvals();
+                app.poll_steering();
+            }
             IdleEvent::Animation => {
                 if !render::needs_animation(&app) {
                     continue;

@@ -51,7 +51,8 @@ impl App {
     /// runtime's own `agent_steering` notice: the TUI adds no claim of its own
     /// that could contradict it.
     fn finish_steering(&mut self) {
-        self.pending_steers.clear();
+        self.pending_steers
+            .retain(|message| message.status == otto_core::agent::steering::Status::Delivered);
         self.steering_generation = None;
         let Some(steer) = self.queued_steer.take() else {
             self.recalling_steer = None;
@@ -101,10 +102,58 @@ impl App {
                 }
             }
         }
+        let same_session = old == (info.workspace.clone(), info.session_id.clone());
+        if same_session
+            && self.scroll.is_some()
+            && entries
+                .iter()
+                .filter(|entry| entry.kind == Some(EntryKind::User))
+                .count()
+                > self
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.kind == Some(EntryKind::User))
+                    .count()
+        {
+            self.new_messages = true;
+        }
+        if same_session {
+            let mut added_users: HashMap<String, usize> = HashMap::new();
+            for entry in entries
+                .iter()
+                .filter(|entry| entry.kind == Some(EntryKind::User))
+            {
+                *added_users.entry(entry.raw.clone()).or_default() += 1;
+            }
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == Some(EntryKind::User))
+            {
+                if let Some(count) = added_users.get_mut(&entry.raw) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+            self.pending_steers.retain(|message| {
+                if let Some(count) = added_users.get_mut(&message.text)
+                    && *count > 0
+                {
+                    *count -= 1;
+                    self.delivered_steers.insert(message.id);
+                    return false;
+                }
+                true
+            });
+        }
         self.entries = entries;
         self.usage = usage;
-        self.info = backend.info();
-        self.scroll = None;
+        self.info = info;
+        if !same_session {
+            self.scroll = None;
+        }
+        // Same-session history may precede a foreign turn's input. Only the
+        // actual added rows above reconcile projections; unmatched deliveries
+        // must survive until their row or notification arrives.
         self.invalidate_reads();
         if old != (self.info.workspace.clone(), self.info.session_id.clone()) {
             self.surfaces.clear();
@@ -112,6 +161,10 @@ impl App {
             self.queued_steer = None;
             self.queued_input = None;
             self.pending_steers.clear();
+            self.delivered_steers.clear();
+            self.new_messages = false;
+            self.awaiting_user_echo = None;
+            self.optimistic_user_echo = None;
             self.recalling_steer = None;
             self.composer.reseed(prompt_history(&self.entries));
         }

@@ -54,12 +54,10 @@ pub(super) struct HarnessOptions {
     pub(super) config_text: Option<String>,
     pub(super) disabled_skills: Vec<String>,
     pub(super) skills_enabled: Option<bool>,
+    pub(super) skill_path: Option<std::path::PathBuf>,
     /// Registers the approval store and the `bash` double that
     /// [`Script::tool_command`] calls.
     pub(super) elevate: bool,
-    /// Gives the builder a reflector backed by this store, with the
-    /// directory as its home, so `~/.otto/skills` is `<home>/.otto/skills`.
-    pub(super) reflection: Option<(Arc<crate::reflection::Store>, std::path::PathBuf)>,
     /// The scheduled-delivery store behind `/v1/schedule/*`.
     pub(super) schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     /// Backs every session with a real session file instead of memory.
@@ -120,18 +118,9 @@ impl Harness {
         let canonical_workspace = std::fs::canonicalize(workspace.path())
             .unwrap_or_else(|_| workspace.path().to_path_buf());
         let mut builder = fixture_tests::builder(&canonical_workspace, sessions.path());
-        if let Some((store, home)) = &options.reflection {
-            let skills_root = home.join(".otto/skills");
-            builder.shared_mut().home = home.to_string_lossy().into_owned();
+        if let Some(skill_path) = options.skill_path {
             builder.shared_mut().config.skills.paths =
-                Some(vec![skills_root.to_string_lossy().into_owned()]);
-            builder.shared_mut().reflector = Arc::new(
-                crate::reflection::Reflector::new(
-                    otto_core::config::ReflectionRuntime::default(),
-                    Some(Arc::clone(store)),
-                )
-                .with_log_dir(home.join(".otto/reflection/runs")),
-            );
+                Some(vec![skill_path.to_string_lossy().into_owned()]);
         }
         builder
             .shared_mut()

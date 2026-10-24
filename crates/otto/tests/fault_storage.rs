@@ -270,37 +270,6 @@ fn usage(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     })
 }
 
-fn reflection(factory: &SqlRepositories, address: &str) -> Option<Handle> {
-    use otto::reflection::store::{RunRow, Status};
-    let store = factory.reflection(endpoint(address)).ok()?;
-    Some(Handle {
-        write: Box::new(move |n| {
-            let at = format!("2026-10-07T00:00:{n:02}Z");
-            let row = RunRow {
-                id: format!("run-{n}"),
-                session_id: "memory:contract".into(),
-                trigger: "manual".into(),
-                started_at: at.clone(),
-                finished_at: at,
-                status: Status::Ok,
-                from_entry: String::new(),
-                to_entry: format!("entry-{n}"),
-                input_bytes: 0,
-                truncated: false,
-                memories_proposed: 0,
-                memories_dropped: 0,
-                skills_written: 0,
-                detail: String::new(),
-            };
-            match store.record(&row) {
-                Ok(()) => Outcome::Written,
-                Err(_) => Outcome::Opaque,
-            }
-        }),
-        list: None,
-    })
-}
-
 fn skill_checks(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     use otto::skill::check_repository::{NewRow, ResultJson};
     let store = factory.skill_checks(endpoint(address)).ok()?;
@@ -427,7 +396,6 @@ fn repos() -> Vec<Repo> {
             Opaque,
             "",
         ),
-        repo("reflection", reflection, "runs", TX, 0, Opaque, Opaque, ""),
         repo(
             "skill_checks",
             skill_checks,

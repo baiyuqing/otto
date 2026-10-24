@@ -226,9 +226,9 @@ Turns:
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
 `/image`, `/context`, `/trace`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
-`/approve [<id>]`, `/steer`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
+`/approve [<id>]`, `/steer`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
-`/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
+`/thinking`, `/archive`, `/memory`, `/remember`, `/skill`,
 `/tasks`, `/task`, `/timers`, `/mcp`, `/login`, `/logout`,
 `/sandbox allow|network|exclude`, and `/approve <id> always`.
 
@@ -317,9 +317,6 @@ Shared commands:
   Use `unset` or `default` to omit the provider reasoning-effort field.
 - `/compact [focus]` creates a manual context checkpoint, or reports
   `[context] no-op` when nothing can be compacted.
-- `/reflect [focus]` runs [reflection](memory-and-extensions.md#reflection): a retrospective of the session
-  plus memory and skill proposals for your review. `/reflect list` and
-  `/reflect show <id>` show past runs.
 - `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads
   `[sandbox]` from the config file and applies it to the running process,
   printing the new state. It is rejected while a turn is in flight, and a

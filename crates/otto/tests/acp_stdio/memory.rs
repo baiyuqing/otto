@@ -149,7 +149,7 @@ fn opening_a_session_with_a_pending_candidate_sends_the_pending_notice() {
         .expect("session id");
     let notice = loop {
         let frame = client.recv();
-        if frame["params"]["update"]["_meta"]["otto"]["reflectionNotice"] == true {
+        if frame["params"]["update"]["_meta"]["otto"]["sessionNotice"] == true {
             break frame;
         }
     };

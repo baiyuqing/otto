@@ -17,17 +17,6 @@ impl Builder {
         let output_logs = Arc::new(crate::tool::bash_output::Logs::default());
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
-        let skills = otto_core::config::resolve_skills(
-            &self.config,
-            &self.environment,
-            &self.workspace_path,
-        );
-        if skills.enabled
-            && let Some(roots) = crate::reflection::skill_roots(&self.home, &skills.roots)
-        {
-            self.reflector
-                .attach_approvals(&self.approvals, &self.workspace_path, roots)?;
-        }
         let mut tools = self.builtin_file_tools(max_output);
         // Parent-only: child registries are built before their session exists,
         // so only the parent can bind verdict evidence to authoritative history.
@@ -82,7 +71,7 @@ impl Builder {
         let memory_client = self
             .runner_memory_client(&plugins, &extensions, runtime, warnings)
             .await?;
-        let advisor = if self.memory_usable()
+        if self.memory_usable()
             && !self.memory.external()
             && self.boundary_allows_dynamic(Some(runtime))
         {
@@ -126,13 +115,12 @@ impl Builder {
             );
             tools.extend(self.memory_tools(
                 max_output,
-                advisor.clone(),
+                advisor,
                 Some((
                     session.header().id.as_str(),
                     Arc::clone(&presentation_origin),
                 )),
             ));
-            advisor
         } else {
             if self.memory.external()
                 && self.memory_usable()
@@ -148,8 +136,7 @@ impl Builder {
                     max_output,
                 ));
             }
-            None
-        };
+        }
         mark_build_trace(&mut trace, "runner/setup");
         let hook_guard = crate::plugin::hooks::session_guard(
             {
@@ -310,7 +297,6 @@ impl Builder {
         if let Some(journal) = self.session_journal(session, "turns.json", warnings) {
             task_control.set_turn_queue_journal(journal);
         }
-        let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
             tools.push(Box::new(crate::tool::approval::RequestApproval {
                 service: self.approvals.clone(),
@@ -354,13 +340,6 @@ impl Builder {
                 Arc::new(session.clone()),
                 &redaction_values,
             )));
-            // Parent-only, like the timer tools: a child has no session file
-            // of its own to reflect on.
-            if self.reflector.enabled() && !self.no_session {
-                tools.push(Box::new(crate::tool::reflect::ReflectTool::new(
-                    Arc::clone(&reflection),
-                )));
-            }
             if include_parent_tools {
                 if subagents.inbox.is_none() {
                     let inbox = Arc::new(otto_core::agent::inbox::Inbox::default());
@@ -686,11 +665,9 @@ impl Builder {
             agents: catalogs.agent_catalog.clone(),
             mcp: mcp_servers,
             task_control,
-            advisor,
             memory_client,
             schedule_origin,
             presentation_origin,
-            reflection,
         };
         if include_parent_tools && extensions.has_hooks() && runner.allows_dynamic_content() {
             if hook_state.claim_start() {

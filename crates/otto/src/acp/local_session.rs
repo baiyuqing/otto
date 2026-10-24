@@ -69,7 +69,7 @@ pub(super) async fn watch_controller_notices(
         } else {
             let (notices, last) = controller.routed_notices_since(after);
             for notice in notices {
-                connection.reflection_notice(
+                connection.session_notice(
                     &session_id,
                     notice.id,
                     &notice.text,
@@ -108,7 +108,7 @@ pub(super) fn emit_notices(
         if wake_replies {
             connection.wake_reply(session_id, notice_id, &text);
         } else {
-            connection.reflection_notice(session_id, notice_id, &text, "");
+            connection.session_notice(session_id, notice_id, &text, "");
         }
     }
 }

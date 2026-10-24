@@ -80,7 +80,6 @@ pub(super) fn codec(domain: &str) -> Result<Arc<dyn SqlDomainCodec>> {
         "schedule" => Arc::new(sql::schedule::ScheduleCodec),
         "usage" => Arc::new(sql::usage::UsageCodec),
         "tasks" => Arc::new(sql::tasks::TaskCodec),
-        "reflection" => Arc::new(sql::reflection::ReflectionCodec),
         "skill_checks" => Arc::new(sql::skill_checks::SkillChecksCodec),
         "memory_advice" => Arc::new(sql::memory_advice::MemoryAdviceCodec),
         _ => return Err(invalid("unsupported local destination domain")),
@@ -115,10 +114,6 @@ pub(super) fn databases(
         (
             options.home.join(".otto/tasks.db"),
             Arc::new(sql::tasks::TaskCodec),
-        ),
-        (
-            options.home.join(".otto/reflection.db"),
-            Arc::new(sql::reflection::ReflectionCodec),
         ),
         (
             options.home.join(".otto/skill-checks.db"),

@@ -248,7 +248,7 @@ impl Runner {
 
     /// Asks the model once with no tools, outside the turn loop, under the
     /// turn timeout and `cancel`. The provider usage is recorded against
-    /// `task_id` so reflection cost is separable from turn cost.
+    /// `task_id` so background cost is separable from turn cost.
     pub async fn complete_text(
         &self,
         request: &otto_core::agent::oneshot::TextRequest<'_>,
@@ -553,19 +553,10 @@ impl Runner {
             agents: crate::subagent::Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
             task_control,
-            advisor: None,
             memory_client: None,
             schedule_origin: Default::default(),
             presentation_origin: Default::default(),
-            reflection: Default::default(),
         }
-    }
-
-    /// Gives a [`Self::scripted`] runner an advisor.
-    #[cfg(test)]
-    pub fn with_advisor(mut self, advisor: Arc<crate::memory::advice::Advisor>) -> Self {
-        self.advisor = Some(advisor);
-        self
     }
 
     /// Replaces the MCP servers a [`Self::scripted`] runner was built with.

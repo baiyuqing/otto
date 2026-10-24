@@ -299,18 +299,6 @@ impl Connection {
                     });
                     return;
                 }
-                let initial = tokio::select! {
-                    biased;
-                    () = stop.cancelled() => return,
-                    result = relay.client.reflection_notices(&id, 0) => result,
-                };
-                let initial = match initial {
-                    Ok(initial) => initial,
-                    Err(failure) => {
-                        relay.fail(failure);
-                        return;
-                    }
-                };
                 // An older serve has no wake-replies route; only this polling
                 // stops then.
                 let mut replies_after = tokio::select! {
@@ -330,21 +318,12 @@ impl Connection {
                     if !notice_watcher_ready(start, &stop).await {
                         return;
                     }
-                    let mut after = initial.last;
                     loop {
                         tokio::select! {
                             biased;
                             () = stop.cancelled() => return,
                             () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
                         }
-                        let result = match &connection.backend {
-                            Backend::Attach(relay) => tokio::select! {
-                                biased;
-                                () = stop.cancelled() => return,
-                                result = relay.client.reflection_notices(&id, after) => result,
-                            },
-                            Backend::Local(_) => return,
-                        };
                         if let Some(replies_cursor) = replies_after {
                             let polled = match &connection.backend {
                                 Backend::Attach(relay) => tokio::select! {
@@ -373,26 +352,6 @@ impl Connection {
                                     }
                                     return;
                                 }
-                            }
-                        }
-                        match result {
-                            Ok(page) => {
-                                for notice in page.notices {
-                                    connection.reflection_notice(
-                                        &id,
-                                        notice.id,
-                                        &notice.text,
-                                        &notice.presentation_origin,
-                                    );
-                                }
-                                after = page.last;
-                            }
-                            Err(crate::client::Error::Http { status: 404, .. }) => return,
-                            Err(failure) => {
-                                if let Backend::Attach(relay) = &connection.backend {
-                                    relay.fail(failure);
-                                }
-                                return;
                             }
                         }
                     }

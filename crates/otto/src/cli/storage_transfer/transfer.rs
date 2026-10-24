@@ -113,7 +113,6 @@ pub(super) async fn transfer_registered(
         "schedule",
         "usage",
         "tasks",
-        "reflection",
         "skill_checks",
         "memory_advice",
         "sessions",

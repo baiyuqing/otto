@@ -11,7 +11,6 @@ pub const DOMAINS: &[&str] = &[
     "schedule",
     "usage",
     "tasks",
-    "reflection",
     "skill_checks",
     "memory_advice",
 ];

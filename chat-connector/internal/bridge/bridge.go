@@ -284,25 +284,27 @@ type Command struct {
 	Agent             bool
 }
 
-// Commands lists the commands in menu order. Keep it in sync with the
-// dispatch in deliver and cmdManage, and with the commands `otto acp`
-// advertises; TestMenuCommandsAreHandled checks it.
+// Commands lists the commands in menu order, grouped like Otto's TUI
+// commands: setup, during a task, approvals, memory, sessions.
+// TestMenuCommandOrder checks the order. Keep it in sync with the dispatch in
+// deliver and cmdManage, and with the commands `otto acp` advertises;
+// TestMenuCommandsAreHandled checks it.
 var Commands = []Command{
-	{"permissions", "Approval mode and policy: /permissions [manual|auto]", false},
-	{"new", "Start a new session on the next message", false},
-	{"stop", "Cancel the running turn and clear the queue", false},
+	{"config", "Show or change provider profiles", false},
+	{"models", "List a provider profile's model IDs", false},
+	{"model", "Choose the conversation's profile: /model, or /model <profile>", true},
+	{"context", "Show what the next request sends, with token counts", true},
+	{"compact", "Compact the session context: /compact [focus]", true},
 	{"steer", "Guide the active task: /steer <guidance>", false},
 	{"queue", "Run a separate follow-up: /queue <prompt>", false},
-	{"compact", "Compact the session context: /compact [focus]", true},
-	{"context", "Show what the next request sends, with token counts", true},
-	{"model", "Choose the conversation's profile: /model, or /model <profile>", true},
-	{"sessions", "List the newest sessions", false},
-	{"use", "Switch to a session: /use <id>", false},
-	{"memory", "List or review pending memory candidates", false},
-	{"models", "List a provider profile's model IDs", false},
-	{"config", "Show or change provider profiles", false},
+	{"stop", "Cancel the running turn and clear the queue", false},
+	{"permissions", "Approval mode and policy: /permissions [manual|auto]", false},
 	{"allow", "Allow the pending permission request once", false},
 	{"deny", "Deny the pending permission request", false},
+	{"memory", "List or review pending memory candidates", false},
+	{"new", "Start a new session on the next message", false},
+	{"sessions", "List the newest sessions", false},
+	{"use", "Switch to a session: /use <id>", false},
 }
 
 // deliver handles one inbound message and does not block: sends and agent

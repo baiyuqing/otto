@@ -20,6 +20,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Breaking changes
 
+- Remove the terminal `/steer` command, including in attached sessions.
+  Ordinary text typed while a turn runs still steers that turn; when no turn is
+  active, such text starts a new turn. Chat, ACP and HTTP steering are
+  unchanged. Reinstall Otto and restart terminal sessions.
+
 - Remove the terminal `/plan` command, including in attached sessions. The
   status line still shows `Plan n/m · <step in progress>`; the `update_plan`
   tool, ACP plan updates and HTTP plan output are unchanged. Reinstall Otto and

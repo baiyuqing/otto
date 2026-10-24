@@ -26,10 +26,13 @@ Docker Desktop).
 ### `read chat completion stream: ...` or stream ended without `[DONE]`
 
 Check SSE support, streaming enablement, proxy buffering/rewriting and idle
-connection limits. Before any text/reasoning/tool delta, eligible transport
-failures retry three times (1, 2, 4 s) within the turn deadline. Failures after a
-delta, HTTP errors and malformed events are not retried. A sent request may have
-started remotely even if no output arrived; inspect effects before resubmitting.
+connection limits. Transient transport failures and model output idle
+timeouts retry up to three times (1, 2, 4 s) within the turn deadline, before
+or after a text/reasoning/tool delta; a retry after a delta discards the
+partial output and repeats the generation, which the endpoint bills again.
+HTTP 429 and 503 retry the same way before any delta. Other HTTP errors and
+malformed events are not retried. A sent request may have started remotely
+even if no output arrived; inspect effects before resubmitting.
 
 ### `warning: bash is unavailable because the configured sandbox could not be established ...`
 

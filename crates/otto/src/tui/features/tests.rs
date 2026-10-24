@@ -543,16 +543,10 @@ fn steer_never_falls_back_to_a_prompt() {
 }
 
 #[test]
-fn plan_command_and_line_show_the_session_plan_and_events_update_it() {
+fn plan_line_shows_the_session_plan_and_events_update_it() {
     use otto_core::session::{PlanStatus, PlanStep};
     let catalog = Catalog::default();
-    let document = |info: &Info| {
-        let Transition::Push(presenter) = catalog.open("/plan", info, false).unwrap() else {
-            panic!("plan should open a document");
-        };
-        presenter.view().document
-    };
-    assert!(document(&Info::default()).starts_with("No plan."));
+    assert!(catalog.open("/plan", &Info::default(), false).is_err());
     assert_eq!(crate::tui::render::plan_line(&[]), None);
 
     let remote = Arc::new(Remote::offline(Vec::new()));
@@ -575,10 +569,6 @@ fn plan_command_and_line_show_the_session_plan_and_events_update_it() {
     assert_eq!(
         crate::tui::render::plan_line(&app.info.plan).as_deref(),
         Some("Plan 1/2 · write")
-    );
-    assert_eq!(
-        document(&app.info),
-        "1 of 2 completed; in progress: write\n\n[x] read\n[>] write"
     );
 
     app.apply_event(&otto_core::wire::events::to_wire(

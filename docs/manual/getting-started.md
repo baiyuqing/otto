@@ -202,7 +202,7 @@ MCP transport removes its former transport's fields.
 
 Projects may set `default_profile`, UI mode, agent limits/deadlines and profile
 model/thinking/context/compaction windows. Provider identity/URL, credentials,
-sandbox grants, listeners, admission, storage, reflection and catalog roots
+sandbox grants, listeners, admission, storage and catalog roots
 require user/managed sources. Ignored fields produce diagnostics. Projects
 cannot retarget credential-bound MCP servers, interpolate environment variables
 in project MCP definitions, or supply their env, headers or OAuth bindings.
@@ -311,7 +311,7 @@ forcibly detached. See [recovery](troubleshooting.md) before retrying a write.
 
 For detailed sandbox exclusions, environment filtering, approval defaults,
 network/read grants and unsandboxed access use [Safety and tools](safety-and-tools.md).
-For memory, reflection, MCP, hooks and custom tools use
+For memory, MCP, hooks and custom tools use
 [Memory and extensions](memory-and-extensions.md). Restart long-lived runtimes
 after changing their configuration or environment.
 

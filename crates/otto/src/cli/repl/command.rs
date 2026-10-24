@@ -109,15 +109,6 @@ impl<'a> Repl<'a> {
                     self.compact(args, cancel).await?;
                     Some(false)
                 }
-                "reflect" => {
-                    match crate::cli::repl_commands::reflect_runs_report(self.controller, args) {
-                        Some(text) => {
-                            let _ = writeln!(self.stdout, "{text}");
-                        }
-                        None => self.reflect(args, cancel).await?,
-                    }
-                    Some(false)
-                }
                 "model" => {
                     self.model(args).await?;
                     Some(false)

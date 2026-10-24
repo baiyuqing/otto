@@ -119,12 +119,6 @@ const ENTRIES: &[Entry] = &[
     entry!("/archive", "archive a session", true, archive),
     entry!("/rename", "rename the current session", false, rename),
     entry!("/compact", "compact context", false, compact),
-    entry!(
-        "/reflect",
-        "reflect, list runs, or show a run",
-        false,
-        reflect
-    ),
     entry!("/image", "attach an image to the next prompt", false, image),
     entry!(
         "/sandbox",
@@ -327,13 +321,6 @@ fn rename(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
 fn compact(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     Ok(Transition::Run(Run::Compact(args.into())))
 }
-fn reflect(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    if args == "list" || args.starts_with("show ") {
-        management("reflect", args)
-    } else {
-        Ok(Transition::Run(Run::Reflect(args.into())))
-    }
-}
 fn image(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     if args.is_empty() {
         Err("usage: /image <path>".into())
@@ -456,7 +443,6 @@ fn management(name: &str, args: &str) -> Result<Transition, String> {
             | M::MemoryReview { .. }
             | M::Remember { .. }
             | M::SkillSet { .. }
-            | M::SkillRevert(_)
             | M::TimerCancel(_)
             | M::TaskCancel(_)
     );

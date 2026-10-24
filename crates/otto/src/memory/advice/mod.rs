@@ -1,6 +1,6 @@
 //! Advisory review hints on memory candidates.
 //!
-//! Before a candidate from the `remember` tool or from reflection is queued,
+//! Before a candidate from the `remember` tool is queued,
 //! [`Advisor::propose`] asks a model three questions about it: where it should
 //! apply (scope), how it relates to the standing records of the user scope
 //! (new, duplicate, conflict), and whether it is a durable habit or a one-off

@@ -15,13 +15,7 @@ pub(super) fn human_gate(request: &Request) -> bool {
         || (request.authority == Authority::Durable
             && !matches!(
                 request.subject.source.as_str(),
-                "memory"
-                    | "skill"
-                    | "reflection_skill"
-                    | "config"
-                    | "profile"
-                    | "schedule"
-                    | "delivery"
+                "memory" | "skill" | "config" | "profile" | "schedule" | "delivery"
             ))
 }
 

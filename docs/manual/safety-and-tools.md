@@ -6,7 +6,7 @@ Approval titles, reasons, proposal details, reviewer context/reasons and decisio
 feedback are not secret-scanned, including credential-shaped text, redaction
 markers and configured exact secret values. This content may be displayed and
 persisted: **do not include actual secrets**. Approval policy, permissions and
-human checkpoints still apply; model redaction and memory/reflection secret
+human checkpoints still apply; model redaction and memory secret
 protections are unchanged. This behavior needs no configuration; existing
 installations require the normal rebuild/upgrade and restart to use it.
 
@@ -193,7 +193,7 @@ Sandboxing controls what an agent can access; it does not by itself control what
 an authorized read may send to a remote model. Before every provider call, Otto
 therefore inspects an ephemeral copy of the complete request locally. This
 boundary covers ordinary turns, local and remote context compaction, sub-agents,
-and one-shot model calls used by approvals, advice, memory and reflection.
+and one-shot model calls used by approvals, advice and memory.
 
 The guard first removes credential values Otto already knows from its runtime
 configuration. It also recognizes a conservative set of high-confidence secret
@@ -440,11 +440,10 @@ runner is built, by the first rule that applies:
    results page.
 
 Hosted search runs at OpenAI inside the model response. It does not use Otto's
-local destination checks, Otto does not see the queries or the pages read, and
-`/reflect` cannot tell that an answer drew on the web, so its source isolation
-does not cover it. `[sandbox].network = "deny"` turns it off. Whether a ChatGPT
-subscription accepts the hosted tool depends on the backend; if searches fail,
-set a Google or Brave key to use a local backend instead.
+local destination checks, and Otto does not see the queries or the pages read.
+`[sandbox].network = "deny"` turns it off. Whether a ChatGPT subscription
+accepts the hosted tool depends on the backend; if searches fail, set a Google
+or Brave key to use a local backend instead.
 
 Local backends run without approval. A failure of the chosen backend, such as
 an exhausted quota, is reported as an error; Otto does
@@ -478,9 +477,8 @@ default). The same destination, credential and network checks apply to
 sub-agents and scheduled runs. Legacy `[web].allow_hosts` entries are still
 accepted in config but have no effect.
 
-Web content is untrusted. Results begin with a notice saying so, and
-`/reflect` never shows `web_fetch` or `web_search` results to the reflection
-model or cites them as evidence. A page can still try to steer the model.
+Web content is untrusted. Results begin with a notice saying so. A page can
+still try to steer the model.
 
 ### Verification verdicts
 
@@ -507,18 +505,6 @@ gate, or guarantee that later changes leave an accepted verdict current. The
 agent must submit only after the relevant evidence-producing calls, describe
 coverage limits, and report failed, blocked, not-run and inconclusive work
 without calling it passed.
-
-### `reflect`
-
-`reflect` runs [reflection](memory-and-extensions.md#reflection) on the current session when you ask the agent for
-a retrospective, a review of the session, or to distil lessons or skills from it. It takes
-an optional `focus` (at most 2 KiB), the same text as `/reflect [focus]`. It writes the
-retrospective to the run log under `~/.otto/reflection/runs/`, queues memory proposals for
-`/memory review`, and publishes skill proposals as approval requests; it writes no memory
-or skill itself, so it needs no approval of its own. It returns the result line, which names
-the run log, and the retrospective. While another reflection (requested or automatic) runs,
-it returns at once and that run's result arrives as a notice. It is not registered when
-`[reflection].enabled = false`, in a `--no-session` session, or in a sub-agent.
 
 ### `list_models`
 

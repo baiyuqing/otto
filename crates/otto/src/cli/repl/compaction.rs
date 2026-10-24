@@ -1,4 +1,4 @@
-//! `/compact` and `/reflect` commands.
+//! `/compact` command.
 
 use super::*;
 
@@ -80,30 +80,6 @@ impl<'a> Repl<'a> {
             let _ = write!(stdout, "{}", compaction_line(&result));
         }
         Ok(())
-    }
-
-    /// Runs one reflection and prints its one-line report.
-    pub(super) async fn reflect(
-        &mut self,
-        focus: &str,
-        cancel: &CancellationToken,
-    ) -> Result<(), Error> {
-        let turn = cancel.child_token();
-        let result = self.controller.reflect(focus, &turn).await;
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        match result {
-            Ok(report) => {
-                let _ = writeln!(self.stdout, "{}", report.summary());
-                Ok(())
-            }
-            Err(crate::reflection::Error::Cancelled) => Ok(()),
-            Err(error) => Err(Error::Command {
-                command: "/reflect".to_string(),
-                message: error.to_string(),
-            }),
-        }
     }
 
     pub(super) fn print_session_id(&mut self) {

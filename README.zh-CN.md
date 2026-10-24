@@ -10,7 +10,7 @@ Otto 帮你研究、写作、规划、编程和处理日常任务。可从终端
 [otto-plus](https://github.com/baiyuqing/otto-plus) 浏览器客户端，或通过
 `otto-connect` 从 Telegram、飞书使用。连接 `otto serve` 后，各客户端可以共享服务端会话。
 
-- **保持上下文：** 持久化会话、记忆、可复用 skills 与反思。
+- **保持上下文：** 持久化会话、记忆与可复用 skills。
 - **委派与自动化：** 子代理、定时任务和可恢复的持久化 workflow。
 - **限定访问：** 工作区文件边界、审批与 macOS Shell 沙箱。
 

@@ -52,13 +52,12 @@ func TestChatPromptPreservesUserText(t *testing.T) {
 func TestChatPromptSendsAgentCommandsAsTyped(t *testing.T) {
 	for _, text := range []string{
 		"/compact", " /compact keep the API names", "/compact\nkeep names", "/context",
-		"/reflect", " /reflect focus on this API", "/skill generated", "/skill revert lint-gate",
 	} {
 		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got != text {
 			t.Errorf("chatPrompt(%q) = %q, want the text unchanged", text, got)
 		}
 	}
-	for _, text := range []string{"/contextual question", "/stop", "please /compact"} {
+	for _, text := range []string{"/contextual question", "/stop", "please /compact", "/reflect", "/skill generated"} {
 		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got == text {
 			t.Errorf("chatPrompt(%q) has no channel context", text)
 		}
@@ -69,6 +68,9 @@ func TestMenuCommandsAreHandled(t *testing.T) {
 	t.Parallel()
 	name := regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
 	for _, c := range Commands {
+		if c.Name == "reflect" || c.Name == "skill" {
+			t.Errorf("removed command /%s is still advertised", c.Name)
+		}
 		if !name.MatchString(c.Name) {
 			t.Errorf("command name %q does not match Telegram's rule", c.Name)
 		}

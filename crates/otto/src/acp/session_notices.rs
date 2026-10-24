@@ -3,6 +3,29 @@
 use super::*;
 
 impl Connection {
+    pub(super) fn session_notice(
+        &self,
+        session_id: &str,
+        notice_id: u64,
+        text: &str,
+        presentation_origin: &str,
+    ) {
+        let meta = serde_json::Map::from_iter([(
+            "otto".to_string(),
+            json!({
+                "sessionNotice": true,
+                "noticeId": notice_id,
+                "presentationOrigin": presentation_origin,
+            }),
+        )]);
+        self.update(
+            session_id,
+            SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(text))).meta(meta),
+            ),
+        );
+    }
+
     /// Memory review uses a controller owned by this process, either a local
     /// ACP session or a serve session opened by this TCP connection.
     pub(super) fn memory_request(&self, method: &str, params: Value) -> Reply {
@@ -80,29 +103,6 @@ impl Connection {
             SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
                 TextContent::new(text),
             ))),
-        );
-    }
-
-    pub(super) fn reflection_notice(
-        &self,
-        session_id: &str,
-        notice_id: u64,
-        text: &str,
-        presentation_origin: &str,
-    ) {
-        let meta = serde_json::Map::from_iter([(
-            "otto".to_string(),
-            json!({
-                "reflectionNotice": true,
-                "noticeId": notice_id,
-                "presentationOrigin": presentation_origin,
-            }),
-        )]);
-        self.update(
-            session_id,
-            SessionUpdate::AgentMessageChunk(
-                ContentChunk::new(ContentBlock::Text(TextContent::new(text))).meta(meta),
-            ),
         );
     }
 

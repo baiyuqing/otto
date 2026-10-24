@@ -529,17 +529,6 @@ pub fn system_prompt_for(
             inspection data, never effective recall.</memory_policy>\n",
         );
     }
-    if tool_names.contains(&crate::tool::reflect::NAME) {
-        prompt.push_str(
-            "\n<reflection_policy>When the user asks for a retrospective, a review \
-            of the session, or to distil lessons or skills from it, call reflect. \
-            It writes the retrospective to the run log under \
-            ~/.otto/reflection/runs/ and queues memory and skill proposals for the \
-            user's review. Do not write retrospective files yourself. Afterwards, \
-            give the user the main points, the run log path, and what awaits their \
-            review.</reflection_policy>\n",
-        );
-    }
     if has_task_queue {
         prompt.push_str(
             "\n<task_control_policy>Use task_queue only for a distinct follow-up \

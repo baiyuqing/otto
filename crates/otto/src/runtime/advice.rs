@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_built_runner_carries_the_advisor_when_memory_is_usable() {
+    async fn a_built_runner_registers_remember_only_when_memory_is_usable() {
         let (_directory, builder) = selection_builder(None, true);
         let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
@@ -352,7 +352,12 @@ mod tests {
             .await
             .expect("runner");
 
-        assert!(runner.advisor.is_some());
+        assert!(
+            runner
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == "remember")
+        );
         let (_directory, builder) = selection_builder(None, false);
         let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
@@ -360,6 +365,11 @@ mod tests {
             .build_runner(&session, &runtime)
             .await
             .expect("runner");
-        assert!(runner.advisor.is_none());
+        assert!(
+            !runner
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == "remember")
+        );
     }
 }

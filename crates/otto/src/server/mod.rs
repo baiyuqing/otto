@@ -7,7 +7,7 @@
 //!
 //! Concurrency: `sessions` is a plain `Mutex<HashMap>` held only for map
 //! operations. Each [`OpenSession`] has its own `Mutex` for the turn,
-//! compaction, and reflection slots.
+//! and compaction slots.
 
 pub mod agents;
 pub mod approvals;
@@ -20,7 +20,6 @@ pub mod fs;
 pub mod listen;
 pub mod mcp;
 mod middleware;
-pub mod reflection;
 mod registry;
 mod responses;
 pub mod sandbox;
@@ -34,6 +33,7 @@ pub mod timers;
 pub mod turn;
 mod turn_routes;
 mod turn_runner;
+mod wake_replies;
 pub mod workflows;
 mod workspace_factory;
 pub mod workspaces;
@@ -81,7 +81,6 @@ use turn::{TRIGGER_RECOVERY, TRIGGER_TASK, TRIGGER_USER, Turn};
 /// `not_found` instead of 500.
 pub const SESSION_NOT_FOUND: &str = "session not found";
 const IMAGE_TURN_BODY_MAX_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 4096;
-const REMEMBERED_REFLECTION_CANCELS: usize = 16;
 
 /// An open session with nothing running is closed after this much idle time,
 /// unless `[server].session_idle_timeout` says otherwise; a server that stays
@@ -187,11 +186,6 @@ struct WaitingApproval {
     decide: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
-struct ActiveReflection {
-    request_id: Option<String>,
-    cancel: CancellationToken,
-}
-
 #[derive(Default)]
 struct SessionState {
     /// The running turn, or the last one that finished. Never a queued turn.
@@ -200,12 +194,6 @@ struct SessionState {
     /// `handle_compact` both check it under the same lock, so a turn and a
     /// compaction are never admitted together.
     compacting: Option<CancellationToken>,
-    /// Non-`None` while `POST .../reflect` runs.
-    reflecting: Option<ActiveReflection>,
-    /// Reflection request ids cancelled before their matching reflect request
-    /// registered. Bounded to the most recent 16 ids; request ids are expected
-    /// to be unique per client operation.
-    canceled_reflections: VecDeque<String>,
     /// Turns waiting for the running turn or compaction, oldest first. Every
     /// reader of this field holds the session lock, so the queue, `turn` and
     /// `compacting` change together.
@@ -235,26 +223,7 @@ impl SessionState {
     /// [`Self::busy`] without the restored turns: they wait for the wake turn
     /// that resumes an interrupted turn, so they must not hold it back.
     fn busy_for_wake(&self) -> bool {
-        self.turn_running()
-            || !self.queue.is_empty()
-            || self.compacting.is_some()
-            || self.reflecting.is_some()
-    }
-
-    fn reflection_cancelled(&self, request_id: &str) -> bool {
-        self.canceled_reflections
-            .iter()
-            .any(|known| known == request_id)
-    }
-
-    fn remember_reflection_cancel(&mut self, request_id: &str) {
-        if self.reflection_cancelled(request_id) {
-            return;
-        }
-        if self.canceled_reflections.len() == REMEMBERED_REFLECTION_CANCELS {
-            self.canceled_reflections.pop_front();
-        }
-        self.canceled_reflections.push_back(request_id.to_string());
+        self.turn_running() || !self.queue.is_empty() || self.compacting.is_some()
     }
 
     fn remember_decided(&mut self, id: &str) {
@@ -338,9 +307,6 @@ impl OpenSession {
         }
         if let Some(cancel) = state.compacting.as_ref() {
             cancel.cancel();
-        }
-        if let Some(active) = state.reflecting.as_ref() {
-            active.cancel.cancel();
         }
     }
 }
@@ -598,29 +564,7 @@ impl Server {
                 post(cancel_turn),
             )
             .route("/v1/sessions/{id}/compact", post(compact::handle))
-            .route("/v1/sessions/{id}/reflect", post(reflection::reflect))
-            .route("/v1/sessions/{id}/reflect/cancel", post(reflection::cancel))
-            .route("/v1/sessions/{id}/notices", get(reflection::notices))
-            .route(
-                "/v1/sessions/{id}/wake-replies",
-                get(reflection::wake_replies),
-            )
-            .route(
-                "/v1/sessions/{id}/reflection/runs",
-                get(reflection::list_runs),
-            )
-            .route(
-                "/v1/sessions/{id}/reflection/runs/{run}",
-                get(reflection::show_run),
-            )
-            .route(
-                "/v1/sessions/{id}/reflection/skills",
-                get(reflection::list_skills),
-            )
-            .route(
-                "/v1/sessions/{id}/reflection/skills/{name}/revert",
-                post(reflection::revert_skill),
-            )
+            .route("/v1/sessions/{id}/wake-replies", get(wake_replies::list))
             .route("/v1/sessions/{id}/tasks", get(tasks::list))
             .route(
                 "/v1/sessions/{id}/deliveries/{approval_id}",

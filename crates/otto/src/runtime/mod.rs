@@ -2,7 +2,7 @@
 //! client, the tool registry and its sandbox, memory, skills, sub-agents and
 //! the system prompt.
 //!
-//! This is the runtime layer that `app`, `tool`, `reflection` and the
+//! This is the runtime layer that `app`, `tool` and the
 //! frontends build on. It must not depend on a frontend (`cli`, `tui`, `acp`,
 //! `server`, `client`); `tests/runtime_boundary.rs` enforces that. Flag
 //! parsing, the REPL and process lifecycle stay in [`crate::cli`], which

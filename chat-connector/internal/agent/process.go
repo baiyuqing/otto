@@ -301,9 +301,9 @@ func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 		return nil
 	}
 	if c.p.isLoading(string(n.SessionId)) {
-		_, _, notice := ReflectionNotice(n.Update)
 		_, wake := WakeReply(n.Update)
-		if !notice && !wake {
+		_, _, notice := SessionNotice(n.Update)
+		if !wake && !notice {
 			return nil
 		}
 	}
@@ -311,14 +311,17 @@ func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 	return nil
 }
 
-// ReflectionNotice returns the text and trusted passive-delivery origin of a
-// valid Otto background notice. An empty origin is discoverable, not broadcast.
-func ReflectionNotice(u acp.SessionUpdate) (string, string, bool) {
-	text, otto, ok := ottoChunkMeta(u, "reflectionNotice", "noticeId")
+// SessionNotice returns the plain text and passive-delivery origin of a valid
+// Otto session notice. An empty origin is discoverable, not broadcast.
+func SessionNotice(u acp.SessionUpdate) (string, string, bool) {
+	text, otto, ok := ottoChunkMeta(u, "sessionNotice", "noticeId")
 	if !ok {
 		return "", "", false
 	}
-	origin, _ := otto["presentationOrigin"].(string)
+	origin, ok := otto["presentationOrigin"].(string)
+	if !ok {
+		return "", "", false
+	}
 	return text, origin, true
 }
 
@@ -332,7 +335,7 @@ func ottoChunkMeta(u acp.SessionUpdate, flag, idKey string) (string, map[string]
 		return "", nil, false
 	}
 	id, ok := otto[idKey].(float64)
-	if !ok || id < 1 || math.Trunc(id) != id {
+	if !ok || math.IsInf(id, 0) || math.IsNaN(id) || id < 1 || math.Trunc(id) != id {
 		return "", nil, false
 	}
 	return chunk.Content.Text.Text, otto, true

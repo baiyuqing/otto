@@ -179,8 +179,6 @@ fn session_new_and_load_are_followed_by_the_command_list() {
             &json!("compact"),
             &json!("context"),
             &json!("model"),
-            &json!("reflect"),
-            &json!("skill"),
             &json!("steer"),
             &json!("queue"),
             &json!("auto"),
@@ -330,15 +328,12 @@ fn task_queue_capability_survives_compaction_and_session_reload() {
         text_reply("answer after reload"),
     ]);
     configure(home.path(), &base_url);
-    // A small recent-token budget makes the first turn summarizable; automatic
-    // reflection would add a background provider request after /compact.
+    // A small recent-token budget makes the first turn summarizable.
     let config = home.path().join(".config/otto/config.toml");
     let text = std::fs::read_to_string(&config).unwrap();
     std::fs::write(
         &config,
-        format!(
-            "{text}\n[agent.compaction]\nkeep_recent_tokens = 1\n\n[reflection]\nauto = \"off\"\n"
-        ),
+        format!("{text}\n[agent.compaction]\nkeep_recent_tokens = 1\n"),
     )
     .unwrap();
 

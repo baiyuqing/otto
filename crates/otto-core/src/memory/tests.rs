@@ -518,3 +518,8 @@ fn semantic_key_and_effective_scope_filter_have_closed_contracts() {
     }
     assert!(serde_json::from_str::<ScopeNamespace>("\"global\"").is_err());
 }
+
+#[test]
+fn removed_reflect_operation_is_not_deserializable() {
+    assert!(serde_json::from_str::<Operation>(r#""reflect""#).is_err());
+}

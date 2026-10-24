@@ -257,10 +257,6 @@ impl Relay {
             Command, compaction_text, context_text, model_switched_text, model_text,
         };
         let command = match command {
-            Command::Reflect { focus } => {
-                return self.reflect_runs_command(session_id, focus, cancel).await;
-            }
-            Command::Skill { args } => return self.skill_command(session_id, args).await,
             Command::Steer { guidance } => {
                 let accepted = self
                     .client
@@ -326,10 +322,9 @@ impl Relay {
                             ))
                         })
                 }
-                Command::Reflect { .. }
-                | Command::Skill { .. }
-                | Command::Steer { .. }
-                | Command::Queue { .. } => unreachable!(),
+                Command::Steer { .. } | Command::Queue { .. } => {
+                    unreachable!()
+                }
             }
         };
         tokio::select! {
@@ -337,146 +332,6 @@ impl Relay {
             () = self.lost.cancelled() => Err(error(INTERNAL_ERROR, LOST)),
             () = cancel.cancelled() => Ok(None),
             answered = call => answered.map_err(|failure| self.fail(failure)),
-        }
-    }
-
-    /// `/reflect list` and `/reflect show <id>` read serve's run logs; any
-    /// other `/reflect` starts a run there.
-    async fn reflect_runs_command(
-        &self,
-        session_id: &str,
-        args: &str,
-        cancel: &CancellationToken,
-    ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
-        use crate::cli::repl_commands::{
-            ReflectCommand, reflect_command, reflection_list_report, reflection_show_report,
-        };
-        let disabled = || crate::reflection::Error::Disabled.to_string();
-        let unavailable = |failure: crate::client::Error| match failure {
-            crate::client::Error::Http {
-                status: 409,
-                ref code,
-                ..
-            } if code == "reflection_unavailable" => Ok(disabled()),
-            failure => Err(failure),
-        };
-        let text = match reflect_command(args) {
-            ReflectCommand::Run { focus } => {
-                return self.reflect_command(session_id, focus, cancel).await;
-            }
-            ReflectCommand::List => {
-                let list = self
-                    .client
-                    .reflection_runs(session_id)
-                    .await
-                    .map_err(|failure| self.fail(failure))?;
-                reflection_list_report(if list.enabled {
-                    Ok(list.runs)
-                } else {
-                    Err(disabled())
-                })
-            }
-            ReflectCommand::Show { id } if id.is_empty() => reflection_show_report(id, Ok(None)),
-            ReflectCommand::Show { id } => {
-                let log = match self.client.reflection_run(session_id, id).await {
-                    Ok(log) => Ok(log.map(|log| (log.path, log.content))),
-                    Err(failure) => {
-                        Err(unavailable(failure).map_err(|failure| self.fail(failure))?)
-                    }
-                };
-                reflection_show_report(id, log)
-            }
-        };
-        Ok(Some(text))
-    }
-
-    async fn reflect_command(
-        &self,
-        session_id: &str,
-        focus: &str,
-        cancel: &CancellationToken,
-    ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
-        let request_id = crate::memory::new_id().map_err(|failure| {
-            error(
-                INTERNAL_ERROR,
-                format!("cannot create reflection request ID: {failure}"),
-            )
-        })?;
-        let mut reflect = Box::pin(self.client.reflect(session_id, focus, &request_id));
-        tokio::select! {
-            biased;
-            () = self.lost.cancelled() => Err(error(INTERNAL_ERROR, LOST)),
-            result = &mut reflect => result
-                .map(|report| report.map(reflection_text))
-                .map_err(|failure| self.fail(failure)),
-            () = cancel.cancelled() => {
-                self.client
-                    .cancel_reflection(session_id, &request_id)
-                    .await
-                    .map_err(|failure| self.fail(failure))?;
-                reflect.await
-                    .map(|report| report.map(reflection_text))
-                    .map_err(|failure| self.fail(failure))
-            }
-        }
-    }
-
-    async fn skill_command(
-        &self,
-        session_id: &str,
-        args: &str,
-    ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
-        match args.split_whitespace().collect::<Vec<_>>().as_slice() {
-            ["generated"] => {
-                let list = self
-                    .client
-                    .generated_skills(session_id)
-                    .await
-                    .map_err(|failure| self.fail(failure))?;
-                let text = if !list.enabled {
-                    "skill generated: reflection is disabled".to_string()
-                } else if list.skills.is_empty() {
-                    "No skills generated by reflection.".to_string()
-                } else {
-                    let mut text = "Skills generated by reflection:".to_string();
-                    for skill in list.skills {
-                        let ownership = if skill.owned {
-                            ""
-                        } else {
-                            " [edited or missing: reflection no longer owns it]"
-                        };
-                        text.push_str(&format!(
-                            "\n- {}{ownership}: run {} (session {}) on {}: {}",
-                            skill.name,
-                            skill.run_id,
-                            skill.session_id,
-                            skill.updated_at,
-                            skill.reason
-                        ));
-                    }
-                    text
-                };
-                Ok(Some(text))
-            }
-            ["revert", name] => {
-                let result = self
-                    .client
-                    .revert_generated_skill(session_id, name)
-                    .await
-                    .map_err(|failure| self.fail(failure))?;
-                Ok(Some(match result.as_str() {
-                    "restored" => format!(
-                        "Reverted skill {name} to its previous version; the change applies to new sessions"
-                    ),
-                    "removed" => format!(
-                        "Removed skill {name}, which reflection created; the change applies to new sessions"
-                    ),
-                    _ => format!("skill revert: unexpected result {result}"),
-                }))
-            }
-            _ => Ok(Some(
-                "Usage: /skill generated | /skill revert <name>".to_string(),
-            )),
         }
     }
 
@@ -737,11 +592,6 @@ pub(super) async fn serve_in_process(
         |_| (),
     )
     .await;
-}
-
-/// What `/reflect` shows for serve's report, as the local frontends show it.
-fn reflection_text(report: crate::client::ReflectionResult) -> String {
-    crate::reflection::summary_text(&report.line, &report.retrospective)
 }
 
 #[cfg(test)]

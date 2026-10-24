@@ -386,16 +386,12 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
-| `POST /v1/sessions/{id}/reflect` | Run one reflection now, optionally with `{"focus":"..."}`, and return what it did (`status`, `candidates`, `skills`, `dropped`, the one-line summary, and the `retrospective`). Memory proposals are queued as pending candidates; skills that pass every check are written to `~/.otto/skills`. `409 turn_active` while a turn runs or is queued, or a compaction or reflection runs; `409 reflection_unavailable` when reflection is disabled, the session has no file, memory is unavailable, or the redaction boundary is closed; `409 reflection_failed` when the model call or its answer failed (nothing is marked covered). |
-| `POST /v1/sessions/{id}/reflect/cancel` | With `{"request_id":"..."}`, cancel only the matching manual reflection and return `202`. Supply the same optional ID on `POST .../reflect`: 1–64 ASCII letters, digits, underscores, or hyphens, with a fresh ID for each operation. The session retains the 16 most recent cancelled IDs to handle cancellation arriving before registration. This cannot cancel a turn, compaction, automatic reflection, or a manual reflection with another or no ID. |
-| `GET /v1/sessions/{id}/reflection/runs` | List the 50 newest reflection run logs, newest first, each with `id`, `path`, `started`, `trigger`, `status`, and `headline` (the retrospective's first line). `enabled:false` when reflection is turned off. |
-| `GET /v1/sessions/{id}/reflection/runs/{run}` | Return one run log, `{"id","path","content"}`, by the `id` the list shows. `404` when there is no such log; `409 reflection_unavailable` when reflection is turned off. Like the skill routes, these read the user's `~/.otto`, not the session. |
 | `GET /v1/sessions/{id}/skill-manager` | Authenticated, session-scoped management snapshot, including discovered disabled skills. Returns `{global_enabled,skills:[{skill:{name,description,contract,directory,path},enabled,loaded}]}`; `contract` is `null` or `{input,output}`. `global_enabled` reflects the latest persisted `skills.enabled` (default true), even for an empty inventory; row `enabled` is the per-skill preference, and `loaded` reflects the fixed current-session catalog. Discovery inventory remains available when globally disabled; no field implies hot reload. `404` for an unknown session; `500 skill_config_read_failed` if configuration cannot be read. |
 | `GET /v1/sessions/{id}/skill-manager/{name}` | Read-only details: `{skill,body,contract_check}`. `skill` has the same metadata shape as the list's row `skill`; `contract_check` is `null` or a string. Reads instructions through the confined skill loader, never executes them. Encode the skill name as one URL path segment. `404` for an unknown session; `400 skill_read_failed` for an unknown skill or a confined read failure. |
 | `POST /v1/sessions/{id}/skills/{name}/enable` and `/disable` | Persist a skill's configured state through the shared configuration writer. Returns `{name,enabled,restart_required:true}`; restart the serving Otto process to apply it. Does not remove skill files or change the current session catalog. These writes require the same server authentication as other management routes; a failed write must not be shown as a confirmed state change. |
-| `GET /v1/sessions/{id}/reflection/skills` | List the skills reflection wrote and not reverted, with the run, session, time, reason, and `owned` (false once the file was edited by hand). `enabled:false` when reflection is turned off. |
-| `POST /v1/sessions/{id}/reflection/skills/{name}/revert` | Restore the previous version of a skill reflection wrote, or remove it if reflection created it (`result` is `restored` or `removed`). `404` when reflection did not write it; `409 skill_not_owned` when it was edited by hand; `409 skills_unavailable` when `[skills]` is disabled. These act on the user's `~/.otto/skills`, not on the session, and are as exposed as the skill enable and disable routes: any holder of the token or socket may call them. |
-| `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
+
+
+
 | `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, in the shape and with the rules of `.../notices`. `otto acp --attach` reads it to send wake replies to its ACP client. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
 | `POST /v1/sessions/{id}/inputs` | Admit ordinary `{"text":"..."}` without model routing or implicit queuing. Returns `"steered"` when bound to the active run's next safe boundary, `"idle"` when the caller may explicitly start a new turn, or `"approval_pending"` while an approval owns input. Nonblank text is limited to 32,000 UTF-8 bytes. An optional `input_id` admits a retry once (`409 duplicate_input` after delivery). `503 input_not_persisted` when the guidance could not be saved; it was not accepted. |
@@ -457,8 +453,8 @@ are open the least recently used ones are closed first; the sweep runs once a
 minute. A setting of `"0"`, or `0` for the cap, turns that rule off. Both are on
 by default and need no restart to change. Busy sessions are never closed,
 whatever their age or the count: a running or queued turn, a compaction, a
-reflection, a waiting approval, an unfinished sub-agent task, or an undelivered
-notification keeps a session open. A live ACP connection (`--acp-listen`, or the
+waiting approval, an unfinished sub-agent task, or an undelivered notification
+keeps a session open. A live ACP connection (`--acp-listen`, or the
 Web UI's own connection) pins the sessions it opened, so those stay open until
 it ends.
 
@@ -579,7 +575,7 @@ Status codes:
 | `400` | Empty or missing turn text, or an invalid JSON body. |
 | `401` | Missing or invalid bearer token (TCP listener only). |
 | `404` | Session, turn, or task not found. |
-| `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `reflection_unavailable`, `reflection_failed`, `skill_not_owned`, `skills_unavailable`, `revert_failed`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
+| `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `skills_unavailable`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
 | `500` | Internal error. The response body is a fixed `internal error` message; details go to the server log only. |
 
 ### Observability
@@ -764,19 +760,15 @@ them.
 
 After `session/new` and `session/load` has replied, Otto sends a
 `session/update` of type `available_commands_update` listing `compact`,
-`context`, `model`, `reflect`, `skill`, `steer`, `queue`, and `auto`.
-A `session/prompt` containing `/context`, `/compact [focus]`, `/model`,
-`/model <profile>`,
-`/reflect [focus]`, `/reflect list`, `/reflect show <id>`, `/skill generated`, or
-`/skill revert <name>` is run by
-Otto itself and is not sent to the task model. Command names must match
+`context`, `model`, `skill`, `steer`, `queue`, and `auto`.
+A `session/prompt` containing `/context`, `/compact [focus]`, `/model`, or
+`/model <profile>` is run by Otto itself and is not sent to the task model. Command names must match
 whole words; `/compactx`, `/models` or a sentence that contains `/context` is a normal
 prompt. `otto acp --attach` does the same, running the command on
 `otto serve` through its existing HTTP APIs. Each command answers with one
 `agent_message_chunk` and the stop reason `end_turn`; `session/cancel` during
-`/compact` or `/reflect` answers `cancelled`. Attached reflection cancellation
-uses an exact request ID and cannot cancel a later operation. Existing
-context/compaction/reflection/skill/model commands are rejected while the session runs
+`/compact` answers `cancelled`. Existing
+context/compaction/skill/model commands are rejected while the session runs
 a prompt. `/steer <guidance>` bypasses the occupied prompt slot and accepts
 guidance for that run. `/queue <prompt>` acknowledges acceptance immediately,
 then streams the independent answer as later session updates; local ACP keeps
@@ -790,13 +782,6 @@ copies, and cancels this connection's attached follow-ups.
 ACP advertises `_meta.otto.taskControl:true`. `_otto/tasks/steer` and
 `_otto/tasks/control` use the HTTP bodies above plus `sessionId`; replies are
 JSON-only, separate from the running prompt's updates.
-
-`/reflect [focus]` reports memory proposals, skill writes and the retrospective from the
-existing [reflection](memory-and-extensions.md#reflection) pipeline; `/reflect list` and `/reflect show <id>` read
-past run logs. `/skill generated` lists generated skills;
-`/skill revert <name>` restores the previous version or removes a generated
-skill, and refuses a skill edited by hand. These commands are also available
-through the chat connector.
 
 - `/compact [focus]` summarizes earlier messages as in the other frontends
   and replies `Compacted the session context: <n> tokens before, about <m>
@@ -929,7 +914,7 @@ See [Chat connector](servers-and-connectors.md#chat-connector).
 - `session/resume`, `session/close`, `session/delete`, session modes and
   config options, and client-supplied MCP servers.
 - Image, audio, and embedded-resource prompt content.
-- Slash commands other than `/compact`, `/context`, `/model`, `/reflect`, `/steer`, `/queue`, and the
+- Slash commands other than `/compact`, `/context`, `/model`, `/steer`, `/queue`, and the
   supported `/skill` operations, such as `/approve` or
   `/sandbox`: text from the client reaches the model as a user message.
 
@@ -1256,7 +1241,7 @@ a log line.
 
 A message whose whole text is one of these commands (for `/use`, the
 command and its argument) is handled by `otto-connect` and not sent to Otto,
-except `/compact`, `/context`, `/reflect`, and `/skill`, which are sent to
+except `/compact`, `/context`, and `/skill`, which are sent to
 Otto as typed for agent-side command handling, and `/model <profile>`, which the
 connector forwards to Otto as a prompt. Bare `/model` is answered by the
 connector itself.
@@ -1272,9 +1257,6 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
 | `/model` | Answered by `otto-connect`: it posts the profiles from the local `~/.config/otto/config.toml`, one line each with provider and model, plus one button per profile. Choosing a button switches the conversation exactly as `/model <profile>` does. On a platform without buttons the same list is posted as text. It makes no model request. The list covers the user configuration only (a workspace's `.otto/config.toml` is not read), and it marks the configured default profile, not the session's current one. |
 | `/model <profile>` | Sent to Otto as a prompt; `otto acp` rebuilds this session on the named profile, replies "Switched to profile …", and leaves the configuration file and every other session unchanged. It works whether the connector runs `otto acp` or `otto acp --attach`, uses no model request, and is therefore the way to move off a profile whose quota is exhausted. An unknown profile answers with an error. |
-| `/reflect [focus]` | Runs the existing reflection over the uncovered part of this session and reports the result and the retrospective. Memory proposals require `/memory` review; generated skills pass the existing evidence and safety checks. `/reflect list` and `/reflect show <id>` show past runs. |
-| `/skill generated` | Lists skills written by reflection. Generated skills become active in new sessions. |
-| `/skill revert <name>` | Restores the previous version or removes a skill created by reflection. Refuses a skill edited by hand. |
 | `/allow` | Answers the pending permission request with Allow once. |
 | `/deny` | Answers the pending permission request with Deny. |
 | `/sessions` | Lists the 10 newest sessions of the workspace, one per line: `*` for the chat's session or a space, the first 8 characters of the id, the last change as `YYYY-MM-DD HH:MM` (`-` when unknown), and the title (`(untitled)` when empty). With none: "No sessions." |
@@ -1284,7 +1266,7 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/memory reject <id>` | Rejects one pending candidate; no record is written. |
 
 At startup `otto-connect` sets the Telegram bot's command menu to these
-commands, including `/compact`, `/context`, `/model`, `/reflect`, `/skill`, `/steer`, and `/queue`, and to `/models` and `/config` (see
+commands, including `/compact`, `/context`, `/model`, `/skill`, `/steer`, and `/queue`, and to `/models` and `/config` (see
 [Provider-profile management](servers-and-connectors.md#provider-profile-management)): `setMyCommands`
 for the default scope, then `deleteMyCommands` for the `all_private_chats` and
 `all_group_chats` scopes, whose lists Telegram would show instead. Lists set

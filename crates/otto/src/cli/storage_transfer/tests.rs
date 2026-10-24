@@ -84,10 +84,6 @@ async fn command_transfers_all_existing_families_and_exact_pi_bytes() {
     drop(crate::storage::backends::turso::usage::Store::open(&backend.join("usage.db")).unwrap());
     drop(crate::storage::backends::turso::tasks::Store::open(&backend.join("tasks.db")).unwrap());
     drop(
-        crate::storage::backends::turso::reflection::Store::open(&backend.join("reflection.db"))
-            .unwrap(),
-    );
-    drop(
         crate::storage::backends::turso::skill_checks::Store::open(
             &backend.join("skill-checks.db"),
         )

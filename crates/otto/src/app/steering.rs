@@ -122,7 +122,7 @@ impl Controller {
         let _serial = tokio::select! {
             guard = self.approval_control.lock() => guard,
             () = cancel.cancelled() => return Err("context canceled".into()),
-            () = self.auto_cancel.cancelled() => return Err(CLOSED.into()),
+            () = self.close_cancel.cancelled() => return Err(CLOSED.into()),
         };
         if self.pending_approval().is_some() {
             drop(_serial);

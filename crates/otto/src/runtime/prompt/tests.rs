@@ -240,24 +240,17 @@ fn the_approval_policy_names_every_session_mode_and_keeps_the_decision_with_the_
 }
 
 #[test]
-fn the_reflection_and_file_write_policies_follow_their_tools() {
+fn file_write_policy_follows_its_tool_and_removed_reflection_has_no_policy() {
     let prompt = system_prompt_for(&definitions(&["write", "reflect"]), off(), "", "", "");
-    assert!(
-        prompt.contains("<reflection_policy>When the user asks for a retrospective"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Do not write retrospective files yourself."),
-        "{prompt}"
-    );
-    assert!(
-            prompt.contains("<file_access>File tools are restricted to the workspace. Create or replace a file with write, not a shell here-document or redirection.</file_access>"),
-            "{prompt}"
-        );
-    let prompt = system_prompt_for(&definitions(&["read"]), off(), "", "", "");
     assert!(!prompt.contains("<reflection_policy>"), "{prompt}");
+    assert!(!prompt.contains("call reflect"), "{prompt}");
     assert!(
-        prompt.contains("<file_access>File tools are restricted to the workspace.</file_access>"),
+        prompt.contains("Create or replace a file with write"),
+        "{prompt}"
+    );
+    let prompt = system_prompt_for(&definitions(&["read"]), off(), "", "", "");
+    assert!(
+        prompt.contains("File tools are restricted to the workspace."),
         "{prompt}"
     );
 }

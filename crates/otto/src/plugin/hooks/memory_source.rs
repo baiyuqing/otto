@@ -6,8 +6,8 @@ use otto_core::{
     memory::{
         ApplyRequest, Error, ErrorKind, FeedbackRequest, ForgetRequest, InspectRequest,
         InspectResult, MemoryService, ObserveRequest, Operation, OperationStatusRequest,
-        PrepareRequest, PreparedChanges, RecallRequest, RecallResult, Receipt, ReflectRequest,
-        RememberRequest, Result, ServiceDescription,
+        PrepareRequest, PreparedChanges, RecallRequest, RecallResult, Receipt, RememberRequest,
+        Result, ServiceDescription,
     },
     operation::OperationControl,
 };
@@ -33,7 +33,7 @@ struct ReplyError {
 fn is_effectful(operation: &str) -> bool {
     matches!(
         operation,
-        "observe" | "remember" | "reflect" | "forget" | "feedback" | "prepare" | "apply"
+        "observe" | "remember" | "forget" | "feedback" | "prepare" | "apply"
     )
 }
 
@@ -189,13 +189,6 @@ impl MemoryService for PluginMemoryService {
         control: &dyn OperationControl,
     ) -> Result<Receipt> {
         self.call(Operation::Remember, request, control).await
-    }
-    async fn reflect(
-        &self,
-        request: &ReflectRequest,
-        control: &dyn OperationControl,
-    ) -> Result<Receipt> {
-        self.call(Operation::Reflect, request, control).await
     }
     async fn forget(
         &self,

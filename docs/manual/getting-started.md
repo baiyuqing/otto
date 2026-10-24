@@ -44,7 +44,13 @@ export OPENAI_API_KEY='…'  # set privately; avoid saving a real key in shell h
 otto --provider openai-compatible --base-url https://api.example.com/v1 --model MODEL_ID
 ```
 
-Use a model ID supported by your endpoint. `otto setup` can create a provider
+Use a model ID supported by your endpoint. Each request carries
+`prompt_cache_key` set to the session id (a sub-agent uses its own transcript
+id), so an endpoint that routes by this field can serve a session's requests
+from the same prompt cache. If the endpoint answers HTTP 400 or 422 with an
+error body that names `prompt_cache_key`, Otto resends that request once
+without the field and omits it from later requests until the provider client
+is rebuilt, for example when Otto restarts. `otto setup` can create a provider
 profile. `otto --help` and each subcommand's `--help` are the complete CLI
 reference; the tables below highlight daily entry points.
 

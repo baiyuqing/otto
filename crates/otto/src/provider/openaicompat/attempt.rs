@@ -19,8 +19,7 @@ impl Client {
 
     /// [`Self::attempt`] after the stop check: a connection that could not
     /// be established is [`AttemptError::NotSent`], and a transport failure
-    /// after dispatch with nothing emitted yet is
-    /// [`AttemptError::Interrupted`].
+    /// after dispatch is [`AttemptError::Interrupted`].
     async fn attempt_sent(
         &self,
         ready: &Ready,
@@ -51,7 +50,11 @@ impl Client {
                 } else if is_transient_transport(&error) {
                     // The request may already be at the endpoint even though
                     // its response never arrived.
-                    AttemptError::Interrupted(ProviderError::Other(message), TRANSPORT_RETRY_REASON)
+                    AttemptError::Interrupted(
+                        ProviderError::Other(message),
+                        TRANSPORT_RETRY_REASON,
+                        false,
+                    )
                 } else {
                     AttemptError::Sent(ProviderError::Other(message))
                 });
@@ -65,11 +68,12 @@ impl Client {
     /// Status 429 and 503 are [`AttemptError::RetryableStatus`] with the
     /// `Retry-After` seconds read from the headers before the body; every
     /// other non-2xx status, and an overflow body, is [`AttemptError::Sent`].
-    /// A transport failure that happens before any event reached `emit` is
+    /// A transient transport failure or the model idle timeout is
     /// [`AttemptError::Interrupted`], so the retry policy may repeat the
-    /// attempt. Once a reasoning, text or tool-call delta has been handed to
-    /// the caller nothing can be repeated, so the failure is
-    /// [`AttemptError::Sent`].
+    /// attempt; its flag records whether a reasoning, text or tool-call delta
+    /// had already reached `emit` in this attempt. Stream codec errors,
+    /// response validation failures and non-transient transport errors are
+    /// [`AttemptError::Sent`] at any point.
     async fn read_response(
         &self,
         response: reqwest::Response,
@@ -136,20 +140,21 @@ impl Client {
                             "read chat completion stream: no model output for {:?}",
                             self.model_idle_timeout
                         ));
-                        return Err(if !emitted {
-                            AttemptError::Interrupted(error, MODEL_IDLE_RETRY_REASON)
-                        } else {
-                            AttemptError::Sent(error)
-                        });
+                        return Err(AttemptError::Interrupted(
+                            error,
+                            MODEL_IDLE_RETRY_REASON,
+                            emitted,
+                        ));
                     }
                     Ok(Err(error)) => {
                         check_running(control).map_err(AttemptError::Sent)?;
                         let message =
                             format!("read chat completion stream: {}", error_chain(&error));
-                        return Err(if !emitted && is_transient_transport(&error) {
+                        return Err(if is_transient_transport(&error) {
                             AttemptError::Interrupted(
                                 ProviderError::Other(message),
                                 TRANSPORT_RETRY_REASON,
+                                emitted,
                             )
                         } else {
                             AttemptError::Sent(ProviderError::Other(message))

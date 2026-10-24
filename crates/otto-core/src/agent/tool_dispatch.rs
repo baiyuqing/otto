@@ -272,18 +272,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let is_error = execution.result.is_error;
         // Observed here because this is the only point that knows both the
         // arguments the model sent and whether the result failed.
-        if self.options.hooks.is_some() {
-            // Hook effects are not described by the tool's retry safety.
-            state
-                .progress
-                .observe(&block.tool_name, arguments.get(), is_error);
-        } else {
-            state.progress.observe_execution(
-                &block.tool_name,
-                arguments.get(),
-                &execution,
-                self.tools.retry_safety(&block.tool_name),
-            );
+        // A user- or deadline-requested stop is not evidence of the model
+        // repeating itself, so a stopped execution is not observed.
+        if execution.outcome.stop_reason.is_none() {
+            if self.options.hooks.is_some() {
+                // Hook effects are not described by the tool's retry safety.
+                state
+                    .progress
+                    .observe(&block.tool_name, arguments.get(), is_error);
+            } else {
+                state.progress.observe_execution(
+                    &block.tool_name,
+                    arguments.get(),
+                    &execution,
+                    self.tools.retry_safety(&block.tool_name),
+                );
+            }
         }
         let terminal = OperationFact::terminal(
             operation_id.clone(),
@@ -533,6 +537,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
     ) -> Result<(), AgentError> {
         self.append_steering(steering.drain(), emit).await
+    }
+
+    /// Delivers the queued guidance of a step interrupt. The event carries the
+    /// exact number of messages appended, which is zero when the guidance was
+    /// withdrawn after the request.
+    pub(super) async fn deliver_steering_after_interrupt(
+        &self,
+        steering: &steering::Run,
+        emit: EventSink<'_>,
+    ) -> Result<(), AgentError> {
+        let messages = steering.drain();
+        emit(Event::StepInterrupted {
+            guidance: messages.len(),
+        });
+        self.append_steering(messages, emit).await
     }
 
     pub(super) async fn append_steering(

@@ -33,6 +33,7 @@ mod session_lifecycle_cases;
 mod sessions_cases;
 mod skills_cases;
 mod status_cases;
+mod steer_interrupt_cases;
 mod turns_cases;
 mod wake_cases;
 mod workspace_cases;

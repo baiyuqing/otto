@@ -91,6 +91,24 @@ pub async fn withdraw_steering(
     }
 }
 
+/// `POST /v1/sessions/{id}/tasks/steer/interrupt` stops the running step and
+/// delivers the queued guidance inside the current turn. No body is read.
+pub async fn interrupt_steering(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.interrupt_step() {
+        Ok(queued_guidance) => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "queued_guidance": queued_guidance as u32 }),
+        ),
+        Err(refusal) => error_response(StatusCode::CONFLICT, refusal.code(), &refusal.message()),
+    }
+}
+
 /// `POST /v1/sessions/{id}/tasks/steer`.
 pub async fn steer(
     State(server): State<Arc<Server>>,

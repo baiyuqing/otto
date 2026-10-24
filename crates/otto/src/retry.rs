@@ -49,6 +49,13 @@ pub fn next_delay(
     (delay <= available_for_delay).then_some(delay)
 }
 
+/// Parses a `Retry-After` header value in its delta-seconds form: a
+/// non-negative integer after trimming whitespace. An HTTP-date or any other
+/// value is absent.
+pub fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
 fn exponential_bound(policy: Policy, attempt: u32) -> Duration {
     let mut delay = policy.base.min(policy.max);
     if delay.is_zero() || delay == policy.max {
@@ -84,6 +91,23 @@ mod tests {
             max: Duration::from_secs(30),
             retry_after_cap: Duration::from_secs(20),
         }
+    }
+
+    #[test]
+    fn retry_after_accepts_only_delta_seconds() {
+        assert_eq!(parse_retry_after_seconds("7"), Some(Duration::from_secs(7)));
+        assert_eq!(
+            parse_retry_after_seconds(" 7 "),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(parse_retry_after_seconds("0"), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after_seconds("-1"), None);
+        assert_eq!(parse_retry_after_seconds(""), None);
+        assert_eq!(parse_retry_after_seconds("1.5"), None);
+        assert_eq!(
+            parse_retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT"),
+            None
+        );
     }
 
     #[test]

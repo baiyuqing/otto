@@ -2,7 +2,8 @@
 //!
 //! The wire codec lives in [`otto_core::openaicompat`]; this module owns only
 //! the parts that need the network: base-URL validation, connection settings,
-//! the bounded retry policy, bounded error-body reader, and API-key redaction.
+//! the bounded retry policy (connection failures, transport interruptions and
+//! HTTP 429/503), bounded error-body reader, and API-key redaction.
 //!
 //! Ownership: a [`Client`] owns its base URL, its API key, and its
 //! [`reqwest::Client`]. The request passed to `complete` is borrowed and never
@@ -65,14 +66,16 @@ const REDACTED: &str = "[REDACTED]";
 /// an unbounded buffer.
 const MAX_MODELS_BODY: usize = 8 << 20;
 
-/// Attempts for one completion, shared by both retryable failure classes: a
-/// connection that could not be established, and a dispatched request whose
-/// transport failed before any stream event reached the caller.
+/// Attempts for one completion, shared by the retryable failure classes: a
+/// connection that could not be established, a dispatched request whose
+/// transport failed before any stream event reached the caller, and an
+/// HTTP 429 or 503 status. A `Retry-After` value replaces the backoff delay
+/// and is capped at `retry_after_cap`.
 const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
     max_attempts: 4,
     base: Duration::from_secs(1),
     max: Duration::from_secs(4),
-    retry_after_cap: Duration::from_secs(4),
+    retry_after_cap: Duration::from_secs(30),
 };
 /// `Retry` event reason for a connection that could not be established: the
 /// request never left Otto.
@@ -102,8 +105,13 @@ enum AttemptError {
     /// visible is duplicated, but the endpoint may already have started the
     /// completion. The reason is the `Retry` event reason.
     Interrupted(ProviderError, &'static str),
+    /// The endpoint answered HTTP 429 or 503 before any stream event, which
+    /// means it did not process the request, so trying again cannot duplicate
+    /// provider work. Carries the reason (the `Retry` event reason) and the
+    /// delta-seconds `Retry-After` value, if the response had one.
+    RetryableStatus(ProviderError, &'static str, Option<Duration>),
     /// No retry: output was already visible, or the failure is not a
-    /// transport failure.
+    /// transport failure or a 429/503 status.
     Sent(ProviderError),
 }
 
@@ -293,13 +301,15 @@ impl Provider for Client {
     /// Sends one chat completion and assembles its streamed response.
     ///
     /// An attempt is repeated while it has produced nothing visible: a
-    /// connection that could not be established never left Otto, and a
+    /// connection that could not be established never left Otto, a
     /// dispatched request whose transport failed before any stream event
-    /// reached the caller has no output to duplicate. Both share one policy
+    /// reached the caller has no output to duplicate, and an HTTP 429 or 503
+    /// status means the request was not processed. All share one policy
     /// (at most 4 attempts, 1/2/4 s apart, within the operation deadline) and
-    /// report every planned retry as a `Retry` event. A failure after any
-    /// reasoning, text or tool-call delta, an HTTP status, and a stream-codec
-    /// error are never retried.
+    /// report every planned retry as a `Retry` event. A `Retry-After` in
+    /// seconds replaces the delay, capped at 30 s. A failure after any
+    /// reasoning, text or tool-call delta, any other HTTP status (including
+    /// 500, 502 and 504), and a stream-codec error are never retried.
     async fn complete(
         &self,
         request: &Request,
@@ -347,23 +357,35 @@ impl Provider for Client {
                 return provider_failure(error, 0, EffectCertainty::NotStarted, control);
             }
             let mut attempts = 0;
+            // Set once any attempt was a dispatched transport interruption.
+            let mut interrupted_seen = false;
             let result = loop {
                 attempts += 1;
                 // `dispatched` records whether a retry could repeat provider work,
                 // which the settlement must keep as unknown effect certainty.
-                let (error, reason, dispatched) = match self
+                let (error, reason, dispatched, retry_after, status_retry) = match self
                     .attempt(ready, &payload, &mut *emit, control, observer)
                     .await
                 {
                     Ok(response) => break Ok(response),
                     Err(AttemptError::Sent(error)) => break Err(error),
-                    Err(AttemptError::NotSent(error)) => (error, CONNECT_RETRY_REASON, false),
-                    Err(AttemptError::Interrupted(error, reason)) => (error, reason, true),
+                    Err(AttemptError::NotSent(error)) => {
+                        (error, CONNECT_RETRY_REASON, false, None, false)
+                    }
+                    Err(AttemptError::Interrupted(error, reason)) => {
+                        interrupted_seen = true;
+                        (error, reason, true, None, false)
+                    }
+                    // A status proves the endpoint answered; only an earlier
+                    // interruption leaves the effect unknown.
+                    Err(AttemptError::RetryableStatus(error, reason, retry_after)) => {
+                        (error, reason, interrupted_seen, retry_after, true)
+                    }
                 };
                 let Some(delay) = crate::retry::next_delay(
                     RETRY_POLICY,
                     attempts,
-                    None,
+                    retry_after,
                     control.remaining().unwrap_or(Duration::MAX),
                     Duration::from_secs(1),
                     &mut Backoff,
@@ -371,6 +393,8 @@ impl Provider for Client {
                     let error = self.safe_error(error);
                     return if dispatched {
                         provider_failure(error, attempts, EffectCertainty::Unknown, control)
+                    } else if status_retry {
+                        ProviderSettlement::failed(error, attempts, EffectCertainty::Completed)
                     } else {
                         ProviderSettlement::failed(error, attempts, EffectCertainty::NotStarted)
                     };

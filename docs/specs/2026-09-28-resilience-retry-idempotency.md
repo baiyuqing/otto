@@ -574,6 +574,16 @@ separately proven and tested.
 > permanent errors and exhausted budgets still settle the turn. Recovery facts
 > are append-only custom entries after the normal model operation settles.
 
+> Amended 2026-10-24 (approved). OpenAI-compatible retries HTTP 429 and 503
+> before any reasoning, text or tool-call delta. RFC 9110 defines both as
+> responses to a request the server did not process, so repetition does not
+> depend on endpoint idempotency. The retry uses the existing four-attempt and
+> deadline budget with 1/2/4-second backoff; a numeric `Retry-After` takes
+> precedence but is capped at 30 seconds. Exhaustion returns the last status with `Completed`
+> certainty, or `Unknown` when an earlier attempt in the same operation was an
+> interrupted dispatched transport. HTTP 500, 502 and 504 may follow processing
+> by the endpoint or an upstream and remain terminal, as do all other statuses.
+
 ## Phase 1: identity, disposition, and effect-certainty contract
 
 ### Scope

@@ -9,6 +9,7 @@ use crate::faults::http;
 
 mod cache_key;
 mod errors;
+mod output_retry;
 mod retry;
 mod wire;
 

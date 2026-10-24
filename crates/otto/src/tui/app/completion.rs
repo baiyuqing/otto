@@ -42,6 +42,11 @@ impl App {
             return;
         }
         if let Ok(Reply::Steering(messages)) = &completion.result {
+            if self.steering_generation != Some(t.generation) {
+                self.pending.remove(&(t.surface, t.generation));
+                return;
+            }
+            self.steering_generation = None;
             self.apply_steering(messages.clone());
         }
         if t.surface == 0 {
@@ -68,10 +73,6 @@ impl App {
         self.pending.remove(&(t.surface, t.generation));
         if !mutation && self.generations.get(&t.surface) != Some(&t.generation) {
             return;
-        }
-        if let Ok(Reply::Image { path, image }) = &completion.result {
-            self.pending_image = Some(image.clone());
-            self.push_system(format!("Attached image: {path}"));
         }
         let management_notice = if mutation {
             match &completion.result {
@@ -161,14 +162,16 @@ impl App {
         if old != (self.info.workspace.clone(), self.info.session_id.clone()) {
             self.surfaces.clear();
             self.composer_notices.clear();
-            self.pending_image = None;
             self.writes.clear();
             self.session_changes.clear();
             // The run that owned the tracked guidance ended with the session.
             self.queued_steer = None;
+            self.queued_input = None;
+            self.pending_steers.clear();
             self.recalling_steer = None;
             self.invalidate_reads();
             self.composer.reseed(prompt_history(&self.entries));
+            self.refresh_steering();
         }
         if let Some(draft) = draft {
             self.composer.set_input(&draft);

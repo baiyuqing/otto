@@ -105,6 +105,14 @@ impl App {
                 return true;
             }
             USER_MESSAGE => {
+                if let Some(index) = self
+                    .pending_steers
+                    .iter()
+                    .position(|steer| steer.text == event.text)
+                {
+                    self.pending_steers.remove(index);
+                    self.refresh_steering();
+                }
                 // The run appended this text as the user's message, which is its
                 // own word that queued guidance reached the model. The steer is
                 // resolved here so a turn end cannot offer it again.

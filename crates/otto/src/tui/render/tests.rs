@@ -82,21 +82,6 @@ fn screen_rows(app: &App, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
-fn trace_app() -> App {
-    let remote = crate::tui::attach::Remote::offline(Vec::new());
-    let mut app = App::new(&crate::tui::app::Backend::Attach(&remote));
-    let mut trace = crate::tui::features::TraceView::new();
-    let _ = crate::tui::features::Presenter::receive(
-        &mut trace,
-        crate::tui::backend::Reply::Trace(crate::tui::features::sample_trace()),
-    );
-    let view = crate::tui::features::Presenter::view(&trace);
-    app.surfaces.push(Box::new(trace), &view);
-    app
-}
-
-const BAR_GLYPHS: [char; 4] = ['░', '▒', '◇', '█'];
-
 /// The drawn rows above the status line, joined.
 ///
 /// The status line is the one row whose content a test cannot predict: it
@@ -181,6 +166,7 @@ mod composer_and_scroll;
 mod layout;
 mod panels;
 mod pinned_rows;
+mod queued_input;
 mod status_line;
 mod task_panel;
 mod transcript_bands;

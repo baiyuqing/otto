@@ -103,6 +103,8 @@ pub(crate) enum Command {
     SteeringState,
     /// Withdraw one guidance item that is still queued.
     WithdrawSteer(u64),
+    /// Stop the running step and deliver the queued guidance in the same turn.
+    InterruptStep,
     Management(crate::app::management::Request),
     Logout,
 }

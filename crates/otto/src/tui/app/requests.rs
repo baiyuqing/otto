@@ -21,7 +21,11 @@ impl App {
         // caller's display never flaps back to a stale list.
         let follows_steering = matches!(
             &request,
-            Request::Command(backend::Command::AdmitInput(_) | backend::Command::WithdrawSteer(_))
+            Request::Command(
+                backend::Command::AdmitInput(_)
+                    | backend::Command::WithdrawSteer(_)
+                    | backend::Command::InterruptStep
+            )
         );
         let composer_feedback = matches!(
             &request,

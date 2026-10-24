@@ -243,7 +243,7 @@ Turns:
   serve, and `/agents` reads serve's task records.
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
-`/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
+`/clear`, `/resume` (the sessions of the workspace), `/fork`, `/rename`, `/compact`,
 `/context`, `/agents`, `/permissions`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/steer`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
@@ -310,7 +310,6 @@ Shared commands:
 - `/help` shows command help.
 - `/init` asks the agent to inspect the repository and create a concise root
   `AGENTS.md` contributor guide. If the file already exists, it is left unchanged.
-- `/plan` shows the [session plan](servers-and-connectors.md#session-plan) as a checklist.
 - `/session` shows session details (ID, path, provider, model, thinking effort,
   and sandbox state, plus the session name once `/rename` has set one).
 - `/new` closes the current session and starts a fresh one in the same process.

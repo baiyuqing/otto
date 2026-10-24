@@ -506,7 +506,6 @@ fn inputs_is_not_recognized_or_listed_locally_or_attached() {
             panic!("help should open a document");
         };
         assert!(!help.view().document.contains("/inputs"));
-        assert!(help.view().document.contains("/steer"));
     }
 
     let remote = Arc::new(Remote::offline(Vec::new()));
@@ -526,20 +525,14 @@ fn inputs_is_not_recognized_or_listed_locally_or_attached() {
 }
 
 #[test]
-fn steer_never_falls_back_to_a_prompt() {
+fn the_steer_slash_command_is_unknown() {
     let catalog = Catalog::default();
-    // Explicit guidance is a command: an idle result must report the runtime's
-    // error rather than become the next prompt.
-    let Ok(Transition::Push(mut steer)) =
-        catalog.open("/steer use the other branch", &Info::default(), false)
-    else {
-        panic!("/steer should open a presenter");
-    };
-    assert!(matches!(
-        steer.start(),
-        Some(BackendRequest::Command(Command::Steer(text))) if text == "use the other branch"
-    ));
-    assert!(catalog.open("/steer", &Info::default(), false).is_err());
+    for line in ["/steer use the other branch", "/steer"] {
+        assert_eq!(
+            catalog.open(line, &Info::default(), false).err(),
+            Some(format!("unknown command: {line}"))
+        );
+    }
 }
 
 #[test]

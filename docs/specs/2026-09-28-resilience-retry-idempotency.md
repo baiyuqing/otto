@@ -584,6 +584,21 @@ separately proven and tested.
 > interrupted dispatched transport. HTTP 500, 502 and 504 may follow processing
 > by the endpoint or an upstream and remain terminal, as do all other statuses.
 
+> Amended 2026-10-24 (approved). OpenAI-compatible also retries a transient
+> transport failure (connection reset, connection closed before the message
+> completed, broken pipe) or a model output idle timeout after partial
+> reasoning, text or tool-call output. This supersedes the pre-output
+> restriction above for these two failure classes on OpenAI-compatible only.
+> Chat Completions keeps no server-side state for a request that does not set
+> `store`, so a retry repeats generation, and the endpoint bills the repeated
+> tokens; it repeats no other effect. The retry uses the same four-attempt,
+> 1/2/4-second and deadline budget, emits the retry flag `interrupted_output`
+> for the attempt that produced output, and settles exhaustion or a stop
+> during the wait with `Unknown` certainty. Failed stream fragments never
+> authorize Otto tool execution or enter assistant history. Stream codec
+> errors, response validation failures, other transport errors, HTTP
+> statuses, cancellation and deadline expiry after output remain terminal.
+
 ## Phase 1: identity, disposition, and effect-certainty contract
 
 ### Scope

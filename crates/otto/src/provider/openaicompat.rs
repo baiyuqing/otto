@@ -101,18 +101,19 @@ enum AttemptError {
     /// The connection could not be established, so the request never left
     /// Otto and trying again cannot duplicate provider work.
     NotSent(ProviderError),
-    /// The request was dispatched and the transport failed before any stream
-    /// event reached the caller. Output cannot be replayed, so nothing
-    /// visible is duplicated, but the endpoint may already have started the
-    /// completion. The reason is the `Retry` event reason.
-    Interrupted(ProviderError, &'static str),
+    /// The request was dispatched and the transport failed or the model went
+    /// idle, possibly after stream events reached the caller. The endpoint
+    /// may already have started the completion. The reason is the `Retry`
+    /// event reason; the flag is true when this attempt emitted a reasoning,
+    /// text or tool-call delta, which the caller must discard on retry.
+    Interrupted(ProviderError, &'static str, bool),
     /// The endpoint answered HTTP 429 or 503 before any stream event, which
     /// means it did not process the request, so trying again cannot duplicate
     /// provider work. Carries the reason (the `Retry` event reason) and the
     /// delta-seconds `Retry-After` value, if the response had one.
     RetryableStatus(ProviderError, &'static str, Option<Duration>),
-    /// No retry: output was already visible, or the failure is not a
-    /// transport failure or a 429/503 status.
+    /// No retry: the failure is not a transient transport failure, a model
+    /// idle timeout or a 429/503 status.
     Sent(ProviderError),
     /// HTTP 400 or 422 whose body names `prompt_cache_key`. The endpoint
     /// rejects the field; the error is reported when the request did not
@@ -309,16 +310,18 @@ impl Client {
 impl Provider for Client {
     /// Sends one chat completion and assembles its streamed response.
     ///
-    /// An attempt is repeated while it has produced nothing visible: a
-    /// connection that could not be established never left Otto, a
-    /// dispatched request whose transport failed before any stream event
-    /// reached the caller has no output to duplicate, and an HTTP 429 or 503
-    /// status means the request was not processed. All share one policy
-    /// (at most 4 attempts, 1/2/4 s apart, within the operation deadline) and
-    /// report every planned retry as a `Retry` event. A `Retry-After` in
-    /// seconds replaces the delay, capped at 30 s. A failure after any
-    /// reasoning, text or tool-call delta, any other HTTP status (including
-    /// 500, 502 and 504), and a stream-codec error are never retried.
+    /// An attempt is repeated after a connection that could not be
+    /// established, a transient transport failure or model idle timeout on a
+    /// dispatched request (before or after stream output), and an HTTP 429 or
+    /// 503 status (the request was not processed). All share one policy (at
+    /// most 4 attempts, 1/2/4 s apart, within the operation deadline) and
+    /// report every planned retry as a `Retry` event; `interrupted_output` is
+    /// true when the failed attempt had emitted a reasoning, text or
+    /// tool-call delta, and each attempt assembles its own response. A
+    /// `Retry-After` in seconds replaces the delay, capped at 30 s. Any other
+    /// HTTP status (including 500, 502 and 504), a stream-codec error, a
+    /// response validation failure and a non-transient transport error are
+    /// never retried.
     ///
     /// A request with a cache key sends `prompt_cache_key`. If the endpoint
     /// answers HTTP 400 or 422 naming that field, the request is sent again
@@ -382,6 +385,8 @@ impl Provider for Client {
             let mut interrupted_seen = false;
             let result = loop {
                 attempts += 1;
+                // Per attempt: only an interruption after output sets it.
+                let mut interrupted_output = false;
                 // `dispatched` records whether a retry could repeat provider work,
                 // which the settlement must keep as unknown effect certainty.
                 let (error, reason, dispatched, retry_after, status_retry) = match self
@@ -406,8 +411,9 @@ impl Provider for Client {
                     Err(AttemptError::NotSent(error)) => {
                         (error, CONNECT_RETRY_REASON, false, None, false)
                     }
-                    Err(AttemptError::Interrupted(error, reason)) => {
+                    Err(AttemptError::Interrupted(error, reason, output_emitted)) => {
                         interrupted_seen = true;
+                        interrupted_output = output_emitted;
                         (error, reason, true, None, false)
                     }
                     // A status proves the endpoint answered; only an earlier
@@ -439,7 +445,7 @@ impl Provider for Client {
                     max_attempts: RETRY_POLICY.max_attempts,
                     delay,
                     reason: reason.to_owned(),
-                    interrupted_output: false,
+                    interrupted_output,
                 });
                 if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
                     return if dispatched {

@@ -150,6 +150,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Features and reliability
 
+- OpenAI-compatible requests whose stream fails with a transient transport
+  error or a model output idle timeout after partial output are now retried
+  within the same four-attempt and deadline budget, as ChatGPT requests
+  already are. The partial output is discarded and never runs tools; the
+  `provider_retry` event carries `interrupted_output: true`. The repeated
+  generation is billed again by the endpoint. Stream codec errors and HTTP
+  statuses after output still end the turn.
+
 - OpenAI-compatible requests now send `prompt_cache_key` set to the session id
   (a sub-agent uses its own transcript id), as ChatGPT requests already do.
   An endpoint that answers HTTP 400 or 422 naming `prompt_cache_key` gets the

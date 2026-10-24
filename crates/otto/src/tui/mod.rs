@@ -392,3 +392,13 @@ fn focus_surface_state(
 
 #[cfg(test)]
 mod tests;
+
+/// Built-in slash command names in catalog order, for tests of other frontends.
+#[cfg(test)]
+pub(crate) fn catalog_command_names() -> Vec<&'static str> {
+    features::Catalog::default()
+        .entries()
+        .iter()
+        .map(|entry| entry.name)
+        .collect()
+}

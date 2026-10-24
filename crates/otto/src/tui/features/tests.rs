@@ -9,7 +9,7 @@ use super::review::Reviews;
 use super::{Catalog, Document, Presenter, Run, Transition};
 use crate::app::Info;
 use crate::memory::{Candidate, CandidateAction, CandidateState, Record, Scope};
-use crate::tui::app::Backend;
+use crate::tui::app::{Action, Backend};
 use crate::tui::attach::Remote;
 use crate::tui::backend::{Command, Reply, Request as BackendRequest};
 use crate::tui::interaction::{Activation, Focus, Intent, State};
@@ -610,6 +610,70 @@ fn quit_alias_exits_without_appearing_in_help() {
 }
 
 #[test]
+fn removed_attachment_and_trace_commands_are_absent_from_help_completion_and_dispatch() {
+    let catalog = Catalog::default();
+    for attached in [false, true] {
+        for line in [
+            "/image",
+            "/image /tmp/picture with spaces.png",
+            "/trace",
+            "/trace extra",
+        ] {
+            assert!(matches!(
+                catalog.open(line, &Info::default(), attached),
+                Err(error) if error == format!("unknown command: {line}")
+            ));
+        }
+        let Transition::Push(help) = catalog.open("/help", &Info::default(), attached).unwrap()
+        else {
+            panic!("help should open a document");
+        };
+        assert!(!help.view().document.contains("/image"));
+        assert!(!help.view().document.contains("/trace"));
+    }
+    assert!(
+        !catalog
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.name, "/image" | "/trace"))
+    );
+
+    let remote = Arc::new(Remote::offline(Vec::new()));
+    let backend = Backend::Attach(&remote);
+    for attached in [false, true] {
+        let mut app = crate::tui::app::App::with_catalog(&backend, Catalog::default());
+        app.attached = attached;
+        for prefix in ["/ima", "/tra"] {
+            app.insert_text(prefix);
+            assert!(app.suggestions().is_empty());
+            app.composer.take();
+        }
+        assert!(
+            app.dispatch_line("/trace", &backend, &CancellationToken::new())
+                .is_none()
+        );
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.raw.contains("unknown command: /trace"))
+        );
+        assert!(
+            app.dispatch_line("/image picture.png", &backend, &CancellationToken::new())
+                .is_none()
+        );
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.raw.contains("unknown command: /image picture.png"))
+        );
+        assert!(matches!(
+            app.dispatch_line("describe this image", &backend, &CancellationToken::new()),
+            Some(Action::Prompt(line)) if line == "describe this image"
+        ));
+    }
+}
+
+#[test]
 fn registered_commands_extend_help_completion_and_dispatch() {
     let mut catalog = Catalog::default();
     catalog
@@ -649,81 +713,4 @@ fn registered_commands_extend_help_completion_and_dispatch() {
         app.surfaces.top().unwrap().model.view().document,
         "custom value"
     );
-}
-
-fn trace_ids(view: &crate::tui::interaction::View) -> Vec<&str> {
-    view.rows.iter().map(|row| row.id.as_str()).collect()
-}
-
-#[test]
-fn trace_rows_follow_the_span_tree_and_sub_agents_toggle() {
-    let mut trace = super::TraceView::new();
-    assert!(trace.view().loading);
-    assert!(matches!(trace.refresh(), Some(BackendRequest::Trace)));
-    assert!(trace.periodic());
-    trace.receive(Reply::Trace(super::sample_trace()));
-
-    let view = trace.view();
-    assert_eq!(trace_ids(&view), ["turn-1", "m1", "b1", "s1", "t3"]);
-    assert_eq!(
-        view.title,
-        format!(
-            "Trace · turn 1/1 · user · 48.0s · in {} out {}",
-            crate::tui::layout::format_token_count(31_400).to_lowercase(),
-            crate::tui::layout::format_token_count(2_100).to_lowercase()
-        )
-    );
-    assert_eq!(view.rows[1].cells[0], "  ├ model #1  3.6s");
-    assert_eq!(view.rows[4].cells[0], "    └ ▸ agent t3  21.0s");
-    let detail = &view.rows[1].detail;
-    assert!(detail.contains("attempts 2"), "{detail}");
-    assert!(detail.contains("retry 1/3: connection interrupted, waited 500ms"));
-    assert!(detail.contains("ttft 3.1s"), "{detail}");
-
-    trace.activate(Activation::Open("t3".into()));
-    assert_eq!(
-        trace_ids(&trace.view()),
-        ["turn-1", "m1", "b1", "s1", "t3", "t3:m1", "t3:b1"]
-    );
-    trace.activate(Activation::Open("t3".into()));
-    assert_eq!(trace_ids(&trace.view()).len(), 5);
-
-    assert!(matches!(
-        trace.activate(Activation::Open("b1".into())),
-        Transition::Request(BackendRequest::TraceSpan(id)) if id == "b1"
-    ));
-    let content = otto_core::session::trace::SpanContent {
-        span_id: "b1".into(),
-        sections: vec![otto_core::session::trace::ContentSection {
-            title: "Arguments".into(),
-            text: "cargo test".into(),
-        }],
-    };
-    let Transition::Push(document) = trace.receive(Reply::TraceSpan(content)) else {
-        panic!("a span reply opens a document");
-    };
-    assert_eq!(document.view().title, "bash cargo test");
-    assert_eq!(document.view().document, "Arguments\ncargo test");
-}
-
-#[test]
-fn trace_other_turns_are_collapsed_rows_that_select_on_open() {
-    let mut sample = super::sample_trace();
-    let mut first = sample.turns[0].clone();
-    first.id = "turn-0".into();
-    first.children.clear();
-    sample.turns.insert(0, first);
-    let mut trace = super::TraceView::new();
-    trace.receive(Reply::Trace(sample));
-
-    let view = trace.view();
-    assert_eq!(view.rows[0].id, "turn-0");
-    assert!(view.rows[0].cells[0].starts_with("▸ turn 1"));
-    assert!(view.title.contains("turn 2/2"));
-    assert_eq!(view.default_row.as_deref(), Some("turn-1"));
-
-    trace.activate(Activation::Open("turn-0".into()));
-    let view = trace.view();
-    assert!(view.title.contains("turn 1/2"));
-    assert!(view.rows[0].cells[0].starts_with("▾ turn 1"));
 }

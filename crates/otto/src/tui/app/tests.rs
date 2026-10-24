@@ -78,26 +78,12 @@ fn enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE)
 }
 
-fn open_trace(app: &mut App) {
-    app.transition(0, Transition::Push(Box::new(features::TraceView::new())));
-    let _ = app
-        .surfaces
-        .top_mut()
-        .unwrap()
-        .model
-        .receive(Reply::Trace(features::sample_trace()));
-}
-
 fn press(app: &mut App, remote: &Remote, code: KeyCode) {
     app.handle_key(
         KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
         &Backend::Attach(remote),
         &CancellationToken::new(),
     );
-}
-
-fn top_key(app: &App) -> String {
-    app.surfaces.top().unwrap().model.key()
 }
 
 fn steer(id: u64, text: &str, status: otto_core::agent::steering::Status) -> SteerMessage {

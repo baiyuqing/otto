@@ -3,9 +3,6 @@
 use super::*;
 
 pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, String> {
-    if let Command::Image(path) = command {
-        return load_image(path).await;
-    }
     if let Command::Fork(entry_id) = command {
         let (result, draft) = c.fork_session(Some(&entry_id)).await?;
         let (info, history) = blocking(c, move |c| Ok((c.info(), c.history()))).await?;
@@ -22,7 +19,7 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
     let mut history = false;
     let mut prompt = None;
     let message = match command {
-        Command::Image(_) | Command::Fork(_) | Command::SteeringState => unreachable!(),
+        Command::Fork(_) | Command::SteeringState => unreachable!(),
         Command::NewSession => {
             c.new_session().await?;
             history = true;

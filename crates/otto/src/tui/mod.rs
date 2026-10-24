@@ -30,14 +30,11 @@ use std::future::Future;
 use std::io;
 use std::sync::Arc;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, KeyEvent, KeyEventKind,
     MouseButton, MouseEventKind,
 };
 use otto_core::agent::{AgentError, Event};
-use otto_core::model::{Block, MAX_IMAGE_BYTES};
 use otto_core::wire::events::{WireEvent, to_wire, to_wire_compaction};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -136,6 +133,7 @@ enum IdleEvent {
     Input(Option<TuiEvent>),
     Registry(bool),
     Tick,
+    Animation,
     FeaturesTick,
     Completion(Box<backend::Completion>),
     Notices,
@@ -171,10 +169,12 @@ async fn run_app<B: Backend>(
     app.driver = Some(backend::Driver::new(backend::Connection::Local(
         Arc::clone(controller),
     )));
+    app.refresh_steering();
     let mut updates: Option<(Arc<dyn otto_core::mailbox::Mailbox>, watch::Receiver<u64>)> = None;
     let mut notices = controller.notices_changed();
     let mut memory_review = controller.memory_review_available_changed();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut frames = render::spinner_interval();
     let mut feature_tick = tokio::time::interval(std::time::Duration::from_secs(2));
     feature_tick.reset();
     let mut actions = std::collections::VecDeque::new();
@@ -225,6 +225,7 @@ async fn run_app<B: Backend>(
                 result=app.next_completion()=>IdleEvent::Completion(Box::new(result)),
                 open=registry=>IdleEvent::Registry(open),
                 _=tick.tick()=>IdleEvent::Tick,
+                _=frames.tick()=>IdleEvent::Animation,
                 _=feature_tick.tick()=>IdleEvent::FeaturesTick,
                 _=notices.changed()=>IdleEvent::Notices,
                 _=memory_review.changed()=>IdleEvent::MemoryReviewAvailable,
@@ -242,6 +243,11 @@ async fn run_app<B: Backend>(
             }
             IdleEvent::Completion(completion) => app.apply_completion(*completion),
             IdleEvent::Tick => app.request_approvals(),
+            IdleEvent::Animation => {
+                if !render::needs_animation(&app) {
+                    continue;
+                }
+            }
             IdleEvent::FeaturesTick => app.tick_features(),
             IdleEvent::MemoryReviewAvailable => app.memory_review_available(),
             IdleEvent::Notices => {}
@@ -267,9 +273,7 @@ async fn run_app<B: Backend>(
                 }
                 Action::CancelTurn => {}
                 Action::Prompt(line) => {
-                    let image = app.pending_image.take();
-                    let result =
-                        run_turn(&mut app, terminal, keys, controller, cancel, line, image).await;
+                    let result = run_turn(&mut app, terminal, keys, controller, cancel, line).await;
                     if let Err(error) = result {
                         propagate_turn_error(error)?;
                     }

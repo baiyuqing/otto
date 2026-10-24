@@ -2,14 +2,6 @@
 
 use super::*;
 
-pub(super) async fn load_image(path: String) -> Result<Reply, String> {
-    tokio::task::spawn_blocking(move || {
-        super::super::image_block_from_path(&path).map(|image| Reply::Image { path, image })
-    })
-    .await
-    .map_err(|_| "image reader failed".to_string())?
-}
-
 pub(super) fn check_scope(info: &Info, ticket: &Ticket) -> Result<(), String> {
     if info.workspace == ticket.workspace && info.session_id == ticket.session {
         Ok(())
@@ -85,11 +77,6 @@ pub(super) async fn local(
                     .context_report()
                     .map(Reply::Context)
                     .ok_or_else(|| "no session is open".into()),
-                Request::Trace => c.trace().map(Reply::Trace),
-                Request::TraceSpan(span_id) => c
-                    .trace_span(&span_id)?
-                    .map(Reply::TraceSpan)
-                    .ok_or_else(|| "span not found".to_string()),
                 Request::SandboxPath(path) => {
                     c.resolve_sandbox_read_path(&path).map(Reply::SandboxPath)
                 }

@@ -11,9 +11,6 @@ pub(super) async fn remote_request(
     if command {
         check_scope(&remote.info(), ticket)?;
     }
-    if let Request::Command(Command::Image(path)) = request {
-        return load_image(path).await;
-    }
     tokio::time::timeout(
         Duration::from_secs(5),
         remote_call(&remote, ticket, request),
@@ -65,17 +62,6 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
             .await
             .map(Reply::Context)
             .map_err(|e| e.to_string()),
-        Request::Trace => client
-            .trace(session)
-            .await
-            .map(Reply::Trace)
-            .map_err(|e| e.to_string()),
-        Request::TraceSpan(span_id) => client
-            .trace_span(session, &span_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .map(Reply::TraceSpan)
-            .ok_or_else(|| "span not found".to_string()),
         Request::Agents(query) => client
             .tasks(&query)
             .await
@@ -109,10 +95,6 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
         }
         Request::Management(request) => remote_management(remote, session, request).await,
         Request::Command(command) => {
-            if let Command::Image(path) = command {
-                return load_image(path).await;
-            }
-
             let mut history = false;
             let mut prompt = None;
             let message = match command {

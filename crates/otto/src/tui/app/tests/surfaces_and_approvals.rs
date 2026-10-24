@@ -68,47 +68,6 @@ fn dismissed_approval_stays_hidden_until_the_collection_reopens_it() {
 }
 
 #[test]
-fn trace_defers_an_approval_until_a_opens_it() {
-    let (mut app, remote) = app();
-    open_trace(&mut app);
-    let request = approval("a1");
-
-    app.sync_shared_approval(std::slice::from_ref(&request));
-    assert_eq!(top_key(&app), "trace");
-    assert!(app.surfaces.iter().all(|s| s.model.key() == "trace"));
-    assert_eq!(
-        app.surfaces
-            .top()
-            .and_then(|s| s.model.view().notice)
-            .as_deref(),
-        Some("1 approval pending · a open")
-    );
-
-    press(&mut app, &remote, KeyCode::Char('a'));
-    assert_eq!(top_key(&app), "approval:a1");
-}
-
-#[test]
-fn closing_the_trace_presents_the_deferred_approval() {
-    let (mut app, remote) = app();
-    open_trace(&mut app);
-    app.sync_shared_approval(&[approval("a1")]);
-    press(&mut app, &remote, KeyCode::Esc);
-    assert_eq!(top_key(&app), "approval:a1");
-    assert_eq!(app.surfaces.iter().count(), 1);
-}
-
-#[test]
-fn trace_defers_an_approval_event_until_it_closes() {
-    let (mut app, remote) = app();
-    open_trace(&mut app);
-    app.show_approval(features::Approval::shared(&approval("a1")));
-    assert_eq!(top_key(&app), "trace");
-    press(&mut app, &remote, KeyCode::Esc);
-    assert_eq!(top_key(&app), "approval:a1");
-}
-
-#[test]
 fn a_decided_approval_is_not_presented_again_from_the_stale_snapshot() {
     let (mut app, _) = app();
     app.sync_shared_approval(&[approval("a1")]);
@@ -117,9 +76,16 @@ fn a_decided_approval_is_not_presented_again_from_the_stale_snapshot() {
     app.transition(surface, Transition::Close);
     assert!(app.surfaces.top().is_none());
 
-    open_trace(&mut app);
-    let trace = app.surfaces.top().unwrap().id;
-    app.transition(trace, Transition::Close);
+    app.transition(
+        0,
+        Transition::Push(probe(
+            "panel",
+            View::default(),
+            Arc::new(AtomicUsize::new(0)),
+        )),
+    );
+    let panel = app.surfaces.top().unwrap().id;
+    app.transition(panel, Transition::Close);
     assert!(app.surfaces.top().is_none());
 }
 

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use otto_core::agent::context_report::ContextReport;
-use otto_core::model::{Block, Message};
+use otto_core::model::Message;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -46,10 +46,6 @@ pub(crate) enum Request {
     ForkPoints,
     Profiles,
     Context,
-    /// The current session's span tree.
-    Trace,
-    /// The text of one span of the trace.
-    TraceSpan(String),
     SandboxPath(String),
     Agents(ListQuery),
     AgentDetail {
@@ -65,7 +61,6 @@ pub(crate) enum Request {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Command {
-    Image(String),
     NewSession,
     Resume(String),
     Archive(String),
@@ -123,15 +118,9 @@ pub(crate) struct SessionChoice {
 
 #[derive(Debug)]
 pub(crate) enum Reply {
-    Image {
-        path: String,
-        image: Block,
-    },
     Sessions(Vec<SessionChoice>),
     Profiles(Vec<ProfileSummary>),
     Context(ContextReport),
-    Trace(otto_core::session::trace::Trace),
-    TraceSpan(otto_core::session::trace::SpanContent),
     SandboxPath(String),
     Agents(ListResult),
     AgentDetail {

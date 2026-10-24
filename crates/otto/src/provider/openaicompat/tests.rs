@@ -7,6 +7,7 @@ use otto_core::provider::StreamEvent;
 use super::*;
 use crate::faults::http;
 
+mod cache_key;
 mod errors;
 mod retry;
 mod wire;

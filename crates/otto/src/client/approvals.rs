@@ -38,19 +38,6 @@ impl Client {
             .map(|(mode, _)| mode)
     }
 
-    pub async fn auto_mode_command(&self, session: &str, args: &str) -> Result<String, Error> {
-        let selected = crate::app::parse_auto_mode(args).map_err(Error::Unreachable)?;
-        let (mode, policy) = self.approval_mode_response(session, selected).await?;
-        Ok(format!(
-            "Approval mode: {}",
-            if policy == Some(otto_core::approval::ApprovalPolicy::Never) {
-                "NEVER (reviewer disabled)"
-            } else {
-                mode.label()
-            }
-        ))
-    }
-
     async fn approval_mode_response(
         &self,
         session: &str,
@@ -176,14 +163,19 @@ impl Client {
 
     pub async fn permissions_command(&self, session: &str, args: &str) -> Result<String, Error> {
         let current = self.approval_policy(session, None).await?;
-        let settings =
-            match crate::app::permissions_update(args, current).map_err(Error::Unreachable)? {
-                Some((policy, reviewer)) => {
-                    self.approval_policy(session, Some((current.revision, policy, reviewer)))
-                        .await?
-                }
-                None => current,
-            };
+        let settings = match crate::app::parse_permissions_command(args, current)
+            .map_err(Error::Unreachable)?
+        {
+            Some(crate::app::PermissionsChange::Preset(mode)) => {
+                self.approval_mode_response(session, Some(mode)).await?;
+                self.approval_policy(session, None).await?
+            }
+            Some(crate::app::PermissionsChange::Settings(policy, reviewer)) => {
+                self.approval_policy(session, Some((current.revision, policy, reviewer)))
+                    .await?
+            }
+            None => current,
+        };
         let activity = self.approval_activity(session).await?;
         Ok(format!(
             "{}\n{} human pending · {} reviewing · {} application failed",

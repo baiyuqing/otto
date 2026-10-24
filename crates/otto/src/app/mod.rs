@@ -224,26 +224,39 @@ pub struct ResumeResult {
     pub warnings: Vec<String>,
 }
 
-pub fn permissions_update(
-    args: &str,
-    current: otto_core::approval::ApprovalSettings,
-) -> Result<
-    Option<(
+/// What `/permissions` (and its hidden alias `/auto`) asks to change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionsChange {
+    /// `manual`, `auto` or `yolo`: replaces policy and reviewer together.
+    Preset(ApprovalMode),
+    /// `policy ...` or `reviewer ...`: the new policy and reviewer pair.
+    Settings(
         otto_core::approval::ApprovalPolicy,
         otto_core::approval::ApprovalReviewer,
-    )>,
-    String,
-> {
+    ),
+}
+
+pub const PERMISSIONS_USAGE: &str =
+    "usage: /permissions [manual|auto|yolo | policy on_request|never | reviewer user|auto_review]";
+
+/// Parses `/permissions` arguments; `Ok(None)` means show the report only.
+/// `on` and `off` are undocumented synonyms of `auto` and `manual`.
+pub fn parse_permissions_command(
+    args: &str,
+    current: otto_core::approval::ApprovalSettings,
+) -> Result<Option<PermissionsChange>, String> {
+    use PermissionsChange::{Preset, Settings};
     use otto_core::approval::{ApprovalPolicy as Policy, ApprovalReviewer as Reviewer};
     match args.split_whitespace().collect::<Vec<_>>().as_slice() {
         [] => Ok(None),
-        ["policy", "on_request"] => Ok(Some((Policy::OnRequest, current.reviewer))),
-        ["policy", "never"] => Ok(Some((Policy::Never, current.reviewer))),
-        ["reviewer", "user"] => Ok(Some((current.policy, Reviewer::User))),
-        ["reviewer", "auto_review"] => Ok(Some((current.policy, Reviewer::AutoReview))),
-        _ => {
-            Err("usage: /permissions [policy on_request|never | reviewer user|auto_review]".into())
-        }
+        ["manual" | "off"] => Ok(Some(Preset(ApprovalMode::Manual))),
+        ["auto" | "on"] => Ok(Some(Preset(ApprovalMode::Auto))),
+        ["yolo"] => Ok(Some(Preset(ApprovalMode::Yolo))),
+        ["policy", "on_request"] => Ok(Some(Settings(Policy::OnRequest, current.reviewer))),
+        ["policy", "never"] => Ok(Some(Settings(Policy::Never, current.reviewer))),
+        ["reviewer", "user"] => Ok(Some(Settings(current.policy, Reviewer::User))),
+        ["reviewer", "auto_review"] => Ok(Some(Settings(current.policy, Reviewer::AutoReview))),
+        _ => Err(PERMISSIONS_USAGE.into()),
     }
 }
 
@@ -258,8 +271,13 @@ pub fn format_permissions(settings: otto_core::approval::ApprovalSettings) -> St
         ApprovalReviewer::AutoReview => "auto_review",
         ApprovalReviewer::Bypass => "bypass",
     };
+    let mode = if settings.policy == ApprovalPolicy::Never {
+        "NEVER (reviewer disabled)"
+    } else {
+        settings.mode().label()
+    };
     format!(
-        "Approval policy: {policy}\nReviewer: {reviewer}{}\nRevision: {}",
+        "Approval mode: {mode}\nApproval policy: {policy}\nReviewer: {reviewer}{}\nRevision: {}",
         if settings.policy == ApprovalPolicy::Never {
             " (disabled)"
         } else {
@@ -267,18 +285,6 @@ pub fn format_permissions(settings: otto_core::approval::ApprovalSettings) -> St
         },
         settings.revision
     )
-}
-
-pub fn parse_auto_mode(args: &str) -> Result<Option<ApprovalMode>, String> {
-    match args.trim() {
-        "" => Ok(None),
-        "on" => Ok(Some(ApprovalMode::Auto)),
-        "off" => Ok(Some(ApprovalMode::Manual)),
-        "manual" => Ok(Some(ApprovalMode::Manual)),
-        "auto" => Ok(Some(ApprovalMode::Auto)),
-        "yolo" => Ok(Some(ApprovalMode::Yolo)),
-        _ => Err("usage: /auto [manual|auto|yolo]".into()),
-    }
 }
 
 fn validate_thinking_arg(thinking: &str) -> Result<(), String> {

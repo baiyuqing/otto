@@ -552,7 +552,7 @@ pub async fn run_with_extensions(
         None => controller,
     };
     let controller = Arc::new(controller);
-    // `--yolo` is the startup form of `/auto yolo`: it stores the mode of the
+    // `--yolo` is the startup form of `/permissions yolo`: it stores the mode of the
     // session this process opens, exactly as the command does.
     if options.yolo {
         let scope = controller.approval_scope();

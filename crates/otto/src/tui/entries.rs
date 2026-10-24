@@ -47,6 +47,8 @@ pub struct Entry {
     pub id: String,
     pub kind: Option<EntryKind>,
     pub raw: String,
+    /// Live TUI projection only; never written into session history.
+    pub approval: Option<otto_core::approval::Request>,
     pub checkpoint_id: String,
     pub tokens_before: i64,
     pub tool_call_id: String,

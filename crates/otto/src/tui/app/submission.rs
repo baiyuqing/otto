@@ -24,6 +24,7 @@ impl App {
         } else {
             self.awaiting_user_echo = Some(line.into());
             if !self.attached {
+                self.optimistic_user_echo = Some(line.into());
                 self.entries.push(Entry {
                     id: format!("user-{}", self.entries.len()),
                     kind: Some(EntryKind::User),
@@ -79,6 +80,8 @@ impl App {
         }
         let line = self.composer.take()?;
         if !line.starts_with('/') {
+            self.scroll = None;
+            self.new_messages = false;
             self.awaiting_user_echo = Some(line.clone());
         }
         if self.has_writes() && !line.starts_with('/') {

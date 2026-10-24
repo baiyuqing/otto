@@ -110,8 +110,14 @@ impl App {
                     .iter()
                     .position(|steer| steer.text == event.text)
                 {
-                    self.pending_steers.remove(index);
-                    self.refresh_steering();
+                    let delivered = self.pending_steers.remove(index);
+                    self.delivered_steers.insert(delivered.id);
+                }
+                // A snapshot taken before this notification must not resurrect
+                // its queued projection, even when we never observed admission.
+                self.refresh_steering();
+                if self.scroll.is_some() {
+                    self.new_messages = true;
                 }
                 // The run appended this text as the user's message, which is its
                 // own word that queued guidance reached the model. The steer is
@@ -141,9 +147,14 @@ impl App {
                     // active turn can emit unrelated user messages meanwhile.
                     let expected_echo =
                         self.awaiting_user_echo.as_deref() == Some(event.text.as_str());
-                    let duplicate = self.entries.last().is_some_and(|entry| {
-                        entry.kind == Some(EntryKind::User) && entry.raw == event.text
-                    });
+                    let duplicate = self.optimistic_user_echo.as_deref()
+                        == Some(event.text.as_str())
+                        && self.entries.last().is_some_and(|entry| {
+                            entry.kind == Some(EntryKind::User) && entry.raw == event.text
+                        });
+                    if duplicate {
+                        self.optimistic_user_echo = None;
+                    }
                     if !expected_echo {
                         self.composer.remember(&event.text);
                     }

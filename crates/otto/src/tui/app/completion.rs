@@ -41,8 +41,14 @@ impl App {
             }
             return;
         }
+        if t.surface == 0
+            && completion.result.is_err()
+            && self.steering_generation == Some(t.generation)
+        {
+            self.steering_generation = None;
+        }
         if let Ok(Reply::Steering(messages)) = &completion.result {
-            if self.steering_generation != Some(t.generation) {
+            if t.surface != 0 || self.steering_generation != Some(t.generation) {
                 self.pending.remove(&(t.surface, t.generation));
                 return;
             }
@@ -50,8 +56,11 @@ impl App {
             self.apply_steering(messages.clone());
         }
         if t.surface == 0 {
-            self.pending.remove(&(0, t.generation));
-            if !mutation && self.generations.get(&0) != Some(&t.generation) {
+            let was_pending = self.pending.remove(&(0, t.generation));
+            if !mutation
+                && self.generations.get(&0) != Some(&t.generation)
+                && !(was_pending && matches!(&completion.result, Ok(Reply::ApprovalSnapshot(_))))
+            {
                 return;
             }
             match completion.result {
@@ -168,6 +177,10 @@ impl App {
             self.queued_steer = None;
             self.queued_input = None;
             self.pending_steers.clear();
+            self.delivered_steers.clear();
+            self.new_messages = false;
+            self.awaiting_user_echo = None;
+            self.optimistic_user_echo = None;
             self.recalling_steer = None;
             self.invalidate_reads();
             self.composer.reseed(prompt_history(&self.entries));

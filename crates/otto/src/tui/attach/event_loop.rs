@@ -139,7 +139,10 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                 }
             }
             Ev::FeaturesTick => ui.app.tick_features(),
-            Ev::ApprovalsTick => ui.app.request_approvals(),
+            Ev::ApprovalsTick => {
+                ui.app.request_approvals();
+                ui.app.poll_steering();
+            }
             Ev::Tick => {
                 // Idle frames need no redraw unless something on screen moves.
                 if !render::needs_animation(&ui.app) {

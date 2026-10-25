@@ -26,6 +26,29 @@ fn acp_token_is_redacted_and_cannot_be_restored_to_tools() {
 }
 
 #[test]
+fn server_token_is_redacted_and_cannot_be_restored_to_tools() {
+    let snapshot = resolve_environment(&EnvironmentOptions {
+        host_entries: vec![b"OTTO_SERVER_TOKEN=test-server-listener-secret".to_vec()],
+        allow_names: vec!["OTTO_SERVER_TOKEN".into()],
+        ..Default::default()
+    })
+    .expect("environment");
+    assert!(
+        !snapshot
+            .entries()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.starts_with("OTTO_SERVER_TOKEN="))
+    );
+    assert!(
+        snapshot
+            .redaction_values()
+            .iter()
+            .any(|value| value == "test-server-listener-secret")
+    );
+}
+
+#[test]
 fn a_failed_resolution_retains_bounded_redactions_from_every_valid_entry() {
     let (_guard, directories) = new_private_directories();
     let rejection = resolve_environment(&EnvironmentOptions {

@@ -49,6 +49,7 @@ pub(super) struct HarnessOptions {
     /// repository in.
     pub(super) workspace: Option<TempDir>,
     pub(super) token: String,
+    pub(super) remote_listener: bool,
     pub(super) info: Info,
     /// Initial config.toml bytes for config-management route tests.
     pub(super) config_text: Option<String>,
@@ -96,6 +97,7 @@ impl Harness {
             },
             config_path: self.factory.builder.shared.config_path.clone(),
             token: String::new(),
+            remote_listener: false,
             logger: Some(Arc::new(Logger::discard())),
             workflows: None,
             schedule: None,
@@ -190,6 +192,7 @@ impl Harness {
             info,
             config_path: factory.builder.shared.config_path.clone(),
             token: options.token,
+            remote_listener: options.remote_listener,
             logger: Some(Arc::new(Logger::new(Box::new(SharedSink(Arc::clone(
                 &log,
             )))))),
@@ -231,6 +234,31 @@ impl Harness {
             .oneshot(request)
             .await
             .expect("infallible")
+    }
+
+    /// One `GET` through the router that serves the Unix socket.
+    pub(super) async fn send_on_socket(&self, path: &str) -> Reply {
+        let request = Request::builder()
+            .method("GET")
+            .uri(path)
+            .body(Body::empty())
+            .expect("request");
+        let response = self
+            .server
+            .socket_router()
+            .oneshot(request)
+            .await
+            .expect("infallible");
+        let status = response.status();
+        let head = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        Reply {
+            status,
+            headers: head,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        }
     }
 
     pub(super) async fn send(&self, method: &str, path: &str, body: Option<&str>) -> Reply {

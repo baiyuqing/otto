@@ -28,6 +28,7 @@ mod doubles;
 mod endpoint_cases;
 mod harness;
 mod queue_cases;
+mod remote_listener_cases;
 mod scoped_route_cases;
 mod session_lifecycle_cases;
 mod sessions_cases;

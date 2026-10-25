@@ -125,6 +125,7 @@ mod tests {
             factory: Arc::new(Factory),
             config_path: Default::default(),
             token: String::new(),
+            remote_listener: false,
             logger: None,
             workflows: None,
             schedule: None,

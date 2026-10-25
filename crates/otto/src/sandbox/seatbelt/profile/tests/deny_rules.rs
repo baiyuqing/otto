@@ -70,6 +70,21 @@ fn profile_is_closed_by_default_and_limits_private_writes() {
     );
 }
 
+fn modules_pattern_filter(workspace: &str, pattern: &str) -> String {
+    pattern_filter(&format!("{workspace}/.git/modules"), pattern)
+}
+
+fn worktrees_pattern_filter(workspace: &str, pattern: &str) -> String {
+    pattern_filter(&format!("{workspace}/.git/worktrees"), pattern)
+}
+
+fn pattern_filter(root: &str, pattern: &str) -> String {
+    format!(
+        "(require-all {} (regex #\"{pattern}\"))",
+        filter("subpath", root)
+    )
+}
+
 #[test]
 fn workspace_git_metadata_and_identity_are_denied_after_every_write_allow() {
     let fixture = new_fixture();
@@ -77,12 +92,15 @@ fn workspace_git_metadata_and_identity_are_denied_after_every_write_allow() {
     let profile = fixture.render();
     let tag = tag_message(&fixture);
     let deny = format!(
-        "(deny file-write*\n  (literal {})\n  (literal {})\n  (literal {})\n  (literal {})\n  (subpath {})\n  (literal {})\n  (literal {})\n  {tag}\n)\n",
+        "(deny file-write*\n  (literal {})\n  (literal {})\n  (literal {})\n  (literal {})\n  (subpath {})\n  {}\n  {}\n  {}\n  (literal {})\n  (literal {})\n  {tag}\n)\n",
         quote(&format!("{workspace}/.git")),
         quote(&format!("{workspace}/.git/config")),
         quote(&format!("{workspace}/.git/config.worktree")),
         quote(&format!("{workspace}/.git/commondir")),
         quote(&format!("{workspace}/.git/hooks")),
+        modules_pattern_filter(&workspace, r"/(config|config\.worktree|commondir)$"),
+        modules_pattern_filter(&workspace, r"/hooks(/|$)"),
+        worktrees_pattern_filter(&workspace, r"/config\.worktree$"),
         quote(&format!("{workspace}/.otto")),
         quote(&format!("{workspace}/.otto/workspace.json")),
     );
@@ -107,6 +125,47 @@ fn managed_worktrees_are_writable_but_keep_their_git_metadata_read_only() {
     assert!(write.contains(&filter("subpath", &linked)));
     assert!(write.contains(&quote(&join(&linked, ".git"))));
     assert!(write.contains(&quote(&join(&linked, crate::workspace::MARKER))));
+    for (prefix, pattern) in GIT_DIR_PROGRAM_SETTINGS {
+        assert!(
+            write.contains(&pattern_filter(&join(&linked, prefix), pattern)),
+            "linked worktree lacks the {prefix} filter for {pattern}"
+        );
+    }
+}
+
+#[test]
+fn git_directory_patterns_are_constant_and_never_hold_workspace_text() {
+    for (prefix, pattern) in GIT_DIR_PROGRAM_SETTINGS {
+        assert!(prefix.starts_with(".git/") && !prefix.contains('"'));
+        assert!(
+            !pattern.contains(['"', '\n']),
+            "pattern {pattern} would end its Seatbelt literal"
+        );
+    }
+    let mut fixture = new_fixture();
+    let linked = make_directory(&join(&fixture.base, "linked-worktree"));
+    fixture.options.workspaces.push(linked.clone());
+    let profile = fixture.render();
+    let write = section(&profile, "WRITE");
+    let mut patterns = 0;
+    for (at, _) in write.match_indices("(regex #\"") {
+        let rest = &write[at + "(regex #\"".len()..];
+        let pattern = &rest[..rest.find("\")").expect("regex literal end")];
+        assert!(
+            GIT_DIR_PROGRAM_SETTINGS
+                .iter()
+                .any(|(_, constant)| *constant == pattern),
+            "regex {pattern} is not one of the constant patterns"
+        );
+        for path in [&fixture.options.workspace, &linked] {
+            assert!(
+                !pattern.contains(path.as_str()),
+                "regex holds workspace text"
+            );
+        }
+        patterns += 1;
+    }
+    assert_eq!(patterns, 2 * GIT_DIR_PROGRAM_SETTINGS.len());
 }
 
 fn tag_message(fixture: &Fixture) -> String {

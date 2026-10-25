@@ -126,3 +126,15 @@ mod process_environment {
         sibling_process_environment_is_unreadable
     );
 }
+
+mod git_directory_settings {
+    use super::SeatbeltContract;
+    use crate::sandbox::NetworkMode;
+
+    crate::sandbox::conformance_tests::contract_check!(
+        SeatbeltContract {
+            network: NetworkMode::Deny
+        },
+        git_directory_program_settings_are_read_only
+    );
+}

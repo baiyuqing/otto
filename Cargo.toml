@@ -28,6 +28,8 @@ tokio-util = { version = "=0.7.20", default-features = false }
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-test = "=0.3.79"
 regex = "=1.13.1"
+# Substring search for the egress secret scan; already in the lockfile through regex.
+memchr = { version = "=2.8.3", default-features = false, features = ["std"] }
 # Native-only. macOS has no safe-wrapper crate for renamex_np(RENAME_EXCL),
 # openat/mkdirat/fstatat with O_NOFOLLOW, so the store calls them through libc.
 libc = "=0.2.191"

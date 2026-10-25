@@ -211,6 +211,8 @@ fn egress_guard_removes_known_exact_secret_and_blocks_incomplete_redactor() {
     assert!(guarded.system_prompt.ends_with(" suffix"));
     let incomplete = Redactor {
         values: Vec::new(),
+        finders: Vec::new(),
+        shortest_value_bytes: 0,
         marker: String::new(),
         complete: false,
     };

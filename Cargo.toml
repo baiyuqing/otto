@@ -76,17 +76,19 @@ otto-core = { path = "crates/otto-core" }
 # own crates stay unoptimized.
 # Release binary size. Measured 2026-10-25 on macOS arm64 with Rust 1.99.0:
 # the default release profile produced a 65,633,504-byte `otto` (52,751,472
-# stripped); this profile produces 31,954,496 bytes, and a clean release build
-# takes about 260 s instead of 170 s on an Apple M4. `panic` stays `unwind`
-# although `abort` would reach 25,443,120 bytes: the TUI restores the terminal
-# from `Drop` guards, which run only while unwinding, and a panicking tokio task
-# must end that task, not the resident `otto serve` process. `strip =
+# stripped); this profile produces 25,443,120 bytes, and a clean release build
+# takes about 260 s instead of 170 s on an Apple M4. `panic = "abort"` saves
+# 6.5 MB over `unwind`. A panic then ends the process with SIGABRT and no
+# `Drop` runs; `cli::panic_cleanup` kills registered child process groups and
+# resets terminal input modes first (ratatui's hook restores raw mode and the
+# alternate screen). Tests ignore this setting and still unwind. `strip =
 # "symbols"` removes 7.3 MB of symbol table over `"debuginfo"` and drops
 # function names from `RUST_BACKTRACE` output; panic messages keep file:line.
 [profile.release]
 lto = "fat"
 codegen-units = 1
 opt-level = "s"
+panic = "abort"
 strip = "symbols"
 
 [profile.dev.package.turso_core]

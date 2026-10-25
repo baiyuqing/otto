@@ -9,13 +9,19 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Development
 
-- The release profile now builds `otto` with fat LTO, one codegen unit and
-  `opt-level = "s"`, and strips symbols. On macOS arm64 with Rust 1.99.0 the
-  `make build` binary shrinks from 65,633,504 to 31,954,496 bytes, and a clean
-  release build takes about 90 s longer (170 s to about 260 s on an Apple M4).
-  Debug and test builds are unchanged. `RUST_BACKTRACE` output no longer shows
-  function names; panic messages still include file and line. Rerun
-  `make install` to pick up the smaller binary.
+- Release builds of `otto` now abort on panic. A panic in any task, including
+  one inside `otto serve`, ends the whole process with SIGABRT (exit status
+  134) instead of ending only that task; before exiting, Otto kills the
+  sandboxed bash and MCP stdio process groups it started and restores the
+  terminal. Run `otto serve` under a supervisor that restarts it, such as
+  `scripts/otto-tcp.sh run`. Debug and test builds still unwind.
+- The release profile now builds `otto` with fat LTO, one codegen unit,
+  `opt-level = "s"` and `panic = "abort"`, and strips symbols. On macOS arm64
+  with Rust 1.99.0 the `make build` binary shrinks from 65,633,504 to
+  25,443,120 bytes, and a clean release build takes about 90 s longer (170 s
+  to about 260 s on an Apple M4). Debug and test builds are unchanged.
+  `RUST_BACKTRACE` output no longer shows function names; panic messages still
+  include file and line. Rerun `make install` to pick up the smaller binary.
 
 ### Features
 

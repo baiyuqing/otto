@@ -23,6 +23,12 @@ pub struct Server {
     pub socket: String,
     #[serde(default)]
     pub listen: String,
+    /// PEM file with the TLS certificate chain for the TCP listener. Set together with `tls_key`.
+    #[serde(default)]
+    pub tls_cert: String,
+    /// PEM file with the private key matching `tls_cert`.
+    #[serde(default)]
+    pub tls_key: String,
     /// Directories, besides the startup workspace, a client may open. Empty
     /// by default, which admits only the startup workspace.
     #[serde(default)]
@@ -38,15 +44,27 @@ pub struct Server {
     pub max_open_sessions: Option<i64>,
 }
 
+/// The TLS files for the TCP listener, with `~` expanded. Both paths are set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerTls {
+    pub cert_path: String,
+    pub key_path: String,
+}
+
 /// The resolved `[server]` configuration for one process. Exactly one of
 /// `listen` and `socket` is set: a non-empty `listen` means the server binds
-/// a loopback TCP address and serves no Unix socket.
+/// the TCP address and serves no Unix socket. `tls` is `Some` when
+/// `[server].tls_cert` and `[server].tls_key` are both set. Only a TCP
+/// listener applies it: the native layer ignores it when only the Unix socket
+/// is served, and it decides whether a non-loopback address is allowed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerRuntime {
     /// Absolute path, when set.
     pub socket: String,
     /// `host:port`, when set.
     pub listen: String,
+    /// TLS files for the TCP listener, when both are configured.
+    pub tls: Option<ServerTls>,
     /// `workspace_roots` with `~` expanded, in file order. Not yet
     /// canonicalized: `otto-core` stays wasm-safe and does no filesystem
     /// access, so the native caller resolves symlinks and checks each entry
@@ -123,10 +141,30 @@ pub fn resolve_server(
         .iter()
         .map(|root| paths::expand_tilde(root, env, "workspace root"))
         .collect::<Result<_, _>>()?;
+    runtime.tls = resolve_tls(&file.server.tls_cert, &file.server.tls_key, env)?;
     runtime.session_idle_timeout =
         resolve_session_idle_timeout(file.server.session_idle_timeout.as_deref())?;
     runtime.max_open_sessions = resolve_max_open_sessions(file.server.max_open_sessions)?;
     Ok(runtime)
+}
+
+/// The TLS files for the TCP listener. Both unset is `None`; setting only one
+/// is an error.
+fn resolve_tls(
+    tls_cert: &str,
+    tls_key: &str,
+    env: &HashMap<String, String>,
+) -> Result<Option<ServerTls>, ConfigError> {
+    match (tls_cert.is_empty(), tls_key.is_empty()) {
+        (true, true) => Ok(None),
+        (false, false) => Ok(Some(ServerTls {
+            cert_path: paths::expand_tilde(tls_cert, env, "server tls_cert")?,
+            key_path: paths::expand_tilde(tls_key, env, "server tls_key")?,
+        })),
+        _ => Err(ConfigError::new(
+            "[server].tls_cert and [server].tls_key must be set together",
+        )),
+    }
 }
 
 /// The idle window `otto serve` applies. An absent setting is
@@ -191,6 +229,7 @@ mod tests {
             ServerRuntime {
                 socket: "/override/otto.sock".into(),
                 listen: String::new(),
+                tls: None,
                 workspace_roots: Vec::new(),
                 session_idle_timeout: Some(Duration::from_secs(30 * 60)),
                 max_open_sessions: Some(64),
@@ -242,6 +281,7 @@ mod tests {
             ServerRuntime {
                 socket: String::new(),
                 listen: "127.0.0.1:2".into(),
+                tls: None,
                 workspace_roots: Vec::new(),
                 session_idle_timeout: Some(Duration::from_secs(30 * 60)),
                 max_open_sessions: Some(64),
@@ -261,6 +301,7 @@ mod tests {
             ServerRuntime {
                 socket: "/override/otto.sock".into(),
                 listen: String::new(),
+                tls: None,
                 workspace_roots: Vec::new(),
                 session_idle_timeout: Some(Duration::from_secs(30 * 60)),
                 max_open_sessions: Some(64),
@@ -280,6 +321,7 @@ mod tests {
             ServerRuntime {
                 socket: String::new(),
                 listen: "127.0.0.1:1".into(),
+                tls: None,
                 workspace_roots: Vec::new(),
                 session_idle_timeout: Some(Duration::from_secs(30 * 60)),
                 max_open_sessions: Some(64),
@@ -410,6 +452,69 @@ mod tests {
             assert!(error.to_string().contains(field), "{error}");
         }
     }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn tls_defaults_to_none() {
+        let runtime = resolve_server(&File::default(), &env("/home"), "", "").expect("resolve");
+        assert_eq!(runtime.tls, None);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn tls_files_parse_from_toml_and_expand_tilde() {
+        let file = super::super::parse(
+            "[server]\nlisten = \"0.0.0.0:8443\"\ntls_cert = \"~/certs/otto.pem\"\ntls_key = \"/etc/otto/key.pem\"\n",
+        )
+        .expect("parse");
+        let runtime = resolve_server(&file, &env("/home"), "", "").expect("resolve");
+        assert_eq!(
+            runtime.tls,
+            Some(ServerTls {
+                cert_path: "/home/certs/otto.pem".into(),
+                key_path: "/etc/otto/key.pem".into(),
+            })
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn tls_cert_without_key_is_an_error_naming_both_fields() {
+        let mut file = File::default();
+        file.server.tls_cert = "/etc/otto/cert.pem".into();
+        let error = resolve_server(&file, &env("/home"), "", "")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("tls_cert") && error.contains("tls_key"),
+            "{error}"
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn tls_key_without_cert_is_an_error_naming_both_fields() {
+        let mut file = File::default();
+        file.server.tls_key = "/etc/otto/key.pem".into();
+        let error = resolve_server(&file, &env("/home"), "", "")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("tls_cert") && error.contains("tls_key"),
+            "{error}"
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn tls_tilde_with_no_home_errors() {
+        let mut file = File::default();
+        file.server.listen = "0.0.0.0:8443".into();
+        file.server.tls_cert = "/etc/otto/cert.pem".into();
+        file.server.tls_key = "~/key.pem".into();
+        assert!(resolve_server(&file, &HashMap::new(), "", "").is_err());
+    }
+
     #[test]
     fn managed_socket_cannot_be_shadowed_by_a_listen_flag_or_lower_layer() {
         let mut file = super::super::parse("[server]\nlisten='127.0.0.1:4321'").unwrap();

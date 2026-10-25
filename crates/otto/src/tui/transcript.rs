@@ -2,8 +2,9 @@
 //!
 //! Split out of [`super::render`] so the rules that decide what a turn looks
 //! like are a pure function of (entries, details, width): no `App`, no frame,
-//! no terminal. See [`super::gutter`] for why wrapping happens here instead of
-//! in `Paragraph::wrap`.
+//! no terminal. [`render_cache::RenderCache`] keeps the rows of unchanged
+//! entries between frames. See [`super::gutter`] for why wrapping happens
+//! here instead of in `Paragraph::wrap`.
 
 use otto_core::model::{EffectCertainty, OperationDisposition};
 use ratatui::style::{Color, Modifier, Style};
@@ -13,6 +14,8 @@ use super::entries::{Entry, EntryKind};
 use super::gutter::{self, BULLET_MARK, RESULT_MARK, SYSTEM_MARK, USER_MARK};
 use super::layout::{escape_plain_text, escape_single_line_text};
 use super::markdown;
+
+pub(crate) mod render_cache;
 
 /// How much of a tool call's arguments, or of one result line, a folded call
 /// shows. The cut is by character count rather than terminal width because
@@ -53,7 +56,7 @@ pub(crate) fn lines(entries: &[Entry], details: bool, width: usize) -> Vec<Line<
 /// reply each read as a single unit. A prompt is literal text the reader
 /// typed and keeps its own line breaks; assistant and system text is
 /// markdown; a tool call is a header plus its result.
-fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> {
+pub(super) fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> {
     if let Some(request) = &entry.approval {
         return super::approval_display::lines(request, width);
     }

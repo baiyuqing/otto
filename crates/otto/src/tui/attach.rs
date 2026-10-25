@@ -221,7 +221,7 @@ pub(crate) async fn run(
         }
     };
     let mut input = TerminalInput::new();
-    if let Err(error) = input.enable(std::io::stdout()) {
+    if let Err(error) = input.enable_terminal() {
         let _ = ratatui::try_restore();
         let _ = writeln!(stderr, "otto: {error}");
         return 1;
@@ -263,7 +263,7 @@ pub(crate) async fn run(
         let _ = worker.await;
     }
     drop(deliver_tx);
-    let _ = input.restore(std::io::stdout());
+    let _ = input.restore_terminal();
     let _ = ratatui::try_restore();
     match result {
         Ok(()) => 0,

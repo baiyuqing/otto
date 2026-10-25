@@ -15,7 +15,6 @@
 mod candidates;
 mod cursor;
 mod format;
-pub(crate) mod import;
 mod records;
 mod retrieve;
 #[cfg(test)]
@@ -56,15 +55,6 @@ const LOCK_RETRY: Duration = Duration::from_millis(10);
 pub struct InvalidFile {
     pub path: PathBuf,
     pub reason: String,
-}
-
-/// Everything a logical import writes into an empty store.
-pub(crate) struct ImportSet {
-    pub database_id: String,
-    pub user_scope_id: String,
-    pub records: Vec<Record>,
-    pub tombstones: Vec<Tombstone>,
-    pub candidates: Vec<Candidate>,
 }
 
 fn unavailable<E>(_: E) -> Error {
@@ -181,52 +171,6 @@ fn check_identity_ids(
             },
         ],
     })
-}
-
-/// Writes a logical import into `root`. Under the store lock, an existing
-/// `identity.json` means the store is already initialized and nothing is
-/// written (`Ok(false)`). Otherwise every file is written and
-/// `identity.json` last, so an interrupted import leaves no identity and can
-/// be repeated.
-pub(crate) fn write_import(root: &Path, set: &ImportSet, busy_timeout: Duration) -> Result<bool> {
-    ensure_layout(root)?;
-    let _lock = acquire(root, busy_timeout)?;
-    if has_identity(root) {
-        return Ok(false);
-    }
-    for record in &set.records {
-        publish_at(
-            root,
-            "records",
-            &record.id,
-            "md",
-            &encode_record_file(record)?,
-        )?;
-    }
-    for tombstone in &set.tombstones {
-        publish_at(
-            root,
-            "tombstones",
-            &tombstone.id,
-            "json",
-            &encode_tombstone_file(tombstone)?,
-        )?;
-    }
-    for candidate in &set.candidates {
-        publish_at(
-            root,
-            "candidates",
-            &candidate.id,
-            "json",
-            &encode_candidate_file(candidate)?,
-        )?;
-    }
-    let identity = IdentityWire {
-        database_id: set.database_id.clone(),
-        user_scope_id: set.user_scope_id.clone(),
-    };
-    publish_path(&root.join("identity.json"), &identity.encode())?;
-    Ok(true)
 }
 
 /// One consistent reading of the directory.

@@ -232,25 +232,20 @@ A `[memory.remote]` table fails startup with:
 memory backend "remote" was removed: install the external memory service as an Otto plugin, such as otto-mem (https://github.com/baiyuqing/otto-mem), set backend = "plugin:otto-mem" in [memory], and bind its token under [plugins.bindings.otto-mem]
 ```
 
-### Importing an earlier database
+### Earlier memory databases are not imported
 
-On first files-store startup, if `identity.json` is absent and the configured
-local Turso memory database exists, Otto imports schema v2 records, tombstones,
-candidates and identity once. Stop **all** old processes first: later database
-writes are not imported. Validation failure reports the offending record and
-writes no files; `required` controls startup failure. Identity is written last,
-so interrupted imports repeat. The source database is unchanged and never read
-again after success; inspect the files before deleting it yourself.
-
-Older SQLite memory and external published memory routes are upgrade blockers:
-use a compatible historical build to migrate/return them to local schema v2
-before upgrading. There is no current one-command conversion for those formats.
+The memory database of Otto 0.4.8 and earlier (`~/.otto/memory/memory.db`) is
+not read: the file store starts empty, and `[memory.turso].path` is accepted
+and ignored. SQLite cannot read the turso full-text index in that database.
+Commit 96646600 is the last build that imports it into `~/.otto/memory/`: run
+that build once with all other Otto processes stopped, check the files, then
+upgrade. The source database is never modified; delete it yourself.
 
 ### Storage operations
 
 Storage routes cover approvals, workflows, schedule, usage, tasks, skill checks
 and memory advice; **not** `~/.otto/memory/`. The ordinary binary
-provides local Turso/POSIX storage, not cloud/MySQL/PostgreSQL drivers. Linked
+provides local SQLite/POSIX storage, not cloud/MySQL/PostgreSQL drivers. Linked
 extensions can register domain factories, configured only in user/managed
 sources. Secrets use endpoint environment bindings, never inline DSNs/options.
 Normal startup opens published namespaces; editing config does not initialize
@@ -275,11 +270,11 @@ state. After publication, use another verified transfer to return, preserving
 new writes. Extension namespace/config/environment must match publication;
 this is coordinated one-host operation, not distributed writer fencing.
 
-For an actual legacy SQLite database, `otto storage migrate SOURCE DESTINATION`
-requires Python 3, a new destination in an existing directory, stopped writers,
+For a legacy-schema database of an earlier Otto release,
+`otto storage migrate SOURCE DESTINATION` requires Python 3, a new destination in an existing directory, stopped writers,
 and preserves source bytes. It validates recognized tables/counts before
 publication; memory databases are not supported. Do not mix old/new writers.
-Read usage peaks without SQLite using
+Read usage peaks without the `sqlite3` tool using
 `otto storage window-peaks ~/.otto/usage.db <session-id>` (read-only JSON).
 
 ### Local memory use

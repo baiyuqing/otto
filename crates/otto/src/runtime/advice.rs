@@ -290,7 +290,7 @@ mod tests {
         if memory {
             let runtime = otto_core::config::MemoryRuntime {
                 enabled: true,
-                backend: "turso".into(),
+                backend: "files".into(),
                 dir: directory
                     .path()
                     .join("memory")

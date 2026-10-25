@@ -5,7 +5,7 @@
 //!
 //! Three properties of this wiring:
 //!
-//! - The Turso store is the only backend and never encrypts at rest, so
+//! - The file store is the only backend and never encrypts at rest, so
 //!   `require_encryption` always fails startup.
 //! - The memory binding is created last, after the provider client, so there
 //!   is no failure left to unwind.
@@ -35,8 +35,7 @@ use super::builder::{BuildError, Builder, ProviderClient, SharedSession};
 use super::info::SandboxMode;
 use crate::failover;
 use crate::mcp;
-use crate::memory::files::import::import_turso;
-use crate::memory::files::{FileStore, has_identity, write_import};
+use crate::memory::files::FileStore;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
 use crate::memory::repository::MemoryOptions as StoreOptions;
 use crate::memory::scope::new_workspace_scope;
@@ -364,44 +363,13 @@ pub fn open_memory_service(
 /// skipped; `otto memory status` lists the same files from these lines.
 pub const SKIPPED_FILE_PREFIX: &str = "warning: memory file skipped: ";
 
-/// The Turso database that the previous release would open, when the store
-/// has no `identity.json` yet.
-fn import_source(
-    storage: &super::storage::Storage,
-    config: &MemoryRuntime,
-) -> crate::memory::Result<PathBuf> {
-    let default = Path::new(&config.turso_path);
-    let endpoint = storage
-        .memory_endpoint(default)
-        .map_err(|error| crate::memory::Error::detailed(ErrorKind::Unavailable, error))?;
-    if endpoint.starts_with("instance:")
-        || !matches!(storage.memory_backend("sqlite"), "sqlite" | "turso")
-    {
-        return Err(crate::memory::Error::detailed(
-            ErrorKind::Unavailable,
-            "memory is routed to an external storage backend; transfer it back to local \
-             storage with Otto 0.4.8 before upgrading",
-        ));
-    }
-    Ok(PathBuf::from(endpoint))
-}
-
-/// Opens the file store at `config.dir`, importing the previous Turso database
-/// first when the directory has no identity, and reports skipped files.
+/// Opens the file store at `config.dir` and reports skipped files.
 fn open_file_store(
-    storage: &super::storage::Storage,
     config: &MemoryRuntime,
     options: StoreOptions,
     stderr: &mut dyn Write,
 ) -> crate::memory::Result<Arc<dyn crate::memory::MemoryStore>> {
     let root = Path::new(&config.dir);
-    if !has_identity(root) {
-        let source = import_source(storage, config)?;
-        if source.exists() {
-            let set = import_turso(&source)?;
-            write_import(root, &set, options.busy_timeout)?;
-        }
-    }
     let store = FileStore::open(root, options)?;
     for file in store.invalid_files()? {
         let _ = writeln!(
@@ -414,8 +382,10 @@ fn open_file_store(
     Ok(Arc::new(store))
 }
 
+/// `_storage` is not read: the file store ignores storage routes since the
+/// database importer was removed. Callers still pass it so the signature stays.
 pub fn open_memory_service_with_storage(
-    storage: &super::storage::Storage,
+    _storage: &super::storage::Storage,
     config: &MemoryRuntime,
     secret_values: &[String],
     stderr: &mut dyn Write,
@@ -437,10 +407,10 @@ pub fn open_memory_service_with_storage(
         .map_err(|error| format!("build memory secret guard: {error}"))?;
 
     let options = StoreOptions {
-        busy_timeout: if config.turso_busy_timeout.is_zero() {
+        busy_timeout: if config.store_busy_timeout.is_zero() {
             StoreOptions::default().busy_timeout
         } else {
-            config.turso_busy_timeout
+            config.store_busy_timeout
         },
         new_id: Box::new(new_id),
         guard: Box::new(CompositeGuard::new(vec![
@@ -448,7 +418,7 @@ pub fn open_memory_service_with_storage(
             Box::new(exact),
         ])),
     };
-    let store = match open_file_store(storage, config, options, stderr) {
+    let store = match open_file_store(config, options, stderr) {
         Ok(store) => store,
         Err(error) => {
             if config.required {

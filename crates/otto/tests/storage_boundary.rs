@@ -291,7 +291,7 @@ fn session_legacy_violations(source: &str) -> Vec<String> {
         "crate::storage::Connection",
         "crate::storage::Transaction",
         "crate::storage::params",
-        "crate::storage::drivers::turso::",
+        "crate::storage::drivers::sqlite::",
         "crate::app::",
         "crate::runtime::",
         "crate::cli::",
@@ -368,14 +368,9 @@ fn domain_violations(path: &Path, source: &str) -> Vec<String> {
             problems.push("legacy facade contains backend logic instead of a pure reexport".into());
         }
     }
-    if [
-        "turso::Builder",
-        "turso::Connection",
-        "rusqlite::",
-        "libsql::",
-    ]
-    .iter()
-    .any(|token| source.contains(token))
+    if ["rusqlite::", "libsql::"]
+        .iter()
+        .any(|token| source.contains(token))
     {
         problems.push("storage SDK import".into());
     }
@@ -433,7 +428,6 @@ fn migration_core_violations(source: &str) -> Vec<String> {
     for forbidden in [
         "crate::storage::backends",
         "crate::storage::drivers",
-        "turso::",
         "rusqlite::",
         "libsql::",
         "crate::storage::Connection",
@@ -452,14 +446,7 @@ fn domain_services_and_repositories_use_typed_ports() {
     for module in DOMAIN_MODULES {
         for path in sources(&src.join(module)) {
             let body = std::fs::read_to_string(&path).expect("read domain source");
-            // The file store is the memory domain's only store and is not a
-            // storage domain; its importer reads the legacy Turso database
-            // with SQL. No other path is exempt.
-            let file_store = path.starts_with(src.join("memory/files"));
             for problem in domain_violations(&path, &body) {
-                if file_store && problem == "inline SQL or physical schema" {
-                    continue;
-                }
                 offenders.push(format!("{}: {problem}", path.display()));
             }
         }
@@ -496,7 +483,7 @@ fn drivers_and_adapters_point_downward() {
     );
 }
 
-fn direct_turso_open_violations(source: &str) -> Vec<String> {
+fn direct_sqlite_open_violations(source: &str) -> Vec<String> {
     let source = without_line_comments(&non_test(source));
     if source.contains("Connection::open(") {
         vec!["`Connection::open(` bypasses the injected SqlDriver".into()]
@@ -506,12 +493,12 @@ fn direct_turso_open_violations(source: &str) -> Vec<String> {
 }
 
 #[test]
-fn turso_repositories_open_through_the_injected_driver() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/backends/turso");
+fn sqlite_repositories_open_through_the_injected_driver() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/backends/sqlite");
     let mut offenders = Vec::new();
     for path in sources(&root) {
         let body = std::fs::read_to_string(&path).expect("read repository source");
-        for problem in direct_turso_open_violations(&body) {
+        for problem in direct_sqlite_open_violations(&body) {
             offenders.push(format!("{}: {problem}", path.display()));
         }
     }
@@ -521,11 +508,12 @@ fn turso_repositories_open_through_the_injected_driver() {
         "repositories open connections with `Connection::open_with_driver` so fault injection reaches them:\n{}",
         offenders.join("\n")
     );
-    assert!(!direct_turso_open_violations("fn f() { Connection::open(path); }").is_empty());
+    assert!(!direct_sqlite_open_violations("fn f() { Connection::open(path); }").is_empty());
     let braces_in_string = "#[cfg(test)]\nmod t {\n    const S: &str = \"}}\";\n    fn f() { Connection::open(p); }\n}";
-    assert!(direct_turso_open_violations(braces_in_string).is_empty());
+    assert!(direct_sqlite_open_violations(braces_in_string).is_empty());
     assert!(
-        direct_turso_open_violations("#[cfg(test)]\nfn f() { Connection::open(path); }").is_empty()
+        direct_sqlite_open_violations("#[cfg(test)]\nfn f() { Connection::open(path); }")
+            .is_empty()
     );
 }
 
@@ -587,7 +575,7 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     assert!(
         !domain_violations(
             service,
-            "use crate::storage::backends::turso::workflow::Store;"
+            "use crate::storage::backends::sqlite::workflow::Store;"
         )
         .is_empty()
     );
@@ -596,12 +584,12 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     assert!(!driver_violations("use crate::memory::Service;").is_empty());
     assert!(!backend_violations("use crate::runtime::Builder;").is_empty());
     assert!(
-        !migration_core_violations("use crate::storage::drivers::turso::TursoDriver;").is_empty()
+        !migration_core_violations("use crate::storage::drivers::sqlite::SqliteDriver;").is_empty()
     );
     assert!(
         domain_violations(
             Path::new("workflow/mod.rs"),
-            "pub use crate::storage::backends::turso::workflow::Store;"
+            "pub use crate::storage::backends::sqlite::workflow::Store;"
         )
         .is_empty()
     );
@@ -609,14 +597,14 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     assert!(
         domain_violations(
             &task_record,
-            "pub use crate::storage::backends::turso::tasks::Store;"
+            "pub use crate::storage::backends::sqlite::tasks::Store;"
         )
         .is_empty()
     );
     assert!(
         !domain_violations(
             &task_record,
-            "pub use crate::storage::backends::turso::tasks::Store;\nfn open() { Store::open(); }"
+            "pub use crate::storage::backends::sqlite::tasks::Store;\nfn open() { Store::open(); }"
         )
         .is_empty()
     );

@@ -48,7 +48,7 @@ impl RepositoryFactory for RegisteredFactory {
 }
 fn factory(calls: Arc<AtomicUsize>) -> Arc<dyn RepositoryFactory> {
     Arc::new(RegisteredFactory {
-        inner: SqlRepositories::new(Arc::new(crate::storage::drivers::turso::TursoDriver)),
+        inner: SqlRepositories::new(Arc::new(crate::storage::drivers::sqlite::SqliteDriver)),
         calls,
     })
 }
@@ -79,10 +79,6 @@ fn memory_route_is_accepted_without_a_registered_backend() {
     );
     let storage = Storage::default().with_routes(routes.clone()).unwrap();
     assert!(storage.approvals(Path::new("ignored-default")).is_ok());
-    assert_eq!(
-        storage.memory_endpoint(Path::new("default")).unwrap(),
-        "legacy-memory-source"
-    );
     routes.get_mut("memory").unwrap().endpoint = " ".into();
     assert!(Storage::default().with_routes(routes).is_err());
 }
@@ -251,7 +247,7 @@ fn unsupported_driver_is_rejected_before_native_endpoint_creation() {
                 address: endpoint.to_str().unwrap(),
                 policy: OpenPolicy::CreateIfMissing
             },
-            &crate::storage::backends::turso::migration::ApprovalCodec
+            &crate::storage::backends::sqlite::migration::ApprovalCodec
         ),
         Err(crate::storage::Error::UnsupportedCapability(
             "durable commits"

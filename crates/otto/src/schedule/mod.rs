@@ -14,7 +14,7 @@ pub mod time;
 pub mod tools;
 pub mod worker;
 
-pub use crate::storage::backends::turso::schedule::TursoScheduleStore as Store;
+pub use crate::storage::backends::sqlite::schedule::SqliteScheduleStore as Store;
 pub use store::{
     CreateError, Delivery, Error, Item, NewItem, Result, ScheduleStore, delivery_text, parse_label,
     run_text,

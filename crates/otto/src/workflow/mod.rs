@@ -5,7 +5,7 @@ pub mod migration;
 pub(crate) mod provenance;
 pub mod repository;
 pub mod service;
-pub use crate::storage::backends::turso::workflow::TursoWorkflowStore as Store;
+pub use crate::storage::backends::sqlite::workflow::SqliteWorkflowStore as Store;
 pub use contracts::*;
 pub use error::Error;
 pub use repository::WorkflowStore;

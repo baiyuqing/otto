@@ -147,7 +147,7 @@ impl SqlRepositories {
     fn connection(
         &self,
         endpoint: Endpoint<'_>,
-        codec: &dyn crate::storage::backends::turso::migration::SqlDomainCodec,
+        codec: &dyn crate::storage::backends::sqlite::migration::SqlDomainCodec,
     ) -> crate::storage::Result<Connection> {
         let requirements = if endpoint.address == ":memory:" {
             SqlRequirements::EPHEMERAL
@@ -177,22 +177,22 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                &crate::storage::backends::turso::migration::ApprovalCodec,
+                &crate::storage::backends::sqlite::migration::ApprovalCodec,
             )
             .map_err(|_| crate::approval::Error::Unavailable)?;
         Ok(Arc::new(
-            crate::storage::backends::turso::approval::Store::from_connection(connection)?,
+            crate::storage::backends::sqlite::approval::Store::from_connection(connection)?,
         ))
     }
     fn schedule(&self, endpoint: Endpoint<'_>) -> crate::schedule::Result<Arc<dyn ScheduleStore>> {
         let connection = self
             .connection(
                 endpoint,
-                &crate::storage::backends::turso::migration::schedule::ScheduleCodec,
+                &crate::storage::backends::sqlite::migration::schedule::ScheduleCodec,
             )
             .map_err(|_| crate::schedule::Error)?;
         Ok(Arc::new(
-            crate::storage::backends::turso::schedule::TursoScheduleStore::from_connection(
+            crate::storage::backends::sqlite::schedule::SqliteScheduleStore::from_connection(
                 connection,
             )?,
         ))
@@ -201,11 +201,11 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                &crate::storage::backends::turso::migration::workflow::WorkflowCodec,
+                &crate::storage::backends::sqlite::migration::workflow::WorkflowCodec,
             )
             .map_err(|_| "workflow storage is unavailable".to_owned())?;
         Ok(Arc::new(
-            crate::storage::backends::turso::workflow::TursoWorkflowStore::from_connection(
+            crate::storage::backends::sqlite::workflow::SqliteWorkflowStore::from_connection(
                 connection,
             )?,
         ))
@@ -214,11 +214,11 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                &crate::storage::backends::turso::migration::usage::UsageCodec,
+                &crate::storage::backends::sqlite::migration::usage::UsageCodec,
             )
             .map_err(|_| crate::usage::Error)?;
         Ok(Arc::new(
-            crate::storage::backends::turso::usage::Store::from_connection(connection)?,
+            crate::storage::backends::sqlite::usage::Store::from_connection(connection)?,
         ))
     }
     fn tasks(
@@ -228,11 +228,11 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                &crate::storage::backends::turso::migration::tasks::TaskCodec,
+                &crate::storage::backends::sqlite::migration::tasks::TaskCodec,
             )
             .map_err(|_| crate::subagent::record::Error)?;
         Ok(Arc::new(
-            crate::storage::backends::turso::tasks::Store::from_connection(connection)?,
+            crate::storage::backends::sqlite::tasks::Store::from_connection(connection)?,
         ))
     }
     fn skill_checks(
@@ -242,11 +242,11 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                &crate::storage::backends::turso::migration::skill_checks::SkillChecksCodec,
+                &crate::storage::backends::sqlite::migration::skill_checks::SkillChecksCodec,
             )
             .map_err(|_| crate::skill::check_repository::StoreError::Io)?;
         Ok(Arc::new(
-            crate::storage::backends::turso::skill_checks::Store::from_connection(connection)?,
+            crate::storage::backends::sqlite::skill_checks::Store::from_connection(connection)?,
         ))
     }
     fn memory_advice(
@@ -256,11 +256,11 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                &crate::storage::backends::turso::migration::memory_advice::MemoryAdviceCodec,
+                &crate::storage::backends::sqlite::migration::memory_advice::MemoryAdviceCodec,
             )
             .map_err(|_| crate::memory::advice::audit::Error::Io)?;
         Ok(Arc::new(
-            crate::storage::backends::turso::memory_advice::Store::from_connection(connection)?,
+            crate::storage::backends::sqlite::memory_advice::Store::from_connection(connection)?,
         ))
     }
 }
@@ -281,7 +281,7 @@ impl Default for Storage {
             factories: HashMap::from([(
                 "sqlite".into(),
                 Arc::new(SqlRepositories::new(Arc::new(
-                    crate::storage::drivers::turso::TursoDriver,
+                    crate::storage::drivers::sqlite::SqliteDriver,
                 ))) as Arc<dyn RepositoryFactory>,
             )]),
             routes: BTreeMap::new(),
@@ -554,21 +554,6 @@ impl Storage {
         ))
     }
 
-    pub fn memory_endpoint(&self, default: &Path) -> Result<String, String> {
-        match self.routes.get("memory") {
-            Some(route) => Ok(route.endpoint.clone()),
-            None => Ok(default
-                .to_str()
-                .ok_or("storage endpoint is not UTF-8")?
-                .to_owned()),
-        }
-    }
-    pub fn memory_backend<'a>(&'a self, default: &'a str) -> &'a str {
-        self.routes
-            .get("memory")
-            .filter(|route| route.backend != "sqlite")
-            .map_or(default, |route| route.backend.as_str())
-    }
     pub fn approvals(&self, default: &Path) -> crate::approval::Result<Arc<dyn ApprovalStore>> {
         let (factory, endpoint) = self
             .route("approvals", default)

@@ -5,7 +5,7 @@ use super::*;
 use crate::faults::http;
 use crate::memory::files::testsupport::open_temp;
 use crate::memory::{Origin, Provenance, RememberRequest, decide_default_policy};
-use crate::storage::backends::turso::memory_advice::Store as TursoAuditStore;
+use crate::storage::backends::sqlite::memory_advice::Store as SqliteAuditStore;
 
 fn service() -> (tempfile::TempDir, Arc<Service>) {
     let (directory, store) = open_temp();
@@ -111,8 +111,8 @@ impl Backend for Fake {
     }
 }
 
-fn audited(backend: Box<dyn Backend>) -> (Advisor, Arc<TursoAuditStore>) {
-    let audit = Arc::new(TursoAuditStore::open_in_memory().expect("audit"));
+fn audited(backend: Box<dyn Backend>) -> (Advisor, Arc<SqliteAuditStore>) {
+    let audit = Arc::new(SqliteAuditStore::open_in_memory().expect("audit"));
     (
         Advisor::new(
             backend,
@@ -357,7 +357,7 @@ async fn a_canceled_run_queues_nothing() {
 async fn an_audit_log_that_cannot_write_does_not_fail_the_proposal() {
     let (_directory, service) = service();
     let (fake, _) = Fake::new(Ok(answers(ALL_WORKSPACES, None, YES)));
-    let audit = Arc::new(TursoAuditStore::open_in_memory().expect("audit"));
+    let audit = Arc::new(SqliteAuditStore::open_in_memory().expect("audit"));
     audit.break_for_test();
     let advisor = Advisor::new(fake, Some(audit as Arc<dyn audit::AuditStore>));
 
@@ -482,7 +482,7 @@ fn no_relation_question_is_asked_without_standing_records() {
 fn audit_store_records_user_version_one_and_rejects_another() {
     let directory = tempfile::tempdir().expect("dir");
     let path = directory.path().join("memory-advice.db");
-    TursoAuditStore::open(&path).expect("open");
+    SqliteAuditStore::open(&path).expect("open");
     let connection = crate::storage::Connection::open(&path).expect("raw");
     let version: i64 = connection
         .query_row("PRAGMA user_version", (), |row| row.get(0))
@@ -493,7 +493,7 @@ fn audit_store_records_user_version_one_and_rejects_another() {
         .expect("set version");
     drop(connection);
     assert_eq!(
-        TursoAuditStore::open(&path).err(),
+        SqliteAuditStore::open(&path).err(),
         Some(audit::Error::UnknownVersion)
     );
 }

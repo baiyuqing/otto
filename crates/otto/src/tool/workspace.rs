@@ -37,54 +37,9 @@ use std::sync::{Arc, Mutex};
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 
+use super::git_read_only::refuse_git_read_only;
 use super::gopath::{base, bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel};
 use super::root::{Root, is_symlink};
-
-/// Refuses a write to the root-relative path made of `components` when it is
-/// one of [`crate::sandbox::GIT_READ_ONLY`], with a `PermissionDenied` error
-/// naming `path`. APFS is case-insensitive by default and also treats the
-/// Kelvin sign (U+212A) as `k` and long s (U+017F) as `s`, so each component
-/// is folded with `to_uppercase().to_lowercase()`, which maps both.
-pub(crate) fn refuse_git_read_only<'a>(
-    components: impl IntoIterator<Item = &'a std::ffi::OsStr>,
-    path: &Path,
-) -> io::Result<()> {
-    let parts: Vec<String> = components
-        .into_iter()
-        .filter(|part| *part != ".")
-        .map(|part| part.to_string_lossy().to_uppercase().to_lowercase())
-        .collect();
-    if crate::workspace::READ_ONLY_PATHS
-        .iter()
-        .any(|(name, _)| parts.iter().map(String::as_str).eq(name.split('/')))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "{} is read-only: workspace identity is managed by Otto",
-                path.display()
-            ),
-        ));
-    }
-    for (name, subpath) in crate::sandbox::GIT_READ_ONLY {
-        let protected: Vec<&str> = name.split('/').collect();
-        let hit = if subpath {
-            parts.len() >= protected.len() && parts[..protected.len()] == protected[..]
-        } else {
-            parts == protected
-        };
-        if hit {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "{} is read-only: git runs hooks and configuration programs outside the sandbox",
-                    path.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
 
 /// Maximum number of symbolic links followed while resolving a write target.
 const MAX_WRITE_SYMLINKS: usize = 40;
@@ -254,10 +209,10 @@ impl Workspace {
     /// final element through ordinary filesystem I/O, so writing through a
     /// symbolic link updates the link target instead of replacing the link.
     ///
-    /// Refuses the git paths the sandbox keeps read-only (see
-    /// [`refuse_git_read_only`]). This check runs before any directory is
-    /// created; [`super::write::write_file_atomic`] repeats it on the
-    /// components it renames into.
+    /// Refuses the paths protected by [`refuse_git_read_only`]. This check
+    /// runs before any directory is created;
+    /// [`super::write::write_file_atomic`] repeats it on the components it
+    /// renames into.
     pub(crate) fn write_relative(&self, path: &Path) -> io::Result<PathBuf> {
         let relative = self.resolve_write_relative(path)?;
         refuse_git_read_only(relative.iter(), path)?;

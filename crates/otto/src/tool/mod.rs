@@ -17,6 +17,7 @@ pub mod bash;
 pub(crate) mod bash_output;
 pub mod edit;
 pub mod find;
+pub(crate) mod git_read_only;
 pub(crate) mod gitignore;
 pub(crate) mod gopath;
 pub mod grep;

@@ -56,7 +56,8 @@ Forking leaves old state untouched and requires stopped workspace processes.
 `storage/{contracts,sql,files}.rs` define guarantees; drivers implement I/O;
 `storage/backends/` owns schemas/codecs. `runtime/storage.rs` validates routes
 and capabilities before opening repositories and injects domain-owned ports.
-Shipped storage uses local Turso-compatible SQL and POSIX session files; no
+Shipped storage uses local SQLite (bundled through `rusqlite`) and POSIX
+session files; no
 MySQL, PostgreSQL or cloud service implementation is shipped.
 
 Domain services own validation, state transitions and recovery. Repositories
@@ -71,7 +72,7 @@ never executes pending tools. Offline `otto storage transfer` resumes by ID,
 keeps original files and publishes destination routes for the same source home.
 Abort cannot undo committed or uncertain publication; roots must not overlap.
 Use the [storage manual](../manual/memory-and-extensions.md#storage-operations) for operational commands.
-The legacy SQLite importer is separate from route transfer.
+The legacy-schema importer (`otto storage migrate`) is separate from route transfer.
 
 ### External storage backends
 

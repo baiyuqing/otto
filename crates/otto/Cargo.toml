@@ -35,9 +35,7 @@ chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
 nix.workspace = true
 regex.workspace = true
-# Turso's debug SQL compiler exceeds the default 2 MiB worker stack.
-stacker = "=0.1.25"
-turso.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true

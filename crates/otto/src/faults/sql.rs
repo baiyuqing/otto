@@ -17,7 +17,7 @@
 //! a test bug.
 //!
 //! The decorator models the poisoning contract of the real driver
-//! (`TursoConnection`), because repositories rely on it:
+//! (`SqliteConnection`), because repositories rely on it:
 //!
 //! - A commit error other than `Busy`, `BusySnapshot` and `Constraint` is
 //!   reported as `CommitUnknown`, as the real `commit` does.

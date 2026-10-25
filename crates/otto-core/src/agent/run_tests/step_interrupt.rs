@@ -1,7 +1,7 @@
 //! Run-loop tests: a step interrupt delivers queued guidance inside the turn.
 
 use super::*;
-use crate::agent::steering::{InterruptError, Steering};
+use crate::agent::steering::Steering;
 use crate::model::{EffectCertainty, OperationDisposition, OperationOutcome, OperationStopReason};
 use crate::session::{TurnOutcome, TurnRecord};
 use crate::tool::ToolExecution;

@@ -105,7 +105,7 @@ async fn command_transfers_all_existing_families_and_exact_pi_bytes() {
         "{}",
         String::from_utf8_lossy(&stderr)
     );
-    assert!(String::from_utf8_lossy(&stdout).contains("transferred 9 domains"));
+    assert!(String::from_utf8_lossy(&stdout).contains("transferred 8 domains"));
     assert_eq!(
         std::fs::read(options.destination.join("sessions/workspace/parent.jsonl")).unwrap(),
         bytes

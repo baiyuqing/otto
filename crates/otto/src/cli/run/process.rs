@@ -450,6 +450,7 @@ pub async fn run_with_extensions(
                 listen,
                 acp_listen: options.acp_listen.clone(),
                 acp_token: lookup.get("OTTO_ACP_TOKEN").cloned().unwrap_or_default(),
+                server_token: lookup.get("OTTO_SERVER_TOKEN").cloned().unwrap_or_default(),
                 control,
                 reloader,
                 delivery_setup_executor: approval_executor.clone(),

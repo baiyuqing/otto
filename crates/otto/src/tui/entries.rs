@@ -5,10 +5,9 @@
 //! `Controller::history()` returns and what a live turn's `Event` stream
 //! describes incrementally.
 //!
-//! ponytail: an entry keeps no render cache: ratatui redraws the whole frame
-//! every tick, so a cached rendering would have no reader. Upgrade path:
-//! reintroduce it if profiling shows markdown rendering is a hot path at large
-//! scrollback sizes.
+//! Rendered rows are cached in `transcript::render_cache::RenderCache`, which
+//! `App` owns. The cache compares each entry with the copy it rendered, so code
+//! that mutates an entry needs no version counter or invalidation call.
 
 use std::time::{Duration, Instant};
 
@@ -41,7 +40,8 @@ const TASK_NOTIFICATION_CONTEXT_TYPE: &str = "task_notification";
 /// before the rest is truncated with a "/task <id>" hint.
 const NOTIFICATION_BODY_LINE_LIMIT: usize = 20;
 
-/// One transcript entry. There is no render cache (see the module doc).
+/// One transcript entry. Rendered rows live in the `App`'s render cache, not in the entry (see the
+/// module doc).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Entry {
     pub id: String,

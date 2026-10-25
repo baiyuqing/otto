@@ -126,6 +126,7 @@ impl Store {
                 owns_lease,
                 enable_failover: None,
                 recovery: None,
+                deferred_custom_entries: Vec::new(),
             }),
         };
         let mut recovery = Recovery {

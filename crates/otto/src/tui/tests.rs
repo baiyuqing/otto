@@ -543,3 +543,38 @@ async fn saved_queued_prompts_run_in_order_when_the_tui_opens_the_session() {
     assert!(journal.pending().is_empty());
     assert_eq!(provider.calls(), 2, "each ran once");
 }
+
+#[test]
+fn enabling_and_restoring_input_modes_updates_the_record() {
+    let record = std::sync::atomic::AtomicBool::new(false);
+    let mut output = Vec::new();
+    let mut input = TerminalInput::new();
+
+    input.enable_recorded(&mut output, &record).expect("enable");
+    assert!(record.load(std::sync::atomic::Ordering::SeqCst));
+
+    input
+        .restore_recorded(&mut output, &record)
+        .expect("restore");
+    assert!(!record.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn panic_reset_writes_all_resets_only_when_modes_are_recorded() {
+    let record = std::sync::atomic::AtomicBool::new(true);
+    let mut output = Vec::new();
+    reset_input_modes(&record, &mut output);
+    let written = String::from_utf8_lossy(&output);
+    for sequence in ["?2004l", "?1006l", "?1002l", "?1000l"] {
+        assert!(written.contains(sequence), "missing {sequence}");
+    }
+    assert!(!record.load(std::sync::atomic::Ordering::SeqCst));
+
+    let mut silent = Vec::new();
+    reset_input_modes(&record, &mut silent);
+    assert!(
+        silent.is_empty(),
+        "wrote {} bytes with no modes enabled",
+        silent.len()
+    );
+}

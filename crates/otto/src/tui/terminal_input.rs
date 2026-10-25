@@ -1,6 +1,15 @@
 //! Terminal mode lifecycle and the key reader task.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// True while a TUI session has mouse reporting or bracketed paste enabled on
+/// the real stdout. Read by the panic hook, which cannot reach the
+/// `TerminalInput` value.
+static TERMINAL_INPUT_MODES_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Sequences that disable bracketed paste and mouse reporting.
+const TERMINAL_INPUT_MODES_RESET: &[u8] = b"\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 #[derive(Default)]
 pub(super) struct TerminalInput {
@@ -16,6 +25,38 @@ impl TerminalInput {
     pub(super) fn enable(&mut self, mut writer: impl io::Write) -> io::Result<()> {
         self.enable_mouse(&mut writer)?;
         self.enable_paste(&mut writer)
+    }
+
+    /// [`Self::enable`] on the real stdout, recording the result in
+    /// `TERMINAL_INPUT_MODES_ENABLED`.
+    pub(super) fn enable_terminal(&mut self) -> io::Result<()> {
+        self.enable_recorded(std::io::stdout(), &TERMINAL_INPUT_MODES_ENABLED)
+    }
+
+    /// [`Self::restore`] on the real stdout, recording the result in
+    /// `TERMINAL_INPUT_MODES_ENABLED`.
+    pub(super) fn restore_terminal(&mut self) -> io::Result<()> {
+        self.restore_recorded(std::io::stdout(), &TERMINAL_INPUT_MODES_ENABLED)
+    }
+
+    pub(super) fn enable_recorded(
+        &mut self,
+        writer: impl io::Write,
+        record: &AtomicBool,
+    ) -> io::Result<()> {
+        let result = self.enable(writer);
+        record.store(self.mouse_active || self.paste_active, Ordering::SeqCst);
+        result
+    }
+
+    pub(super) fn restore_recorded(
+        &mut self,
+        writer: impl io::Write,
+        record: &AtomicBool,
+    ) -> io::Result<()> {
+        let result = self.restore(writer);
+        record.store(self.mouse_active || self.paste_active, Ordering::SeqCst);
+        result
     }
 
     pub(super) fn restore(&mut self, mut writer: impl io::Write) -> io::Result<()> {
@@ -80,8 +121,23 @@ impl TerminalInput {
 
 impl Drop for TerminalInput {
     fn drop(&mut self) {
-        let _ = self.restore(std::io::stdout());
+        let _ = self.restore_terminal();
     }
+}
+
+/// Disables mouse reporting and bracketed paste on stdout when a TUI session
+/// enabled them. Called from the panic hook, where `Drop` does not run.
+/// Writes nothing when no session enabled them, because stdout may be a pipe.
+pub(crate) fn reset_terminal_input_modes_after_panic() {
+    reset_input_modes(&TERMINAL_INPUT_MODES_ENABLED, std::io::stdout());
+}
+
+pub(super) fn reset_input_modes(record: &AtomicBool, mut writer: impl io::Write) {
+    if !record.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let _ = writer.write_all(TERMINAL_INPUT_MODES_RESET);
+    let _ = writer.flush();
 }
 
 pub(super) fn io_error(error: std::io::Error) -> ReplError {

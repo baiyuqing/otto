@@ -1,6 +1,8 @@
 //! Heuristic detection of credential-shaped text and the redaction of detected ranges.
 
 use super::*;
+use std::ops::Range;
+use std::sync::LazyLock;
 
 /// Provider-bound request fields that may contain prose are transformed on a
 /// clone. Structural and provider-opaque fields are checked but never changed.
@@ -167,67 +169,142 @@ fn assignment_finding(line: &str) -> Option<std::ops::Range<usize>> {
     credential_value(line.get(finding.clone())?).then_some(finding)
 }
 
-pub(super) fn independent_finding_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut findings = Vec::new();
-    for label in ["PRIVATE", "RSA PRIVATE", "EC PRIVATE", "OPENSSH PRIVATE"] {
-        // Construct PEM boundaries from fragments so repository secret scanners
-        // do not mistake the detector itself for embedded key material.
-        let begin = format!("-----{} {label} KEY-----", "BEGIN");
-        let end = format!("-----{} {label} KEY-----", "END");
+/// Receives one finding range and returns whether the scan should continue.
+type FindingSink<'a> = &'a mut dyn FnMut(Range<usize>) -> bool;
+
+/// A PEM private-key boundary pair with prebuilt searchers.
+struct PemBoundary {
+    begin_bytes: usize,
+    end_bytes: usize,
+    begin_finder: memchr::memmem::Finder<'static>,
+    end_finder: memchr::memmem::Finder<'static>,
+}
+
+static PEM_BOUNDARIES: LazyLock<Vec<PemBoundary>> = LazyLock::new(|| {
+    ["PRIVATE", "RSA PRIVATE", "EC PRIVATE", "OPENSSH PRIVATE"]
+        .into_iter()
+        .map(|label| {
+            // Construct PEM boundaries from fragments so repository secret scanners
+            // do not mistake the detector itself for embedded key material.
+            let begin = format!("-----{} {label} KEY-----", "BEGIN");
+            let end = format!("-----{} {label} KEY-----", "END");
+            PemBoundary {
+                begin_bytes: begin.len(),
+                end_bytes: end.len(),
+                begin_finder: memchr::memmem::Finder::new(begin.as_bytes()).into_owned(),
+                end_finder: memchr::memmem::Finder::new(end.as_bytes()).into_owned(),
+            }
+        })
+        .collect()
+});
+
+/// Reports each PEM private-key block. A block without an END boundary runs to
+/// the end of `text`. Returns false when `sink` stopped the scan.
+fn scan_pem_blocks(text: &str, sink: FindingSink<'_>) -> bool {
+    let haystack = text.as_bytes();
+    for boundary in PEM_BOUNDARIES.iter() {
+        if boundary.begin_bytes > haystack.len() {
+            continue;
+        }
         let mut offset = 0;
-        while let Some(relative_start) = text[offset..].find(&begin) {
+        while let Some(relative_start) = boundary.begin_finder.find(&haystack[offset..]) {
             let start = offset + relative_start;
-            let after_begin = start + begin.len();
-            let finish = text[after_begin..]
-                .find(&end)
-                .map_or(text.len(), |relative_end| {
-                    after_begin + relative_end + end.len()
+            let after_begin = start + boundary.begin_bytes;
+            let finish = boundary
+                .end_finder
+                .find(&haystack[after_begin..])
+                .map_or(haystack.len(), |relative_end| {
+                    after_begin + relative_end + boundary.end_bytes
                 });
-            findings.push(start..finish);
+            if !sink(start..finish) {
+                return false;
+            }
             offset = finish;
-            if offset == text.len() {
+            if offset == haystack.len() {
                 break;
             }
         }
     }
-    let mut offset = 0;
-    for token in text.split_ascii_whitespace() {
-        let relative = text[offset..].find(token).unwrap_or_default();
-        let token_start = offset + relative;
-        let trimmed_start = token
-            .find(|character: char| {
-                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-            })
-            .unwrap_or(token.len());
-        let trimmed_end = token
-            .rfind(|character: char| {
-                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-            })
-            .map_or(trimmed_start, |index| index + 1);
-        if strong_prefixed_token(token) {
-            findings.push(token_start + trimmed_start..token_start + trimmed_end);
-        }
-        offset = token_start + token.len();
-    }
-    findings
+    true
 }
 
-fn heuristic_finding_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut findings = independent_finding_ranges(text);
+/// Reports the trimmed range of each ASCII-whitespace-delimited token that is a
+/// strong-prefixed credential. Returns false when `sink` stopped the scan.
+fn scan_prefixed_tokens(text: &str, sink: FindingSink<'_>) -> bool {
+    let bytes = text.as_bytes();
+    let mut position = 0;
+    while position < bytes.len() {
+        if bytes[position].is_ascii_whitespace() {
+            position += 1;
+            continue;
+        }
+        let token_start = position;
+        while position < bytes.len() && !bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        // ASCII whitespace bytes are char boundaries, so both ends are valid.
+        let token = &text[token_start..position];
+        if !strong_prefixed_token(token) {
+            continue;
+        }
+        let is_token_character =
+            |character: char| character.is_ascii_alphanumeric() || matches!(character, '-' | '_');
+        let trimmed_start = token.find(is_token_character).unwrap_or(token.len());
+        let trimmed_end = token
+            .rfind(is_token_character)
+            .map_or(trimmed_start, |index| index + 1);
+        if !sink(token_start + trimmed_start..token_start + trimmed_end) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reports the credential value of each sensitive `key=value` or `key: value`
+/// line. Returns false when `sink` stopped the scan.
+fn scan_assignment_lines(text: &str, sink: FindingSink<'_>) -> bool {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let content = line.strip_suffix('\n').unwrap_or(line);
         let content = content.strip_suffix('\r').unwrap_or(content);
-        if let Some(range) = assignment_finding(content) {
-            findings.push(offset + range.start..offset + range.end);
+        if let Some(range) = assignment_finding(content)
+            && !sink(offset + range.start..offset + range.end)
+        {
+            return false;
         }
         offset += line.len();
     }
+    true
+}
+
+pub(super) fn independent_finding_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut findings = Vec::new();
+    let mut collect = |range: Range<usize>| {
+        findings.push(range);
+        true
+    };
+    let _ = scan_pem_blocks(text, &mut collect) && scan_prefixed_tokens(text, &mut collect);
     findings
 }
 
+pub(super) fn heuristic_finding_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut findings = Vec::new();
+    let mut collect = |range: Range<usize>| {
+        findings.push(range);
+        true
+    };
+    let _ = scan_pem_blocks(text, &mut collect)
+        && scan_prefixed_tokens(text, &mut collect)
+        && scan_assignment_lines(text, &mut collect);
+    findings
+}
+
+/// Whether the heuristics find any credential-shaped range. Stops at the first.
 pub(super) fn heuristic_secret(text: &str) -> bool {
-    !heuristic_finding_ranges(text).is_empty()
+    let mut stop_at_first = |_: Range<usize>| false;
+    !(scan_pem_blocks(text, &mut stop_at_first)
+        && scan_prefixed_tokens(text, &mut stop_at_first)
+        && scan_assignment_lines(text, &mut stop_at_first))
 }
 
 pub(super) fn redact_ranges(
@@ -289,7 +366,7 @@ pub(super) fn redact_heuristic_text(redactor: &Redactor, text: &str) -> Option<S
 }
 
 pub(super) fn protected_text_is_safe(redactor: &Redactor, text: &str) -> bool {
-    redactor.redact_string(text) == text && !heuristic_secret(text)
+    redactor.unchanged_by_redaction(text) && !heuristic_secret(text)
 }
 
 pub(super) fn redact_json_string_value(

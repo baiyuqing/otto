@@ -105,6 +105,8 @@ pub(crate) struct App {
     optimistic_user_echo: Option<String>,
     pub scroll: Option<u16>,
     pub max_scroll: std::cell::Cell<u16>,
+    /// Rendered transcript rows kept between frames; synced by the renderer.
+    pub transcript_cache: std::cell::RefCell<super::transcript::render_cache::RenderCache>,
     pub selection: Option<Selection>,
     pub show_details: bool,
     pub tasks: Vec<Task>,
@@ -186,6 +188,7 @@ impl App {
             optimistic_user_echo: None,
             scroll: None,
             max_scroll: Default::default(),
+            transcript_cache: Default::default(),
             selection: None,
             show_details: false,
             tasks: Vec::new(),

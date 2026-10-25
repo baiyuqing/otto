@@ -170,3 +170,4 @@ mod queued_input;
 mod status_line;
 mod task_panel;
 mod transcript_bands;
+mod transcript_window;

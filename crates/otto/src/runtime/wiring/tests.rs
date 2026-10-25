@@ -237,7 +237,7 @@ fn a_successful_open_returns_a_stable_user_scope() {
 }
 
 #[test]
-fn require_encryption_fails_because_turso_never_encrypts_at_rest() {
+fn require_encryption_fails_because_the_file_store_never_encrypts_at_rest() {
     let directory = tempfile::tempdir().expect("directory");
     let config = MemoryRuntime {
         require_encryption: true,

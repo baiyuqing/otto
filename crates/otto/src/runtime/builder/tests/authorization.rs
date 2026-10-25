@@ -106,7 +106,7 @@ async fn review_freezes_accepted_standing_constraints_and_excludes_generated_rec
         crate::cli::fixture_tests::builder(directory.path(), &directory.path().join("sessions"));
     let memory_runtime = otto_core::config::MemoryRuntime {
         enabled: true,
-        backend: "turso".into(),
+        backend: "files".into(),
         dir: directory
             .path()
             .join("memory")

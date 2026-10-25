@@ -1,5 +1,5 @@
 //! Storage capability families and portable migration contracts.
-//! SQL compatibility remains SQLite/Turso-specific. External dialects implement
+//! SQL compatibility remains SQLite-specific. External dialects implement
 //! the domain repositories through the runtime factory boundary.
 pub mod backends;
 #[cfg(feature = "storage-conformance")]
@@ -47,7 +47,7 @@ impl Connection {
 
     fn open_options(path: &Path, read_only: bool) -> Result<Self> {
         Self::open_with_driver(
-            &drivers::turso::TursoDriver,
+            &drivers::sqlite::SqliteDriver,
             path,
             OpenOptions {
                 read_only,
@@ -446,9 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn injected_turso_rolls_back_whole_transaction_on_drop() {
+    fn injected_sqlite_rolls_back_whole_transaction_on_drop() {
         let connection = Connection::open_with_driver(
-            &drivers::turso::TursoDriver,
+            &drivers::sqlite::SqliteDriver,
             Path::new(":memory:"),
             OpenOptions::default(),
             SqlRequirements::EPHEMERAL,

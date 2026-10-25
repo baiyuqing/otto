@@ -30,6 +30,7 @@ mod status;
 pub mod task_control;
 pub mod tasks;
 pub mod timers;
+pub mod tls;
 pub mod turn;
 mod turn_routes;
 mod turn_runner;
@@ -109,9 +110,15 @@ pub struct Options {
     /// only server routes that read or write it.
     pub config_path: std::path::PathBuf,
     /// When non-empty, required as `Authorization: Bearer <token>` on every
-    /// `/v1/` route. Empty means no check, which is only safe behind a Unix
-    /// socket with private file modes.
+    /// `/v1/` route, and on every route except `GET /healthz` when
+    /// `remote_listener` is set. Empty means no check, which is only safe
+    /// behind a Unix socket with private file modes. Requests that arrive on
+    /// the Unix socket router never need the token.
     pub token: String,
+    /// The TCP listener is bound to a non-loopback address. Every route except
+    /// `GET /healthz` then needs the token, because `/metrics` carries session
+    /// ids and model names.
+    pub remote_listener: bool,
     pub logger: Option<Arc<Logger>>,
     pub workflows: Option<Arc<crate::workflow::Controller>>,
     /// The scheduled-delivery store shared by every workspace; `None` when
@@ -321,6 +328,8 @@ pub struct Server {
     /// token. Tokens expire in the config route before a write can occur.
     approvals: Option<Arc<crate::approval::Service>>,
     token: String,
+    /// See [`Options::remote_listener`].
+    remote_listener: bool,
     log: Arc<Logger>,
     metrics: Arc<Metrics>,
     sessions: Mutex<HashMap<String, Arc<OpenSession>>>,
@@ -374,6 +383,7 @@ impl Server {
             config_path: options.config_path,
             approvals,
             token: options.token,
+            remote_listener: options.remote_listener,
             log: options.logger.unwrap_or_else(|| Arc::new(Logger::stderr())),
             metrics: Arc::new(Metrics::new()),
             sessions: Mutex::new(HashMap::new()),

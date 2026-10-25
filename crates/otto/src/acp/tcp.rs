@@ -24,10 +24,7 @@ pub fn bind(address: &str, token: &str) -> Result<TcpListener, String> {
             "serve: ACP requires a non-empty printable OTTO_ACP_TOKEN (maximum 4000 bytes)".into(),
         );
     }
-    match listen::listen_tcp(address)? {
-        listen::Listener::Tcp(listener) => Ok(listener),
-        listen::Listener::Unix(..) => unreachable!(),
-    }
+    listen::listen_tcp(address, listen::AllowedHosts::LoopbackOnly)
 }
 
 async fn authenticate(stream: &mut TcpStream, token: &str) -> std::io::Result<bool> {

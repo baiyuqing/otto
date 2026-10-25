@@ -4,14 +4,126 @@ mod delivery_run;
 mod persisted_workspaces;
 mod workspace_registry;
 
+const TEST_SERVER_TOKEN: &str = "test-server-token-0123456789abcdefghijklmnop";
+
 #[test]
 fn tcp_startup_prints_connection_details() {
     let mut stdout = Vec::new();
-    announce_listen(&mut stdout, "127.0.0.1:8787", "tok");
+    announce_listen(&mut stdout, "http", "127.0.0.1:8787", Some("tok"));
     assert_eq!(
         String::from_utf8(stdout).expect("utf-8"),
         "otto serve: http://127.0.0.1:8787/?token=tok\n"
     );
+}
+
+#[test]
+fn an_environment_token_is_not_printed() {
+    let mut stdout = Vec::new();
+    announce_listen(&mut stdout, "https", "127.0.0.1:8787", None);
+    assert_eq!(
+        String::from_utf8(stdout).expect("utf-8"),
+        "otto serve: https://127.0.0.1:8787/ (token from OTTO_SERVER_TOKEN)\n"
+    );
+}
+
+// ---- OTTO_SERVER_TOKEN and bind ----
+
+#[test]
+fn server_token_length_and_characters_are_validated() {
+    assert!(validate_server_token(&"a".repeat(31)).is_err());
+    assert!(validate_server_token(&"a".repeat(32)).is_ok());
+    assert!(validate_server_token(&"a".repeat(4000)).is_ok());
+    assert!(validate_server_token(&"a".repeat(4001)).is_err());
+    assert!(validate_server_token(&format!("{} b", "a".repeat(32))).is_err());
+    assert!(validate_server_token(&format!("{}\u{7f}", "a".repeat(32))).is_err());
+}
+
+/// Writes a self-signed certificate and key for `localhost` into `directory`.
+fn self_signed_tls_files(directory: &tempfile::TempDir) -> otto_core::config::ServerTls {
+    let identity =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("certificate");
+    let cert_path = directory.path().join("cert.pem");
+    let key_path = directory.path().join("key.pem");
+    std::fs::write(&cert_path, identity.cert.pem()).expect("write certificate");
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).expect("write key");
+    otto_core::config::ServerTls {
+        cert_path: cert_path.to_string_lossy().into_owned(),
+        key_path: key_path.to_string_lossy().into_owned(),
+    }
+}
+
+fn tcp_runtime(address: &str, tls: Option<otto_core::config::ServerTls>) -> ServerRuntime {
+    ServerRuntime {
+        listen: address.into(),
+        tls,
+        ..Default::default()
+    }
+}
+
+fn discard_logger() -> Arc<Logger> {
+    Arc::new(Logger::discard())
+}
+
+#[tokio::test]
+async fn a_bad_environment_token_fails_bind() {
+    let error = bind(
+        &tcp_runtime("127.0.0.1:0", None),
+        "short",
+        &discard_logger(),
+    )
+    .err()
+    .expect("bind must fail");
+    assert!(error.contains("OTTO_SERVER_TOKEN"), "{error}");
+}
+
+#[tokio::test]
+async fn a_non_loopback_address_needs_tls_and_an_environment_token() {
+    let directory = tempfile::tempdir().expect("directory");
+    let tls = self_signed_tls_files(&directory);
+    for (runtime, token) in [
+        (tcp_runtime("0.0.0.0:0", None), TEST_SERVER_TOKEN),
+        (tcp_runtime("0.0.0.0:0", Some(tls)), ""),
+    ] {
+        let error = bind(&runtime, token, &discard_logger())
+            .err()
+            .expect("bind must fail");
+        assert!(error.contains("[server].tls_cert"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn tls_with_a_random_token_binds_loopback_only() {
+    let directory = tempfile::tempdir().expect("directory");
+    let tls = self_signed_tls_files(&directory);
+    let bound = bind(
+        &tcp_runtime("127.0.0.1:0", Some(tls)),
+        "",
+        &discard_logger(),
+    )
+    .ok()
+    .expect("bind");
+    assert!(bound.tls);
+    assert!(!bound.remote);
+    assert!(!bound.token_from_env);
+    assert_eq!(bound.token.len(), 32);
+}
+
+#[tokio::test]
+async fn tls_and_an_environment_token_bind_a_non_loopback_address() {
+    let directory = tempfile::tempdir().expect("directory");
+    let tls = self_signed_tls_files(&directory);
+    let bound = bind(
+        &tcp_runtime("0.0.0.0:0", Some(tls)),
+        TEST_SERVER_TOKEN,
+        &discard_logger(),
+    )
+    .ok()
+    .expect("bind");
+    assert!(bound.remote);
+    assert!(bound.tls);
+    assert!(bound.token_from_env);
+    assert_eq!(bound.token, TEST_SERVER_TOKEN);
+    assert!(matches!(bound.tcp, Some(Listener::Tls(_))));
 }
 
 // ---- admission ----

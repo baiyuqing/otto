@@ -20,7 +20,7 @@ After merge, remove the worktree and its local branch.
 
 ## Rust workflow
 
-Use the pinned `rust-toolchain.toml` toolchain (currently 1.99.0) and its
+Use the pinned `rust-toolchain.toml` toolchain (currently 1.99.1) and its
 `wasm32-unknown-unknown` target. Workspace dependencies are exact-pinned in
 `Cargo.toml`. Keep platform-specific code behind `cfg`.
 

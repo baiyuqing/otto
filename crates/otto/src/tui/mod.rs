@@ -54,6 +54,7 @@ mod operations;
 mod terminal_input;
 mod turns;
 use operations::*;
+pub(crate) use terminal_input::reset_terminal_input_modes_after_panic;
 use terminal_input::*;
 use turns::*;
 
@@ -67,13 +68,13 @@ pub(crate) async fn run(
 ) -> Result<(), ReplError> {
     let mut terminal = ratatui::try_init().map_err(io_error)?;
     let mut input = TerminalInput::new();
-    if let Err(error) = input.enable(std::io::stdout()) {
+    if let Err(error) = input.enable_terminal() {
         let _ = ratatui::try_restore();
         return Err(io_error(error));
     }
     let mut keys = spawn_key_reader();
     let result = run_app(&mut terminal, controller, cancel, &mut keys).await;
-    let _ = input.restore(std::io::stdout());
+    let _ = input.restore_terminal();
     let _ = ratatui::try_restore();
     result
 }

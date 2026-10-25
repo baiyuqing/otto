@@ -1,5 +1,6 @@
 //! Registry of process ids started by this process, killed together when a
-//! lease's watchdog fences this process.
+//! lease's watchdog fences this process or when the panic hook
+//! (`cli::panic_cleanup`) runs under `panic = "abort"`.
 //!
 //! Ownership: one process-wide [`Children`], reached via [`Children::global`].
 //! Concurrency: a `Mutex<State>` guards the registered set; `register` and
@@ -7,7 +8,7 @@
 //! `kill_all` is best-effort and never fails; a pid that has already exited
 //! yields `ESRCH` from the kill syscall, which is ignored.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
@@ -87,6 +88,28 @@ impl Children {
         }
     }
 
+    /// [`Children::kill_all`] for the panic hook. The hook runs on the
+    /// panicking thread, which may already hold the registry mutex;
+    /// `lock()` would then never return. This uses `try_lock`, signals and
+    /// returns true when it got the lock (a poisoned lock is read anyway),
+    /// and returns false without signaling when another holder has it.
+    pub fn kill_all_without_blocking(&self) -> bool {
+        let entries = match self.state.try_lock() {
+            Ok(state) => state.entries.clone(),
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().entries.clone(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        for entry in entries {
+            let target = if entry.process_group {
+                -entry.pid
+            } else {
+                entry.pid
+            };
+            let _ = signal::kill(Pid::from_raw(target), Signal::SIGKILL);
+        }
+        true
+    }
+
     fn unregister(&self, id: u64) {
         let mut state = self.state.lock().unwrap();
         state.entries.retain(|entry| entry.id != id);
@@ -149,6 +172,39 @@ mod tests {
             child.try_wait().unwrap().is_none(),
             "unregistered child was killed"
         );
+        child.kill().unwrap();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn kill_all_without_blocking_kills_a_process_group() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let children = Arc::new(Children::new());
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let _reg = Children::register(&children, child.id() as i32, true);
+
+        assert!(children.kill_all_without_blocking());
+
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(9));
+    }
+
+    #[test]
+    fn kill_all_without_blocking_does_not_signal_while_the_lock_is_held() {
+        let children = Arc::new(Children::new());
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let _reg = Children::register(&children, child.id() as i32, false);
+
+        let guard = children.state.lock().unwrap();
+        assert!(!children.kill_all_without_blocking());
+        drop(guard);
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert!(child.try_wait().unwrap().is_none(), "child was signaled");
         child.kill().unwrap();
         let _ = child.wait();
     }

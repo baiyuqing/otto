@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 use otto::cli::terminate::{Action, Terminate, die_by_sigterm};
 
 fn main() -> std::process::ExitCode {
+    // Release builds abort on panic, so `Drop` cleanup does not run; see the module.
+    otto::cli::panic_cleanup::install();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

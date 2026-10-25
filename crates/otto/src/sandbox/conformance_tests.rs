@@ -41,11 +41,13 @@ use super::{
 };
 
 mod confinement_checks;
+mod git_metadata_checks;
 mod lifecycle_checks;
 mod processes;
 mod recorders;
 mod setup;
 pub(crate) use confinement_checks::*;
+pub(crate) use git_metadata_checks::*;
 pub(crate) use lifecycle_checks::*;
 use processes::*;
 pub(crate) use recorders::*;

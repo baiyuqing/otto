@@ -243,7 +243,10 @@ pub(crate) fn write_file_atomic(
     }
 
     let refuse_git = |resolved: &[std::ffi::OsString]| {
-        super::workspace::refuse_git_read_only(resolved.iter().map(|part| part.as_os_str()), path)
+        super::git_read_only::refuse_git_read_only(
+            resolved.iter().map(|part| part.as_os_str()),
+            path,
+        )
     };
     let (parent, name) = root
         .open_parent(path, &refuse_git)
@@ -394,6 +397,43 @@ mod tests {
         assert!(!root.path().join(".git/hooks/pre-commit").exists());
 
         let ok = run(&tool, r#"{"path":".git/info/exclude","content":"x"}"#).await;
+        assert!(!ok.is_error, "{ok:?}");
+    }
+
+    #[tokio::test]
+    async fn nested_git_metadata_is_refused_and_other_git_files_are_written() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".git/worktrees/dev")).unwrap();
+        std::fs::create_dir_all(root.path().join(".git/modules/lib/hooks")).unwrap();
+        std::fs::write(root.path().join(".git/worktrees/dev/commondir"), "old").unwrap();
+        let workspace = workspace(root.path());
+        let tool = WriteTool::new(Arc::clone(&workspace));
+
+        for path in [
+            ".git/worktrees/dev/commondir",
+            ".git/modules/lib/config",
+            ".git/modules/lib/hooks/post-checkout",
+            "sub/.git",
+        ] {
+            let result = run(&tool, &format!(r#"{{"path":"{path}","content":"new"}}"#)).await;
+            assert!(
+                result.is_error && result.content.contains("read-only"),
+                "{path}: {result:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".git/worktrees/dev/commondir")).unwrap(),
+            "old"
+        );
+        for path in [
+            ".git/modules/lib/config",
+            ".git/modules/lib/hooks/post-checkout",
+            "sub/.git",
+        ] {
+            assert!(!root.path().join(path).exists(), "{path}");
+        }
+
+        let ok = run(&tool, r#"{"path":".git/worktrees/dev/HEAD","content":"x"}"#).await;
         assert!(!ok.is_error, "{ok:?}");
     }
 

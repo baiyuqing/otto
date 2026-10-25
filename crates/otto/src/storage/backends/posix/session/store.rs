@@ -52,6 +52,7 @@ use crate::storage::backends::posix::lease::{self, Keeper};
 use crate::session::fsops;
 use crate::storage::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 
+mod deferred;
 mod lifecycle;
 mod open;
 mod pi_file;
@@ -192,6 +193,10 @@ pub(crate) struct StoreState {
     /// from a session its previous writer left mid-turn or by taking over
     /// another holder's lease epoch.
     pub(crate) recovery: Option<Recovery>,
+    /// Custom entries [`Store::append_custom_entry_when_created`] queued
+    /// while the file did not exist; written by [`StoreState::ensure_file`]
+    /// right after the runtime entry.
+    pub(crate) deferred_custom_entries: Vec<deferred::DeferredCustomEntry>,
 }
 
 /// An append-only session file.
@@ -300,6 +305,7 @@ impl Store {
                 owns_lease: false,
                 enable_failover: None,
                 recovery: None,
+                deferred_custom_entries: Vec::new(),
             }),
         })
     }

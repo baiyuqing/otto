@@ -456,6 +456,45 @@ async fn plugin_packages_register_skills_tools_and_lifecycle_once_across_runner_
     }
 }
 
+/// A fresh lazy session with a trusted plugin installed gets no session file
+/// from the runner build: the `otto.plugins` record waits for the first
+/// durable write.
+#[tokio::test]
+async fn building_a_runner_with_plugins_does_not_create_the_session_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let package = temp.path().join("source-demo");
+    std::fs::create_dir_all(package.join("skills/example")).unwrap();
+    std::fs::write(
+        package.join("skills/example/SKILL.md"),
+        "---\nname: example\ndescription: Example skill\n---\nDo the example task.\n",
+    )
+    .unwrap();
+    let components = serde_json::json!({"version":1});
+    std::fs::write(package.join("plugin.json"),serde_json::json!({"$schema":crate::plugin::package::PLUGIN_SCHEMA,"name":"demo","extensions":{"dev.otto":components}}).to_string()).unwrap();
+    let service = crate::plugin::Service::new(temp.path());
+    let installed = service.install(package.to_str().unwrap(), None).unwrap();
+    service.change("demo", "trust").unwrap();
+    let builder = builder_for(shared_with_no_session(temp.path(), false), temp.path());
+    let session = builder.create_session(&runtime()).unwrap();
+    let runner = builder.build_runner(&session, &runtime()).await.unwrap();
+    assert!(runner.system_prompt.contains("Example skill"));
+    assert_eq!(
+        session.path(),
+        "",
+        "building the runner created a session file"
+    );
+    runner.close();
+    use std::os::unix::fs::PermissionsExt;
+    let snapshot = service.package_path(&installed.digest);
+    for path in [
+        snapshot.clone(),
+        snapshot.join("skills"),
+        snapshot.join("skills/example"),
+    ] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn closing_a_session_cancels_the_owned_startup_hook_after_build_waiter_drop() {
     let temp = tempfile::tempdir().unwrap();

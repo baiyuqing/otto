@@ -53,6 +53,27 @@ pub trait SessionHandle: Session + Send + Sync {
     fn forked_from(&self) -> Option<ForkRecord> {
         None
     }
+
+    /// Appends a plain custom entry once the session is persisted. A handle
+    /// whose backing file does not exist yet queues the entry and writes it
+    /// right after the header and runtime entry when the first durable write
+    /// creates the file; a handle with a file writes it immediately. The
+    /// default implementation writes immediately through
+    /// [`Session::append_custom`]. The returned future is boxed so the trait
+    /// stays usable as `dyn SessionHandle`.
+    fn append_custom_when_created<'a>(
+        &'a self,
+        custom_type: &'a str,
+        data: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), otto_core::session::SessionError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(self.append_custom(custom_type, data))
+    }
 }
 
 /// A prepared native session held until identity is revalidated and activated.

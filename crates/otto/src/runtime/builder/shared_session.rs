@@ -41,6 +41,17 @@ impl SharedSession {
         self.0.update_thinking_level(thinking)
     }
 
+    /// Appends a plain custom entry that is written when the session file is
+    /// created (see [`SessionHandle::append_custom_when_created`]), or at once
+    /// when the file already exists. A fresh lazy session gets no file here.
+    pub async fn append_custom_when_created(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), SessionError> {
+        self.0.append_custom_when_created(custom_type, data).await
+    }
+
     pub fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String> {
         self.0.update_runtime(runtime)
     }

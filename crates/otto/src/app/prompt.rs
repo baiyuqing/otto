@@ -61,15 +61,14 @@ impl Controller {
                 path: String::new(),
             },
         };
-        let result = runner
+        runner
             .run_with_system_context(
                 text,
                 system_context,
                 &mut crate::herdr::observing(emit, reporter.as_deref(), &session),
                 cancel,
             )
-            .await;
-        result
+            .await
     }
 
     pub(super) async fn run_followups_held(
@@ -253,10 +252,9 @@ impl Controller {
         emit(otto_core::agent::Event::TextDelta {
             text: "\n\n".into(),
         });
-        let result = runner
+        runner
             .run_followup_with_system_context(text, system_context, emit, cancel)
-            .await;
-        result
+            .await
     }
 
     pub async fn prompt_with_image(
@@ -312,7 +310,6 @@ impl Controller {
     ) -> Result<CompactionResult, AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        let result = runner.compact(focus, emit, cancel).await;
-        result
+        runner.compact(focus, emit, cancel).await
     }
 }

@@ -15,9 +15,13 @@ components:
       scheme: bearer
       description: >
         Required on every /v1/ path when otto serve listens on TCP
-        (--listen): the per-process token printed at startup, sent as
+        (--listen): the per-process token printed at startup, or the value of
+        OTTO_SERVER_TOKEN when that variable is set, sent as
         "Authorization: Bearer <token>". Missing or wrong tokens get 401 with
-        WWW-Authenticate: Bearer. The Unix-socket listener has no token.
+        WWW-Authenticate: Bearer. On a non-loopback listener (which requires
+        [server].tls_cert, [server].tls_key and OTTO_SERVER_TOKEN) every path
+        except GET /healthz needs the token, /metrics included. The
+        Unix-socket listener has no token.
   schemas:
     InputId:
       type: string

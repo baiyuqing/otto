@@ -79,6 +79,22 @@ impl SessionHandle for Store {
     fn forked_from(&self) -> Option<otto_core::session::ForkRecord> {
         Store::forked_from(self)
     }
+    fn append_custom_when_created<'a>(
+        &'a self,
+        custom_type: &'a str,
+        data: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), otto_core::session::SessionError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            Store::append_custom_entry_when_created(self, custom_type, data)
+                .map_err(|error| otto_core::session::SessionError::Persist(error.to_string()))
+        })
+    }
 }
 
 /// Session repository backed by the injected confined file driver.

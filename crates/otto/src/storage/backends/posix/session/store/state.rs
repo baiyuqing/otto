@@ -66,8 +66,9 @@ impl StoreState {
         Ok(())
     }
 
-    /// Creates the directory, file, header and runtime entry. A no-op once the
-    /// file exists.
+    /// Creates the directory, file, header, runtime entry and the queued
+    /// deferred custom entries, in that order, in one published file. A no-op
+    /// once the file exists.
     pub(crate) fn ensure_file(&mut self) -> Result<(), PiError> {
         if self.file.is_some() {
             return Ok(());
@@ -160,7 +161,7 @@ impl StoreState {
                     .map(|_| value)
                     .map_err(|error| PiError::other(format!("sync session directory: {error}")))
             });
-        let (file_bytes, entry) = match result {
+        let (file_bytes, written_entries) = match result {
             Ok(value) => value,
             Err(error) => {
                 drop(file);
@@ -177,9 +178,13 @@ impl StoreState {
         };
 
         self.path = path.to_string_lossy().into_owned();
-        self.leaf_id = Some(entry.id.clone());
-        self.entry_ids = HashSet::from([entry.id.clone()]);
-        self.entries = vec![entry];
+        self.leaf_id = written_entries.last().map(|entry| entry.id.clone());
+        self.entry_ids = written_entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        self.entries = written_entries;
+        self.deferred_custom_entries.clear();
         self.file = Some(file);
         self.file_bytes = file_bytes;
         Ok(())
@@ -188,7 +193,7 @@ impl StoreState {
     pub(super) fn write_initial_records(
         &self,
         file: &mut dyn JournalFile,
-    ) -> Result<(i64, PiEntry), PiError> {
+    ) -> Result<(i64, Vec<PiEntry>), PiError> {
         use otto_core::session::pi::{PI_SESSION_VERSION, PiHeader};
         let timestamp = format_rfc3339_nano(self.header.created_at);
         let header = PiHeader {
@@ -218,7 +223,26 @@ impl StoreState {
         });
         file_bytes += write_pi_record(file, &encode_pi_record(PiRecord::Entry(&entry))?)
             .map_err(|error| error.context("write runtime metadata"))?;
-        Ok((file_bytes, entry))
+        let mut written_entries = vec![entry];
+        for deferred in &self.deferred_custom_entries {
+            let used_ids: HashSet<String> = written_entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            let deferred_id = fsops::new_pi_entry_id(&used_ids)
+                .map_err(|error| error.context("generate deferred custom entry id"))?;
+            let parent_id = written_entries.last().map(|entry| entry.id.clone());
+            let mut deferred_entry = PiEntry::new("custom", &deferred_id, parent_id, &timestamp);
+            deferred_entry.custom = Some(PiCustom {
+                custom_type: deferred.custom_type.clone(),
+                data: Some(deferred.data.clone()),
+            });
+            file_bytes +=
+                write_pi_record(file, &encode_pi_record(PiRecord::Entry(&deferred_entry))?)
+                    .map_err(|error| error.context("write deferred custom entry"))?;
+            written_entries.push(deferred_entry);
+        }
+        Ok((file_bytes, written_entries))
     }
 
     /// Creates the file, poisoning the store when creation fails.

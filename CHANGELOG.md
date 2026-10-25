@@ -7,6 +7,16 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Development
+
+- The release profile now builds `otto` with fat LTO, one codegen unit and
+  `opt-level = "s"`, and strips symbols. On macOS arm64 with Rust 1.99.0 the
+  `make build` binary shrinks from 65,633,504 to 31,954,496 bytes, and a clean
+  release build takes about 90 s longer (170 s to about 260 s on an Apple M4).
+  Debug and test builds are unchanged. `RUST_BACKTRACE` output no longer shows
+  function names; panic messages still include file and line. Rerun
+  `make install` to pick up the smaller binary.
+
 ### Features
 
 - In the terminal, `Esc` while guidance is queued for the running turn now

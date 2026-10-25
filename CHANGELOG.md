@@ -367,7 +367,7 @@ commit ledger; Git and release tags retain the full history. See the
   build, the `embed` tests that run a turn needed up to 2.2 MB of thread stack,
   more than the 2 MiB default of a test thread or Tokio worker thread; they now
   need at most 1.03 MB.
-- Rust is pinned to 1.99.0. Provider TLS and connector WebSocket dependencies
+- Rust is pinned to 1.99.1. Provider TLS and connector WebSocket dependencies
   receive security updates. `otto --version` includes the checkout commit.
 - Rust dependencies are upgraded to their latest releases, including tokio
   1.54, sha2 0.11, jsonschema 0.59 and reqwest 0.13; base64 stays at 0.22.1. With reqwest 0.13, HTTPS

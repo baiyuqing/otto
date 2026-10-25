@@ -135,10 +135,14 @@ pub fn system_prompt_for(
     endpoint_host: &str,
     session_model: &str,
 ) -> String {
-    let (policy, sandbox_attributes, bash_usable) =
-        match (info.mode, info.network, info.bash_available, info.reason) {
-            (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true, SandboxReason::None) => (
-                "Bash is confined to workspace-write with network allowed. When a Bash \
+    let (policy, sandbox_attributes, bash_usable) = match (
+        info.mode,
+        info.network,
+        info.bash_available,
+        info.reason,
+    ) {
+        (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true, SandboxReason::None) => (
+            "Bash is confined to workspace-write with network allowed. When a Bash \
                 command fails because the sandbox denied reading a path, request \
                 approval by retrying Bash with sandbox_read_path set to that absolute \
                 path and a justification; keep sandbox_permissions as use_default. \
@@ -148,21 +152,22 @@ pub fn system_prompt_for(
                 fails because it needs its real home directory or keychain, tell the \
                 user to run /sandbox exclude '&lt;program&gt; *'. The workspace's \
                 `.git` entry, `.git/config`, `.git/config.worktree`, `.git/commondir` \
-                and `.git/hooks` are read-only in the sandbox; a git command that \
-                writes them (such as `git init`, `git config` without `--global`, `git \
-                remote add`, `git push -u`, or a hook installer) must be run with \
-                `sandbox_permissions` set to `require_escalated`. A failed command's \
+                and `.git/hooks` are read-only in the sandbox, as are configuration \
+                files and hooks below `.git/modules`; a git command that writes them \
+                (such as `git init`, `git config` without `--global`, `git remote \
+                add`, `git push -u`, `git submodule update`, or a hook installer) must \
+                be run with `sandbox_permissions` set to `require_escalated`. A failed command's \
                 result can end with a `sandbox_denied:` list of operations the sandbox \
                 refused: for a denied read outside the workspace, retry Bash with \
                 sandbox_read_path set to that absolute path and a justification \
                 (sandbox_permissions use_default) to request persistent read access; \
                 for a denied write to `.git` metadata or outside the workspace, retry \
                 with `sandbox_permissions` set to `require_escalated`.",
-                "mode=\"seatbelt\" network=\"allowed\"",
-                true,
-            ),
-            (SandboxMode::Seatbelt, SandboxNetwork::Denied, true, SandboxReason::None) => (
-                "Bash is confined to workspace-write with network denied. When a Bash \
+            "mode=\"seatbelt\" network=\"allowed\"",
+            true,
+        ),
+        (SandboxMode::Seatbelt, SandboxNetwork::Denied, true, SandboxReason::None) => (
+            "Bash is confined to workspace-write with network denied. When a Bash \
                 command fails because the sandbox denied reading a path or a network \
                 connection, request approval by retrying Bash with sandbox_read_path \
                 set to that absolute path and a justification; keep sandbox_permissions \
@@ -174,26 +179,27 @@ pub fn system_prompt_for(
                 directory or keychain, tell the user to run /sandbox exclude \
                 '&lt;program&gt; *'. The workspace's `.git` entry, `.git/config`, \
                 `.git/config.worktree`, `.git/commondir` and `.git/hooks` are read-only \
-                in the sandbox; a git command that writes them (such as `git init`, \
-                `git config` without `--global`, `git remote add`, `git push -u`, or a \
-                hook installer) must be run with `sandbox_permissions` set to \
-                `require_escalated`. A failed command's result can end with a \
+                in the sandbox, as are configuration files and hooks below \
+                `.git/modules`; a git command that writes them (such as `git init`, \
+                `git config` without `--global`, `git remote add`, `git push -u`, `git \
+                submodule update`, or a hook installer) must be run with \
+                `sandbox_permissions` set to `require_escalated`. A failed command's result can end with a \
                 `sandbox_denied:` list of operations the sandbox refused: for a denied \
                 read outside the workspace, retry Bash with sandbox_read_path set to \
                 that absolute path and a justification (sandbox_permissions \
                 use_default) to request persistent read access; for a denied write to \
                 `.git` metadata or outside the workspace, retry with \
                 `sandbox_permissions` set to `require_escalated`.",
-                "mode=\"seatbelt\" network=\"denied\"",
-                true,
-            ),
-            (SandboxMode::Off, SandboxNetwork::Unconfined, true, SandboxReason::None) => (
-                "Bash is unsandboxed and has the current macOS user's access.",
-                "mode=\"off\" network=\"unconfined\"",
-                true,
-            ),
-            _ => ("Bash is unavailable.", "mode=\"unavailable\"", false),
-        };
+            "mode=\"seatbelt\" network=\"denied\"",
+            true,
+        ),
+        (SandboxMode::Off, SandboxNetwork::Unconfined, true, SandboxReason::None) => (
+            "Bash is unsandboxed and has the current macOS user's access.",
+            "mode=\"off\" network=\"unconfined\"",
+            true,
+        ),
+        _ => ("Bash is unavailable.", "mode=\"unavailable\"", false),
+    };
 
     let mut tool_names: Vec<&str> = Vec::with_capacity(definitions.len());
     let mut has_agent_tool = false;

@@ -26,9 +26,20 @@ pub async fn serve(
     let graceful = async move { shutdown.cancelled().await };
     match listener {
         listen::Listener::Tcp(bound) => {
-            axum::serve(bound, router)
-                .with_graceful_shutdown(graceful)
-                .await
+            axum::serve(
+                bound,
+                router.into_make_service_with_connect_info::<listen::PeerAddress>(),
+            )
+            .with_graceful_shutdown(graceful)
+            .await
+        }
+        listen::Listener::Tls(bound) => {
+            axum::serve(
+                bound,
+                router.into_make_service_with_connect_info::<listen::PeerAddress>(),
+            )
+            .with_graceful_shutdown(graceful)
+            .await
         }
         listen::Listener::Unix(bound, socket_file) => {
             let result = axum::serve(bound, router)

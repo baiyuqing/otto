@@ -22,7 +22,9 @@ use otto_core::session::{ListResult, Session};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{Controller, SandboxControl};
-use crate::server::listen::{Listener, listen_tcp, listen_unix};
+use crate::log::Logger;
+use crate::server::listen::{AllowedHosts, Listener, listen_tcp, listen_unix};
+use crate::server::tls::{TlsListener, load_acceptor};
 use crate::server::{self, Factory, Info, Options, SESSION_NOT_FOUND, Server};
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
 
@@ -58,6 +60,8 @@ pub struct ServeOptions<'a> {
     pub listen: ServerRuntime,
     pub acp_listen: String,
     pub acp_token: String,
+    /// `OTTO_SERVER_TOKEN` from the process environment; empty when unset.
+    pub server_token: String,
     /// The process sandbox the composition root opened, already behind its
     /// switch. [`run`] owns closing it.
     pub control: Arc<SandboxSwitch>,
@@ -86,6 +90,7 @@ pub async fn run(
         listen,
         acp_listen,
         acp_token,
+        server_token,
         control,
         reloader,
         delivery_setup_executor,
@@ -114,14 +119,21 @@ pub async fn run(
         }
     };
     let serve_cancel = cancel.child_token();
-    let bound = match bind(&listen) {
+    let bound = match bind(&listen, &server_token, &builder.logger) {
         Ok(bound) => bound,
         Err(message) => {
             let _ = control.close().await;
             return fail(stderr, &builder.redact_error(&message, Some(&runtime)));
         }
     };
-    let Bound { tcp, socket, token } = bound;
+    let Bound {
+        tcp,
+        socket,
+        token,
+        token_from_env,
+        tls,
+        remote,
+    } = bound;
     if let Some((listener, _)) = &acp {
         let _ = writeln!(
             stdout,
@@ -130,7 +142,13 @@ pub async fn run(
         );
     }
     if let Some(tcp) = &tcp {
-        announce_listen(stdout, &tcp.address(), &token);
+        let scheme = if tls { "https" } else { "http" };
+        let printed_token = if token_from_env {
+            None
+        } else {
+            Some(token.as_str())
+        };
+        announce_listen(stdout, scheme, &tcp.address(), printed_token);
     }
 
     let builder = Arc::new(builder);
@@ -218,6 +236,7 @@ pub async fn run(
         factory: Arc::clone(&factory),
         config_path: builder.shared.config_path.clone(),
         token,
+        remote_listener: remote,
         logger: Some(Arc::clone(&builder.logger)),
         workflows: host.workflows.clone(),
         schedule: builder.schedule.clone(),
@@ -338,32 +357,102 @@ async fn serve_listeners(
     tcp_result.err().or(socket_result.err())
 }
 
-fn announce_listen(stdout: &mut (dyn Write + Send), address: &str, token: &str) {
-    let _ = writeln!(stdout, "otto serve: http://{address}/?token={token}");
+/// Prints the TCP listener's URL. `token` is `Some` only for a token that
+/// `otto serve` generated; a token from `OTTO_SERVER_TOKEN` is never written
+/// to stdout.
+fn announce_listen(
+    stdout: &mut (dyn Write + Send),
+    scheme: &str,
+    address: &str,
+    token: Option<&str>,
+) {
+    match token {
+        Some(token) => {
+            let _ = writeln!(stdout, "otto serve: {scheme}://{address}/?token={token}");
+        }
+        None => {
+            let _ = writeln!(
+                stdout,
+                "otto serve: {scheme}://{address}/ (token from OTTO_SERVER_TOKEN)"
+            );
+        }
+    }
 }
 
 /// The bound listeners. `token` is non-empty exactly when `tcp` is set.
 struct Bound {
+    /// The TCP listener, wrapped in TLS when `[server].tls_cert` is set.
     tcp: Option<Listener>,
+    /// The Unix socket listener.
     socket: Option<Listener>,
+    /// The token the TCP listener requires.
     token: String,
+    /// The token came from `OTTO_SERVER_TOKEN`, so it must not be printed.
+    token_from_env: bool,
+    /// The TCP listener terminates TLS.
+    tls: bool,
+    /// The TCP listener is bound to a non-loopback address.
+    remote: bool,
+}
+
+/// Checks the length and the characters of an `OTTO_SERVER_TOKEN` value:
+/// 32 to 4000 printable ASCII bytes without spaces.
+fn validate_server_token(token: &str) -> Result<(), String> {
+    let printable = token.bytes().all(|byte| (33..=126).contains(&byte));
+    if (32..=4000).contains(&token.len()) && printable {
+        return Ok(());
+    }
+    Err("serve: OTTO_SERVER_TOKEN must be 32 to 4000 printable ASCII bytes without spaces".into())
 }
 
 /// Binds the TCP listener, the Unix socket, or both, from the two fields of
-/// `listen`. A TCP port is reachable by every local user and every page open
-/// in a browser, so the API on it is gated by a per-process token; the token
-/// is printed once by the caller and never logged. The socket is protected by
-/// its file permissions and needs no token.
-fn bind(listen: &ServerRuntime) -> Result<Bound, String> {
+/// `listen`. The API on a TCP port is gated by a token. The token is
+/// `server_token` (`OTTO_SERVER_TOKEN`) when that is non-empty, else a
+/// per-process random value that the caller prints once; neither is logged.
+/// A non-loopback address is accepted only when `[server].tls_cert` and
+/// `tls_key` are set and the token comes from the environment; otherwise the
+/// address must be loopback. `server_token` and `tls` are ignored when
+/// `listen.listen` is empty. The socket is protected by its file permissions
+/// and needs no token.
+fn bind(listen: &ServerRuntime, server_token: &str, log: &Arc<Logger>) -> Result<Bound, String> {
     let mut bound = Bound {
         tcp: None,
         socket: None,
         token: String::new(),
+        token_from_env: false,
+        tls: false,
+        remote: false,
     };
     if !listen.listen.is_empty() {
-        bound.tcp = Some(listen_tcp(&listen.listen).map_err(|error| format!("serve: {error}"))?);
-        bound.token =
-            crate::runtime::builder::random_id().map_err(|error| format!("serve: {error}"))?;
+        if !server_token.is_empty() {
+            validate_server_token(server_token)?;
+            bound.token = server_token.to_string();
+            bound.token_from_env = true;
+        } else {
+            bound.token =
+                crate::runtime::builder::random_id().map_err(|error| format!("serve: {error}"))?;
+        }
+        let acceptor = listen
+            .tls
+            .as_ref()
+            .map(|tls| load_acceptor(&tls.cert_path, &tls.key_path))
+            .transpose()
+            .map_err(|error| format!("serve: {error}"))?;
+        let hosts = if acceptor.is_some() && bound.token_from_env {
+            AllowedHosts::Any
+        } else {
+            AllowedHosts::LoopbackOnly
+        };
+        let tcp = listen_tcp(&listen.listen, hosts).map_err(|error| format!("serve: {error}"))?;
+        let local_address = tcp
+            .local_addr()
+            .map_err(|error| format!("serve: {error}"))?;
+        bound.remote = !local_address.ip().is_loopback();
+        bound.tls = acceptor.is_some();
+        bound.tcp = Some(match acceptor {
+            Some(acceptor) => Listener::Tls(TlsListener::new(tcp, acceptor, Arc::clone(log))),
+            None => Listener::Tcp(tcp),
+        });
     }
     if !listen.socket.is_empty() {
         let socket = match Path::new(&listen.socket).is_absolute() {

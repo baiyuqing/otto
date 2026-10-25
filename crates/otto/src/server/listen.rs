@@ -1,19 +1,52 @@
-//! The two listeners `otto serve` can bind.
+//! The listeners `otto serve` can bind.
 //!
 //! A Unix socket is the default because file modes alone keep other local users
 //! out. A TCP port is reachable by every local user and every page open in a
-//! browser, so it is restricted to loopback and gated by the per-process token
-//! in [`Options::token`](super::Options).
+//! browser, so it is gated by a token. [`AllowedHosts::LoopbackOnly`] restricts
+//! a plain TCP port to loopback addresses; [`AllowedHosts::Any`] accepts any IP
+//! literal and is selected by the caller only once TLS and an environment token
+//! are configured. TLS wraps the TCP listener in [`super::tls::TlsListener`].
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// A bound listener, either flavour.
+use axum::extract::connect_info::Connected;
+use axum::serve::IncomingStream;
+
+/// Which listen addresses [`listen_tcp`] accepts.
+///
+/// `LoopbackOnly` is the default for a plain TCP port. `Any` is what the caller
+/// selects once TLS and an environment token are configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllowedHosts {
+    LoopbackOnly,
+    Any,
+}
+
+/// The `ConnectInfo` type the TCP and TLS listeners attach to every request;
+/// the `http_request` log line reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerAddress(pub SocketAddr);
+
+impl Connected<IncomingStream<'_, tokio::net::TcpListener>> for PeerAddress {
+    fn connect_info(stream: IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
+impl Connected<IncomingStream<'_, super::tls::TlsListener>> for PeerAddress {
+    fn connect_info(stream: IncomingStream<'_, super::tls::TlsListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
+/// A bound listener, any flavour.
 #[derive(Debug)]
 pub enum Listener {
     Tcp(tokio::net::TcpListener),
+    Tls(super::tls::TlsListener),
     Unix(tokio::net::UnixListener, SocketFile),
 }
 
@@ -22,6 +55,10 @@ impl Listener {
     pub fn address(&self) -> String {
         match self {
             Self::Tcp(listener) => listener
+                .local_addr()
+                .map(|address| address.to_string())
+                .unwrap_or_default(),
+            Self::Tls(listener) => listener
                 .local_addr()
                 .map(|address| address.to_string())
                 .unwrap_or_default(),
@@ -150,20 +187,25 @@ fn remove_stale_socket(path: &str) -> Result<(), String> {
 
 /// Creates a TCP listener on `address` (`host:port`).
 ///
-/// Only loopback hosts are accepted: the token is the only thing separating
-/// the API from other local users, and it is not a substitute for TLS on a
-/// shared network. Port 0 picks a free port; read the result from
-/// [`Listener::address`].
-pub fn listen_tcp(address: &str) -> Result<Listener, String> {
+/// No DNS lookup happens in either mode: `localhost` maps to 127.0.0.1 and any
+/// other host must be an IP literal. With [`AllowedHosts::LoopbackOnly`] the
+/// literal must be a loopback address. Port 0 picks a free port; read the
+/// result from `local_addr()`.
+pub fn listen_tcp(address: &str, hosts: AllowedHosts) -> Result<tokio::net::TcpListener, String> {
     let Some((host, port)) = split_host_port(address) else {
         return Err(format!(
             "listen address {address:?}: missing port in address"
         ));
     };
-    let Some(host) = loopback_host(host) else {
-        return Err(format!(
-            "listen address {address:?} is not a loopback address; use 127.0.0.1, ::1, or localhost"
-        ));
+    let Some(host) = resolve_host(host, hosts) else {
+        return Err(match hosts {
+            AllowedHosts::LoopbackOnly => format!(
+                "listen address {address:?} is not a loopback address; a non-loopback address needs [server].tls_cert, [server].tls_key and OTTO_SERVER_TOKEN"
+            ),
+            AllowedHosts::Any => {
+                format!("listen address {address:?}: host must be an IP literal or localhost")
+            }
+        });
     };
     let port: u16 = port
         .parse()
@@ -173,9 +215,8 @@ pub fn listen_tcp(address: &str) -> Result<Listener, String> {
     bound
         .set_nonblocking(true)
         .map_err(|error| format!("listen on {address}: {error}"))?;
-    let listener = tokio::net::TcpListener::from_std(bound)
-        .map_err(|error| format!("listen on {address}: {error}"))?;
-    Ok(Listener::Tcp(listener))
+    tokio::net::TcpListener::from_std(bound)
+        .map_err(|error| format!("listen on {address}: {error}"))
 }
 
 /// Splits host and port for the forms an address may take here.
@@ -192,15 +233,18 @@ fn split_host_port(address: &str) -> Option<(&str, &str)> {
 }
 
 /// Maps the literal `localhost` to 127.0.0.1 (no DNS lookup, so an
-/// `/etc/hosts` entry cannot redirect the bind) and accepts any loopback IP
-/// literal. Relax this function, not its callers, when a non-loopback bind
-/// behind TLS is added.
-fn loopback_host(host: &str) -> Option<IpAddr> {
+/// `/etc/hosts` entry cannot redirect the bind) and parses any other host as
+/// an IP literal. `LoopbackOnly` additionally requires a loopback address;
+/// `Any` accepts every literal. Returns `None` for a rejected host.
+fn resolve_host(host: &str, hosts: AllowedHosts) -> Option<IpAddr> {
     if host == "localhost" {
         return Some(IpAddr::from([127, 0, 0, 1]));
     }
     let address: IpAddr = host.parse().ok()?;
-    address.is_loopback().then_some(address)
+    match hosts {
+        AllowedHosts::LoopbackOnly => address.is_loopback().then_some(address),
+        AllowedHosts::Any => Some(address),
+    }
 }
 
 #[cfg(test)]
@@ -216,24 +260,52 @@ mod tests {
             "example.com:0",
             "127.0.0.1",
         ] {
-            let error = listen_tcp(address).expect_err("should be rejected");
+            let error =
+                listen_tcp(address, AllowedHosts::LoopbackOnly).expect_err("should be rejected");
             assert!(error.contains(address), "{error} does not name {address}");
         }
     }
 
     #[tokio::test]
     async fn port_zero_resolves_to_a_real_loopback_port() {
-        let listener = listen_tcp("127.0.0.1:0").expect("bind");
-        let address: SocketAddr = listener.address().parse().expect("socket address");
+        let listener = listen_tcp("127.0.0.1:0", AllowedHosts::LoopbackOnly).expect("bind");
+        let address = listener.local_addr().expect("socket address");
         assert!(address.port() != 0);
         assert!(address.ip().is_loopback());
     }
 
     #[tokio::test]
     async fn localhost_binds_to_the_ipv4_loopback_literal() {
-        let listener = listen_tcp("localhost:0").expect("bind");
-        let address: SocketAddr = listener.address().parse().expect("socket address");
+        let listener = listen_tcp("localhost:0", AllowedHosts::LoopbackOnly).expect("bind");
+        let address = listener.local_addr().expect("socket address");
         assert_eq!(address.ip(), IpAddr::from([127, 0, 0, 1]));
+    }
+
+    #[tokio::test]
+    async fn any_host_mode_accepts_unspecified_and_private_ip_literals() {
+        for address in ["0.0.0.0:0", "127.0.0.1:0"] {
+            listen_tcp(address, AllowedHosts::Any)
+                .unwrap_or_else(|error| panic!("{address}: {error}"));
+        }
+        // 192.168.1.1 is usually not a local address, so the bind may fail;
+        // only a rejection by the host check is an error here.
+        if let Err(error) = listen_tcp("192.168.1.1:0", AllowedHosts::Any) {
+            assert!(!error.contains("is not a loopback address"), "{error}");
+        }
+    }
+
+    #[test]
+    fn any_host_mode_rejects_hostnames() {
+        let error = listen_tcp("example.com:0", AllowedHosts::Any).expect_err("hostname");
+        assert!(error.contains("IP literal"), "{error}");
+    }
+
+    #[test]
+    fn loopback_only_error_names_the_three_requirements() {
+        let error = listen_tcp("0.0.0.0:0", AllowedHosts::LoopbackOnly).expect_err("rejected");
+        for required in ["[server].tls_cert", "[server].tls_key", "OTTO_SERVER_TOKEN"] {
+            assert!(error.contains(required), "{error} lacks {required}");
+        }
     }
 
     fn socket_path(directory: &tempfile::TempDir) -> String {

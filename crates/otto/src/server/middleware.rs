@@ -51,7 +51,11 @@ pub(super) fn session_id_in_path(path: &str) -> Option<&str> {
 
 /// Request-ID handling, token gating, structured logging and HTTP metrics.
 /// Token gating is folded in so a 401 is still logged and measured under its
-/// real route.
+/// real route. The token gates `/v1/` routes; when the TCP listener is
+/// non-loopback it gates every route except `GET /healthz`, including
+/// `/metrics` and unmatched paths. Requests from the Unix socket router are
+/// never gated. The `http_request` log line carries `peer` when the listener
+/// attached the peer address.
 pub(super) async fn instrument(
     State(server): State<Arc<Server>>,
     request: axum::extract::Request,
@@ -75,10 +79,17 @@ pub(super) async fn instrument(
         .map(|path| path.as_str().to_string());
     let route = route_label(&method, matched.as_deref());
 
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<crate::server::listen::PeerAddress>>()
+        .map(|info| info.0.0.to_string());
+    let gated_route =
+        route.contains(" /v1/") || (server.remote_listener && route != "GET /healthz");
+
     let start = Instant::now();
     let mut response = if !server.token.is_empty()
         && request.extensions().get::<SocketRequest>().is_none()
-        && route.contains(" /v1/")
+        && gated_route
         && !auth::authorized(&server.token, request.headers())
     {
         auth::unauthorized()
@@ -95,16 +106,17 @@ pub(super) async fn instrument(
     server
         .metrics
         .http_request(&route, method.as_str(), status, elapsed);
-    server.log.info(
-        "http_request",
-        &[
-            ("method", method.to_string()),
-            ("route", route),
-            ("status", status.to_string()),
-            ("duration_ms", elapsed.as_millis().to_string()),
-            ("request_id", id),
-        ],
-    );
+    let mut fields: Vec<(&str, String)> = vec![
+        ("method", method.to_string()),
+        ("route", route),
+        ("status", status.to_string()),
+        ("duration_ms", elapsed.as_millis().to_string()),
+        ("request_id", id),
+    ];
+    if let Some(peer) = peer {
+        fields.push(("peer", peer));
+    }
+    server.log.info("http_request", &fields);
     response
 }
 

@@ -12,7 +12,7 @@ loaded workspaces. Turns in different sessions run concurrently. A session
 runs one turn at a time; a turn requested while another runs is queued when
 the request asks for it, and otherwise returns `409` (see
 [Turn queue](servers-and-connectors.md#turn-queue)). It listens on a Unix domain socket (the default),
-a loopback TCP port, or both.
+a TCP port, or both.
 
 Clients authenticated by the server token or Unix-socket permissions share
 one user's authority over the server; there is no per-client session ACL.
@@ -50,9 +50,9 @@ run the normal shutdown, for example after `SIGKILL` or a second `SIGTERM`,
 is replaced at the next start. File permissions are the only access control;
 requests carry no token.
 
-**Loopback TCP.** `--listen HOST:PORT` accepts only loopback hosts:
-`127.0.0.1`, `::1`, or the literal `localhost` (mapped to `127.0.0.1` without a
-DNS lookup). Any other host is rejected at startup. Port `0` picks a free
+**Loopback TCP.** `--listen HOST:PORT` with a loopback host (`127.0.0.1`,
+`::1`, or the literal `localhost`, mapped to `127.0.0.1` without a DNS lookup)
+is the default TCP form and needs no configuration. Port `0` picks a free
 port. Otto generates a random access token for the process and prints one
 line to stdout before serving:
 
@@ -65,10 +65,63 @@ otto-plus frontend. The printed URL itself no longer serves a page.
 
 Every `/v1/` request must then carry `Authorization: Bearer <token>`; a
 missing or wrong token returns `401` with `WWW-Authenticate: Bearer`. The
-token is accepted from that header only, never from a query parameter. `/healthz` and `/metrics` need no token; `/` and `/assets/` are not served. The token is never
-logged and is not persisted; restarting the process issues a new one. There
-is no TLS and no CORS: the port is meant for a browser or client on the same
-machine.
+token is accepted from that header only, never from a query parameter. On a
+loopback listener `/healthz` and `/metrics` need no token; `/` and `/assets/`
+are not served. The random token is never logged and is not persisted;
+restarting the process issues a new one. There is no CORS: a loopback port is
+meant for a browser or client on the same machine.
+
+**Token from the environment.** When `OTTO_SERVER_TOKEN` is set in the
+environment of `otto serve`, that value is the access token instead of a
+random one, so clients keep working across restarts. The value is 32 to 4000
+bytes of printable ASCII without spaces (bytes 33 to 126); any other value
+fails startup. The token is never written to stdout; the startup line then
+reads `otto serve: http://HOST:PORT/ (token from OTTO_SERVER_TOKEN)`. The
+variable is redacted from logs and errors and is not passed to sandboxed
+commands. Rotating the token means changing the variable and restarting the
+process. The variable is ignored when no TCP listener is bound.
+
+**TLS.** `[server].tls_cert` and `[server].tls_key` name PEM files (`~` is
+expanded) holding the certificate chain and the matching private key. Both
+keys are set together, or neither; one without the other fails config
+resolution. With both set, the TCP listener terminates TLS (TLS 1.2 and 1.3,
+server certificate only, no client certificates, HTTP/1.1) and the startup
+line uses `https://`. The files are read once at startup; a renewed
+certificate needs a restart. The settings are ignored when only the Unix
+socket is served.
+
+```toml
+[server]
+listen = "0.0.0.0:8443"
+tls_cert = "/etc/otto/tls/fullchain.pem"
+tls_key = "/etc/otto/tls/privkey.pem"
+```
+
+**Non-loopback TCP.** A `--listen` or `[server].listen` host other than a
+loopback address (for example `0.0.0.0`, `::`, or the machine's own IP
+literal; hostnames are not resolved) is accepted only when TLS is configured
+and `OTTO_SERVER_TOKEN` is set. Without both, startup fails with an error
+naming the three requirements, so a plain-HTTP or random-token listener can
+never be exposed to the network. On such a listener every path except
+`GET /healthz` needs the token, including `/metrics` (its session labels
+carry session ids and model names) and unmatched paths, which answer `401`
+instead of `404`. Each `http_request` log line carries the client address as
+`peer`. The token grants the same authority the host user has over the
+server, including approving elevated Bash commands, so treat it as that
+user's credential: restrict the source addresses that can reach the port with
+a firewall or security group, inject the token from the supervisor's secret
+store, and use a certificate the client trusts (a private CA or a public
+one). A TLS handshake that fails or does not finish within 5 seconds is
+closed and logged as `tls_handshake_failed` with the peer address. At most 64
+handshakes are in flight at once; a further connection is closed and logged as
+`tls_handshake_dropped`. Established connections are not limited by that
+count.
+
+```bash
+OTTO_SERVER_TOKEN=<token> otto serve --cwd /srv/work --listen 0.0.0.0:8443
+# prints: otto serve: https://0.0.0.0:8443/ (token from OTTO_SERVER_TOKEN)
+curl -s --cacert ca.pem -H "Authorization: Bearer $OTTO_SERVER_TOKEN" https://host.example:8443/v1/info
+```
 
 ### Workspaces
 
@@ -679,11 +732,11 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessi
 
 ### Not supported
 
-- Non-loopback TCP binds, TLS, and CORS; the TCP listener is for clients on
-  the same machine.
+- CORS on the TCP listener; a browser page on another origin cannot call the
+  API directly. Client certificates and certificate reload without a restart.
 - Authentication on the Unix socket beyond file permissions (owner-only
-  directory and socket modes); there is no peer-uid check. Token persistence
-  or rotation on the TCP listener.
+  directory and socket modes); there is no peer-uid check. More than one
+  token, or a token with less than the host user's authority.
 - Streaming compaction progress; `POST .../compact` returns only the result.
 - Event replay across turns; only the most recent turn per session is readable.
   Workflow events are separate and durable.
@@ -1505,7 +1558,7 @@ Provider runtime events shared by non-interactive frontends:
 
 | Event | Fields |
 | --- | --- |
-| `http_request` | `method`, `route`, `status`, `duration_ms`, `request_id` |
+| `http_request` | `method`, `route`, `status`, `duration_ms`, `request_id`, `peer` (TCP and TLS listeners only) |
 | `session_evicted` | `session_id`, `idle_ms` |
 | `turn_started` | `session_id`, `turn_id`, `trigger`, `request_id`, `inbox_kind` on wake turns |
 | `provider_request_finished` | `session_id`, `turn_id`, `request_id`, `provider`, `model`, `status`, `attempts`, `duration_ms` |
@@ -1587,9 +1640,13 @@ events carry the ID.
 ### Prometheus
 
 Prometheus cannot read a Unix socket, so start `otto serve` with a loopback
-TCP listener next to the socket (see [Listener](servers-and-connectors.md#listener)); `/metrics` and
-`/healthz` need no token. `otto-connect` serves its metrics on
-`[metrics].listen`, by default `127.0.0.1:9465`.
+TCP listener next to the socket (see [Listener](servers-and-connectors.md#listener)); on a loopback
+listener `/metrics` and `/healthz` need no token. On a non-loopback TLS
+listener `/metrics` needs the token: add `scheme: https`, a `tls_config` that
+trusts the certificate, and `authorization: {type: Bearer, credentials_file:
+...}` holding the value of `OTTO_SERVER_TOKEN` to the scrape job.
+`otto-connect` serves its metrics on `[metrics].listen`, by default
+`127.0.0.1:9465`.
 
 ```yaml
 scrape_configs:

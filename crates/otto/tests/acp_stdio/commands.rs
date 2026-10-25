@@ -176,17 +176,16 @@ fn session_new_and_load_are_followed_by_the_command_list() {
     assert_eq!(
         names,
         [
-            &json!("compact"),
-            &json!("context"),
             &json!("model"),
+            &json!("context"),
+            &json!("compact"),
             &json!("steer"),
             &json!("queue"),
-            &json!("auto"),
             &json!("permissions")
         ]
     );
     assert_eq!(
-        update["availableCommands"][0]["input"]["hint"],
+        update["availableCommands"][2]["input"]["hint"],
         "optional focus"
     );
     let available_commands = update["availableCommands"].clone();

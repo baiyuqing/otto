@@ -17,6 +17,7 @@ pub mod flags;
 pub mod login;
 pub mod mcp;
 pub mod memory_command;
+pub mod panic_cleanup;
 pub mod plugin;
 pub mod repl;
 pub mod repl_commands;

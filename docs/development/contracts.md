@@ -137,6 +137,10 @@ Apply to every feature, fix and refactor:
 - Turn invariants into fast offline architecture/contract checks identifying
   the broken rule. Update code, schemas, tests and canonical docs together.
   Keep agent instruction files short navigation maps, not duplicate inventories.
+- Release builds use `panic = "abort"`: a panic runs the panic hooks and ends
+  the process without running `Drop`. Cleanup that must happen on a crash
+  belongs in `cli::panic_cleanup`, not only in a `Drop` guard; register child
+  processes with `failover::children::Children` so the hook can kill them.
 - Execution diagnostics are out-of-band typed metadata, never request/response/
   tool bodies, raw errors, ordinary stderr or model history. Native private
   rotating files consume the observer; wrappers preserve serialization, stream

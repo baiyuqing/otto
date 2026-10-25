@@ -71,6 +71,7 @@ unicode-width = "=0.2.2"
 agent-client-protocol-schema = { version = "=1.12.0", default-features = false }
 
 tower.workspace = true
+tokio-rustls.workspace = true
 
 [dev-dependencies]
 # Gives the integration tests `otto::faults` without compiling it into a
@@ -81,6 +82,9 @@ nix = { workspace = true, features = ["term"] }
 # `start_paused` drives the bash timeout deterministically without real waits.
 # `net` gives the in-file provider tests a loopback TCP origin server.
 tokio = { workspace = true, features = ["test-util", "net"] }
+# Self-signed certificates for the TLS listener tests; a key must not live in
+# a fixture.
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 
 [[test]]
 name = "mcp_stdio"

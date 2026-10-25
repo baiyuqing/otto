@@ -66,6 +66,10 @@ axum = "=0.8.9"
 # Dev-only: `ServiceExt::oneshot` drives the router in-process, so the route
 # contract tests need no listening socket.
 tower = { version = "=0.5.3", features = ["util"] }
+# Native-only server-side TLS for `otto serve --listen` on a non-loopback
+# address. The same rustls and aws-lc-rs provider reqwest pins; `rustls` and
+# its `pki_types` are reached through this crate's re-export.
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs"] }
 # Embedded SQLite, compiled from the bundled C source.
 rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }

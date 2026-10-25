@@ -333,7 +333,7 @@ Options:
   --attach               use the otto serve on the socket instead of running the agent (terminal UI, or acp: relay)
   --yolo                 start this process's session in the YOLO approval mode
                          (every request of the session is approved without asking)
-  --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
+  --listen HOST:PORT     TCP address for the serve subcommand (non-loopback needs [server].tls_cert, tls_key and OTTO_SERVER_TOKEN)
   --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
 ";
 

@@ -23,7 +23,7 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   Linux has no confined driver and bash stays unavailable unless the user
   explicitly selects `--sandbox off`. Keep platform code behind `cfg`, and
   limit claims to the platform actually tested.
-- External MCP/provider transports, OAuth, Turso, scheduling, failover and
+- External MCP/provider transports, OAuth, SQLite, scheduling, failover and
   native process control remain in this crate, outside the WASM-safe core.
 - Add or update adjacent behavioral tests and architecture guards. macOS-only
   acceptance cannot be validated by a Linux run that discovers zero tests.

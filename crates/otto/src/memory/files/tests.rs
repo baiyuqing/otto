@@ -6,9 +6,8 @@ use super::testsupport::{at, open_temp, sample_record};
 use super::*;
 use crate::memory::{
     CandidateAction, CandidateListRequest, CandidateRef, CandidateState, ListRequest,
-    NAMESPACE_USER, NAMESPACE_WORKSPACE, Origin, Provenance, RecordKey, RecordRef,
-    RetrievalRequest, RetrievalResult, ReviewDecision, StoreForgetRequest, StoreReviewRequest,
-    UpsertRequest,
+    NAMESPACE_WORKSPACE, Origin, Provenance, RecordKey, RecordRef, RetrievalRequest,
+    RetrievalResult, ReviewDecision, StoreForgetRequest, StoreReviewRequest, UpsertRequest,
 };
 
 fn user(store: &FileStore) -> Scope {
@@ -667,35 +666,5 @@ fn a_proposal_batch_with_one_invalid_member_writes_no_file() {
             .unwrap()
             .count(),
         0
-    );
-}
-
-#[test]
-fn write_import_writes_files_then_identity_and_returns_false_the_second_time() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().join("memory");
-    let scope = Scope::new(NAMESPACE_USER, "u-import");
-    let set = ImportSet {
-        database_id: "0123456789abcdef0123456789abcdef".into(),
-        user_scope_id: "u-import".into(),
-        records: vec![Record {
-            revision: 1,
-            ..sample_record("rec-1", &scope, "tone", "imported")
-        }],
-        tombstones: Vec::new(),
-        candidates: Vec::new(),
-    };
-    assert!(!has_identity(&root));
-    assert_eq!(write_import(&root, &set, Duration::from_secs(1)), Ok(true));
-    assert!(has_identity(&root));
-    assert_eq!(write_import(&root, &set, Duration::from_secs(1)), Ok(false));
-
-    let store = FileStore::open(&root, MemoryOptions::default()).unwrap();
-    let identity = store.identity().unwrap();
-    assert_eq!(identity.database_id, set.database_id);
-    assert_eq!(identity.user_scope, scope);
-    assert_eq!(
-        store.get(&record_ref(&scope, "rec-1")).unwrap().text,
-        "imported"
     );
 }

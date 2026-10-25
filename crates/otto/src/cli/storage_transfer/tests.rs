@@ -70,27 +70,27 @@ async fn command_transfers_all_existing_families_and_exact_pi_bytes() {
     std::fs::create_dir_all(&memory).unwrap();
     std::fs::write(memory.join("identity.json"), b"{}").unwrap();
     drop(
-        crate::storage::backends::turso::workflow::TursoWorkflowStore::open(
+        crate::storage::backends::sqlite::workflow::SqliteWorkflowStore::open(
             &backend.join("workflows.db"),
         )
         .unwrap(),
     );
     drop(
-        crate::storage::backends::turso::schedule::TursoScheduleStore::open(
+        crate::storage::backends::sqlite::schedule::SqliteScheduleStore::open(
             &backend.join("schedule.db"),
         )
         .unwrap(),
     );
-    drop(crate::storage::backends::turso::usage::Store::open(&backend.join("usage.db")).unwrap());
-    drop(crate::storage::backends::turso::tasks::Store::open(&backend.join("tasks.db")).unwrap());
+    drop(crate::storage::backends::sqlite::usage::Store::open(&backend.join("usage.db")).unwrap());
+    drop(crate::storage::backends::sqlite::tasks::Store::open(&backend.join("tasks.db")).unwrap());
     drop(
-        crate::storage::backends::turso::skill_checks::Store::open(
+        crate::storage::backends::sqlite::skill_checks::Store::open(
             &backend.join("skill-checks.db"),
         )
         .unwrap(),
     );
     drop(
-        crate::storage::backends::turso::memory_advice::Store::open(
+        crate::storage::backends::sqlite::memory_advice::Store::open(
             &backend.join("memory-advice.db"),
         )
         .unwrap(),

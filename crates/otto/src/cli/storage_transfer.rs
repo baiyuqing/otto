@@ -10,7 +10,7 @@ use crate::{
                     LocalCutover, LocalJournal, PreparedCutover, RouteGroup, StoppedOwners,
                 },
             },
-            turso::migration::{self as sql, SqlDomainCodec},
+            sqlite::migration::{self as sql, SqlDomainCodec},
         },
         migration::{
             self, Coordinator, Cutover, FreezeGuard, MigrationJournal, SnapshotExport, StageImport,

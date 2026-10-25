@@ -64,16 +64,10 @@ axum = "=0.8.9"
 # Dev-only: `ServiceExt::oneshot` drives the router in-process, so the route
 # contract tests need no listening socket.
 tower = { version = "=0.5.3", features = ["util"] }
-# Native-only embedded Rust database. The "fts" feature lets the memory
-# importer open v2 memory databases, which contain a `USING fts` index.
-turso = { version = "=0.8.3", default-features = false, features = ["fts"] }
+# Embedded SQLite, compiled from the bundled C source.
+rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }
 
-# The memory, usage, task and workflow stores run every query through Turso,
-# and its unoptimized SQL compiler and VM made those tests about three times
-# slower than they are at opt-level 2. These crates are dependencies, so the
-# extra compile time is paid once per Turso version, not per change. Otto's
-# own crates stay unoptimized.
 # Release binary size. Measured 2026-10-25 on macOS arm64 with Rust 1.99.0:
 # the default release profile produced a 65,633,504-byte `otto` (52,751,472
 # stripped); this profile produces 25,443,120 bytes, and a clean release build
@@ -90,12 +84,3 @@ codegen-units = 1
 opt-level = "s"
 panic = "abort"
 strip = "symbols"
-
-[profile.dev.package.turso_core]
-opt-level = 2
-
-[profile.dev.package.turso_parser]
-opt-level = 2
-
-[profile.dev.package.turso_ext]
-opt-level = 2

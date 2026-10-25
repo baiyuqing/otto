@@ -55,6 +55,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Features
 
+- `otto serve` can now listen on a non-loopback TCP address for a client on
+  another machine. This needs `[server].tls_cert` and `[server].tls_key` (PEM
+  files; the listener terminates TLS and the startup line uses `https://`)
+  and `OTTO_SERVER_TOKEN` (32 to 4000 printable ASCII bytes), which replaces
+  the random per-process token and is never printed; without both, a
+  non-loopback `--listen` host still fails at startup. On such a listener
+  every path except `GET /healthz` needs the token, `/metrics` included, and
+  `http_request` log lines carry the client address as `peer`. Loopback
+  listeners behave as before, and `OTTO_SERVER_TOKEN` alone makes a loopback
+  token stable across restarts. See
+  [Listener](docs/manual/servers-and-connectors.md#listener).
 - In the terminal, `Esc` while guidance is queued for the running turn now
   delivers it at once instead of cancelling the turn: the running model or tool
   call is stopped, the guidance is appended, and the same turn continues. `Esc`

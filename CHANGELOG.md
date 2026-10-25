@@ -7,6 +7,24 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Security
+
+- The Seatbelt sandbox no longer admits a directory as a writable worktree
+  only because `git worktree list` names it. A sandboxed command could write
+  `.git/worktrees/<id>/gitdir` with any path, and the next `/sandbox reload`,
+  approval reload or restart made that path writable. Otto now admits a listed
+  path only when its own `.git` entry links back to the workspace's common Git
+  directory, and skips `bare` and `prunable` records.
+- Below `.git/modules` (submodule Git directories) the files `config`,
+  `config.worktree` and `commondir` and every `hooks` directory are now
+  read-only in the sandbox, as is `config.worktree` below `.git/worktrees`.
+  `git submodule update` fails in the sandbox when it has to clone a submodule
+  into `.git/modules`; run it outside the sandbox. The `write` and `edit`
+  tools additionally refuse, at any depth, a `.git` entry and, below any
+  `.git` component, the files `config`, `config.worktree`, `commondir` and
+  `gitdir` and every `hooks` directory. See
+  [git metadata is read-only](docs/manual/safety-and-tools.md#git-metadata-is-read-only-in-the-seatbelt-sandbox).
+
 ### Development
 
 - Release builds of `otto` now abort on panic. A panic in any task, including

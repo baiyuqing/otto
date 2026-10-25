@@ -74,6 +74,21 @@ otto-core = { path = "crates/otto-core" }
 # slower than they are at opt-level 2. These crates are dependencies, so the
 # extra compile time is paid once per Turso version, not per change. Otto's
 # own crates stay unoptimized.
+# Release binary size. Measured 2026-10-25 on macOS arm64 with Rust 1.99.0:
+# the default release profile produced a 65,633,504-byte `otto` (52,751,472
+# stripped); this profile produces 31,954,496 bytes, and a clean release build
+# takes about 260 s instead of 170 s on an Apple M4. `panic` stays `unwind`
+# although `abort` would reach 25,443,120 bytes: the TUI restores the terminal
+# from `Drop` guards, which run only while unwinding, and a panicking tokio task
+# must end that task, not the resident `otto serve` process. `strip =
+# "symbols"` removes 7.3 MB of symbol table over `"debuginfo"` and drops
+# function names from `RUST_BACKTRACE` output; panic messages keep file:line.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+strip = "symbols"
+
 [profile.dev.package.turso_core]
 opt-level = 2
 

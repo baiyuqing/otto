@@ -41,6 +41,18 @@ commit ledger; Git and release tags retain the full history. See the
   `RUST_BACKTRACE` output no longer shows function names; panic messages still
   include file and line. Rerun `make install` to pick up the smaller binary.
 
+### Performance
+
+- Scanning each provider request for secrets before it leaves the process
+  now uses one prebuilt substring finder per secret value and a heuristic scan
+  that stops at the first finding, instead of one `str::replace` per secret
+  value and text field and PEM boundary strings rebuilt on every call.
+  Redaction output is unchanged. With a loopback mock provider and 1000 tool
+  steps over a context growing to 2002 messages, the pause between a model
+  response and the next request drops from a median of 25.9 ms (47.7 ms over
+  the last ten steps) to 2.1 ms (3.6 ms), and the turn's wall time from
+  26.4 s to 2.6 s.
+
 ### Features
 
 - In the terminal, `Esc` while guidance is queued for the running turn now

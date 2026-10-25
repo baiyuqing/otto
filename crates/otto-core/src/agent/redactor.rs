@@ -41,6 +41,10 @@ pub struct Redactor {
     /// Canonical secret forms, longest first then lexicographic, so the
     /// leftmost-longest match wins.
     values: Vec<String>,
+    /// One substring finder per entry of `values`, in the same order.
+    finders: Vec<memchr::memmem::Finder<'static>>,
+    /// Byte length of the shortest entry of `values`; 0 when there are none.
+    shortest_value_bytes: usize,
     /// The replacement text. Empty exactly when `complete` is false.
     marker: String,
     complete: bool,
@@ -59,6 +63,8 @@ impl Redactor {
         if !complete {
             return Self {
                 values: Vec::new(),
+                finders: Vec::new(),
+                shortest_value_bytes: 0,
                 marker: String::new(),
                 complete: false,
             };
@@ -74,8 +80,15 @@ impl Redactor {
         }
         safetext::sort_longest_first(&mut canonical);
         let marker = safetext::dynamic_redaction_marker(&canonical);
+        let finders = canonical
+            .iter()
+            .map(|value| memchr::memmem::Finder::new(value.as_bytes()).into_owned())
+            .collect();
+        let shortest_value_bytes = canonical.iter().map(String::len).min().unwrap_or(0);
         Self {
             values: canonical,
+            finders,
+            shortest_value_bytes,
             complete: marker.is_some(),
             marker: marker.unwrap_or_default(),
         }
@@ -178,11 +191,42 @@ impl Redactor {
         if self.values.is_empty() {
             return text.to_owned();
         }
-        let mut redacted = text.to_owned();
-        for value in &self.values {
-            redacted = redacted.replace(value.as_str(), &self.marker);
+        let mut redacted: Option<String> = None;
+        for finder in &self.finders {
+            let current = redacted.as_deref().unwrap_or(text);
+            let mut matches = finder.find_iter(current.as_bytes()).peekable();
+            if matches.peek().is_none() {
+                continue;
+            }
+            let mut replaced = String::with_capacity(current.len());
+            let mut copied_until = 0;
+            for start in matches {
+                replaced.push_str(&current[copied_until..start]);
+                replaced.push_str(&self.marker);
+                copied_until = start + finder.needle().len();
+            }
+            replaced.push_str(&current[copied_until..]);
+            redacted = Some(replaced);
         }
-        redacted
+        redacted.unwrap_or_else(|| text.to_owned())
+    }
+
+    /// Whether any configured secret value occurs in `text`. False for an
+    /// incomplete redactor, which holds no values.
+    pub(super) fn contains_secret(&self, text: &str) -> bool {
+        if !self.complete || self.values.is_empty() || text.len() < self.shortest_value_bytes {
+            return false;
+        }
+        self.finders
+            .iter()
+            .any(|finder| finder.find(text.as_bytes()).is_some())
+    }
+
+    /// Whether `redact_string(text) == text`, without building the redacted
+    /// text. The marker occurs in no value, so sequential replacement changes
+    /// the text exactly when some value occurs in the original text.
+    pub(super) fn unchanged_by_redaction(&self, text: &str) -> bool {
+        text.is_empty() || (self.complete && !self.contains_secret(text))
     }
 
     /// Redacts every string in a JSON document, keys included, and returns
@@ -311,14 +355,15 @@ impl StreamRedactor<'_> {
     /// preferring the longest match at that position.
     fn first_secret(&self) -> Option<(usize, usize)> {
         let mut first: Option<(usize, usize)> = None;
-        for secret in &self.redactor.values {
-            let Some(index) = self.pending.find(secret.as_str()) else {
+        for finder in &self.redactor.finders {
+            let Some(index) = finder.find(self.pending.as_bytes()) else {
                 continue;
             };
+            let secret_bytes = finder.needle().len();
             match first {
                 Some((found, _)) if index > found => continue,
-                Some((found, length)) if index == found && secret.len() <= length => continue,
-                _ => first = Some((index, secret.len())),
+                Some((found, length)) if index == found && secret_bytes <= length => continue,
+                _ => first = Some((index, secret_bytes)),
             }
         }
         first
@@ -401,5 +446,7 @@ mod json_parse;
 
 use heuristics::*;
 
+#[cfg(test)]
+mod egress_scan_tests;
 #[cfg(test)]
 mod tests;

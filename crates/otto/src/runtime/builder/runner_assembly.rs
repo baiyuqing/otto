@@ -628,7 +628,7 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/registry-and-options");
         if !plugins.packages.is_empty() {
             session
-                .append_custom("otto.plugins", &plugins.provenance())
+                .append_custom_when_created("otto.plugins", &plugins.provenance())
                 .await
                 .map_err(|e| e.to_string())?;
         }

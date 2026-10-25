@@ -51,7 +51,7 @@ pub use resolve::{
 };
 pub use sandbox::{SandboxDriverMode, SandboxNetworkMode, SandboxSettings, resolve_sandbox};
 pub use sandbox_setup::update_sandbox;
-pub use server::{Server, ServerRuntime, resolve_server};
+pub use server::{Server, ServerRuntime, ServerTls, resolve_server};
 pub use skills::{Skills, SkillsRuntime, resolve_skills};
 pub use ui::{UiMode, resolve_ui_mode};
 

@@ -332,7 +332,7 @@ impl Controller {
                                     .begin_runner_operation(runner)
                                     .map_err(AgentError::Other)?,
                             };
-                            let result = runner
+                            runner
                                 .run_with_image_system_context(
                                     text,
                                     image,
@@ -340,8 +340,7 @@ impl Controller {
                                     &mut send,
                                     cancel,
                                 )
-                                .await;
-                            result
+                                .await
                         }
                         Some(Step::Followup(text)) => {
                             let _admission = match first_admission.take() {

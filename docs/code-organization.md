@@ -90,7 +90,7 @@ contract or format and `otto` holds the implementation:
 | `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store` in `storage/backends/posix/session/`, which `session/` re-exports |
 | `config` | configuration schema, layered merge, provenance, managed constraints, resolution, `config::edit` | source discovery, executable trust, the compare-and-swap writer |
 | `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; file store in `memory/files/` |
-| `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; Turso store under `storage/` |
+| `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; SQLite store under `storage/` |
 | `provider` | `Provider` trait; wire codecs in `openaicompat` and `openairesponses` | HTTP transports in `provider/openaicompat.rs` and `provider/chatgpt.rs` |
 | `tool` | tool definitions, schema assembly, `ToolExecutor` trait | `Tool` trait, `Registry` (implements `ToolExecutor`), native tool execution, MCP tool adapter |
 
@@ -154,7 +154,7 @@ The other modules group native responsibilities:
 Domain directories own typed repository ports and state semantics. Concrete
 schema, physical row mappings, SQL and file operations live under
 `crates/otto/src/storage/backends/`; the small capability contracts and
-Turso/POSIX drivers live beside them in `storage/`. `runtime/storage.rs`
+SQLite/POSIX drivers live beside them in `storage/`. `runtime/storage.rs`
 validates routes and capabilities, opens concrete repositories, and injects
 domain ports into consumers. Portable migration record definitions live beside
 their domain owners in `migration.rs` (`skill/check_migration.rs` for skill
@@ -162,13 +162,13 @@ audits); approval envelopes also belong to their domains. Backend packages retai
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
-| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `storage/backends/turso/approval.rs` |
-| Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `storage/backends/turso/memory_advice.rs` (advice audit) |
+| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `storage/backends/sqlite/approval.rs` |
+| Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `storage/backends/sqlite/memory_advice.rs` (advice audit) |
 | Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `storage/backends/posix/session/` |
-| Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/turso/{schedule,workflow}.rs` |
-| Tasks, usage, skill checks | Their domain repository modules | `storage/backends/turso/{tasks,usage,skill_checks}.rs` |
+| Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/sqlite/{schedule,workflow}.rs` |
+| Tasks, usage, skill checks | Their domain repository modules | `storage/backends/sqlite/{tasks,usage,skill_checks}.rs` |
 
-The default registry uses the local Turso-compatible SQL driver for SQL-backed
+The default registry uses the local SQLite driver for SQL-backed
 state and the confined POSIX file driver for sessions. The repository registry
 has a public extension entry point in `runtime/storage/backend.rs` and
 `cli::run::run_with_backends`. Linked extensions implement `RepositoryFactory`;

@@ -55,6 +55,20 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Breaking changes
 
+- Approvals, schedules, workflows, tasks, usage, skill checks and memory advice
+  are stored through SQLite (bundled by `rusqlite` 0.41.0) instead of the
+  turso 0.8.3 engine. Existing databases under `~/.otto/` open without
+  conversion. **Stop every Otto process, including `otto serve` and connectors,
+  before starting the new binary:** turso processes coordinate through a
+  `<database>-tshm` file and SQLite processes through `<database>-shm`, so an
+  old and a new process must not use one database at the same time. The memory
+  database of 0.4.8 (`~/.otto/memory/memory.db`) is no longer imported into the
+  file store, because SQLite cannot read its turso full-text index; to keep
+  those records, run a build of commit 96646600 once with all other Otto
+  processes stopped, then upgrade. `[memory.turso].path` is accepted and
+  ignored. On an Apple M4, a clean release build takes 139.8 s instead of
+  248.4 s and the release binary shrinks from 25,459,648 to 16,604,928 bytes.
+
 - Remove the terminal `/steer` command, including in attached sessions.
   Ordinary text typed while a turn runs still steers that turn; when no turn is
   active, such text starts a new turn. Chat, ACP and HTTP steering are
@@ -167,13 +181,10 @@ commit ledger; Git and release tags retain the full history. See the
 - Memory now defaults to editable files in `~/.otto/memory/`, not a Turso
   database. Recall injects standing preferences and bounded in-scope records;
   search uses case-insensitive substrings. Invalid files are reported by
-  `otto memory status`. **Upgrade with all Otto processes stopped:** legacy
-  SQLite memory must first be migrated with Otto 0.4.8; external memory routes
-  must first be transferred back to local storage with 0.4.8. Remove
-  `[storage.routes].memory`, then start this version for the one-time import
-  of the schema-version-2 database. Check the imported files before manually
-  deleting the old database. Memory is no longer a storage domain and is not
-  moved by `otto storage transfer`. ([#491](https://github.com/baiyuqing/otto/pull/491))
+  `otto memory status`. Memory databases of earlier releases are not imported
+  (see the SQLite entry under Breaking changes); remove
+  `[storage.routes].memory` from configuration. Memory is no longer a storage
+  domain and is not moved by `otto storage transfer`. ([#491](https://github.com/baiyuqing/otto/pull/491))
 - Approval content is no longer secret-scanned. It may be displayed and
   persisted: **do not include actual secrets**. Policy, permissions, human
   checkpoints, model redaction and non-approval protections are unchanged.
@@ -312,8 +323,7 @@ commit ledger; Git and release tags retain the full history. See the
 - Rust is pinned to 1.99.0. Provider TLS and connector WebSocket dependencies
   receive security updates. `otto --version` includes the checkout commit.
 - Rust dependencies are upgraded to their latest releases, including tokio
-  1.54, turso 0.8.3, sha2 0.11, jsonschema 0.59 and reqwest 0.13; base64
-  stays at 0.22.1, the version turso uses. With reqwest 0.13, HTTPS
+  1.54, sha2 0.11, jsonschema 0.59 and reqwest 0.13; base64 stays at 0.22.1. With reqwest 0.13, HTTPS
   certificates are verified by rustls-platform-verifier (the macOS trust
   evaluation; the system root store on Linux) over the aws-lc-rs provider,
   instead of rustls-native-certs roots over ring. `license-check` allows

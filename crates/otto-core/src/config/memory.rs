@@ -44,10 +44,13 @@ pub struct Memory {
     pub turso: MemoryTurso,
 }
 
-/// The `[memory.turso]` table.
+/// The `[memory.turso]` table (alias `[memory.sqlite]`). The name is kept so
+/// existing config files still parse under `deny_unknown_fields`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryTurso {
+    /// Accepted for compatibility with earlier releases and ignored: the
+    /// memory store is a directory of files at `MemoryRuntime::dir`.
     #[serde(default)]
     pub path: String,
     #[serde(default)]
@@ -66,10 +69,8 @@ pub struct MemoryRuntime {
     pub workspace_ids: HashMap<String, String>,
     /// Absolute `{home}/.otto/memory`; not configurable.
     pub dir: String,
-    /// Absolute path of the Turso database that the first start imports.
-    pub turso_path: String,
     /// The writer lock wait. Zero when `[memory.turso].busy_timeout` is absent.
-    pub turso_busy_timeout: Duration,
+    pub store_busy_timeout: Duration,
 }
 
 impl MemoryRuntime {
@@ -94,9 +95,8 @@ fn valid_plugin_name(name: &str) -> bool {
         && !name.contains("..")
 }
 
-/// Resolves `[memory]`. The store directory is `$HOME/.otto/memory`; the
-/// Turso path, defaulting to `$HOME/.otto/memory/memory.db`, only locates the
-/// database that the first start imports.
+/// Resolves `[memory]`. The store directory is `$HOME/.otto/memory`;
+/// `[memory.turso].path` is parsed and ignored.
 ///
 /// Add it back if a real memory override is introduced.
 pub fn resolve_memory(
@@ -110,8 +110,8 @@ pub fn resolve_memory(
     } else {
         file.memory.backend.clone()
     };
-    // Earlier releases selected the Turso engine with `turso` or `sqlite`; all
-    // three values select the file store.
+    // Earlier releases selected a SQL engine with `turso` or `sqlite`; existing
+    // config files keep working, and all three values select the file store.
     let backend = match backend.as_str() {
         "files" | "turso" | "sqlite" => DEFAULT_MEMORY_BACKEND.to_string(),
         "remote" => return Err(ConfigError::new(REMOTE_BACKEND_REMOVED)),
@@ -162,13 +162,8 @@ pub fn resolve_memory(
         ));
     }
     let dir = paths::clean(&format!("{home}/.otto/memory"));
-    let turso_path = if !file.memory.turso.path.is_empty() {
-        paths::expand_tilde(&file.memory.turso.path, env, "memory turso path")?
-    } else {
-        paths::clean(&format!("{home}/.otto/memory/memory.db"))
-    };
 
-    let mut turso_busy_timeout = Duration::ZERO;
+    let mut store_busy_timeout = Duration::ZERO;
     if !file.memory.turso.busy_timeout.is_empty() {
         let nanos = parse_go_duration(&file.memory.turso.busy_timeout)
             .map_err(|err| ConfigError::new(format!("invalid memory turso busy_timeout: {err}")))?;
@@ -177,7 +172,7 @@ pub fn resolve_memory(
                 "invalid memory turso busy_timeout: must be greater than zero",
             ));
         }
-        turso_busy_timeout = Duration::from_nanos(nanos as u64);
+        store_busy_timeout = Duration::from_nanos(nanos as u64);
     }
 
     Ok(MemoryRuntime {
@@ -189,8 +184,7 @@ pub fn resolve_memory(
         require_encryption: file.memory.require_encryption,
         workspace_ids: file.memory.workspace_ids.clone(),
         dir,
-        turso_path,
-        turso_busy_timeout,
+        store_busy_timeout,
     })
 }
 
@@ -214,8 +208,7 @@ mod tests {
         assert_eq!(runtime.dir, "/home/u/.otto/memory");
         assert_eq!(runtime.recall_tokens, 2000);
         assert_eq!(runtime.max_results, 12);
-        assert_eq!(runtime.turso_path, "/home/u/.otto/memory/memory.db");
-        assert_eq!(runtime.turso_busy_timeout, Duration::ZERO);
+        assert_eq!(runtime.store_busy_timeout, Duration::ZERO);
         assert!(runtime.workspace_ids.is_empty());
     }
 
@@ -235,22 +228,16 @@ busy_timeout = "10s"
         let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
         assert_eq!(runtime.backend, "files");
         assert_eq!(runtime.dir, "/home/u/.otto/memory");
-        assert_eq!(runtime.turso_path, "/custom/memory.db");
-        assert_eq!(runtime.turso_busy_timeout, Duration::from_secs(10));
+        assert_eq!(runtime.store_busy_timeout, Duration::from_secs(10));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn a_home_relative_turso_path_resolves_against_home_not_the_working_directory() {
+    fn the_legacy_database_path_is_accepted_and_does_not_change_the_store_directory() {
         let mut file = File::default();
-        file.memory.turso.path = "~/.otto/memory/memory-turso.db".into();
-        let mut env = HashMap::new();
-        env.insert("HOME".to_string(), "/home/u".to_string());
-        let runtime = resolve_memory(&file, &env).expect("resolve");
-        assert_eq!(runtime.turso_path, "/home/u/.otto/memory/memory-turso.db");
-
-        let err = resolve_memory(&file, &HashMap::new()).unwrap_err();
-        assert!(err.to_string().contains("home"), "{err}");
+        file.memory.turso.path = "/custom/memory.db".into();
+        let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
+        assert_eq!(runtime.dir, "/home/u/.otto/memory");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -299,8 +286,7 @@ busy_timeout = "10s"
             runtime.workspace_ids.get("/old/path"),
             Some(&"stable-id".to_string())
         );
-        assert_eq!(runtime.turso_path, "/custom/memory.db");
-        assert_eq!(runtime.turso_busy_timeout, Duration::from_secs(10));
+        assert_eq!(runtime.store_busy_timeout, Duration::from_secs(10));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

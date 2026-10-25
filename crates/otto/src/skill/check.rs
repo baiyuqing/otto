@@ -4,7 +4,7 @@
 //! runs in the background: deterministic rules run first
 //! ([`context_reference_fires`], [`vague_output_fires`]); if none fires,
 //! [`typesafe::Client`] asks four questions about the skill's `SKILL.md`. Every
-//! result is appended to a local Turso database and never overwritten. Verdicts
+//! result is appended to a local SQLite database and never overwritten. Verdicts
 //! ([`hint_for`]) are computed from the stored answers when displayed, not
 //! stored, so a threshold change is visible immediately.
 //!
@@ -431,7 +431,7 @@ impl Checker {
     pub(crate) fn open_in_memory(base_url: &str, api_key: &str) -> Self {
         Self::with_store(
             Arc::new(
-                crate::storage::backends::turso::skill_checks::Store::open_in_memory()
+                crate::storage::backends::sqlite::skill_checks::Store::open_in_memory()
                     .expect("in-memory store"),
             ),
             Client::new(base_url, api_key).with_backoff(vec![

@@ -78,7 +78,7 @@ pub trait Sink: Send + Sync {
     }
 }
 
-pub use crate::storage::backends::turso::usage::Store;
+pub use crate::storage::backends::sqlite::usage::Store;
 
 /// Persisted token and provider-operation totals. Usage-event counts are not
 /// provider attempts. Cache totals/rate are absent until a provider explicitly

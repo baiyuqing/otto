@@ -245,7 +245,7 @@ fn workflow_store(
 #[test]
 fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_interrupted_step() {
     use otto::faults::sql::{FaultySqlDriver, SqlOp};
-    use otto::storage::drivers::turso::TursoDriver;
+    use otto::storage::drivers::sqlite::SqliteDriver;
     use otto::workflow::{RunStatus, StepStatus};
 
     crash::run(crash::name_of(&|| {}), |role| {
@@ -253,7 +253,7 @@ fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_inte
         match role {
             Role::Child(dir) => {
                 let address = address(dir);
-                let created = workflow_store(&address, Arc::new(TursoDriver));
+                let created = workflow_store(&address, Arc::new(SqliteDriver));
                 created
                     .create_run(
                         "run-1",
@@ -273,7 +273,7 @@ fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_inte
                 )]);
                 let faulty = workflow_store(
                     &address,
-                    Arc::new(FaultySqlDriver::new(Arc::new(TursoDriver), plan)),
+                    Arc::new(FaultySqlDriver::new(Arc::new(SqliteDriver), plan)),
                 );
                 let _ = faulty.claim_ready("run-1", "one", "transcript.jsonl");
             }
@@ -283,7 +283,7 @@ fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_inte
                     Some(CRASH_EXIT),
                     "child did not crash at the fault"
                 );
-                let store = workflow_store(&address(dir), Arc::new(TursoDriver));
+                let store = workflow_store(&address(dir), Arc::new(SqliteDriver));
                 let before = store.get_run("run-1").expect("get").expect("run exists");
                 assert_eq!(
                     before.steps[0].status,

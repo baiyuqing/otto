@@ -19,12 +19,12 @@ mod coordinator_tests;
 impl Service {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         Self::from_store(std::sync::Arc::new(
-            crate::storage::backends::turso::approval::Store::open(path)?,
+            crate::storage::backends::sqlite::approval::Store::open(path)?,
         ))
     }
     pub fn in_memory() -> Result<Self> {
         Self::from_store(std::sync::Arc::new(
-            crate::storage::backends::turso::approval::Store::in_memory()?,
+            crate::storage::backends::sqlite::approval::Store::in_memory()?,
         ))
     }
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use otto::faults::sql::{FaultySqlDriver, SqlOp};
 use otto::faults::{Fault, FaultError, FaultPlan, Filter, Rule, SqlFault, Trigger};
 use otto::runtime::storage::{Endpoint, RepositoryFactory, SqlRepositories};
-use otto::storage::drivers::turso::TursoDriver;
+use otto::storage::drivers::sqlite::SqliteDriver;
 use otto::storage::{Connection, OpenPolicy};
 
 /// What a repository's caller learns from one write. Most repositories
@@ -66,7 +66,7 @@ fn plan(rules: Vec<Rule<SqlOp>>) -> Arc<FaultPlan<SqlOp>> {
 
 fn factory(plan: &Arc<FaultPlan<SqlOp>>) -> SqlRepositories {
     SqlRepositories::new(Arc::new(FaultySqlDriver::new(
-        Arc::new(TursoDriver),
+        Arc::new(SqliteDriver),
         plan.clone(),
     )))
 }

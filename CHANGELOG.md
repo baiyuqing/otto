@@ -37,6 +37,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixes
 
+- With at least one plugin installed, a new session no longer creates its
+  session file before the first prompt. The `otto.plugins` record is now
+  written together with the first real entry. Previously every new session
+  was written to disk at start with only this record, so it appeared in the
+  `/archive` panel, `/resume` and `--continue`; archiving the current session
+  then produced another such session each time, and the list never emptied.
+
 - Local and attached TUI approval notices now show labeled states, reasons,
   feedback and literal request details. Serialized JSON detail values display
   readable newlines/indentation without decoding literal command backslashes or

@@ -18,6 +18,10 @@ mod turn_limits;
 mod workflows;
 
 fn shared(root: &Path) -> Arc<Shared> {
+    shared_with_no_session(root, true)
+}
+
+fn shared_with_no_session(root: &Path, no_session: bool) -> Arc<Shared> {
     Arc::new(Shared {
         storage: Arc::new(Default::default()),
         approvals: Arc::new(crate::approval::Service::in_memory().expect("approval store")),
@@ -27,7 +31,7 @@ fn shared(root: &Path) -> Arc<Shared> {
         home: root.to_string_lossy().into_owned(),
         session_root: root.join("sessions"),
         shell: "/bin/sh".to_string(),
-        no_session: true,
+        no_session,
         headless: false,
         host_entries: Vec::new(),
         overrides: Overrides::default(),

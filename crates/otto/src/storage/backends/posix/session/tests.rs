@@ -34,6 +34,7 @@ use crate::storage::drivers::posix::PosixDriver;
 
 mod compaction_list;
 mod create_append;
+mod deferred_custom;
 mod fork_cases;
 mod inputs;
 mod lease_prepare;

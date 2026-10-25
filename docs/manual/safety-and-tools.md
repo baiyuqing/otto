@@ -758,12 +758,20 @@ that the sandboxed child cannot read. Otto does not treat the workspace as prote
 `.git`, tests, and generated files remain writable.
 
 When the selected workspace is a Git worktree, Otto also admits the other
-canonical worktrees Git registers under that exact repository's common Git
-directory. Bash can read and write those worktrees without a separate
-`read_paths` approval; their `.git` metadata and Otto workspace identity stay
-read-only. This does not admit a similarly named directory, a different
-repository, or change the file tools' selected-workspace boundary. Otto
-rediscovers this set at startup and `/sandbox reload`.
+worktrees of that repository. Candidates come from `git worktree list
+--porcelain` run in the workspace. A candidate is admitted only when its own
+`.git` entry links back to the workspace's common Git directory: a regular
+`.git` file whose `gitdir:` target is a directory directly below
+`<common>/worktrees`, or a `.git` directory that is `<common>` itself. The
+listing alone is not sufficient, because it is derived from
+`.git/worktrees/<id>/gitdir` files that a sandboxed command can write.
+Records marked `bare` or `prunable`, `.git` entries that are symbolic links,
+and paths that fail to canonicalize are not admitted. Bash can read and write
+admitted worktrees without a separate `read_paths` approval; their `.git`
+metadata and Otto workspace identity stay read-only. This does not admit a
+similarly named directory, a different repository, or change the file tools'
+selected-workspace boundary. Otto rediscovers this set at startup and
+`/sandbox reload`.
 
 Host home content is not automatically readable. Git config, shell dotfiles,
 and host caches are not implicitly mounted into the command view. Add only the
@@ -875,27 +883,43 @@ Limits of this check:
 
 Git runs hooks and the programs named in its configuration outside the
 sandbox, so a sandboxed command must not write them. Under Seatbelt, these
-paths are read-only, whether or not they exist, and no setting turns this off:
+paths are read-only in the workspace and in every admitted worktree, whether
+or not they exist, and no setting turns this off:
 
 - `<workspace>/.git` (the entry itself, so it cannot be renamed or removed)
 - `<workspace>/.git/config`
 - `<workspace>/.git/config.worktree`
 - `<workspace>/.git/commondir`
 - `<workspace>/.git/hooks` and everything below it
+- below `<workspace>/.git/modules` (submodule Git directories), at any depth:
+  files named `config`, `config.worktree` and `commondir`, and every `hooks`
+  directory with its contents
+- below `<workspace>/.git/worktrees`, at any depth: files named
+  `config.worktree`
 
-The `write` and `edit` tools run outside the sandbox and refuse the same
-paths, with or without `--sandbox off`. The comparison ignores letter case
-the way APFS does (including U+212A KELVIN SIGN for `k` and U+017F LATIN SMALL
-LETTER LONG S for `s`) and applies after symbolic links are resolved, both
-before the write starts and again at the final rename.
+`.git/worktrees/<id>/gitdir` and `.git/worktrees/<id>/commondir` stay
+writable because `git worktree add` creates them. The worktree admission
+described above does not trust them. A sandboxed command can still point a
+linked worktree's `commondir` at another directory, and the user's next git
+command in that worktree reads its configuration from there. Nested
+repositories (`<dir>/.git` below the workspace) are not covered, so `git
+clone` and `git init` into a subdirectory work in the sandbox.
 
-The rule applies to the workspace root only. Repositories below it (nested
-clones, submodules, and linked worktrees inside the workspace) are not covered.
+The `write` and `edit` tools run outside the sandbox and refuse the paths
+above, with or without `--sandbox off`. They refuse more than the sandbox
+does, because they never need these paths: at any depth in the workspace, a
+`.git` entry, and below any `.git` component the files `config`,
+`config.worktree`, `commondir` and `gitdir` and every `hooks` directory. The
+comparison ignores letter case the way APFS does (including U+212A KELVIN
+SIGN for `k` and U+017F LATIN SMALL LETTER LONG S for `s`) and applies after
+symbolic links are resolved, both before the write starts and again at the
+final rename.
 
 Commands that fail in the sandbox because they write these paths: `git init`
 in the workspace, `git config` without `--global`, `git remote add` and
 `set-url`, `git push -u`, `git branch --set-upstream-to`, creating a branch
-that tracks a remote branch, `git submodule init`, and hook installers such as
+that tracks a remote branch, `git submodule init`, `git submodule update`
+when it clones a submodule into `.git/modules`, and hook installers such as
 `pre-commit install`.
 
 Commands that are not affected: `git commit`, `checkout`, `branch` without

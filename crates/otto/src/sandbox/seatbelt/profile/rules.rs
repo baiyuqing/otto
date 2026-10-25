@@ -12,29 +12,20 @@ pub(super) fn render_read_rules(
     builder.push_str("; OTTO-DYNAMIC-METADATA-BEGIN\n");
     let literals: Vec<Filter> = metadata
         .iter()
-        .map(|path| Filter {
-            kind: FilterKind::Literal,
-            path: path.clone(),
-        })
+        .map(|path| Filter::Literal(path.clone()))
         .collect();
     write_rule(&mut builder, "allow", "file-read-metadata", &literals, None)?;
     builder.push_str("; OTTO-DYNAMIC-METADATA-END\n");
     builder.push_str("; OTTO-DYNAMIC-READ-DATA-BEGIN\n");
     let mut filters: Vec<Filter> = Vec::with_capacity(writable.len() + roots.len());
     for path in writable {
-        filters.push(Filter {
-            kind: FilterKind::Subpath,
-            path: path.clone(),
-        });
+        filters.push(Filter::Subpath(path.clone()));
     }
     for root in roots {
-        filters.push(Filter {
-            kind: if root.kind == PathKind::Directory {
-                FilterKind::Subpath
-            } else {
-                FilterKind::Literal
-            },
-            path: root.path.clone(),
+        filters.push(if root.kind == PathKind::Directory {
+            Filter::Subpath(root.path.clone())
+        } else {
+            Filter::Literal(root.path.clone())
         });
     }
     write_rule(&mut builder, "allow", "file-read*", &filters, None)?;
@@ -52,10 +43,7 @@ pub(super) fn render_write_rules(
     builder.push_str("; OTTO-DYNAMIC-WRITE-BEGIN\n");
     let filters: Vec<Filter> = writable
         .iter()
-        .map(|path| Filter {
-            kind: FilterKind::Subpath,
-            path: path.clone(),
-        })
+        .map(|path| Filter::Subpath(path.clone()))
         .collect();
     write_rule(&mut builder, "allow", "file-write*", &filters, None)?;
     // Git runs hooks and the configuration's program settings outside the
@@ -66,19 +54,7 @@ pub(super) fn render_write_rules(
     // setting turns them off.
     let protected: Vec<Filter> = workspaces
         .iter()
-        .flat_map(|workspace| {
-            crate::sandbox::GIT_READ_ONLY
-                .iter()
-                .chain(crate::workspace::READ_ONLY_PATHS.iter())
-                .map(move |(name, subpath)| Filter {
-                    kind: if *subpath {
-                        FilterKind::Subpath
-                    } else {
-                        FilterKind::Literal
-                    },
-                    path: join(workspace, name),
-                })
-        })
+        .flat_map(|workspace| protected_workspace_filters(workspace))
         .collect();
     write_rule(
         &mut builder,
@@ -89,6 +65,36 @@ pub(super) fn render_write_rules(
     )?;
     builder.push_str("; OTTO-DYNAMIC-WRITE-END");
     Ok(builder)
+}
+
+/// The write-denied filters of one workspace: the fixed git paths, then the
+/// git directory program settings below `.git/modules` and `.git/worktrees`,
+/// then the workspace identity files.
+fn protected_workspace_filters(workspace: &str) -> Vec<Filter> {
+    let literal_or_subpath = |(name, subpath): &(&str, bool)| {
+        let path = join(workspace, name);
+        if *subpath {
+            Filter::Subpath(path)
+        } else {
+            Filter::Literal(path)
+        }
+    };
+    let mut filters: Vec<Filter> = crate::sandbox::GIT_READ_ONLY
+        .iter()
+        .map(literal_or_subpath)
+        .collect();
+    filters.extend(GIT_DIR_PROGRAM_SETTINGS.iter().map(|(prefix, pattern)| {
+        Filter::SubpathMatching {
+            root: join(workspace, prefix),
+            pattern,
+        }
+    }));
+    filters.extend(
+        crate::workspace::READ_ONLY_PATHS
+            .iter()
+            .map(literal_or_subpath),
+    );
+    filters
 }
 
 pub(super) fn render_network_rules(network: NetworkMode) -> String {
@@ -129,35 +135,57 @@ pub(super) fn render_shell_rule(shell: &str) -> Result<String, Rejected> {
         &mut builder,
         "allow",
         "file-read*",
-        &[Filter {
-            kind: FilterKind::Literal,
-            path: shell.to_string(),
-        }],
+        &[Filter::Literal(shell.to_string())],
         None,
     )?;
     builder.push_str("; OTTO-DYNAMIC-SHELL-END");
     Ok(builder)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FilterKind {
-    Literal,
-    Subpath,
-}
-
-impl FilterKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Literal => "literal",
-            Self::Subpath => "subpath",
-        }
-    }
-}
+/// Files below a git directory that git reads as program settings or hooks
+/// outside the sandbox: `(prefix, regex)`. `prefix` is relative to the
+/// workspace and becomes a `subpath`; `regex` is a constant Seatbelt regex
+/// matched against the full path, and holds no workspace text.
+///
+/// - `.git/modules`, at any depth: files named `config`, `config.worktree` and
+///   `commondir`, and every `hooks` directory with everything below it. These
+///   belong to submodule git directories, whose names may contain `/`.
+/// - `.git/worktrees`, at any depth: files named `config.worktree`.
+///
+/// `gitdir` and `commondir` below `.git/worktrees` stay writable because
+/// `git worktree add` creates them, and nested `<dir>/.git` repositories are
+/// not covered.
+pub(super) const GIT_DIR_PROGRAM_SETTINGS: [(&str, &str); 3] = [
+    (".git/modules", r"/(config|config\.worktree|commondir)$"),
+    (".git/modules", r"/hooks(/|$)"),
+    (".git/worktrees", r"/config\.worktree$"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Filter {
-    kind: FilterKind,
-    path: String,
+enum Filter {
+    /// `(literal "<path>")`
+    Literal(String),
+    /// `(subpath "<path>")`
+    Subpath(String),
+    /// `(require-all (subpath "<root>") (regex #"<pattern>"))`. The pattern is
+    /// a constant, so no untrusted text is ever embedded in a regex.
+    SubpathMatching { root: String, pattern: &'static str },
+}
+
+impl Filter {
+    fn render(&self) -> Result<String, Rejected> {
+        Ok(match self {
+            Self::Literal(path) => format!("(literal {})", string_literal(path)?),
+            Self::Subpath(path) => format!("(subpath {})", string_literal(path)?),
+            Self::SubpathMatching { root, pattern } => {
+                debug_assert!(!pattern.contains(['"', '\n']));
+                format!(
+                    "(require-all (subpath {}) (regex #\"{pattern}\"))",
+                    string_literal(root)?
+                )
+            }
+        })
+    }
 }
 
 /// Writes one `(allow …)` or `(deny …)` form. An empty filter list is a
@@ -178,12 +206,9 @@ fn write_rule(
     builder.push_str(operation);
     builder.push('\n');
     for filter in filters {
-        let literal = string_literal(&filter.path)?;
-        builder.push_str("  (");
-        builder.push_str(filter.kind.as_str());
-        builder.push(' ');
-        builder.push_str(&literal);
-        builder.push_str(")\n");
+        builder.push_str("  ");
+        builder.push_str(&filter.render()?);
+        builder.push('\n');
     }
     if let Some(message) = message {
         builder.push_str("  ");

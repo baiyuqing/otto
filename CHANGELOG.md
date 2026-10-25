@@ -43,6 +43,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Performance
 
+- The terminal UI now keeps the rendered rows of every transcript entry
+  between frames and re-renders only the entries that changed, instead of
+  rendering the whole transcript again on every tick. At 180x50 with a
+  300-turn session loaded, idle CPU drops from 15.3% to 2.1% (2.76 s to
+  0.37 s over 18 s) and resident memory rises from 63 MB to 65 MB; an empty
+  transcript stays at 1.6%.
 - Scanning each provider request for secrets before it leaves the process
   now uses one prebuilt substring finder per secret value and a heuristic scan
   that stops at the first finding, instead of one `str::replace` per secret

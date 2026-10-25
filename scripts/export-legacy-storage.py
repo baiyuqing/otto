@@ -1,4 +1,4 @@
-"""Read-only logical export for `otto storage migrate`; no SQLite in Otto's runtime."""
+"""Read-only logical export of a legacy-schema database for `otto storage migrate`."""
 import json
 import math
 import pathlib

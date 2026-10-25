@@ -1,5 +1,5 @@
 //! Owned async I/O for adapters that must also provide synchronous compatibility ports.
-//! Network futures run on a real runtime, never on Turso's thread-waker bridge.
+//! Network futures run on a real runtime, never on a SQL driver thread.
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

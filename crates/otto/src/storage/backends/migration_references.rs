@@ -237,7 +237,7 @@ fn approval_references(
     let mut rows = statement.query(()).map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         let body: String = row.get(0).map_err(sql_error)?;
-        let request = crate::storage::backends::turso::approval::decode_persisted(&body)
+        let request = crate::storage::backends::sqlite::approval::decode_persisted(&body)
             .map_err(|_| invalid("invalid linked approval record"))?;
         use otto_core::approval::{ApplicationState, State};
         if request.state != State::Pending
@@ -365,7 +365,7 @@ fn sql_error(_: crate::storage::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::backends::turso::workflow::TursoWorkflowStore;
+    use crate::storage::backends::sqlite::workflow::SqliteWorkflowStore;
     use crate::workflow::{Definition, Step, StepKind, repository::WorkflowStore};
     use otto_core::approval::ApprovalMode;
     #[test]
@@ -373,7 +373,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let approvals_path = dir.path().join("approvals.db");
         let workflow_path = dir.path().join("workflows.db");
-        let workflows = TursoWorkflowStore::open(&workflow_path).unwrap();
+        let workflows = SqliteWorkflowStore::open(&workflow_path).unwrap();
         workflows
             .create_run(
                 "run",

@@ -363,7 +363,7 @@ pub struct Advisor {
 }
 
 impl Advisor {
-    /// Compatibility constructor for callers using the current Turso store.
+    /// Compatibility constructor for callers using the current SQLite store.
     pub fn new(backend: Box<dyn Backend>, audit: Option<Arc<dyn audit::AuditStore>>) -> Self {
         Self::new_with_audit(backend, audit)
     }

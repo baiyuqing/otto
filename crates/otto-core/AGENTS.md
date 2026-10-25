@@ -13,7 +13,7 @@ with its implementation.
   in `crates/otto` even where a part of it performs no I/O, for example
   approval policy and memory validation.
 - Filesystem, process, environment, network, stdio and clock access,
-  credentials, Turso and sandbox integration stay in `crates/otto`.
+  credentials, SQLite and sandbox integration stay in `crates/otto`.
   `tests/io_boundary.rs` fails on `std::fs`, `std::process`, `std::net`,
   `std::env`, stdio and `now()` calls outside `#[cfg(test)]`;
   `make rust-wasm-check` does not detect them because they compile on wasm32.

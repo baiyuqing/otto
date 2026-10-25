@@ -233,7 +233,7 @@ fn migrate(source: &Path, destination: &Path) -> Result<(), ()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let staging = tempfile::Builder::new()
-        .prefix(".otto-turso-migrate-")
+        .prefix(".otto-sqlite-migrate-")
         .tempfile_in(parent)
         .map_err(|_| ())?;
     let mut child = Command::new("python3")
@@ -266,8 +266,8 @@ fn migrate(source: &Path, destination: &Path) -> Result<(), ()> {
         let _ = child.kill();
         let _ = child.wait();
     }
-    // Turso creates private WAL coordination files next to the staging DB.
-    for suffix in ["-wal", "-shm", ".tshm"] {
+    // SQLite creates WAL and shared-memory files next to the staging DB.
+    for suffix in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", staging.path().display()));
     }
     outcome?;

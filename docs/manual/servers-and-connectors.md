@@ -587,7 +587,7 @@ Each normal provider response, compaction summary, and sub-agent provider
 response appends a content-free row to `~/.otto/usage.db`. The row contains
 time, workspace/session/task identifiers, provider/profile/model, usage
 presence, and token counts; it never contains prompts, response text, tool
-arguments, or tool output. Collection, Turso storage, and the HTTP/UI query
+arguments, or tool output. Collection, SQLite storage, and the HTTP/UI query
 path are separate boundaries.
 
 `GET /v1/usage` returns all recorded totals; pass `session_id` to restrict the
@@ -624,7 +624,7 @@ for the events, their fields, and a Prometheus scrape configuration.
 ### Sub-agent task records
 
 Every sub-agent task started by the `agent` tool is recorded in
-`~/.otto/tasks.db` (Turso, file mode `0600`), one row per task, keyed by
+`~/.otto/tasks.db` (SQLite, file mode `0600`), one row per task, keyed by
 parent session and task id. Otto writes the row when the task is queued and
 again when it starts, after each provider step and tool call, and when it
 finishes. Each Otto process writes only its own tasks; `/agents`, the Web

@@ -100,7 +100,6 @@ async fn tls_with_a_random_token_binds_loopback_only() {
         "",
         &discard_logger(),
     )
-    .ok()
     .expect("bind");
     assert!(bound.tls);
     assert!(!bound.remote);
@@ -117,7 +116,6 @@ async fn tls_and_an_environment_token_bind_a_non_loopback_address() {
         TEST_SERVER_TOKEN,
         &discard_logger(),
     )
-    .ok()
     .expect("bind");
     assert!(bound.remote);
     assert!(bound.tls);

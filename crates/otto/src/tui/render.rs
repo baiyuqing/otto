@@ -191,16 +191,25 @@ fn composer_and_panel_height(
 const STARTUP_LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/";
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
-    if lines.is_empty() {
-        lines.extend(
-            STARTUP_LOGO
-                .lines()
-                .map(|line| Line::from(line.to_string())),
-        );
-    }
-    // Pending input is a projection, never a persisted transcript entry. Keep
-    // every accepted item visible rather than only the newest recall target.
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let mut cache = app.transcript_cache.borrow_mut();
+    cache.sync(&app.entries, app.show_details, width);
+    // An empty transcript shows the logo in place of the cached rows.
+    let logo: Vec<Line<'static>> = if cache.row_count() == 0 {
+        STARTUP_LOGO
+            .lines()
+            .map(|line| Line::from(line.to_string()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let head_rows = logo.len().max(cache.row_count());
+    // Rows after the transcript, rendered fresh each frame because they come
+    // from transient state. Pending input is a projection, never a persisted
+    // transcript entry. Keep every accepted item visible rather than only the
+    // newest recall target.
+    let mut trailing: Vec<Line<'static>> = Vec::new();
     let pending = app
         .pending_steers
         .iter()
@@ -218,36 +227,46 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|text| format!("[Queued next input] {text}")),
         );
     for text in pending {
-        lines.push(Line::default());
-        lines.extend(transcript::lines(
+        trailing.push(Line::default());
+        trailing.extend(transcript::lines(
             &[super::entries::Entry {
                 kind: Some(super::entries::EntryKind::User),
                 raw: text,
                 ..Default::default()
             }],
             false,
-            area.width as usize,
+            width,
         ));
     }
     if let Some(status) = app.thinking() {
-        if !lines.is_empty() {
-            lines.push(Line::default());
+        if head_rows > 0 || !trailing.is_empty() {
+            trailing.push(Line::default());
         }
-        lines.push(thinking_line(&status));
+        trailing.push(thinking_line(&status));
     }
 
-    // No `Wrap`: `transcript` already broke every row to `area.width` so it
-    // could keep a gutter marker on each one, and re-wrapping here would
-    // split those rows again and lose the alignment.
-    let paragraph = Paragraph::new(Text::from(lines));
-    let total_lines = paragraph.line_count(area.width).min(u16::MAX as usize) as u16;
-    let bottom = total_lines.saturating_sub(area.height);
+    let total_rows = (head_rows + trailing.len()).min(u16::MAX as usize) as u16;
+    let bottom = total_rows.saturating_sub(area.height);
     // The scroll keys need the bottom this layout produced to turn
     // "following" into an absolute offset; nothing outside the renderer
     // knows how the entries wrap at this width.
     app.max_scroll.set(bottom);
-    let scroll = app.scroll.map_or(bottom, |top| top.min(bottom));
-    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+    let top = app.scroll.map_or(bottom, |top| top.min(bottom)) as usize;
+    let window_end = top + height;
+    // Only the visible rows are cloned out of the cache.
+    let mut window = cache.rows(top..window_end);
+    window.extend(logo.into_iter().skip(top).take(height));
+    let trailing_needed = window_end.saturating_sub(head_rows.max(top));
+    window.extend(
+        trailing
+            .into_iter()
+            .skip(top.saturating_sub(head_rows))
+            .take(trailing_needed),
+    );
+    // No `Wrap`: `transcript` already broke every row to `area.width` so it
+    // could keep a gutter marker on each one, and re-wrapping here would
+    // split those rows again and lose the alignment.
+    frame.render_widget(Paragraph::new(Text::from(window)), area);
 }
 
 /// Spinner frames, in order.

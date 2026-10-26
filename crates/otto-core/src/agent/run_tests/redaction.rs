@@ -41,6 +41,7 @@ async fn seeded_session_with_candidate(candidate: &str) -> MemorySession {
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn provider_egress_guard_redacts_ordinary_dynamic_fields_and_json() {
     let candidate = heuristic_credential();
+    let email = "alice@example.com";
     let provider = FakeProvider::new(vec![
         Turn::tool_call("guard-call", &format!(r#"{{"token":"{candidate}"}}"#)),
         Turn::text("done"),
@@ -53,7 +54,7 @@ async fn provider_egress_guard_redacts_ordinary_dynamic_fields_and_json() {
         },
         MemorySession::new(),
         Options {
-            system_prompt: format!("API_KEY={candidate}"),
+            system_prompt: format!("API_KEY={candidate}; contact {email}"),
             ..options()
         },
     );
@@ -70,10 +71,16 @@ async fn provider_egress_guard_redacts_ordinary_dynamic_fields_and_json() {
     let requests = agent.provider().requests();
     assert_eq!(requests.len(), 2);
     for request in requests {
+        let rendered = format!("{request:?}");
         assert!(
-            !format!("{request:?}").contains(&candidate),
+            !rendered.contains(&candidate),
             "candidate reached ordinary provider request"
         );
+        assert!(
+            !rendered.contains(email),
+            "PII reached ordinary provider request"
+        );
+        assert!(rendered.contains("<EMAIL_1>"), "PII placeholder is missing");
     }
 }
 

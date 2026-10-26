@@ -330,30 +330,35 @@ pub(super) fn redact_ranges(
     Some(redacted)
 }
 
-fn json_strings_are_safe(redactor: &Redactor, value: &serde_json::Value, depth: usize) -> bool {
+fn json_strings_are_safe(
+    redactor: &Redactor,
+    value: &serde_json::Value,
+    depth: usize,
+    detect_pii: bool,
+) -> bool {
     if depth > MAXIMUM_EGRESS_JSON_DEPTH {
         return false;
     }
     match value {
-        serde_json::Value::String(value) => protected_text_is_safe(redactor, value),
+        serde_json::Value::String(value) => protected_text_is_safe(redactor, value, detect_pii),
         serde_json::Value::Array(values) => values
             .iter()
-            .all(|value| json_strings_are_safe(redactor, value, depth + 1)),
+            .all(|value| json_strings_are_safe(redactor, value, depth + 1, detect_pii)),
         serde_json::Value::Object(values) => values.iter().all(|(key, value)| {
-            protected_text_is_safe(redactor, key)
+            protected_text_is_safe(redactor, key, detect_pii)
                 && !(matches!(value, serde_json::Value::String(value)
                     if sensitive_key(key) && credential_value(value)))
-                && json_strings_are_safe(redactor, value, depth + 1)
+                && json_strings_are_safe(redactor, value, depth + 1, detect_pii)
         }),
         _ => true,
     }
 }
 
-pub(super) fn protected_json_is_safe(redactor: &Redactor, raw: &str) -> bool {
+pub(super) fn protected_json_is_safe(redactor: &Redactor, raw: &str, detect_pii: bool) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return false;
     };
-    json_strings_are_safe(redactor, &value, 0)
+    json_strings_are_safe(redactor, &value, 0, detect_pii)
 }
 
 pub(super) fn redact_heuristic_text(redactor: &Redactor, text: &str) -> Option<String> {
@@ -365,8 +370,22 @@ pub(super) fn redact_heuristic_text(redactor: &Redactor, text: &str) -> Option<S
     redact_ranges(redactor, &exact, ranges)
 }
 
-pub(super) fn protected_text_is_safe(redactor: &Redactor, text: &str) -> bool {
-    redactor.unchanged_by_redaction(text) && !heuristic_secret(text)
+pub(super) fn protected_text_is_safe(redactor: &Redactor, text: &str, detect_pii: bool) -> bool {
+    redactor.unchanged_by_redaction(text)
+        && !heuristic_secret(text)
+        && (!detect_pii || !contains_pii(text))
+}
+
+pub(super) fn redact_provider_text_value(
+    redactor: &Redactor,
+    pii: Option<&mut PiiRedactor>,
+    text: &str,
+) -> Option<String> {
+    let secret_safe = redact_heuristic_text(redactor, text)?;
+    Some(match pii {
+        Some(pii) => pii.redact_text(&secret_safe),
+        None => secret_safe,
+    })
 }
 
 pub(super) fn redact_json_string_value(
@@ -386,31 +405,46 @@ pub(super) fn redact_json_string_value(
     }
 }
 
-pub(super) fn redact_egress_json(redactor: &Redactor, raw: &str) -> Option<Box<RawValue>> {
-    let text = redactor.redact_egress_json_text(raw)?;
+pub(super) fn redact_egress_json(
+    redactor: &Redactor,
+    pii: Option<&mut PiiRedactor>,
+    raw: &str,
+) -> Option<Box<RawValue>> {
+    let text = redactor.redact_egress_json_text(pii, raw)?;
     RawValue::from_string(text).ok()
 }
 
 pub(super) fn finish_reason_is_safe(
     redactor: &Redactor,
     reason: &crate::model::FinishReason,
+    detect_pii: bool,
 ) -> bool {
     match reason {
-        crate::model::FinishReason::Other(value) => protected_text_is_safe(redactor, value),
+        crate::model::FinishReason::Other(value) => {
+            protected_text_is_safe(redactor, value, detect_pii)
+        }
         _ => true,
     }
 }
 
-pub(super) fn role_is_safe(redactor: &Redactor, role: &crate::model::Role) -> bool {
+pub(super) fn role_is_safe(
+    redactor: &Redactor,
+    role: &crate::model::Role,
+    detect_pii: bool,
+) -> bool {
     match role {
-        crate::model::Role::Other(value) => protected_text_is_safe(redactor, value),
+        crate::model::Role::Other(value) => protected_text_is_safe(redactor, value, detect_pii),
         _ => true,
     }
 }
 
-pub(super) fn block_type_is_safe(redactor: &Redactor, block_type: &BlockType) -> bool {
+pub(super) fn block_type_is_safe(
+    redactor: &Redactor,
+    block_type: &BlockType,
+    detect_pii: bool,
+) -> bool {
     match block_type {
-        BlockType::Other(value) => protected_text_is_safe(redactor, value),
+        BlockType::Other(value) => protected_text_is_safe(redactor, value, detect_pii),
         _ => true,
     }
 }

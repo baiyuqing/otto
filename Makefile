@@ -24,6 +24,10 @@ install: build connect-build ## install Otto, otto-connect and bundled skills
 	install -m 0755 target/otto-connect "$(INSTALL_DIR)/otto-connect"
 	install -d "$(SKILLS_INSTALL_DIR)/sandbox-setup"
 	install -m 0644 .otto/skills/sandbox-setup/SKILL.md "$(SKILLS_INSTALL_DIR)/sandbox-setup/SKILL.md"
+	install -d "$(SKILLS_INSTALL_DIR)/rust-best-practices/references"
+	install -m 0644 .otto/skills/rust-best-practices/SKILL.md "$(SKILLS_INSTALL_DIR)/rust-best-practices/SKILL.md"
+	install -m 0644 .otto/skills/rust-best-practices/LICENSE "$(SKILLS_INSTALL_DIR)/rust-best-practices/LICENSE"
+	install -m 0644 .otto/skills/rust-best-practices/references/sources.md "$(SKILLS_INSTALL_DIR)/rust-best-practices/references/sources.md"
 
 setup-git-hooks: ## install the pre-commit hook (Gitleaks, code limits) for this clone and its worktrees
 	@command -v gitleaks >/dev/null || { echo "Install gitleaks first (macOS: brew install gitleaks)"; exit 1; }

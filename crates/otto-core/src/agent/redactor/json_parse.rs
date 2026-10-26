@@ -21,17 +21,25 @@ impl Redactor {
 
     /// Parses provider-bound JSON while preserving scalar literals verbatim
     /// and applying heuristic redaction at each string's own tree position.
-    pub(super) fn redact_egress_json_text(&self, raw: &str) -> Option<String> {
+    pub(super) fn redact_egress_json_text(
+        &self,
+        mut pii: Option<&mut PiiRedactor>,
+        raw: &str,
+    ) -> Option<String> {
         let mut parser = Parser {
             bytes: raw.as_bytes(),
             index: 0,
         };
-        let value = self.parse_egress_value(&mut parser)?;
+        let value = self.parse_egress_value(&mut parser, &mut pii)?;
         parser.skip_whitespace();
         (parser.index == parser.bytes.len()).then_some(value)
     }
 
-    fn parse_egress_value(&self, parser: &mut Parser<'_>) -> Option<String> {
+    fn parse_egress_value(
+        &self,
+        parser: &mut Parser<'_>,
+        pii: &mut Option<&mut PiiRedactor>,
+    ) -> Option<String> {
         let mut stack: Vec<EgressFrame> = Vec::new();
         'read: loop {
             parser.skip_whitespace();
@@ -48,7 +56,7 @@ impl Redactor {
                         parser.index += 1;
                         "{}".to_owned()
                     } else {
-                        let key = self.parse_egress_member_key(parser)?;
+                        let key = self.parse_egress_member_key(parser, pii.is_some())?;
                         stack.push(EgressFrame::Object(Vec::new(), Some(key)));
                         continue 'read;
                     }
@@ -67,11 +75,18 @@ impl Redactor {
                         continue 'read;
                     }
                 }
-                b'"' => encode_json_string(&redact_json_string_value(
-                    self,
-                    &parser.parse_string()?,
-                    sensitive_association,
-                )?),
+                b'"' => {
+                    let secret_safe = redact_json_string_value(
+                        self,
+                        &parser.parse_string()?,
+                        sensitive_association,
+                    )?;
+                    let value = match pii.as_deref_mut() {
+                        Some(pii) => pii.redact_text(&secret_safe),
+                        None => secret_safe,
+                    };
+                    encode_json_string(&value)
+                }
                 _ => parser.parse_scalar()?,
             };
 
@@ -97,7 +112,8 @@ impl Redactor {
                         parser.skip_whitespace();
                         match parser.next()? {
                             b',' => {
-                                *pending_key = Some(self.parse_egress_member_key(parser)?);
+                                *pending_key =
+                                    Some(self.parse_egress_member_key(parser, pii.is_some())?);
                                 continue 'read;
                             }
                             b'}' => {}
@@ -113,12 +129,19 @@ impl Redactor {
         }
     }
 
-    fn parse_egress_member_key(&self, parser: &mut Parser<'_>) -> Option<(String, bool)> {
+    fn parse_egress_member_key(
+        &self,
+        parser: &mut Parser<'_>,
+        detect_pii: bool,
+    ) -> Option<(String, bool)> {
         parser.skip_whitespace();
         if parser.peek()? != b'"' {
             return None;
         }
         let original = parser.parse_string()?;
+        if detect_pii && contains_pii(&original) {
+            return None;
+        }
         let sensitive = sensitive_key(&original);
         let exact = self.redact_string(&original);
         let ranges = independent_finding_ranges(&exact);

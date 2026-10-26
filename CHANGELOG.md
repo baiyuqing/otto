@@ -9,6 +9,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Security
 
+- Every provider request now receives always-on, local PII filtering in addition
+  to credential filtering. High-confidence email addresses, international phone
+  numbers, checksum-valid payment cards and Chinese resident identity cards are
+  replaced with stable typed placeholders in free text and JSON values; PII in
+  structural or opaque fields refuses the request. There is no PII configuration
+  or remote classification.
 - The Seatbelt sandbox no longer admits a directory as a writable worktree
   only because `git worktree list` names it. A sandboxed command could write
   `.git/worktrees/<id>/gitdir` with any path, and the next `/sandbox reload`,

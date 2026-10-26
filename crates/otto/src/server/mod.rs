@@ -377,6 +377,7 @@ impl Server {
                 )
                 .expect("approval domain registry");
         }
+        let logger = options.logger.unwrap_or_else(|| Arc::new(Logger::stderr()));
         Arc::new(Self {
             factory: options.factory,
             info: options.info,
@@ -384,8 +385,8 @@ impl Server {
             approvals,
             token: options.token,
             remote_listener: options.remote_listener,
-            log: options.logger.unwrap_or_else(|| Arc::new(Logger::stderr())),
-            metrics: Arc::new(Metrics::new()),
+            metrics: Arc::new(Metrics::with_logger(Arc::clone(&logger))),
+            log: logger,
             sessions: Mutex::new(HashMap::new()),
             open_gate: tokio::sync::Mutex::new(()),
             wake_loops: Mutex::new(Vec::new()),

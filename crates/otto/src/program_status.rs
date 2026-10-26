@@ -26,14 +26,48 @@ pub enum State {
     Error,
 }
 
+/// The terminal-visible outcome of a completed operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion {
+    /// The operation completed successfully.
+    Succeeded,
+    /// The operation failed.
+    Failed,
+    /// The operation was canceled before completing.
+    Canceled,
+}
+
+impl Completion {
+    /// Classifies an operation result that was not canceled.
+    pub fn from_result<T, E>(result: &Result<T, E>) -> Self {
+        if result.is_ok() {
+            Self::Succeeded
+        } else {
+            Self::Failed
+        }
+    }
+}
+
+impl From<Completion> for State {
+    fn from(completion: Completion) -> Self {
+        match completion {
+            Completion::Succeeded => Self::Done,
+            Completion::Failed => Self::Error,
+            Completion::Canceled => Self::Idle,
+        }
+    }
+}
+
 impl State {
+    /// Classifies the legacy pair of completion flags.
+    #[deprecated(note = "use State::from(Completion) with one explicit outcome")]
     pub fn finished(success: bool, canceled: bool) -> Self {
         if canceled {
-            Self::Idle
+            Completion::Canceled.into()
         } else if success {
-            Self::Done
+            Completion::Succeeded.into()
         } else {
-            Self::Error
+            Completion::Failed.into()
         }
     }
 
@@ -166,7 +200,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cancellation_takes_priority_in_final_state_classification() {
+    fn completion_has_one_terminal_state() {
+        assert_eq!(State::from(Completion::Succeeded), State::Done);
+        assert_eq!(State::from(Completion::Failed), State::Error);
+        assert_eq!(State::from(Completion::Canceled), State::Idle);
+    }
+
+    #[test]
+    fn result_classification_keeps_success_and_failure_distinct() {
+        assert_eq!(
+            Completion::from_result(&Ok::<_, ()>(())),
+            Completion::Succeeded
+        );
+        assert_eq!(
+            Completion::from_result(&Err::<(), _>("failed")),
+            Completion::Failed
+        );
+    }
+
+    #[test]
+    #[expect(deprecated, reason = "the compatibility test exercises the legacy API")]
+    fn legacy_completion_flags_keep_cancellation_priority() {
         assert_eq!(State::finished(true, false), State::Done);
         assert_eq!(State::finished(false, false), State::Error);
         assert_eq!(State::finished(true, true), State::Idle);

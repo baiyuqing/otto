@@ -54,7 +54,12 @@ pub(super) async fn run_wake<B: Backend>(
     };
     let parent_cancelled = cancel.is_cancelled();
     let turn_cancelled = result.as_ref().err().is_some_and(AgentError::is_cancelled);
-    app.finish_turn(result.is_ok(), parent_cancelled || turn_cancelled);
+    let completion = if parent_cancelled || turn_cancelled {
+        crate::program_status::Completion::Canceled
+    } else {
+        crate::program_status::Completion::from_result(&result)
+    };
+    app.finish_turn(completion);
     if !error_rendered && let Err(error) = &result {
         app.push_system(error.to_string());
     }
@@ -129,7 +134,12 @@ pub(super) async fn run_compact<B: Backend>(
     };
     let parent_cancelled = cancel.is_cancelled();
     let turn_cancelled = result.as_ref().err().is_some_and(AgentError::is_cancelled);
-    app.finish_turn(result.is_ok(), parent_cancelled || turn_cancelled);
+    let completion = if parent_cancelled || turn_cancelled {
+        crate::program_status::Completion::Canceled
+    } else {
+        crate::program_status::Completion::from_result(&result)
+    };
+    app.finish_turn(completion);
     if parent_cancelled {
         return Err(ReplError::Cancelled);
     }

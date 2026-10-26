@@ -38,8 +38,12 @@ impl<'a> Repl<'a> {
         if let Some(reporter) = program_status {
             let canceled = cancel.is_cancelled()
                 || result.as_ref().err().is_some_and(AgentError::is_cancelled);
-            let state = crate::program_status::State::finished(result.is_ok(), canceled);
-            reporter.report(&mut **stdout, state);
+            let completion = if canceled {
+                crate::program_status::Completion::Canceled
+            } else {
+                crate::program_status::Completion::from_result(&result)
+            };
+            reporter.report(&mut **stdout, completion.into());
         };
         if let Err(error) = &result
             && !error_rendered
@@ -117,8 +121,12 @@ impl<'a> Repl<'a> {
         if let Some(reporter) = program_status {
             let canceled = cancel.is_cancelled()
                 || result.as_ref().err().is_some_and(AgentError::is_cancelled);
-            let state = crate::program_status::State::finished(result.is_ok(), canceled);
-            reporter.report(&mut **stdout, state);
+            let completion = if canceled {
+                crate::program_status::Completion::Canceled
+            } else {
+                crate::program_status::Completion::from_result(&result)
+            };
+            reporter.report(&mut **stdout, completion.into());
         }
         if let Err(error) = &result
             && !error_rendered
@@ -248,8 +256,12 @@ impl<'a> Repl<'a> {
         if let Some(reporter) = &self.program_status {
             let canceled = cancel.is_cancelled()
                 || result.as_ref().err().is_some_and(AgentError::is_cancelled);
-            let state = crate::program_status::State::finished(result.is_ok(), canceled);
-            reporter.report(&mut *self.stdout, state);
+            let completion = if canceled {
+                crate::program_status::Completion::Canceled
+            } else {
+                crate::program_status::Completion::from_result(&result)
+            };
+            reporter.report(&mut *self.stdout, completion.into());
         }
         if let Err(error) = &result
             && !error_rendered

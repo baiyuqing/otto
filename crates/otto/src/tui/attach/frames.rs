@@ -78,12 +78,12 @@ impl<'a> Ui<'a> {
         let id = followed.stream.turn_id;
         self.remote.finish(&id);
         self.last_done = Some(id);
-        let (success, canceled) = match event.status.as_str() {
-            "error" => (false, false),
-            "canceled" => (false, true),
-            _ => (true, false),
+        let completion = match event.status.as_str() {
+            "error" => crate::program_status::Completion::Failed,
+            "canceled" => crate::program_status::Completion::Canceled,
+            _ => crate::program_status::Completion::Succeeded,
         };
-        self.app.finish_turn(success, canceled);
+        self.app.finish_turn(completion);
         match event.status.as_str() {
             "error" if !followed.error_rendered => {
                 self.app.push_system(if event.error.is_empty() {
@@ -114,9 +114,12 @@ impl<'a> Ui<'a> {
 
     pub(super) fn on_compact(&mut self, result: Result<Option<WireCompaction>, Error>) {
         self.compacting = None;
-        let success = matches!(&result, Ok(Some(_)));
-        let canceled = matches!(&result, Ok(None));
-        self.app.finish_turn(success, canceled);
+        let completion = match &result {
+            Ok(Some(_)) => crate::program_status::Completion::Succeeded,
+            Ok(None) => crate::program_status::Completion::Canceled,
+            Err(_) => crate::program_status::Completion::Failed,
+        };
+        self.app.finish_turn(completion);
         self.transcript = self.transcript.wrapping_add(1);
         match result {
             Ok(Some(compaction)) => self.app.push_system(compaction_line(&compaction)),

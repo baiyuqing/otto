@@ -40,9 +40,9 @@ impl App {
         self.busy_since = None;
         self.finish_steering();
     }
-    pub(crate) fn finish_turn(&mut self, success: bool, canceled: bool) {
+    pub(crate) fn finish_turn(&mut self, completion: crate::program_status::Completion) {
         self.end_turn();
-        self.report_program_status(crate::program_status::State::finished(success, canceled));
+        self.report_program_status(completion.into());
     }
 
     /// A turn end is the last moment tracked guidance can be resolved. Guidance

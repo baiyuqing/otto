@@ -10,6 +10,8 @@
 !.otto/skills/
 !.otto/skills/sandbox-setup/
 !.otto/skills/sandbox-setup/SKILL.md
+!.otto/skills/rust-best-practices/
+!.otto/skills/rust-best-practices/**
 *.test
 
 # Rust build artifacts.

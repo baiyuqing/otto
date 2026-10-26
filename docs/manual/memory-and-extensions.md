@@ -27,8 +27,17 @@ routes:
 | `identity.json` | Store and user scope IDs |
 | `records/<id>.md` | Active record |
 | `tombstones/<id>.json` | Forgotten record ID, without its text |
-| `candidates/<id>.json` | Pending/decided proposal |
+| `candidates/<id>.json` | Pending proposal |
+| `candidates/archive/<id>.json` | Accepted/rejected proposal receipt |
 | `.lock` | Exclusive writer lock |
+
+Decided proposals are archived automatically after review. Opening the store
+also archives valid decided files left by older versions or an interrupted
+archive; pending and invalid files stay in place. Normal recall and pending
+review lists do not scan the archive. Exact-ID lookup and explicit history
+lists still read archived receipts for approval history and retry confirmation.
+Archiving does not delete history or reduce the total file count. Older Otto
+versions do not look in the archive for receipts.
 
 Record frontmatter uses one `name: <JSON value>` per line. All eleven names
 below are required exactly once; unknown fields and multiline bodies are invalid.

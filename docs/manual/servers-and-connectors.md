@@ -667,8 +667,13 @@ backend is involved.
 `otto_tasks_started_total`, `otto_tasks_finished_total{status}`,
 `otto_tasks_running`, `otto_workflow_runs{status}`,
 `otto_workflow_steps{status}`, `otto_schedule_runs_total{outcome}`,
-`otto_schedule_deliveries_total{channel,outcome}`,
-`otto_build_info{version}`, and `process_start_time_seconds`.
+`otto_schedule_deliveries_total{channel,outcome}`, `otto_build_info{version}`,
+`process_start_time_seconds`, `process_resident_memory_bytes`,
+`process_virtual_memory_bytes`, `process_cpu_seconds_total`, `process_threads`,
+and `process_open_fds`. Process resource samples describe the Otto server process
+only, not its child processes, and are omitted individually when the operating
+system cannot provide them. Otto logs a rate-limited
+`process_metrics_sample_incomplete` warning naming omitted samples.
 
 Otto logs one line per HTTP request, turn, provider request, and tool call.
 See [Logs, metrics, and request correlation](servers-and-connectors.md#logs-metrics-and-request-correlation)

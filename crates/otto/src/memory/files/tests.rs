@@ -1,3 +1,5 @@
+mod candidate_archive;
+
 use std::fs;
 use std::time::Duration;
 
@@ -664,6 +666,7 @@ fn a_proposal_batch_with_one_invalid_member_writes_no_file() {
     assert_eq!(
         fs::read_dir(store.root().join("candidates"))
             .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_file())
             .count(),
         0
     );

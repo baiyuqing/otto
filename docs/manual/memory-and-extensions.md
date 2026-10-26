@@ -339,6 +339,8 @@ about omitted records.
 
 Skills are directories containing `SKILL.md` (YAML frontmatter plus Markdown)
 in the Agent Skills format. `make install` installs bundled skills globally.
+The checkout bundles `sandbox-setup` for sandbox recovery and
+`rust-best-practices` for repository-aware Rust implementation and review.
 
 ```toml
 [skills]

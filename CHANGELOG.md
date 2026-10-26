@@ -40,6 +40,10 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Development
 
+- `make install` now includes a repository-aware `rust-best-practices` skill,
+  adapted from BeautifulRust with source attribution. It applies idiomatic Rust
+  guidance while keeping Otto's scoped `AGENTS.md`, architecture, exact
+  dependency pins and focused local verification authoritative.
 - Release builds of `otto` now abort on panic. A panic in any task, including
   one inside `otto serve`, ends the whole process with SIGABRT (exit status
   134) instead of ending only that task; before exiting, Otto kills the

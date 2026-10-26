@@ -191,7 +191,7 @@ configured model review and the artifact checks still run. Saving a profile
 change still requires a restart.
 Read-path requests explicitly disclose persistence; commands remain sandboxed.
 
-## Provider egress secret guard
+## Provider egress secret and PII guard
 
 Sandboxing controls what an agent can access; it does not by itself control what
 an authorized read may send to a remote model. Before every provider call, Otto
@@ -206,24 +206,33 @@ configuration assignments and strongly identified token formats. Detection is
 deterministic local code: suspect text is not sent to another model for
 classification.
 
-Free text and JSON strings that can be changed without altering their meaning are
-replaced before transmission. If a credential appears in a structural or opaque
-field—such as a model or tool identifier, tool schema, image payload, cache key,
-or provider-owned remote-compaction checkpoint—Otto refuses the provider call
-instead of rewriting the field. The error identifies the local safety refusal
-without echoing the credential. An admission-time structural refusal happens before
-persistence and appends nothing. If later dynamically produced state is refused,
-Otto preserves only the history already appended and appends no provider response.
-Remove the credential from the source or replace it with an obvious placeholder,
-then retry the request.
+The always-on PII pass recognizes ASCII email addresses, international phone
+numbers beginning with `+`, payment-card numbers from known card networks that
+pass the Luhn checksum, and Chinese resident identity-card numbers with valid
+dates and checksums. In free text and JSON values it replaces each distinct
+value with a typed placeholder such as `<EMAIL_1>` or `<PAYMENT_CARD_1>`; the
+same value keeps the same placeholder throughout one request. There is no PII
+configuration or remote classifier.
 
-This is defense in depth, not a guarantee that arbitrary secrets can always be
-recognized. Otto deliberately avoids broad entropy guessing because source code,
-fixtures and encoded data would produce frequent false positives. Unrecognized
-custom credential formats can still be transmitted, and the guard does not OCR
-images or inspect decoded binary payloads. Keep secrets out of prompts, workspace
-files intended for model review, session files, skills and plugin output whenever
-possible.
+Free text and JSON strings that can be changed without altering their meaning are
+replaced before transmission. If a credential or recognized PII appears in a
+structural or opaque field—such as a model or tool identifier, tool schema, image
+payload, cache key, or provider-owned remote-compaction checkpoint—Otto refuses
+the provider call instead of rewriting the field. The error identifies the local
+safety refusal without echoing the sensitive value. An admission-time structural
+refusal happens before persistence and appends nothing. If later dynamically
+produced state is refused, Otto preserves only the history already appended and
+appends no provider response. Remove the sensitive value from the source or
+replace it with an obvious placeholder, then retry the request.
+
+This is defense in depth, not a guarantee that arbitrary secrets or personal
+data can always be recognized. Otto deliberately avoids broad entropy guessing
+and contextual guesses because source code, fixtures and ordinary prose would
+produce frequent false positives. Names, street addresses, local-format phone
+numbers, unsupported identity documents and unrecognized custom credentials can
+still be transmitted. The guard does not OCR images or inspect decoded binary
+payloads. Keep sensitive data out of prompts, workspace files intended for model
+review, session files, skills and plugin output whenever possible.
 
 ## Tools and safety
 

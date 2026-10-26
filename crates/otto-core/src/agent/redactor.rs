@@ -1,4 +1,5 @@
-//! Removes resolved secret values at the provider-neutral agent boundary.
+//! Removes resolved secrets and high-confidence PII at the provider-neutral
+//! agent boundary.
 //!
 //! The agent runs every tool result, every streamed text delta, and every error
 //! string through a [`Redactor`] before it reaches an event sink or the session
@@ -109,31 +110,49 @@ impl Redactor {
         redact_heuristic_text(self, text).ok_or(AgentError::ProviderEgressSecret)
     }
 
-    /// Clones a provider request, redacting known and high-confidence secrets
-    /// only in free text and JSON string keys/values. Structural and opaque
-    /// fields are preserved byte-for-byte or cause a local refusal.
+    /// Clones a provider request, redacting known/high-confidence secrets and
+    /// PII only in free text and JSON values. Structural and opaque fields are
+    /// preserved byte-for-byte or cause a local refusal.
     pub fn guard_provider_request(&self, request: &Request) -> Result<Request, AgentError> {
+        let mut pii = PiiRedactor::default();
+        self.guard_provider_request_internal(request, Some(&mut pii))
+    }
+
+    /// Sanitizes transient compaction input before it is assembled into the
+    /// complete request. The final provider guard owns request-wide PII names.
+    pub(super) fn guard_provider_request_secrets_only(
+        &self,
+        request: &Request,
+    ) -> Result<Request, AgentError> {
+        self.guard_provider_request_internal(request, None)
+    }
+
+    fn guard_provider_request_internal(
+        &self,
+        request: &Request,
+        mut pii: Option<&mut PiiRedactor>,
+    ) -> Result<Request, AgentError> {
+        let detect_pii = pii.is_some();
         if !self.complete
-            || !protected_text_is_safe(self, &request.model)
-            || !protected_text_is_safe(self, &request.thinking)
-            || !protected_text_is_safe(self, &request.cache_key)
+            || !protected_text_is_safe(self, &request.model, detect_pii)
+            || !protected_text_is_safe(self, &request.thinking, detect_pii)
+            || !protected_text_is_safe(self, &request.cache_key, detect_pii)
         {
             return Err(blocked());
         }
         if let Some(remote) = &request.remote_compaction
-            && (!protected_text_is_safe(self, &remote.provider)
-                || !protected_text_is_safe(self, &remote.id)
-                || !protected_text_is_safe(self, &remote.encrypted_content))
+            && (!protected_text_is_safe(self, &remote.provider, detect_pii)
+                || !protected_text_is_safe(self, &remote.id, detect_pii)
+                || !protected_text_is_safe(self, &remote.encrypted_content, detect_pii))
         {
             return Err(blocked());
         }
         for tool in &request.tools {
-            if !protected_text_is_safe(self, &tool.name)
-                || !protected_text_is_safe(self, &tool.description)
-                || tool
-                    .parameters
-                    .as_ref()
-                    .is_some_and(|parameters| !protected_json_is_safe(self, parameters.get()))
+            if !protected_text_is_safe(self, &tool.name, detect_pii)
+                || !protected_text_is_safe(self, &tool.description, detect_pii)
+                || tool.parameters.as_ref().is_some_and(|parameters| {
+                    !protected_json_is_safe(self, parameters.get(), detect_pii)
+                })
             {
                 return Err(blocked());
             }
@@ -141,41 +160,44 @@ impl Redactor {
 
         let mut guarded = request.clone();
         guarded.system_prompt =
-            redact_heuristic_text(self, &request.system_prompt).ok_or_else(blocked)?;
+            redact_provider_text_value(self, pii.as_deref_mut(), &request.system_prompt)
+                .ok_or_else(blocked)?;
         for message in &mut guarded.messages {
-            if !protected_text_is_safe(self, &message.id)
-                || !role_is_safe(self, &message.role)
-                || !protected_text_is_safe(self, &message.context_type)
-                || !protected_text_is_safe(self, &message.input_id)
+            if !protected_text_is_safe(self, &message.id, detect_pii)
+                || !role_is_safe(self, &message.role, detect_pii)
+                || !protected_text_is_safe(self, &message.context_type, detect_pii)
+                || !protected_text_is_safe(self, &message.input_id, detect_pii)
                 || message
                     .finish_reason
                     .as_ref()
-                    .is_some_and(|reason| !finish_reason_is_safe(self, reason))
-                || message
-                    .context_metadata
-                    .as_ref()
-                    .is_some_and(|metadata| !protected_text_is_safe(self, &metadata.task_id))
+                    .is_some_and(|reason| !finish_reason_is_safe(self, reason, detect_pii))
+                || message.context_metadata.as_ref().is_some_and(|metadata| {
+                    !protected_text_is_safe(self, &metadata.task_id, detect_pii)
+                })
             {
                 return Err(blocked());
             }
             for block in &mut message.blocks {
-                if !block_type_is_safe(self, &block.block_type)
-                    || !protected_text_is_safe(self, &block.data)
-                    || !protected_text_is_safe(self, &block.mime_type)
-                    || !protected_text_is_safe(self, &block.tool_call_id)
-                    || !protected_text_is_safe(self, &block.tool_name)
+                if !block_type_is_safe(self, &block.block_type, detect_pii)
+                    || !protected_text_is_safe(self, &block.data, detect_pii)
+                    || !protected_text_is_safe(self, &block.mime_type, detect_pii)
+                    || !protected_text_is_safe(self, &block.tool_call_id, detect_pii)
+                    || !protected_text_is_safe(self, &block.tool_name, detect_pii)
                     || block.operation_metadata.as_ref().is_some_and(|metadata| {
                         metadata.operation_id.as_ref().is_some_and(|operation_id| {
-                            !protected_text_is_safe(self, operation_id.as_str())
+                            !protected_text_is_safe(self, operation_id.as_str(), detect_pii)
                         })
                     })
                 {
                     return Err(blocked());
                 }
-                block.text = redact_heuristic_text(self, &block.text).ok_or_else(blocked)?;
+                block.text = redact_provider_text_value(self, pii.as_deref_mut(), &block.text)
+                    .ok_or_else(blocked)?;
                 if let Some(arguments) = &block.arguments {
-                    block.arguments =
-                        Some(redact_egress_json(self, arguments.get()).ok_or_else(blocked)?);
+                    block.arguments = Some(
+                        redact_egress_json(self, pii.as_deref_mut(), arguments.get())
+                            .ok_or_else(blocked)?,
+                    );
                 }
             }
         }
@@ -443,10 +465,14 @@ fn encode_object(members: Vec<(String, String)>) -> String {
 
 mod heuristics;
 mod json_parse;
+mod pii;
 
 use heuristics::*;
+use pii::*;
 
 #[cfg(test)]
 mod egress_scan_tests;
+#[cfg(test)]
+mod pii_tests;
 #[cfg(test)]
 mod tests;

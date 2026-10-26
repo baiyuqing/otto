@@ -32,7 +32,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         ..Request::default()
                     };
                     self.redactor
-                        .guard_provider_request(&request)?
+                        .guard_provider_request_secrets_only(&request)?
                         .messages
                         .into_iter()
                         .next()

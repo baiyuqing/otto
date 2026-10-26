@@ -28,7 +28,8 @@ impl<'a> Ui<'a> {
         self.compacting = None;
         self.rows.clear();
         self.last_row = None;
-        self.app.finish_turn(false, true);
+        self.app
+            .finish_turn(crate::program_status::Completion::Canceled);
         self.app.connected = false;
         self.app.push_system(DISCONNECTED);
         self.transcript = self.transcript.wrapping_add(1);
@@ -185,7 +186,8 @@ impl<'a> Ui<'a> {
                     self.last_done = self.last_row.as_ref().and_then(|row| row.turn_id.clone());
                 }
                 if self.followed.is_none() && self.compacting.is_none() && self.app.busy() {
-                    self.app.finish_turn(false, false);
+                    self.app
+                        .finish_turn(crate::program_status::Completion::Failed);
                 }
                 self.report("serve", error);
                 return;
@@ -227,7 +229,8 @@ impl<'a> Ui<'a> {
                         self.adopt_stream(stream);
                     }
                 } else if self.followed.is_none() && self.compacting.is_none() {
-                    self.app.finish_turn(false, true);
+                    self.app
+                        .finish_turn(crate::program_status::Completion::Canceled);
                 }
                 if self.cancel_after_send {
                     self.cancel_after_send = false;

@@ -135,7 +135,8 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                     ui.last_done = None;
                     ui.last_row = None;
                     ui.fresh = true;
-                    ui.app.finish_turn(false, true);
+                    ui.app
+                        .finish_turn(crate::program_status::Completion::Canceled);
                 }
             }
             Ev::FeaturesTick => ui.app.tick_features(),

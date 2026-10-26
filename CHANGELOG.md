@@ -7,6 +7,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Observability
+
+- `GET /metrics` now reports the Otto server process's resident and virtual
+  memory, cumulative CPU time, thread count and open file-descriptor count on
+  macOS and Linux. An unavailable operating-system sample is omitted without
+  failing the metrics scrape.
+
 ### Security
 
 - Every provider request now receives always-on, local PII filtering in addition

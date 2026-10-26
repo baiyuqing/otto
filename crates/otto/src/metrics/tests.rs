@@ -1,6 +1,26 @@
 use super::*;
 use std::sync::Arc;
 
+#[derive(Clone)]
+struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLog {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).expect("UTF-8 log")
+    }
+}
+
 fn millis(value: u64) -> Duration {
     Duration::from_millis(value)
 }
@@ -190,6 +210,48 @@ fn build_info_and_start_time_render_with_their_documented_names() {
 }
 
 #[test]
+fn process_resource_metrics_render_with_their_documented_names() {
+    let body = Metrics::new().render();
+    for name in [
+        "process_resident_memory_bytes",
+        "process_virtual_memory_bytes",
+        "process_cpu_seconds_total",
+        "process_threads",
+        "process_open_fds",
+    ] {
+        assert_lines(&body, &[&format!("# TYPE {name} ")]);
+        let value = body
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} ")))
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("missing numeric sample for {name}:\n{body}"));
+        assert!(value >= 0.0, "{name}={value}");
+    }
+}
+
+#[test]
+fn process_sample_failures_log_once_during_the_warning_interval() {
+    let captured = CapturedLog(Arc::new(Mutex::new(Vec::new())));
+    let metrics = Metrics::with_logger(Arc::new(crate::log::Logger::new(Box::new(
+        captured.clone(),
+    ))));
+    let sample = process::Sample {
+        failures: vec!["resident_memory", "open_fds"],
+        ..process::Sample::default()
+    };
+
+    metrics.render_with_process_sample(&sample);
+    metrics.render_with_process_sample(&sample);
+
+    let log = captured.text();
+    assert_eq!(
+        log.matches("msg=process_metrics_sample_incomplete").count(),
+        1
+    );
+    assert!(log.contains("metrics=resident_memory,open_fds"));
+}
+
+#[test]
 fn schedule_counters_render_with_their_documented_names_and_labels() {
     let metrics = Metrics::new();
     metrics.schedule_run("reply");
@@ -245,7 +307,11 @@ fn rendering_is_deterministic() {
         output_tokens: 3,
         cached_input_tokens: 1,
     });
-    assert_eq!(metrics.render(), metrics.render());
+    let process_sample = process::sample();
+    assert_eq!(
+        metrics.render_with_process_sample(&process_sample),
+        metrics.render_with_process_sample(&process_sample)
+    );
 }
 
 #[test]

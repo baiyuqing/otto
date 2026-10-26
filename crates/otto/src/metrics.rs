@@ -11,8 +11,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+mod process;
+
+const PROCESS_SAMPLE_WARNING_INTERVAL: Duration = Duration::from_secs(300);
 
 use otto_core::model::{
     EffectCertainty, OperationDisposition, OperationId, OperationOutcome, OperationStopReason,
@@ -142,6 +146,8 @@ struct State {
 #[derive(Debug)]
 pub struct Metrics {
     state: Mutex<State>,
+    logger: Arc<crate::log::Logger>,
+    last_process_sample_warning: Mutex<Option<Instant>>,
     /// Unix seconds when this registry was created.
     started_at: u64,
 }
@@ -154,15 +160,42 @@ impl Default for Metrics {
 
 impl Metrics {
     pub fn new() -> Self {
+        Self::with_logger(Arc::new(crate::log::Logger::discard()))
+    }
+
+    pub(crate) fn with_logger(logger: Arc<crate::log::Logger>) -> Self {
         Self {
             state: Mutex::new(State {
                 turn_duration: Some(Histogram::new(TURN_TOOL_BUCKETS)),
                 ..State::default()
             }),
+            logger,
+            last_process_sample_warning: Mutex::new(None),
             started_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_secs()),
         }
+    }
+
+    fn warn_process_sample_failures(&self, failures: &[&str]) {
+        if failures.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut last_warning = self
+            .last_process_sample_warning
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if last_warning
+            .is_some_and(|last| now.duration_since(last) < PROCESS_SAMPLE_WARNING_INTERVAL)
+        {
+            return;
+        }
+        *last_warning = Some(now);
+        self.logger.warn(
+            "process_metrics_sample_incomplete",
+            &[("metrics", failures.join(","))],
+        );
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -374,6 +407,12 @@ impl Metrics {
 
     /// The `text/plain; version=0.0.4` body.
     pub fn render(&self) -> String {
+        let process_sample = process::sample();
+        self.render_with_process_sample(&process_sample)
+    }
+
+    fn render_with_process_sample(&self, process_sample: &process::Sample) -> String {
+        self.warn_process_sample_failures(&process_sample.failures);
         let state = self.lock();
         let mut out = String::new();
         write_help(
@@ -393,6 +432,7 @@ impl Metrics {
             "Start time of the process in Unix seconds.",
             self.started_at as i64,
         );
+        process::write(&mut out, process_sample);
         write_counter_http_requests(&mut out, &state.http_total);
         write_histogram_by_label(
             &mut out,

@@ -1,17 +1,18 @@
 //! The file-backed memory store.
 //!
 //! One directory holds the whole store: `records/<id>.md` (Markdown with
-//! frontmatter), `tombstones/<id>.json`, `candidates/<id>.json`,
-//! `identity.json` and the `.lock` file. A person can read and edit the record
-//! files directly; the next operation sees the edit.
+//! frontmatter), `tombstones/<id>.json`, pending `candidates/<id>.json`,
+//! decided `candidates/archive/<id>.json`, `identity.json` and the `.lock` file.
+//! A person can read and edit record files; the next operation sees the edit.
 //!
 //! Writes take an exclusive `flock` on `.lock`, re-read the directory under
 //! it and publish each file with an atomic rename. Reads take no lock and
 //! tolerate a file that disappears between the directory listing and the read.
 //!
-//! ponytail: every operation loads the full directory (tens of records). Add
-//! an index only if a store holds thousands of records.
+//! Normal snapshots load active files only; decided candidate receipts are
+//! read by ID or scanned only for an explicit history listing.
 
+mod candidate_archive;
 mod candidates;
 mod cursor;
 mod format;
@@ -76,9 +77,10 @@ fn ensure_directory(path: &Path) -> Result<()> {
 fn ensure_layout(root: &Path) -> Result<()> {
     ensure_directory(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).map_err(unavailable)?;
-    for name in ["records", "tombstones", "candidates"] {
+    for name in ["records", "tombstones", "candidates", "candidates/archive"] {
         ensure_directory(&root.join(name))?;
     }
+    fsops::open_dir_no_follow(&root.join("candidates/archive")).map_err(unavailable)?;
     Ok(())
 }
 
@@ -219,6 +221,7 @@ pub struct FileStore {
 impl FileStore {
     /// Opens `root`, creating its layout and identity when absent, and removes
     /// record files whose id has a tombstone (left by an interrupted forget).
+    /// Archives legacy decided candidates while holding the same store lock.
     pub fn open(root: &Path, options: MemoryOptions) -> Result<Self> {
         ensure_layout(root)?;
         let lock = acquire(root, options.busy_timeout)?;
@@ -259,6 +262,7 @@ impl FileStore {
         for tombstone in &snapshot.tombstones {
             remove_if_present(&store.path("records", &tombstone.id, "md"))?;
         }
+        store.archive_decided_candidates(&snapshot)?;
         drop(lock);
         Ok(store)
     }
@@ -337,7 +341,11 @@ impl FileStore {
             &candidate.id,
             "json",
             &encode_candidate_file(candidate)?,
-        )
+        )?;
+        if candidate.state != crate::memory::CandidateState::Pending {
+            self.archive_candidate(candidate)?;
+        }
+        Ok(())
     }
 
     fn snapshot(&self) -> Result<Snapshot> {

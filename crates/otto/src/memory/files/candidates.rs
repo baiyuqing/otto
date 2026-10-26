@@ -1,7 +1,8 @@
 //! Pending candidates and their review.
 //!
 //! A review runs entirely under the store lock. The record or tombstone a
-//! decision authorizes is written first and the decided candidate second, so
+//! decision authorizes is written first and the decided candidate second, then
+//! the decided receipt is archived. This ordering means
 //! an interrupted review leaves the candidate pending and the repeated
 //! accept fails on the already-written record instead of writing twice.
 
@@ -100,8 +101,9 @@ impl FileStore {
         self.write(|_| {
             for candidate in candidates {
                 Self::file_id(&candidate.id, "candidate ID")?;
-                if std::fs::symlink_metadata(self.path("candidates", &candidate.id, "json")).is_ok()
-                {
+                if ["candidates", "candidates/archive"].iter().any(|dir| {
+                    std::fs::symlink_metadata(self.path(dir, &candidate.id, "json")).is_ok()
+                }) {
                     return Err(Error::new(ErrorKind::Conflict));
                 }
             }
@@ -133,9 +135,11 @@ impl FileStore {
 
     pub fn get_candidate(&self, reference: &CandidateRef) -> Result<Candidate> {
         validate_candidate_ref(reference)?;
-        self.snapshot()?
-            .candidate(&reference.scope, &reference.id)
-            .cloned()
+        self.ensure_open()?;
+        if let Some(candidate) = self.read_candidate("candidates", reference)? {
+            return Ok(candidate);
+        }
+        self.read_candidate("candidates/archive", reference)?
             .ok_or_else(|| Error::new(ErrorKind::NotFound))
     }
 
@@ -151,9 +155,17 @@ impl FileStore {
             )),
             None => None,
         };
-        let snapshot = self.snapshot()?;
+        let mut snapshot = self.snapshot()?;
         if request.scopes.is_empty() {
             return Ok(CandidatePage::default());
+        }
+        if request.states.is_empty()
+            || request
+                .states
+                .iter()
+                .any(|state| *state != CandidateState::Pending)
+        {
+            self.include_candidate_archive(&mut snapshot)?;
         }
         let mut candidates: Vec<Candidate> = snapshot
             .candidates
@@ -222,7 +234,17 @@ impl FileStore {
                     {
                         return Err(corrupt());
                     }
-                    None => return Err(Error::new(ErrorKind::NotFound)),
+                    None => {
+                        let kind = if self
+                            .read_candidate("candidates/archive", &request.reference)?
+                            .is_some()
+                        {
+                            ErrorKind::Conflict
+                        } else {
+                            ErrorKind::NotFound
+                        };
+                        return Err(Error::new(kind));
+                    }
                 };
             if candidate.state != CandidateState::Pending {
                 return Err(Error::new(ErrorKind::Conflict));

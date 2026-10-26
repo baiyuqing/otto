@@ -43,6 +43,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Performance
 
+- Local memory automatically moves accepted/rejected proposals into
+  `candidates/archive/`, including existing decided files on startup, so normal
+  memory reads no longer scan that history. Receipts remain available for
+  exact-ID lookup and explicit history lists; older Otto versions cannot find
+  archived receipts. Files are retained, not deleted.
+
 - The terminal UI now keeps the rendered rows of every transcript entry
   between frames and re-renders only the entries that changed, instead of
   rendering the whole transcript again on every tick. At 180x50 with a

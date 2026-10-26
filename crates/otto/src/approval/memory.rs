@@ -556,6 +556,7 @@ mod tests {
     #[test]
     fn one_memory_request_is_shared_across_authorized_workspaces_without_copying_text() {
         let (_dir, store) = crate::memory::files::testsupport::open_temp();
+        let root = store.root().to_path_buf();
         let user = store.identity().unwrap().user_scope;
         let memory = Arc::new(crate::memory::Service::new(
             store,
@@ -634,6 +635,31 @@ mod tests {
             })
             .unwrap();
         assert_eq!(accepted.state, CandidateState::Accepted);
+        assert!(
+            !root
+                .join("candidates")
+                .join(format!("{}.json", accepted.id))
+                .exists()
+        );
+        assert!(
+            root.join("candidates/archive")
+                .join(format!("{}.json", accepted.id))
+                .is_file()
+        );
+        let applied = service.get(&one.id, "/one", Some("s1")).unwrap();
+        assert!(
+            applied
+                .subject
+                .details
+                .contains("Original authorized subject digest")
+        );
+        let adapter = Adapter {
+            memory: memory.clone(),
+            scopes: vec![user.clone()],
+        };
+        let persisted = service.store.load(&one.id).unwrap();
+        adapter.apply(&persisted).unwrap();
+        assert!(adapter.details(&persisted).unwrap().contains(&accepted.id));
         let record = memory
             .get(&crate::memory::RecordRef {
                 scope: user,

@@ -44,13 +44,26 @@ pub async fn run_with_extensions(
     } else {
         None
     };
-    let flag_args = if workflow_command.is_some() {
-        &[]
+    let eval_command = if args.first().is_some_and(|first| first == "eval") {
+        match crate::cli::eval_command::parse(&args[1..]) {
+            Ok(command) => Some(command),
+            Err(message) => {
+                let _ = writeln!(stderr, "{message}");
+                return 2;
+            }
+        }
     } else {
-        args
+        None
+    };
+    let flag_args: Vec<String> = if workflow_command.is_some() {
+        Vec::new()
+    } else if let Some(command) = &eval_command {
+        command.startup_flags()
+    } else {
+        args.to_vec()
     };
 
-    let options = match parse_flags(flag_args, stdout) {
+    let options = match parse_flags(&flag_args, stdout) {
         Ok(Parsed::Help | Parsed::Version) => return 0,
         Ok(Parsed::Options(options)) => *options,
         Err(ParseFailure::Unsafe) => {
@@ -168,6 +181,18 @@ pub async fn run_with_extensions(
         Err(message) => return fail(stderr, &message),
     };
     let session_root = &prepared.session_root;
+    let eval_roots = eval_command
+        .as_ref()
+        .map(|_| crate::cli::eval_command::Roots {
+            session_root: session_root.clone(),
+            workspace: workspace_path.clone(),
+            home: loaded.home.clone(),
+        });
+    if let (Some(command), Some(roots)) = (&eval_command, &eval_roots)
+        && command.is_dry_run()
+    {
+        return crate::cli::eval_command::run_dry(command, roots, stdout, stderr);
+    }
 
     if !options.archive_path.is_empty() {
         return match storage.sessions().and_then(|repository| {
@@ -223,7 +248,7 @@ pub async fn run_with_extensions(
     // Stderr is free for serve, acp and workflow; the REPL, TUI and one-shot
     // frontends own the terminal or already print warnings there.
     let logger = Arc::new(
-        if options.serve || options.acp || workflow_command.is_some() {
+        if options.serve || options.acp || workflow_command.is_some() || eval_command.is_some() {
             crate::log::Logger::stderr()
         } else {
             crate::log::Logger::discard()
@@ -238,7 +263,8 @@ pub async fn run_with_extensions(
             headless: frontend == Frontend::Once
                 && !options.serve
                 && !options.acp
-                && workflow_command.is_none(),
+                && workflow_command.is_none()
+                && eval_command.is_none(),
             overrides: overrides_from(&options),
             explicit_config: options.explicit_config,
             logger,
@@ -297,6 +323,14 @@ pub async fn run_with_extensions(
         Ok(runtime) => runtime,
         Err(message) => return fail(stderr, &message),
     };
+
+    // The evaluation needs the provider and the redactor only: no sandbox and no memory.
+    if let (Some(command), Some(roots)) = (&eval_command, &eval_roots) {
+        return crate::cli::eval_command::run(
+            command, &builder, &resolved, roots, stdout, stderr, cancel,
+        )
+        .await;
+    }
 
     // `elevate` is REPL/TUI-specific here (an interactive frontend or a
     // server both need `/approve`); `load_workspace` always passes `true`,

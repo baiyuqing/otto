@@ -38,6 +38,7 @@ const MAXIMUM_JSON_DEPTH: usize = 10_000;
 /// or [`Redactor::with_completeness`] when the caller could not enumerate
 /// every value. An incomplete redactor suppresses all dynamic content,
 /// because it cannot promise that what it passes through is safe.
+#[derive(Clone)]
 pub struct Redactor {
     /// Canonical secret forms, longest first then lexicographic, so the
     /// leftmost-longest match wins.

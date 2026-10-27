@@ -7,6 +7,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Development
+
+- `otto eval view-tree` evaluates a summary-tree context view on an existing
+  session: it builds the tree with the compressor model, generates and
+  validates recall probes, answers them with zoom over the view and with the
+  current context, and reports correctness and a computed cache cost. See
+  [testing](docs/development/testing.md#summary-tree-view-evaluation).
+
 ### Observability
 
 - `GET /metrics` now reports the Otto server process's resident and virtual

@@ -26,6 +26,39 @@ changes need no new tests.
 - File-memory tests use temporary roots; legacy import tests construct temporary
   schema-version-2 databases, not real user stores.
 
+## Summary-tree view evaluation
+
+`otto eval view-tree` is an opt-in live-provider evaluation of the summary-tree
+context view in [the spec](../specs/2026-10-27-view-tree-eval.md). It reads an
+existing JSONL session without taking its writer lease and does not change how
+sessions run. Every provider call goes through the agent's secret redaction and
+PII egress guard, and every file it writes holds redacted text.
+
+```sh
+otto eval view-tree all --session <id|path> --dry-run   # call and byte estimate, no requests
+otto eval view-tree all --session <id|path>             # build, probes, run, report
+```
+
+`all` runs `build`, `probes` and `run`; each action can also run alone. A rerun
+with the same output directory (default `~/.otto/eval/view-tree/<session-id>/`)
+reuses built nodes, probes and answers.
+
+| Action | Provider calls | Output |
+| --- | --- | --- |
+| `build` | One compressor call per message or sibling pair over 512 bytes, up to 5 attempts each | `log.jsonl`, `tree.jsonl`, `build_calls.jsonl`, `view.json`, `build.json`, `cost.json` |
+| `probes` | One generation and one validation call per probe | `probes.jsonl`, dropped probes kept with reasons |
+| `run` | Per probe: a view answer (up to `--max-steps` calls), a baseline answer and judge calls | `answers.jsonl`, `report.json`, `report.md` |
+
+`build` and `all` take `--session`; `probes` and `run` take `--out` and read the
+session recorded in `build.json`. `--dry-run` needs no credentials.
+
+The compressor model defaults to the profile's first `subagent_models` entry,
+else the profile model. The number of compressor calls grows with the number of
+session messages; run `--dry-run` first. Use `--view-low`/`--view-high` (KB) to
+force compression on short sessions. `cost.json` is computed from message byte
+sizes with the multipliers given by flags; it is not a measured bill.
+`report.md` prints pass or fail for the spec's acceptance criteria.
+
 ## Fault injection
 
 `otto::faults` provides deterministic seams, compiled only for tests or the

@@ -34,9 +34,10 @@ pub mod turn;
 pub use codec::{PiRecord, decode_pi_entry, decode_pi_file, decode_pi_header, encode_pi_record};
 pub use context::{
     BRANCH_CONTEXT_TYPE, CAPABILITIES_CUSTOM_TYPE, CAPABILITY_UPDATE_CONTEXT_TYPE,
-    COMPACTION_CONTEXT_TYPE, Capabilities, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE,
-    ResolvedContext, active_context_path, build_context, decode_capabilities, encode_capabilities,
-    index_context_entries, is_pi_entry_id, new_context_message,
+    COMPACTION_CONTEXT_TYPE, Capabilities, ContextEntryIndex, HistoryMessage,
+    OTTO_RUNTIME_CUSTOM_TYPE, ResolvedContext, active_branch_history, active_context_path,
+    build_context, decode_capabilities, encode_capabilities, index_context_entries, is_pi_entry_id,
+    new_context_message,
 };
 pub use fork::{
     FORK_CUSTOM_TYPE, FORK_SCHEMA_VERSION, ForkError, ForkPlan, ForkPoint, ForkPromptError,

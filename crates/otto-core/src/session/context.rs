@@ -614,11 +614,13 @@ fn to_raw_value<T: serde::Serialize>(value: &T) -> Result<Box<RawValue>, PiError
 }
 
 mod entries;
+mod history_messages;
 mod messages;
 mod snapshot_preview;
 mod tool_results;
 
 pub use entries::*;
+pub use history_messages::*;
 pub use messages::*;
 pub use snapshot_preview::*;
 pub use tool_results::*;

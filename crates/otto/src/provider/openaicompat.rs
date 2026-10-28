@@ -468,9 +468,9 @@ impl Provider for Client {
                         {
                             EffectCertainty::Unknown
                         }
-                        ProviderError::Overflow(_) | ProviderError::Other(_) => {
-                            EffectCertainty::Completed
-                        }
+                        ProviderError::Overflow(_)
+                        | ProviderError::PolicyCapacityUnavailable
+                        | ProviderError::Other(_) => EffectCertainty::Completed,
                     };
                     let error = self.safe_error(error);
                     if certainty == EffectCertainty::Completed {

@@ -134,7 +134,7 @@ async fn auth_command(
     // the file still works after the process context is cancelled.
     let uncancelled = CancellationToken::new();
     match args[0].as_str() {
-        "logout" => match service.logout(&uncancelled) {
+        "logout" => match service.logout(&uncancelled).await {
             Err(_) => fail(stderr, &AuthError::CredentialsRemoval.to_string()),
             Ok(false) => {
                 let _ = writeln!(stdout, "{NOT_SIGNED_IN}");
@@ -255,7 +255,7 @@ async fn repl_login_with(
     }
 }
 
-pub fn repl_logout(
+pub async fn repl_logout(
     controller: &Controller,
     stdout: &mut (dyn Write + Send),
     cancel: &CancellationToken,
@@ -264,7 +264,7 @@ pub fn repl_logout(
         let _ = writeln!(stdout, "{}", AuthError::InteractiveUnavailable);
         return Ok(());
     };
-    match service.logout(cancel) {
+    match service.logout(cancel).await {
         Ok(true) => {
             let _ = writeln!(stdout, "{SIGNED_OUT}");
             Ok(())
@@ -577,7 +577,9 @@ mod tests {
         )
         .await;
         let mut stdout = Vec::new();
-        repl_logout(&controller, &mut stdout, &CancellationToken::new()).expect("logout");
+        repl_logout(&controller, &mut stdout, &CancellationToken::new())
+            .await
+            .expect("logout");
         let stdout = String::from_utf8(stdout).expect("stdout");
         assert!(stdout.contains(SIGNED_OUT), "{stdout}");
         assert!(matches!(auth::load(&path), Err(AuthError::NoCredentials)));
@@ -598,7 +600,9 @@ mod tests {
         )
         .await;
         let mut stdout = Vec::new();
-        repl_logout(&controller, &mut stdout, &CancellationToken::new()).expect("logout");
+        repl_logout(&controller, &mut stdout, &CancellationToken::new())
+            .await
+            .expect("logout");
         assert!(
             String::from_utf8(stdout)
                 .expect("stdout")
@@ -635,7 +639,7 @@ mod tests {
         let (status_out, _, status) = repl_call(&controller, "status", &failing_flow).await;
         let (login_out, _, login) = repl_call(&controller, "", &failing_flow).await;
         let mut logout_out = Vec::new();
-        let logout = repl_logout(&controller, &mut logout_out, &CancellationToken::new());
+        let logout = repl_logout(&controller, &mut logout_out, &CancellationToken::new()).await;
         let logout_out = String::from_utf8(logout_out).expect("stdout");
 
         assert!(status.is_ok() && login.is_ok() && logout.is_ok());

@@ -81,16 +81,18 @@ impl Service {
         if cancel.is_cancelled() {
             return Err(AuthError::Cancelled);
         }
+        let _file_lock = super::lock_credentials(&self.path, cancel, None).await?;
         credentials
             .save(&self.path)
             .map_err(|_| AuthError::CredentialsPersistence)
     }
 
     /// The bool reports whether a file was removed.
-    pub fn logout(&self, cancel: &CancellationToken) -> Result<bool, AuthError> {
+    pub async fn logout(&self, cancel: &CancellationToken) -> Result<bool, AuthError> {
         if cancel.is_cancelled() {
             return Err(AuthError::Cancelled);
         }
+        let _file_lock = super::lock_credentials(&self.path, cancel, None).await?;
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -147,8 +149,8 @@ mod tests {
         assert!(line.contains("Signed in to ChatGPT"), "{line}");
         assert!(!line.contains("acct-2"), "{line}");
 
-        assert!(service.logout(&cancel).unwrap());
-        assert!(!service.logout(&cancel).unwrap());
+        assert!(service.logout(&cancel).await.unwrap());
+        assert!(!service.logout(&cancel).await.unwrap());
     }
 
     /// A missing opener and a cancelled token are distinct outcomes, and
@@ -210,8 +212,8 @@ mod tests {
 
     /// A cancelled token makes status and logout unavailable rather than
     /// reporting "not signed in".
-    #[test]
-    fn a_cancelled_token_makes_status_and_logout_unavailable() {
+    #[tokio::test]
+    async fn a_cancelled_token_makes_status_and_logout_unavailable() {
         let directory = tempfile::tempdir().unwrap();
         let service = Service::new(directory.path().join("chatgpt.json"));
         let cancel = CancellationToken::new();
@@ -219,7 +221,7 @@ mod tests {
         let (line, signed_in) = service.status(&cancel);
         assert!(!signed_in);
         assert_eq!(line, "chatgpt sign-in is unavailable in this session");
-        assert_eq!(service.logout(&cancel), Err(AuthError::Cancelled));
+        assert_eq!(service.logout(&cancel).await, Err(AuthError::Cancelled));
     }
 
     /// The opener the flow receives is the one the caller passed.

@@ -12,6 +12,7 @@ impl Client {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
         retry_reason: &mut Option<Retry>,
+        rejected_access_token: &mut Option<String>,
         observer: &dyn otto_core::diagnostics::Observer,
     ) -> ProviderSettlement {
         if let Err(error) = check_running(control) {
@@ -115,14 +116,34 @@ impl Client {
 
         let status = response.status().as_u16();
         observer.activity(otto_core::diagnostics::Phase::Headers, 0, Some(status));
+        if status == 401 {
+            *rejected_access_token = Some(access_token);
+            return ProviderSettlement::failed(
+                ProviderError::Other(AUTHORIZATION_FAILED.to_owned()),
+                1,
+                EffectCertainty::Unknown,
+            );
+        }
         if !(200..300).contains(&status) {
+            let retry = transient_http_retry(status, response.headers());
+            match policy_capacity_error(response, control).await {
+                Ok(true) => {
+                    return ProviderSettlement::failed(
+                        ProviderError::PolicyCapacityUnavailable,
+                        1,
+                        EffectCertainty::Completed,
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => return chatgpt_failure(error, 1, EffectCertainty::Unknown, control),
+            }
             if matches!(status, 400 | 404)
                 && let Some(path) = &self.catalog_cache_path
             {
                 let _guard = self.catalog_cache_lock.lock().await;
                 super::super::catalog_cache::invalidate(path);
             }
-            if let Some(retry) = transient_http_retry(status, response.headers()) {
+            if let Some(retry) = retry {
                 *retry_reason = Some(retry);
                 return ProviderSettlement::failed(
                     ProviderError::Other(format!("chatgpt responses HTTP {status}")),
@@ -197,6 +218,13 @@ impl Client {
                 if let Err(stop) = check_running(control) {
                     return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
                 }
+                if matches!(error, StreamError::PolicyCapacityUnavailable) {
+                    return ProviderSettlement::failed(
+                        ProviderError::PolicyCapacityUnavailable,
+                        1,
+                        EffectCertainty::Completed,
+                    );
+                }
                 *retry_reason = stream_retry(&error);
                 let certainty = if retry_reason.is_some() {
                     EffectCertainty::Unknown
@@ -242,6 +270,13 @@ impl Client {
             Err(error) => {
                 if let Err(stop) = check_running(control) {
                     return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
+                }
+                if matches!(error, StreamError::PolicyCapacityUnavailable) {
+                    return ProviderSettlement::failed(
+                        ProviderError::PolicyCapacityUnavailable,
+                        1,
+                        EffectCertainty::Completed,
+                    );
                 }
                 *retry_reason = stream_retry(&error);
                 let certainty = if retry_reason.is_some() {

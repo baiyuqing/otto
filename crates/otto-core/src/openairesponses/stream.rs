@@ -53,6 +53,10 @@ pub enum StreamError {
     /// event carried. `code` is the event's error code, empty when absent.
     #[error("responses stream reported {detail}")]
     Reported { detail: String, code: String },
+    /// The backend reported a recognized error code without retaining arbitrary
+    /// upstream text in the provider-neutral result.
+    #[error("responses stream policy capacity unavailable")]
+    PolicyCapacityUnavailable,
     /// The body ended before a terminal `response.completed` event.
     #[error("responses stream ended without response.completed")]
     MissingCompletion,
@@ -405,6 +409,9 @@ impl StreamAssembler {
             }
             "response.failed" | "error" => {
                 let (code, message) = normalized_error(&event);
+                if code == "policy_capacity_unavailable" {
+                    return Err(StreamError::PolicyCapacityUnavailable);
+                }
                 let detail = [code.clone(), message]
                     .into_iter()
                     .filter(|part| !part.is_empty())

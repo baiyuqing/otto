@@ -99,12 +99,50 @@ fn stream_retry(error: &StreamError) -> Option<Retry> {
             _ => return None,
         },
         StreamError::MissingCompletion => TRANSPORT_RETRY_REASON,
+        StreamError::PolicyCapacityUnavailable => return None,
         _ => return None,
     };
+
     Some(Retry {
         reason,
         retry_after: None,
     })
+}
+
+async fn policy_capacity_error(
+    response: reqwest::Response,
+    control: &dyn OperationControl,
+) -> Result<bool, ProviderError> {
+    const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|length| length as usize > MAX_ERROR_BODY_BYTES)
+    {
+        return Ok(false);
+    }
+    let mut body = Vec::new();
+    let mut stream = Box::pin(response.bytes_stream());
+    loop {
+        match await_control(control, stream.try_next()).await {
+            Ok(Ok(Some(chunk))) => {
+                if body.len().saturating_add(chunk.len()) > MAX_ERROR_BODY_BYTES {
+                    return Ok(false);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .is_some_and(|value| {
+            value.pointer("/error/code").and_then(|code| code.as_str())
+                == Some("policy_capacity_unavailable")
+                || value.get("code").and_then(|code| code.as_str())
+                    == Some("policy_capacity_unavailable")
+        }))
 }
 
 #[derive(Clone, Copy)]
@@ -310,9 +348,11 @@ impl Provider for Client {
     ) -> otto_core::provider::DiagnosticFuture<'a> {
         Box::pin(async move {
             let mut attempts = 0;
+            let mut auth_recovery_used = false;
             loop {
                 let mut output_started = false;
                 let mut retry_reason = None;
+                let mut rejected_access_token = None;
                 let mut settlement = self
                     .attempt(
                         request,
@@ -322,6 +362,7 @@ impl Provider for Client {
                         },
                         control,
                         &mut retry_reason,
+                        &mut rejected_access_token,
                         observer,
                     )
                     .await;
@@ -330,6 +371,46 @@ impl Provider for Client {
                 }
                 attempts += settlement.attempts;
                 settlement.attempts = attempts;
+                if let Some(rejected_access_token) = rejected_access_token {
+                    if auth_recovery_used {
+                        return authorization_failure(attempts);
+                    }
+                    auth_recovery_used = true;
+                    let refreshed = match await_control(
+                        control,
+                        self.tokens
+                            .refresh_rejected(&rejected_access_token, control.cancellation_token()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(credentials)) => credentials,
+                        Ok(Err(_)) => {
+                            if let Err(error) = check_running(control) {
+                                return chatgpt_failure(
+                                    error,
+                                    attempts,
+                                    EffectCertainty::Unknown,
+                                    control,
+                                );
+                            }
+                            return authorization_failure(attempts);
+                        }
+                        Err(error) => {
+                            return chatgpt_failure(
+                                error,
+                                attempts,
+                                EffectCertainty::Unknown,
+                                control,
+                            );
+                        }
+                    };
+                    if refreshed.access_token.trim().is_empty()
+                        || refreshed.account_id != self.account_id
+                    {
+                        return authorization_failure(attempts);
+                    }
+                    continue;
+                }
                 // Retry only this completion. A partial stream never authorizes
                 // tools; previously completed tools remain in the borrowed request.
                 // The retry event separates provisional output from its replacement.
@@ -368,6 +449,18 @@ impl Provider for Client {
             }
         })
     }
+}
+
+fn authorization_failure(attempts: u32) -> ProviderSettlement {
+    ProviderSettlement::failed(
+        ProviderError::Other(AUTHORIZATION_FAILED.to_owned()),
+        attempts,
+        if attempts == 0 {
+            EffectCertainty::NotStarted
+        } else {
+            EffectCertainty::Unknown
+        },
+    )
 }
 
 fn transient_http_retry(status: u16, headers: &reqwest::header::HeaderMap) -> Option<Retry> {

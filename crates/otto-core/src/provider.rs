@@ -243,6 +243,9 @@ pub enum ProviderError {
     /// The operation's deadline was exhausted.
     #[error("provider call deadline exceeded")]
     DeadlineExceeded,
+    /// The provider cannot serve the request because policy capacity is unavailable.
+    #[error("provider policy capacity unavailable")]
+    PolicyCapacityUnavailable,
     /// The call stopped because its cancellation token was cancelled.
     #[error("provider call was cancelled")]
     Cancelled,

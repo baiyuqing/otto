@@ -137,9 +137,15 @@ limits apply; an API subscription/key is a different connection.
 
 Otto uses the signed-in account's authenticated ChatGPT connection. Credentials
 are local authentication state and must not be copied into workspace files,
-logs, prompts or examples. If startup reports missing credentials, run
-`otto login` in the runtime's environment and restart it. See
-[Troubleshooting](troubleshooting.md).
+logs, prompts or examples. Otto refreshes an expired token and retries once when
+ChatGPT rejects the token; if authorization still fails, run `otto login` in the
+runtime's environment and restart it. Login, logout and token refresh serialize
+credential changes so an in-flight refresh cannot restore a signed-out account
+or overwrite a newer login. See [Troubleshooting](troubleshooting.md).
+
+Changing the signed-in account still requires restarting running Otto processes.
+A process that already captured the previous account does not switch accounts at
+runtime.
 
 ## Command-line reference
 

@@ -19,14 +19,58 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg};
 use otto_core::safetext::{self, SecretCollector};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 
 pub const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
+
+/// Takes the cross-process lock that serializes credential mutations.
+///
+/// Login, logout and token refresh all use the same sibling lock file. The
+/// lock file is persistent; only the advisory lock represents ownership.
+pub(crate) async fn lock_credentials(
+    path: &Path,
+    cancel: &CancellationToken,
+    base: Option<&CancellationToken>,
+) -> Result<Flock<File>, AuthError> {
+    let mut lock_name = path.file_name().unwrap_or_default().to_owned();
+    lock_name.push(".lock");
+    let lock_path = path.with_file_name(lock_name);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|_| AuthError::CredentialsPersistence)?;
+    }
+    let mut lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|_| AuthError::CredentialsPersistence)?;
+    loop {
+        match Flock::lock(lock_file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => return Ok(lock),
+            Err((returned, Errno::EWOULDBLOCK)) => lock_file = returned,
+            Err(_) => return Err(AuthError::CredentialsPersistence),
+        }
+        if cancel.is_cancelled() || base.is_some_and(|token| token.is_cancelled()) {
+            return Err(AuthError::Cancelled);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
 
 /// The sentinel errors this module reports. The variants carry no data: a
 /// cause would be the only way a secret could escape.

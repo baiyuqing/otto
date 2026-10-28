@@ -7,13 +7,8 @@
 //! written by another source is adopted instead of refreshing with a refresh
 //! token that may already be rotated. A waiter aborts on cancellation.
 
-use std::fs::{File, OpenOptions};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
-use std::time::Duration;
 
-use nix::errno::Errno;
-use nix::fcntl::{Flock, FlockArg};
 use tokio_util::sync::CancellationToken;
 
 use super::oauth::{self, Endpoint};
@@ -32,6 +27,10 @@ enum Refresher {
 /// processes.
 pub struct TokenSource {
     path: PathBuf,
+    /// A source created before any credential file may persist its first
+    /// refresh. A source that captured an existing login never recreates a
+    /// file later removed by logout.
+    may_create_credentials: bool,
     /// The process-level cancellation.
     base: CancellationToken,
     refresher: Refresher,
@@ -49,8 +48,10 @@ impl TokenSource {
         path: PathBuf,
         base: CancellationToken,
     ) -> Self {
+        let may_create_credentials = !path.exists();
         Self {
             path,
+            may_create_credentials,
             base,
             refresher: Refresher::Endpoint(endpoint),
             credentials: tokio::sync::Mutex::new(credentials),
@@ -58,79 +59,86 @@ impl TokenSource {
     }
 
     /// Returns the stored credentials when the access token is still valid,
-    /// otherwise refreshes once and persists the result.
+    /// otherwise refreshes once and conditionally persists the result.
     pub async fn token(&self, cancel: &CancellationToken) -> Result<Credentials, AuthError> {
-        if self.cancelled(cancel) {
-            return Err(AuthError::Cancelled);
-        }
-        let mut guard = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Err(AuthError::Cancelled),
-            () = self.base.cancelled() => return Err(AuthError::Cancelled),
-            guard = self.credentials.lock() => guard,
-        };
+        let mut guard = self.lock_memory(cancel).await?;
         if guard.token_valid(chrono::Utc::now().fixed_offset()) {
             return Ok(guard.clone());
         }
-        let _credentials_lock = self.lock_credentials_file(cancel).await?;
-        let stored_credentials = super::load(&self.path);
-        let refreshed = match stored_credentials {
-            Ok(stored) if stored.account_id == guard.account_id => {
-                if stored.token_valid(chrono::Utc::now().fixed_offset()) {
-                    *guard = stored.clone();
-                    return Ok(stored);
-                }
-                self.refresh(&stored, cancel, true).await?
-            }
-            // A newer login to another account owns the file; keep it.
-            Ok(_) => self.refresh(&guard, cancel, false).await?,
-            Err(_) => self.refresh(&guard, cancel, true).await?,
-        };
-        *guard = refreshed.clone();
-        Ok(refreshed)
+        self.refresh_locked(&mut guard, cancel, false).await
     }
 
-    /// Takes the exclusive lock on `<credential file>.lock`, polling every
-    /// 20 ms until cancellation.
-    async fn lock_credentials_file(
+    /// Refreshes only when `rejected_access_token` is still current.
+    ///
+    /// A concurrent caller that already rotated the token wins and its current
+    /// credentials are returned without another refresh.
+    pub async fn refresh_rejected(
+        &self,
+        rejected_access_token: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Credentials, AuthError> {
+        let mut guard = self.lock_memory(cancel).await?;
+        if guard.access_token != rejected_access_token {
+            return Ok(guard.clone());
+        }
+        self.refresh_locked(&mut guard, cancel, true).await
+    }
+
+    async fn lock_memory(
         &self,
         cancel: &CancellationToken,
-    ) -> Result<Flock<File>, AuthError> {
-        let mut lock_name = self.path.file_name().unwrap_or_default().to_owned();
-        lock_name.push(".lock");
-        let lock_path = self.path.with_file_name(lock_name);
-        if let Some(parent) = lock_path.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)
-                .map_err(|_| AuthError::CredentialsPersistence)?;
-        }
-        let mut lock_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&lock_path)
-            .map_err(|_| AuthError::CredentialsPersistence)?;
-        loop {
-            match Flock::lock(lock_file, FlockArg::LockExclusiveNonblock) {
-                Ok(credentials_lock) => return Ok(credentials_lock),
-                Err((returned, Errno::EWOULDBLOCK)) => lock_file = returned,
-                Err(_) => return Err(AuthError::CredentialsPersistence),
-            }
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(AuthError::Cancelled),
-                () = self.base.cancelled() => return Err(AuthError::Cancelled),
-                () = tokio::time::sleep(Duration::from_millis(20)) => {}
-            }
+    ) -> Result<tokio::sync::MutexGuard<'_, Credentials>, AuthError> {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(AuthError::Cancelled),
+            () = self.base.cancelled() => Err(AuthError::Cancelled),
+            guard = self.credentials.lock() => Ok(guard),
         }
     }
 
-    fn cancelled(&self, cancel: &CancellationToken) -> bool {
-        cancel.is_cancelled() || self.base.is_cancelled()
+    async fn refresh_locked(
+        &self,
+        guard: &mut tokio::sync::MutexGuard<'_, Credentials>,
+        cancel: &CancellationToken,
+        force: bool,
+    ) -> Result<Credentials, AuthError> {
+        let _file_lock = super::lock_credentials(&self.path, cancel, Some(&self.base)).await?;
+        let stored = super::load(&self.path).ok();
+        if let Some(stored) = &stored
+            && stored.account_id == guard.account_id
+            && stored.access_token != guard.access_token
+            && stored.token_valid(chrono::Utc::now().fixed_offset())
+        {
+            **guard = stored.clone();
+            return Ok(stored.clone());
+        }
+        if !force
+            && let Some(stored) = &stored
+            && stored.account_id == guard.account_id
+            && stored.token_valid(chrono::Utc::now().fixed_offset())
+        {
+            **guard = stored.clone();
+            return Ok(stored.clone());
+        }
+        let snapshot = stored
+            .as_ref()
+            .filter(|stored| {
+                stored.account_id == guard.account_id
+                    && stored.refresh_token == guard.refresh_token
+                    && stored.access_token == guard.access_token
+            })
+            .unwrap_or(&**guard)
+            .clone();
+        let persist = stored
+            .as_ref()
+            .map_or(self.may_create_credentials, |stored| {
+                stored.account_id == snapshot.account_id
+                    && stored.refresh_token == snapshot.refresh_token
+                    && stored.access_token == snapshot.access_token
+            });
+        let refreshed = self.refresh(&snapshot, cancel, persist).await?;
+        **guard = refreshed.clone();
+        Ok(refreshed)
     }
 
     /// The rotated credentials are validated against the size bound before
@@ -182,6 +190,7 @@ impl TokenSource {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use super::*;
     use crate::auth::{MAX_CREDENTIAL_FILE_BYTES, expiry, go_time, load};
@@ -194,8 +203,10 @@ mod tests {
         credentials: Credentials,
         stub: impl Fn() -> Result<oauth::Token, ()> + Send + Sync + 'static,
     ) -> TokenSource {
+        let may_create_credentials = !path.exists();
         TokenSource {
             path,
+            may_create_credentials,
             base: CancellationToken::new(),
             refresher: Refresher::Stub(Box::new(stub)),
             credentials: tokio::sync::Mutex::new(credentials),
@@ -573,6 +584,112 @@ mod tests {
             assert_eq!(handle.await.unwrap().unwrap().access_token, "access-new");
         }
         assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_rejections_refresh_the_current_token_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chatgpt.json");
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let counted = refresh_calls.clone();
+        let source = Arc::new(stub_source(
+            path,
+            valid_credentials("access-rejected", "acct-1"),
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(rotated_token("access-new"))
+            },
+        ));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let source = source.clone();
+                tokio::spawn(async move {
+                    source
+                        .refresh_rejected("access-rejected", &CancellationToken::new())
+                        .await
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.await.unwrap().unwrap().access_token, "access-new");
+        }
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn logout_waits_for_refresh_then_removes_the_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chatgpt.json");
+        valid_credentials("access-rejected", "acct-1")
+            .save(&path)
+            .unwrap();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let refresh_entered = entered.clone();
+        let refresh_release = release.clone();
+        let source = Arc::new(stub_source(
+            path.clone(),
+            valid_credentials("access-rejected", "acct-1"),
+            move || {
+                refresh_entered.wait();
+                refresh_release.wait();
+                Ok(rotated_token("access-new"))
+            },
+        ));
+        let refreshing = {
+            let source = source.clone();
+            tokio::spawn(async move {
+                source
+                    .refresh_rejected("access-rejected", &CancellationToken::new())
+                    .await
+            })
+        };
+        entered.wait();
+        let logging_out = {
+            let path = path.clone();
+            tokio::spawn(async move {
+                crate::auth::service::Service::new(path)
+                    .logout(&CancellationToken::new())
+                    .await
+            })
+        };
+        release.wait();
+        assert_eq!(
+            refreshing.await.unwrap().unwrap().access_token,
+            "access-new"
+        );
+        assert!(logging_out.await.unwrap().unwrap());
+        assert!(matches!(load(&path), Err(AuthError::NoCredentials)));
+    }
+
+    #[tokio::test]
+    async fn a_source_captured_before_logout_does_not_recreate_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chatgpt.json");
+        valid_credentials("access-rejected", "acct-1")
+            .save(&path)
+            .unwrap();
+        let source = stub_source(
+            path.clone(),
+            valid_credentials("access-rejected", "acct-1"),
+            || Ok(rotated_token("access-new")),
+        );
+        assert!(
+            crate::auth::service::Service::new(path.clone())
+                .logout(&CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            source
+                .refresh_rejected("access-rejected", &CancellationToken::new())
+                .await
+                .unwrap()
+                .access_token,
+            "access-new"
+        );
+        assert!(matches!(load(&path), Err(AuthError::NoCredentials)));
     }
 
     #[tokio::test]

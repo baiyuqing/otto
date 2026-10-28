@@ -183,7 +183,9 @@ impl Observation {
                 ProviderError::Overflow(_) => ErrorClass::ContextOverflow,
                 ProviderError::DeadlineExceeded => ErrorClass::Deadline,
                 ProviderError::Cancelled => ErrorClass::Cancelled,
-                ProviderError::Other(_) => ErrorClass::Provider,
+                ProviderError::PolicyCapacityUnavailable | ProviderError::Other(_) => {
+                    ErrorClass::Provider
+                }
             }),
         });
     }

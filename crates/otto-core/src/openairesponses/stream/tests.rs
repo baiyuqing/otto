@@ -1,6 +1,32 @@
 use super::*;
 use crate::model::FinishReason;
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn policy_capacity_errors_use_a_fixed_typed_failure() {
+    for body in [
+        r#"data: {"type":"error","code":"policy_capacity_unavailable","message":"secret upstream detail"}"#,
+        r#"data: {"type":"response.failed","response":{"error":{"code":"policy_capacity_unavailable","message":"secret upstream detail"}}}"#,
+    ] {
+        let (result, _) = assemble(body.as_bytes(), 0);
+        assert_eq!(result.unwrap_err(), StreamError::PolicyCapacityUnavailable);
+        assert_eq!(
+            StreamError::PolicyCapacityUnavailable.to_string(),
+            "responses stream policy capacity unavailable"
+        );
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn policy_capacity_error_code_is_recognized_in_protocol_shapes() {
+    let value: WireEvent = serde_json::from_str(
+        r#"{"type":"error","code":"policy_capacity_unavailable","message":"ignored"}"#,
+    )
+    .unwrap();
+    assert_eq!(value.code, "policy_capacity_unavailable");
+}
+
 /// Feeds `body` in slices of `chunk` bytes (`0` meaning one push) and
 /// returns the assembled result together with every emitted event.
 fn assemble(body: &[u8], chunk: usize) -> (Result<Response, StreamError>, Vec<StreamEvent>) {

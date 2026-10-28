@@ -212,21 +212,20 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             return blocking(c, move |c| c.management(request).map(Reply::Management)).await;
         }
         Command::Logout => {
-            blocking(c.clone(), |c| {
-                if c.auth_path().is_empty() {
-                    return Err("sign-out is unavailable".into());
-                }
-                let removed = crate::auth::service::Service::new(c.auth_path().into())
-                    .logout(&CancellationToken::new())
-                    .map_err(|error| error.to_string())?;
-                Ok(if removed {
-                    "Signed out."
-                } else {
-                    "Not signed in."
-                }
-                .into())
-            })
-            .await?
+            let auth_path = c.auth_path();
+            if auth_path.is_empty() {
+                return Err("sign-out is unavailable".into());
+            }
+            let removed = crate::auth::service::Service::new(auth_path.into())
+                .logout(&CancellationToken::new())
+                .await
+                .map_err(|error| error.to_string())?;
+            if removed {
+                "Signed out."
+            } else {
+                "Not signed in."
+            }
+            .into()
         }
     };
     let (info, history) =

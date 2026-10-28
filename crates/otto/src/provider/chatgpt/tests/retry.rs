@@ -38,6 +38,34 @@ fn transient_http_statuses_and_retry_after_are_classified_without_a_body() {
 }
 
 #[tokio::test]
+async fn policy_capacity_http_error_is_typed_fixed_and_not_retried() {
+    let server = testserver::spawn(|_| {
+        testserver::status_response(
+            503,
+            r#"{"error":{"code":"policy_capacity_unavailable","message":"secret upstream detail"}}"#,
+        )
+    })
+    .await;
+    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let (settlement, events) = complete(&client, &Request::default()).await;
+    assert!(matches!(
+        settlement.result,
+        Err(ProviderError::PolicyCapacityUnavailable)
+    ));
+    assert_eq!(settlement.attempts, 1);
+    assert_eq!(
+        settlement.outcome.effect_certainty,
+        EffectCertainty::Completed
+    );
+    assert!(events.is_empty());
+    assert_eq!(server.count(), 1);
+    assert_eq!(
+        ProviderError::PolicyCapacityUnavailable.to_string(),
+        "provider policy capacity unavailable"
+    );
+}
+
+#[tokio::test]
 async fn non_transient_http_statuses_are_not_retried() {
     for status in [400, 401, 408, 409, 501] {
         let server = testserver::spawn(move |_| {
@@ -47,10 +75,12 @@ async fn non_transient_http_statuses_are_not_retried() {
         let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
 
         let (settlement, events) = complete(&client, &Request::default()).await;
-        assert_eq!(
-            settlement.result.unwrap_err().to_string(),
+        let expected = if status == 401 {
+            "chatgpt authorization failed; run 'otto login'".to_owned()
+        } else {
             format!("chatgpt responses HTTP {status}")
-        );
+        };
+        assert_eq!(settlement.result.unwrap_err().to_string(), expected);
         assert_eq!(server.count(), 1, "status {status}");
         assert!(events.is_empty());
     }
@@ -264,6 +294,34 @@ async fn a_reported_overload_is_retried_with_the_same_request() {
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].body, requests[1].body);
+}
+
+#[tokio::test]
+async fn policy_capacity_stream_errors_are_fixed_and_not_retried() {
+    for body in [
+        concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"code\":\"policy_capacity_unavailable\",\"message\":\"secret upstream detail\"}\n",
+            "\n",
+        ),
+        concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"policy_capacity_unavailable\",\"message\":\"secret upstream detail\"}}}\n",
+            "\n",
+        ),
+    ] {
+        let body = body.to_owned();
+        let server = testserver::spawn(move |_| sse_response(&body)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert_eq!(settlement.attempts, 1);
+        assert!(retry_reasons(&events).is_empty());
+        assert_eq!(server.count(), 1);
+        let error = settlement.result.unwrap_err();
+        assert!(matches!(error, ProviderError::PolicyCapacityUnavailable));
+        assert_eq!(error.to_string(), "provider policy capacity unavailable");
+        assert!(!error.to_string().contains("secret upstream detail"));
+    }
 }
 
 #[tokio::test]

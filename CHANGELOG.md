@@ -24,6 +24,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Security
 
+- ChatGPT login, logout and token refresh now serialize credential changes and
+  conditionally commit refreshed tokens, so an in-flight refresh cannot restore
+  a signed-out account or overwrite a newer login. A request whose current token
+  is rejected refreshes it and retries once; policy-restricted capacity failures
+  remain distinct from retryable server overloads.
 - Every provider request now receives always-on, local PII filtering in addition
   to credential filtering. High-confidence email addresses, international phone
   numbers, checksum-valid payment cards and Chinese resident identity cards are

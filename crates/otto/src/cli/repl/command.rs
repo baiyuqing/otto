@@ -205,7 +205,8 @@ impl<'a> Repl<'a> {
                     if !args.is_empty() {
                         break 'dispatch None;
                     }
-                    crate::cli::login::repl_logout(self.controller, &mut *self.stdout, cancel)?;
+                    crate::cli::login::repl_logout(self.controller, &mut *self.stdout, cancel)
+                        .await?;
                     Some(false)
                 }
                 "mcp" => {

@@ -5,6 +5,7 @@ use otto_core::model::{Block, BlockType, FinishReason, Message, Role, ToolDefini
 use otto_core::provider::StreamEvent;
 use tokio_util::sync::CancellationToken;
 
+mod auth_recovery;
 mod catalog;
 mod retry;
 mod stream;

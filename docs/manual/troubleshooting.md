@@ -12,16 +12,24 @@ external operation did nothing: inspect state before repeating a write.
 ### `otto: missing api key`
 
 Set the active profile's `api_key_env` variable privately in the runtime's
-environment, then restart. Use `otto config explain --json` to check the active
-profile/source without resolving credentials. Never paste a key into chat.
+environment, then restart. For Claude this is normally `ANTHROPIC_API_KEY`; if
+the key is not scoped to one workspace, also set the variable named by
+`workspace_id_env`. When using `otto-connect`, change the environment of the
+`otto acp` child or existing `otto serve` process that performs model requests,
+not the chat connector's config. Use `otto config explain --json` to check the
+active profile/source without resolving credentials. Never paste a key into
+chat.
 
 ### `otto: missing base_url`, `otto: invalid base_url`, or request failures
 
-Check the selected profile, `--base-url` and endpoint path. OpenAI-compatible
-requests go to `<base-url>/chat/completions`; confirm the endpoint supports
-streaming chat completions. A server/container may need a different hostname
-than the attaching terminal (`host.docker.internal` reaches the Mac host from
-Docker Desktop).
+Check the selected profile, `--base-url` and endpoint path. Claude requests use
+`<base-url>/v1/messages` and require the configured `anthropic-version`; the
+default base URL is `https://api.anthropic.com`. OpenAI-compatible requests go
+to `<base-url>/chat/completions`; confirm the endpoint supports streaming chat
+completions. HTTP 401/403 usually means the key, workspace binding, or account
+access is wrong; HTTP 429 may require waiting for the provider's retry window.
+A server/container may need a different hostname than the attaching terminal
+(`host.docker.internal` reaches the Mac host from Docker Desktop).
 
 ### `read chat completion stream: ...` or stream ended without `[DONE]`
 

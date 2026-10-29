@@ -236,6 +236,8 @@ fn redact_table(table: &mut Table, path: &[String]) {
                     | "env"
                     | "headers"
                     | "api_key_env"
+                    | "api_version"
+                    | "workspace_id_env"
                     | "args"
                     | "url"
                     | "base_url"
@@ -506,8 +508,20 @@ impl ManagedPolicy {
                 ("model", &runtime.model),
                 ("thinking", &runtime.thinking),
                 ("api_key_env", &runtime.api_key_env),
+                ("api_version", &runtime.api_version),
+                ("workspace_id_env", &runtime.workspace_id_env),
             ] {
                 if forced.get(key).and_then(Value::as_str).is_some_and(|v| {
+                    let v = if runtime.provider == super::PROVIDER_CLAUDE && v.is_empty() {
+                        match key {
+                            "base_url" => "https://api.anthropic.com",
+                            "api_key_env" => "ANTHROPIC_API_KEY",
+                            "api_version" => super::DEFAULT_CLAUDE_API_VERSION,
+                            _ => v,
+                        }
+                    } else {
+                        v
+                    };
                     if key == "base_url" {
                         super::resolve::normalize_base_url(v)
                             .is_ok_and(|normalized| normalized != *actual)
@@ -557,6 +571,14 @@ impl ManagedPolicy {
             }
         }
         if let Some(names) = &self.allowed_credential_variables {
+            if runtime.provider == super::PROVIDER_CLAUDE
+                && !runtime.workspace_id_env.is_empty()
+                && !names.contains(&runtime.workspace_id_env)
+            {
+                return Err(ConfigError::new(
+                    "provider workspace credential binding is prohibited by managed policy",
+                ));
+            }
             let name = if runtime.api_key_env.is_empty() {
                 "OTTO_API_KEY"
             } else {

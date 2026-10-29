@@ -188,11 +188,17 @@ fn the_config_environment_always_holds_every_fixed_key() {
         "alpha".to_string(),
         otto_core::config::Profile {
             api_key_env: "ALPHA_KEY".to_string(),
+            workspace_id_env: "CLAUDE_WORKSPACE".to_string(),
             ..Default::default()
         },
     );
     let mut lookup = HashMap::new();
     lookup.insert("ALPHA_KEY".to_string(), "sk-alpha".to_string());
+    lookup.insert(
+        "ANTHROPIC_API_KEY".to_string(),
+        "sk-ant-default".to_string(),
+    );
+    lookup.insert("CLAUDE_WORKSPACE".to_string(), "wrkspc-one".to_string());
     let environment = config_environment(&file, &lookup);
     for key in [
         "HOME",
@@ -208,6 +214,14 @@ fn the_config_environment_always_holds_every_fixed_key() {
     assert_eq!(
         environment.get("ALPHA_KEY").map(String::as_str),
         Some("sk-alpha")
+    );
+    assert_eq!(
+        environment.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("sk-ant-default")
+    );
+    assert_eq!(
+        environment.get("CLAUDE_WORKSPACE").map(String::as_str),
+        Some("wrkspc-one")
     );
 }
 
@@ -237,6 +251,7 @@ fn provider_environment_names_are_sorted_and_deduplicated() {
         "alpha".to_string(),
         otto_core::config::Profile {
             api_key_env: "ZED_KEY".to_string(),
+            workspace_id_env: "CLAUDE_WORKSPACE".to_string(),
             ..Default::default()
         },
     );
@@ -250,7 +265,9 @@ fn provider_environment_names_are_sorted_and_deduplicated() {
     assert_eq!(
         sandbox_provider_environment_names(&file, "BETA_KEY"),
         vec![
+            "ANTHROPIC_API_KEY".to_string(),
             "BETA_KEY".to_string(),
+            "CLAUDE_WORKSPACE".to_string(),
             "OTTO_API_KEY".to_string(),
             "ZED_KEY".to_string()
         ]

@@ -7,6 +7,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Providers
+
+- Added a first-party Claude Messages API provider with environment-only API-key
+  authentication, streaming text and local tool calls, model discovery, typed
+  context-overflow recovery, bounded retries and diagnostic redaction. Claude
+  profiles work in terminal, server, ACP and `otto-connect` sessions; the key
+  remains in the Otto runtime and is never stored by the connector.
+
 ### Development
 
 - `otto eval view-tree` evaluates a summary-tree context view on an existing

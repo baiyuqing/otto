@@ -481,10 +481,12 @@ async fn chatgpt_non_transient_http_statuses_are_terminal_after_one_request() {
     for status in [400, 401, 408, 409, 501] {
         let server = http::spawn_repeating(Script::status(status, "body is not exposed")).await;
         let (settlement, events) = complete_plain(&chatgpt(&server, "token")).await;
-        assert_eq!(
-            settlement.result.unwrap_err().to_string(),
+        let expected = if status == 401 {
+            "chatgpt authorization failed; run 'otto login'".to_owned()
+        } else {
             format!("chatgpt responses HTTP {status}")
-        );
+        };
+        assert_eq!(settlement.result.unwrap_err().to_string(), expected);
         assert_eq!(settlement.attempts, 1, "status {status}");
         assert_eq!(server.count(), 1, "status {status}");
         assert!(retries(&events).is_empty(), "status {status}");

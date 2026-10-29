@@ -984,7 +984,12 @@ See [Chat connector](servers-and-connectors.md#chat-connector).
 `otto-connect` connects Telegram and Feishu (Lark) chats to Otto through ACP.
 It is a separate Go program in `chat-connector/`: it starts one `otto acp` child by
 default or connects directly to `otto serve` over authenticated ACP TCP,
-and maps each chat to one Otto session.
+and maps each chat to one Otto session. Provider selection and authentication
+always belong to that Otto runtime. For example, a Claude key must be present
+in the environment of `otto acp` or `otto serve`, never in `connect.toml` or the
+connector process when it connects to an existing server. Restart the Otto
+runtime after changing its profile or credentials; restarting only the
+connector does not update a running server.
 Telegram and Feishu can be enabled in the same process.
 
 Otto is a general-purpose personal agent for research, writing, planning,
@@ -1060,7 +1065,10 @@ listen = "127.0.0.1:9465"          # the default; "" turns the endpoint off
   started without these variables, so tools run by Otto cannot read them.
 - `otto acp` inherits the rest of the environment and reads its provider key
   as usual (the profile's `api_key_env` variable or `OTTO_API_KEY`), or uses
-  the `chatgpt` provider after `otto login`.
+  the `chatgpt` provider after `otto login`. For Claude, export the selected
+  API-key variable (and optional `workspace_id_env`) in the environment that
+  starts `otto acp`; `otto-connect` never reads, stores, or forwards either
+  value.
 - State is kept in `~/.otto/connect/state.json` (mode `0600`): the session id
   of each chat and the Telegram update offset.
 - `[metrics].listen` is the loopback address of the connector's `/metrics`

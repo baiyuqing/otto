@@ -59,6 +59,10 @@ struct ProfileResponse {
     base_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     api_key_env: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    api_version: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    workspace_id_env: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_window: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,6 +79,8 @@ fn profile(name: &str, file: &otto_core::config::File) -> Option<ProfileResponse
         thinking: value.thinking.clone(),
         base_url: value.base_url.clone(),
         api_key_env: value.api_key_env.clone(),
+        api_version: value.api_version.clone(),
+        workspace_id_env: value.workspace_id_env.clone(),
         context_window: value.context_window,
         compaction_window: value.compaction_window,
     })
@@ -149,28 +155,51 @@ pub async fn models(
             "the chatgpt provider cannot list models",
         );
     }
-    if profile.provider != otto_core::config::PROVIDER_OPENAI_COMPATIBLE {
+    if !matches!(
+        profile.provider.as_str(),
+        otto_core::config::PROVIDER_OPENAI_COMPATIBLE | otto_core::config::PROVIDER_CLAUDE
+    ) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_provider",
             "profile has an unsupported provider",
         );
     }
-    let api_key = match std::env::var(&profile.api_key_env) {
-        Ok(value) if !value.is_empty() => value,
-        _ => {
+    let environment: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let runtime = match otto_core::config::resolve(
+        &file,
+        &environment,
+        &otto_core::config::SessionDefaults::default(),
+        &otto_core::config::Overrides {
+            profile: query.profile.clone(),
+            ..Default::default()
+        },
+    ) {
+        Ok(runtime) => runtime,
+        Err(_) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "api_key_unavailable",
-                "the profile API-key environment variable is unavailable",
+                "profile connection or credentials are unavailable; check the profile and its environment bindings",
             );
         }
     };
-    let client = OpenAiClient::new(&profile.base_url, &api_key);
-    match client
-        .list_models(&tokio_util::sync::CancellationToken::new())
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let result = if runtime.provider == otto_core::config::PROVIDER_CLAUDE {
+        crate::provider::claude::Client::new(
+            &runtime.base_url,
+            &runtime.api_key,
+            &runtime.api_version,
+            &runtime.workspace_id,
+        )
+        .list_models(&cancel)
         .await
-    {
+    } else {
+        OpenAiClient::new(&runtime.base_url, &runtime.api_key)
+            .list_models(&cancel)
+            .await
+    };
+    match result {
         Ok(mut ids) => {
             ids.truncate(MAX_MODEL_IDS);
             json_response(
@@ -213,10 +242,11 @@ fn provider(value: &str) -> Result<ProfileProvider, Box<Response>> {
     match value {
         otto_core::config::PROVIDER_OPENAI_COMPATIBLE => Ok(ProfileProvider::OpenAiCompatible),
         otto_core::config::PROVIDER_CHATGPT => Ok(ProfileProvider::ChatGpt),
+        otto_core::config::PROVIDER_CLAUDE => Ok(ProfileProvider::Claude),
         _ => Err(Box::new(error_response(
             StatusCode::BAD_REQUEST,
             "invalid_provider",
-            "provider must be openai-compatible or chatgpt",
+            "provider must be openai-compatible, claude or chatgpt",
         ))),
     }
 }
@@ -226,6 +256,8 @@ fn field(value: &str) -> Result<ProfileField, Box<Response>> {
         "thinking" => Ok(ProfileField::Thinking),
         "base_url" => Ok(ProfileField::BaseUrl),
         "api_key_env" => Ok(ProfileField::ApiKeyEnv),
+        "api_version" => Ok(ProfileField::ApiVersion),
+        "workspace_id_env" => Ok(ProfileField::WorkspaceIdEnv),
         _ => Err(Box::new(error_response(
             StatusCode::BAD_REQUEST,
             "invalid_field",
@@ -470,5 +502,23 @@ pub async fn cancel(
             "change_not_found",
             "configuration change was not found",
         ),
+    }
+}
+
+#[cfg(test)]
+mod claude_tests {
+    use super::*;
+    #[test]
+    fn claude_provider_and_connection_fields_are_editable() {
+        assert!(matches!(provider("claude"), Ok(ProfileProvider::Claude)));
+        assert!(matches!(field("api_version"), Ok(ProfileField::ApiVersion)));
+        assert!(matches!(
+            field("workspace_id_env"),
+            Ok(ProfileField::WorkspaceIdEnv)
+        ));
+        let file = otto_core::config::parse("[profiles.claude]\nprovider='claude'\nmodel='fixture'\napi_version='2026-10-21'\nworkspace_id_env='WORKSPACE_ID'").unwrap();
+        let value = serde_json::to_value(profile("claude", &file).unwrap()).unwrap();
+        assert_eq!(value["api_version"], "2026-10-21");
+        assert_eq!(value["workspace_id_env"], "WORKSPACE_ID");
     }
 }

@@ -177,7 +177,7 @@ pub(super) fn load_config(
 /// Every fixed key is always present, even when the process has no such
 /// variable: the empty string is inserted, and resolution distinguishes
 /// "absent" from "empty" nowhere. The map also holds each profile's
-/// `api_key_env` and the `web_search` key names.
+/// `api_key_env`, Claude workspace bindings and the `web_search` key names.
 pub(crate) fn config_environment(
     file: &File,
     lookup: &EnvironmentLookup,
@@ -193,10 +193,18 @@ pub(crate) fn config_environment(
     ];
     use crate::tool::web::{BRAVE_KEY_ENV, GOOGLE_ENGINE_ENV, GOOGLE_KEY_ENV};
     let mut keys: BTreeSet<&str> = FIXED_KEYS.into_iter().collect();
-    keys.extend([GOOGLE_KEY_ENV, GOOGLE_ENGINE_ENV, BRAVE_KEY_ENV]);
+    keys.extend([
+        GOOGLE_KEY_ENV,
+        GOOGLE_ENGINE_ENV,
+        BRAVE_KEY_ENV,
+        "ANTHROPIC_API_KEY",
+    ]);
     for profile in file.profiles.values() {
         if !profile.api_key_env.is_empty() {
             keys.insert(profile.api_key_env.as_str());
+        }
+        if !profile.workspace_id_env.is_empty() {
+            keys.insert(profile.workspace_id_env.as_str());
         }
     }
     let credential_variables = file.plugins.credential_variables();

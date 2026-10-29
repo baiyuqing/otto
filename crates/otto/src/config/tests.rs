@@ -725,3 +725,39 @@ fn profile_change_rejects_default_and_last_profile_removal() {
     .expect_err("default profile");
     assert!(default_profile.to_string().contains("default profile"));
 }
+
+#[test]
+fn claude_profile_creation_and_connection_field_edits_preview_without_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let default = dir.path().join("default.toml");
+    let path = write(
+        dir.path(),
+        "config.toml",
+        "default_profile='existing'\n[profiles.existing]\nprovider='chatgpt'\nmodel='fixture'\n",
+    );
+    let preview = preview_profile_change_impl(
+        &path,
+        &default,
+        &ProfileChange::Create {
+            profile: "claude".into(),
+            provider: ProfileProvider::Claude,
+            model: "fixture-claude".into(),
+            thinking: String::new(),
+            base_url: None,
+            api_key_env: None,
+        },
+    )
+    .expect("Claude create uses native defaults without environment access");
+    let _ = preview;
+    for (field, value) in [
+        (ProfileField::ApiVersion, "2026-10-21"),
+        (ProfileField::WorkspaceIdEnv, "CLAUDE_WORKSPACE"),
+    ] {
+        super::profile_change::validate_field(field, value, "claude").unwrap();
+        assert!(super::profile_change::validate_field(field, value, "chatgpt").is_err());
+    }
+    assert!(
+        super::profile_change::validate_field(ProfileField::ApiVersion, "bad-version", "claude")
+            .is_err()
+    );
+}

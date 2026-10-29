@@ -26,7 +26,8 @@ use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, fcntl};
 
 use otto_core::config::{
-    ConfigError, File, Overrides, PROVIDER_CHATGPT, PROVIDER_OPENAI_COMPATIBLE, SessionDefaults,
+    ConfigError, File, Overrides, PROVIDER_CHATGPT, PROVIDER_CLAUDE, PROVIDER_OPENAI_COMPATIBLE,
+    SessionDefaults,
 };
 
 /// An error from the native config layer: either an I/O failure opening,
@@ -382,7 +383,10 @@ pub(crate) fn initial_profile_content(
     base_url: &str,
     api_key_env: &str,
 ) -> Result<String, String> {
-    if !matches!(provider, PROVIDER_CHATGPT | PROVIDER_OPENAI_COMPATIBLE) {
+    if !matches!(
+        provider,
+        PROVIDER_CHATGPT | PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CLAUDE
+    ) {
         return Err("unsupported provider; no changes made".to_string());
     }
     let mut profile_table = toml::Table::new();
@@ -391,7 +395,7 @@ pub(crate) fn initial_profile_content(
         toml::Value::String(provider.to_string()),
     );
     profile_table.insert("model".to_string(), toml::Value::String(model.to_string()));
-    if provider == PROVIDER_OPENAI_COMPATIBLE {
+    if matches!(provider, PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CLAUDE) {
         profile_table.insert(
             "base_url".to_string(),
             toml::Value::String(base_url.to_string()),
@@ -399,6 +403,12 @@ pub(crate) fn initial_profile_content(
         profile_table.insert(
             "api_key_env".to_string(),
             toml::Value::String(api_key_env.to_string()),
+        );
+    }
+    if provider == PROVIDER_CLAUDE {
+        profile_table.insert(
+            "api_version".into(),
+            toml::Value::String(otto_core::config::DEFAULT_CLAUDE_API_VERSION.into()),
         );
     }
     let mut profiles = toml::Table::new();
@@ -413,7 +423,7 @@ pub(crate) fn initial_profile_content(
     let parsed = otto_core::config::parse(&content)
         .map_err(|_| "cannot create configuration".to_string())?;
     let mut environment = HashMap::new();
-    if provider == PROVIDER_OPENAI_COMPATIBLE {
+    if matches!(provider, PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CLAUDE) {
         environment.insert(api_key_env.to_string(), "configured".to_string());
     }
     otto_core::config::resolve(

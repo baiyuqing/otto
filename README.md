@@ -15,9 +15,10 @@ clients share server-side sessions.
 - **Delegate and automate:** sub-agents, scheduled tasks and recoverable workflows.
 - **Control access:** workspace-confined file tools, approvals and macOS shell sandboxing.
 
-Otto supports **OpenAI-compatible** endpoints and **ChatGPT** sign-in. Model
-requests go to the selected provider; “local-first” describes the runtime,
-session history and default memory storage, not a local model.
+Otto supports the first-party **Claude API**, **OpenAI-compatible** endpoints,
+and **ChatGPT** sign-in. Model requests go to the selected provider;
+“local-first” describes the runtime, session history and default memory storage,
+not a local model.
 
 ## Install from source
 
@@ -50,9 +51,10 @@ otto login
 otto
 ```
 
-For an OpenAI-compatible endpoint, select its URL, model and API-key environment
-variable during setup. Set that variable privately in the environment before
-starting `otto`; never put its value in a config file or prompt.
+For Claude or an OpenAI-compatible endpoint, select its model and API-key
+environment variable during setup (and the endpoint URL for an OpenAI-compatible
+profile). Set that variable privately in the environment before starting
+`otto`; never put its value in a config file or prompt.
 
 Try asking Otto to explain a repository, research a question or implement a
 small change. Use `/help` for commands and `/new` to start a fresh session.

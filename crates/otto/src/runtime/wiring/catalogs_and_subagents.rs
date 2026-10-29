@@ -116,6 +116,7 @@ impl Builder {
     ) -> Result<SubagentWiring, BuildError> {
         let provider: Arc<dyn otto_core::provider::Provider + Send + Sync> = match client {
             ProviderClient::Compat { client, .. } => Arc::clone(client) as _,
+            ProviderClient::Claude { client, .. } => Arc::clone(client) as _,
             ProviderClient::ChatGpt { client, .. } => Arc::clone(client) as _,
             ProviderClient::Unavailable => return Ok(SubagentWiring::default()),
             #[cfg(test)]

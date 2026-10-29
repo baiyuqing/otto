@@ -7,6 +7,7 @@ impl Provider for ProviderClient {
     fn capabilities(&self) -> otto_core::provider::ProviderCapabilities {
         match self {
             Self::Compat { client, .. } => client.capabilities(),
+            Self::Claude { client, .. } => client.capabilities(),
             Self::ChatGpt { client, .. } => client.capabilities(),
             Self::Unavailable => otto_core::provider::ProviderCapabilities::default(),
             #[cfg(test)]
@@ -34,6 +35,24 @@ impl Provider for ProviderClient {
         Box::pin(async move {
             match self {
                 Self::Compat {
+                    client,
+                    timeout,
+                    cancellation_grace,
+                } => {
+                    complete_with_timeout(
+                        &ObservedProvider {
+                            inner: client.as_ref(),
+                            observer,
+                        },
+                        request,
+                        emit,
+                        control,
+                        *timeout,
+                        *cancellation_grace,
+                    )
+                    .await
+                }
+                Self::Claude {
                     client,
                     timeout,
                     cancellation_grace,

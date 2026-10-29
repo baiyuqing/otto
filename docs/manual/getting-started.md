@@ -5,10 +5,10 @@
 ## Prerequisites
 
 Install the toolchains pinned in `rust-toolchain.toml` and
-`chat-connector/go.mod` (Rust and Go), then configure either an
-**OpenAI-compatible** endpoint or the **ChatGPT** provider. These are the only
-supported providers. Model requests leave your machine; sessions, configuration
-and default memory remain local.
+`chat-connector/go.mod` (Rust and Go), then configure the first-party
+**Claude API**, an **OpenAI-compatible** endpoint, or the **ChatGPT** provider.
+Model requests leave your machine; sessions, configuration and default memory
+remain local.
 
 ### Platform support
 
@@ -36,18 +36,30 @@ binary use `make build`, then `./otto`. Upgrade by updating the checkout,
 rerunning `make install`, and restarting affected runtimes and connectors.
 Browser UI development/hosting is separate: [otto-plus](https://github.com/baiyuqing/otto-plus).
 
-For an OpenAI-compatible connection, keep the API key in the environment, not
-TOML or a prompt:
+For Claude or an OpenAI-compatible connection, keep the API key in the
+environment, not TOML, a command-line argument, or a prompt:
 
 ```bash
-export OPENAI_API_KEY='…'  # set privately; avoid saving a real key in shell history
+export ANTHROPIC_API_KEY='…'  # set privately; avoid saving a real key in shell history
+otto --provider claude --model MODEL_ID
+
+export OPENAI_API_KEY='…'
 otto --provider openai-compatible --base-url https://api.example.com/v1 --model MODEL_ID
 ```
 
-Use a model ID supported by your endpoint. Each request carries
-`prompt_cache_key` set to the session id (a sub-agent uses its own transcript
-id), so an endpoint that routes by this field can serve a session's requests
-from the same prompt cache. If the endpoint answers HTTP 400 or 422 with an
+A Claude profile defaults to `https://api.anthropic.com`, API version
+`2026-10-21`, and the `ANTHROPIC_API_KEY` binding. If the key is not scoped to
+one Claude workspace, set a separate environment variable containing the
+workspace ID and name it with the profile's `workspace_id_env`; do not put the
+workspace ID or key in TOML. `api_version` can pin a different Claude API
+version when required. The Claude provider covers the Messages API used by
+Otto; Bedrock, Vertex AI, Foundry, OAuth and workload identity are different
+connections and are not supported by this provider.
+
+Use a model ID supported by your provider. Each OpenAI-compatible request
+carries `prompt_cache_key` set to the session id (a sub-agent uses its own
+transcript id), so an endpoint that routes by this field can serve a session's
+requests from the same prompt cache. If the endpoint answers HTTP 400 or 422 with an
 error body that names `prompt_cache_key`, Otto resends that request once
 without the field and omits it from later requests until the provider client
 is rebuilt, for example when Otto restarts. `otto setup` can create a provider
@@ -88,8 +100,10 @@ Rebuild the image and recreate the service after upgrades; preserve its volume.
 Create the host workspace first and allow it in Docker Desktop file sharing;
 the container runs as UID/GID 1000 and needs write access. In setup choose the
 API-key variable that Compose forwards, or add the profile's selected variable
-to the service `environment` mapping. Export it before `compose up`; it is not
-a build argument. Use `host.docker.internal`, not container `localhost`, for a
+to the service `environment` mapping. A default Claude profile therefore needs
+`ANTHROPIC_API_KEY` added there; add `ANTHROPIC_WORKSPACE_ID` too when
+`workspace_id_env` names it. Export values before `compose up`; they are not
+build arguments. Use `host.docker.internal`, not container `localhost`, for a
 model endpoint on the Mac. The published API is Mac-loopback only, retains
 bearer authentication, and gets a new token after each server restart.
 
@@ -177,9 +191,10 @@ line: process listings and shell history can expose them.
 ## Environment variables
 
 Use the environment binding selected by the active provider profile
-(`api_key_env` for OpenAI-compatible profiles). MCP, chat and plugin package
-credentials likewise come from their configured environment bindings, never
-literal secrets in configuration. `otto login` manages ChatGPT credentials.
+(`api_key_env` for Claude and OpenAI-compatible profiles, plus optional
+`workspace_id_env` for Claude). MCP, chat and plugin package credentials
+likewise come from their configured environment bindings, never literal
+secrets in configuration. `otto login` manages ChatGPT credentials.
 
 Set variables in the process that actually performs the work. An attaching
 terminal's environment does not replace the server's; a supervisor, container
@@ -269,10 +284,12 @@ default_profile = "work"
 mode = "tui"
 
 [profiles.work]
-provider = "openai-compatible"
-base_url = "https://api.example.com/v1"
+provider = "claude"
+base_url = "https://api.anthropic.com"
 model = "MODEL_ID"
-api_key_env = "OPENAI_API_KEY"
+api_key_env = "ANTHROPIC_API_KEY"
+api_version = "2026-10-21"
+# workspace_id_env = "ANTHROPIC_WORKSPACE_ID"  # only when the key requires it
 
 [sandbox]
 driver = "auto"

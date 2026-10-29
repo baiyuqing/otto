@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod approval;
+pub mod claude;
 pub mod config;
 #[cfg(feature = "conformance")]
 pub mod conformance;

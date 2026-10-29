@@ -20,8 +20,8 @@ the owning code instead of restating it.
 | Browser frontend | [otto-plus](https://github.com/baiyuqing/otto-plus); separate client of Otto HTTP APIs |
 | Chat connector | `chat-connector/`; independent Go ACP client; [guide](docs/manual/servers-and-connectors.md#chat-connector) |
 
-Otto supports only `openai-compatible` and `chatgpt`. Do not implement or
-advertise other providers or planned roadmap features.
+Otto supports only `claude`, `openai-compatible` and `chatgpt`. Do not
+implement or advertise other providers or planned roadmap features.
 
 ## Workflow
 

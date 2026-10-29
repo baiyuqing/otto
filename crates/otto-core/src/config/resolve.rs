@@ -127,11 +127,29 @@ pub struct Runtime {
     /// `OTTO_API_KEY` fallback). Empty for the `chatgpt` provider.
     pub api_key: String,
     pub api_key_env: String,
+    pub api_version: String,
+    pub workspace_id_env: String,
+    pub workspace_id: String,
     pub shell_timeout: Duration,
     pub max_output_bytes: i64,
     pub compaction: CompactionRuntime,
     pub resilience: ResilienceRuntime,
     pub progress: ProgressRuntime,
+}
+
+fn effective_api_key_env(profile: &Profile) -> &str {
+    if profile.provider == super::PROVIDER_CLAUDE && profile.api_key_env.is_empty() {
+        "ANTHROPIC_API_KEY"
+    } else {
+        &profile.api_key_env
+    }
+}
+fn effective_base_url(profile: &Profile) -> &str {
+    if profile.provider == super::PROVIDER_CLAUDE && profile.base_url.is_empty() {
+        "https://api.anthropic.com"
+    } else {
+        &profile.base_url
+    }
 }
 
 /// Explains connection-scoped child model fallback without exposing configured values.
@@ -146,8 +164,18 @@ pub fn subagent_model_diagnostic(
     }
     let same_connection = runtime.provider == profile.provider
         && (runtime.provider == super::PROVIDER_CHATGPT
-            || (runtime.api_key_env == profile.api_key_env
-                && normalize_base_url(&profile.base_url).ok().as_deref()
+            || (runtime.api_key_env == effective_api_key_env(profile)
+                && runtime.workspace_id_env == profile.workspace_id_env
+                && (runtime.provider != super::PROVIDER_CLAUDE
+                    || runtime.api_version
+                        == if profile.api_version.is_empty() {
+                            super::DEFAULT_CLAUDE_API_VERSION
+                        } else {
+                            &profile.api_version
+                        })
+                && normalize_base_url(effective_base_url(profile))
+                    .ok()
+                    .as_deref()
                     == Some(runtime.base_url.as_str())));
     if same_connection {
         return None;
@@ -215,6 +243,8 @@ fn resolve_impl(
     let mut thinking = String::new();
     let mut base_url = String::new();
     let mut api_key_env = String::new();
+    let mut api_version = String::new();
+    let mut workspace_id_env = String::new();
     let mut profile_config = Profile::default();
 
     if !selected_profile.is_empty() {
@@ -229,6 +259,8 @@ fn resolve_impl(
         thinking = profile.thinking.clone();
         base_url = profile.base_url.clone();
         api_key_env = profile.api_key_env.clone();
+        api_version = profile.api_version.clone();
+        workspace_id_env = profile.workspace_id_env.clone();
     }
     if !explicit_profile {
         if !session.provider.is_empty() {
@@ -264,7 +296,10 @@ fn resolve_impl(
     if provider.is_empty() {
         return Err(ConfigError::new("missing provider"));
     }
-    if provider != super::PROVIDER_OPENAI_COMPATIBLE && provider != super::PROVIDER_CHATGPT {
+    if !matches!(
+        provider.as_str(),
+        super::PROVIDER_OPENAI_COMPATIBLE | super::PROVIDER_CHATGPT | super::PROVIDER_CLAUDE
+    ) {
         return Err(ConfigError::new(format!(
             "unsupported provider \"{provider}\""
         )));
@@ -274,7 +309,35 @@ fn resolve_impl(
     }
     validate_thinking(&thinking)?;
 
-    if provider == super::PROVIDER_OPENAI_COMPATIBLE {
+    if matches!(
+        provider.as_str(),
+        super::PROVIDER_OPENAI_COMPATIBLE | super::PROVIDER_CLAUDE
+    ) {
+        if provider == super::PROVIDER_CLAUDE {
+            if base_url.is_empty() {
+                base_url = "https://api.anthropic.com".into();
+            }
+            if api_key_env.is_empty() {
+                api_key_env = "ANTHROPIC_API_KEY".into();
+            }
+            if api_version.is_empty() {
+                api_version = super::DEFAULT_CLAUDE_API_VERSION.into();
+            }
+            let bytes = api_version.as_bytes();
+            if bytes.len() != 10
+                || !bytes.iter().enumerate().all(|(index, byte)| {
+                    if index == 4 || index == 7 {
+                        *byte == b'-'
+                    } else {
+                        byte.is_ascii_digit()
+                    }
+                })
+            {
+                return Err(ConfigError::new(
+                    "invalid Claude api_version: expected YYYY-MM-DD",
+                ));
+            }
+        }
         if base_url.is_empty() {
             return Err(ConfigError::new("missing base_url"));
         }
@@ -288,8 +351,18 @@ fn resolve_impl(
     validate_subagent_models(&selected_profile, &profile_config.subagent_models)?;
     let same_connection = provider == profile_config.provider
         && (provider == super::PROVIDER_CHATGPT
-            || (api_key_env == profile_config.api_key_env
-                && normalize_base_url(&profile_config.base_url).ok().as_deref()
+            || (api_key_env == effective_api_key_env(&profile_config)
+                && workspace_id_env == profile_config.workspace_id_env
+                && (provider != super::PROVIDER_CLAUDE
+                    || api_version
+                        == if profile_config.api_version.is_empty() {
+                            super::DEFAULT_CLAUDE_API_VERSION
+                        } else {
+                            &profile_config.api_version
+                        })
+                && normalize_base_url(effective_base_url(&profile_config))
+                    .ok()
+                    .as_deref()
                     == Some(base_url.as_str())));
     let subagent_models = if same_connection {
         profile_config.subagent_models.clone()
@@ -325,7 +398,11 @@ fn resolve_impl(
     let progress = resolve_progress(&file.agent)?;
 
     let mut api_key = String::new();
-    if provider == super::PROVIDER_OPENAI_COMPATIBLE && credentials {
+    if matches!(
+        provider.as_str(),
+        super::PROVIDER_OPENAI_COMPATIBLE | super::PROVIDER_CLAUDE
+    ) && credentials
+    {
         if let Some(allowed) = file
             .policy
             .as_ref()
@@ -345,6 +422,23 @@ fn resolve_impl(
         api_key = resolve_api_key(env, &api_key_env)?;
     }
 
+    let workspace_id =
+        if provider == super::PROVIDER_CLAUDE && credentials && !workspace_id_env.is_empty() {
+            if let Some(allowed) = file
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.allowed_credential_variables.as_ref())
+            {
+                if !allowed.contains(&workspace_id_env) {
+                    return Err(ConfigError::new(
+                        "provider workspace credential binding is prohibited by managed policy",
+                    ));
+                }
+            }
+            env_value(env, &workspace_id_env)
+        } else {
+            String::new()
+        };
     let runtime = Runtime {
         profile: runtime_profile,
         provider,
@@ -354,6 +448,9 @@ fn resolve_impl(
         thinking,
         api_key,
         api_key_env,
+        api_version,
+        workspace_id_env,
+        workspace_id,
         shell_timeout,
         max_output_bytes,
         compaction,

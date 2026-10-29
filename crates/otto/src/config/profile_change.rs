@@ -6,6 +6,7 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileProvider {
     OpenAiCompatible,
+    Claude,
     ChatGpt,
 }
 
@@ -13,6 +14,7 @@ impl ProfileProvider {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::OpenAiCompatible => PROVIDER_OPENAI_COMPATIBLE,
+            Self::Claude => PROVIDER_CLAUDE,
             Self::ChatGpt => PROVIDER_CHATGPT,
         }
     }
@@ -25,6 +27,8 @@ pub enum ProfileField {
     Thinking,
     BaseUrl,
     ApiKeyEnv,
+    ApiVersion,
+    WorkspaceIdEnv,
 }
 
 impl ProfileField {
@@ -34,6 +38,8 @@ impl ProfileField {
             Self::Thinking => "thinking",
             Self::BaseUrl => "base_url",
             Self::ApiKeyEnv => "api_key_env",
+            Self::ApiVersion => "api_version",
+            Self::WorkspaceIdEnv => "workspace_id_env",
         }
     }
 }
@@ -292,6 +298,11 @@ pub(super) fn validate_create_fields(
                 validate_env_name(name)?;
             }
         }
+        ProfileProvider::Claude => {
+            if let Some(name) = api_key_env {
+                validate_env_name(name)?;
+            }
+        }
         ProfileProvider::ChatGpt if base_url.is_some() || api_key_env.is_some() => {
             return Err(ConfigError::new(
                 "chatgpt does not support base_url or api_key_env",
@@ -303,7 +314,10 @@ pub(super) fn validate_create_fields(
 }
 
 pub(super) fn validate_provider(provider: &str) -> Result<(), ConfigError> {
-    if matches!(provider, PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CHATGPT) {
+    if matches!(
+        provider,
+        PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CHATGPT | PROVIDER_CLAUDE
+    ) {
         Ok(())
     } else {
         Err(ConfigError::new(format!(
@@ -319,6 +333,34 @@ pub(super) fn validate_field(
 ) -> Result<(), ConfigError> {
     validate_provider(provider)?;
     match field {
+        ProfileField::ApiVersion => {
+            let bytes = value.as_bytes();
+            if provider != PROVIDER_CLAUDE
+                || bytes.len() != 10
+                || !bytes.iter().enumerate().all(|(index, byte)| {
+                    if index == 4 || index == 7 {
+                        *byte == b'-'
+                    } else {
+                        byte.is_ascii_digit()
+                    }
+                })
+            {
+                Err(ConfigError::new(
+                    "api_version requires Claude and a YYYY-MM-DD API version",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        ProfileField::WorkspaceIdEnv => {
+            if provider != PROVIDER_CLAUDE {
+                Err(ConfigError::new("workspace_id_env requires Claude"))
+            } else if value.is_empty() {
+                Ok(())
+            } else {
+                validate_env_name(value)
+            }
+        }
         ProfileField::Model => validate_model(value),
         ProfileField::Thinking => validate_thinking(value),
         ProfileField::BaseUrl => {

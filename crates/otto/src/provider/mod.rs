@@ -7,4 +7,5 @@
 pub mod catalog;
 mod catalog_cache;
 pub mod chatgpt;
+pub mod claude;
 pub mod openaicompat;

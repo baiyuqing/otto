@@ -57,6 +57,8 @@ pub use ui::{UiMode, resolve_ui_mode};
 
 /// Provider identifier for a base-URL-and-key OpenAI-compatible backend.
 pub const PROVIDER_OPENAI_COMPATIBLE: &str = "openai-compatible";
+pub const PROVIDER_CLAUDE: &str = "claude";
+pub const DEFAULT_CLAUDE_API_VERSION: &str = "2026-10-21";
 /// Provider identifier for a ChatGPT subscription via OAuth credentials.
 pub const PROVIDER_CHATGPT: &str = "chatgpt";
 
@@ -233,6 +235,10 @@ pub struct Profile {
     pub thinking: String,
     #[serde(default)]
     pub api_key_env: String,
+    #[serde(default)]
+    pub api_version: String,
+    #[serde(default)]
+    pub workspace_id_env: String,
     pub context_window: Option<i64>,
     pub compaction_window: Option<i64>,
 }

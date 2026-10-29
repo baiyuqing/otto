@@ -161,6 +161,11 @@ pub enum ProviderClient {
         timeout: Option<Duration>,
         cancellation_grace: Duration,
     },
+    Claude {
+        client: Arc<crate::provider::claude::Client>,
+        timeout: Option<Duration>,
+        cancellation_grace: Duration,
+    },
     ChatGpt {
         client: Arc<crate::provider::chatgpt::Client>,
         timeout: Option<Duration>,

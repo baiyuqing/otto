@@ -223,10 +223,10 @@ async fn a_credential_split_across_reasoning_deltas_is_redacted() {
     assert_eq!(response.message.blocks[0], Block::reasoning(expected));
 }
 
-/// An HTTP error names only the status, so no part of the body can reach
-/// it.
+/// An authorization error uses fixed guidance, so no part of the response body
+/// can reach it.
 #[tokio::test]
-async fn a_non_2xx_response_reports_only_the_status() {
+async fn an_unauthorized_response_reports_fixed_guidance() {
     let access_token = "secret-abc";
     let account_id = "acct-secret";
     let body = format!(
@@ -265,7 +265,13 @@ async fn a_non_2xx_response_reports_only_the_status() {
     );
 
     let error = settlement.result.unwrap_err();
-    assert_eq!(error.to_string(), "chatgpt responses HTTP 401");
+    let error_message = error.to_string();
+    assert_eq!(
+        error_message,
+        "chatgpt authorization failed; run 'otto login'"
+    );
+    assert!(!error_message.contains(access_token));
+    assert!(!error_message.contains(account_id));
 }
 
 #[tokio::test]

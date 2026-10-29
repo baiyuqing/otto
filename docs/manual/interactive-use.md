@@ -840,8 +840,9 @@ so it can size compaction conservatively.
 - `gpt-5.3-codex-spark` is an exact 128000-context / 32000-output override;
   `*-chat-latest` aliases use their catalog chat values.
 - GPT-4.1, GPT-4o, o1/o3/o4, and listed Claude aliases use the static catalog.
-- Claude metadata is used only when an OpenAI-compatible endpoint exposes a
-  Claude-family model ID; Otto has no Anthropic provider.
+  A listed Claude model ID can come from the first-party Claude provider or an
+  OpenAI-compatible endpoint; catalog discovery does not itself prove a model's
+  context limits or capabilities.
 
 If a model ID is unknown, proactive automation is disabled (no trustworthy local
 window), but reactive one-shot recovery can still happen after a typed provider

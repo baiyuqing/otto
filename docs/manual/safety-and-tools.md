@@ -521,14 +521,14 @@ without calling it passed.
 
 ### `list_models`
 
-For both `openai-compatible` and `chatgpt`, `list_models` discovers the active
-provider connection's model catalog, with metadata only where actually
-available. An OpenAI-compatible endpoint supplies its catalog through
-`GET {base_url}/models`; ChatGPT discovery uses the signed-in connection.
-Otto performs discovery with the existing provider authentication: the profile's
-API-key environment variable or credentials from `otto login`. Credentials stay
-in the runtime, not in tool arguments or `bash`. Child agents do not get this
-tool.
+For `claude`, `openai-compatible`, and `chatgpt`, `list_models` discovers the
+active provider connection's model catalog, with metadata only where actually
+available. Claude supplies its catalog through `GET {base_url}/v1/models`; an
+OpenAI-compatible endpoint uses `GET {base_url}/models`; ChatGPT discovery uses
+the signed-in connection. Otto performs discovery with the existing provider
+authentication: the profile's API-key environment variable (and optional Claude
+workspace binding) or credentials from `otto login`. Credentials stay in the
+runtime, not in tool arguments or `bash`. Child agents do not get this tool.
 
 Catalog entries do not guarantee that every model is usable for every task.
 Providers may omit pricing, capabilities or other metadata; Otto has no built-in

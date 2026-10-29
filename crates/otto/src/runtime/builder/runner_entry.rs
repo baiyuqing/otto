@@ -178,6 +178,17 @@ impl Builder {
         }
         Ok(if !self.boundary_allows_dynamic(Some(runtime)) {
             ProviderClient::Unavailable
+        } else if runtime.provider == otto_core::config::PROVIDER_CLAUDE {
+            ProviderClient::Claude {
+                client: Arc::new(crate::provider::claude::Client::new(
+                    &runtime.base_url,
+                    &runtime.api_key,
+                    &runtime.api_version,
+                    &runtime.workspace_id,
+                )),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+            }
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
             ProviderClient::ChatGpt {
                 client: Arc::new(

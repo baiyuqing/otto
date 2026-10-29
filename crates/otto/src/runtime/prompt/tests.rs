@@ -385,7 +385,7 @@ fn delegation_policy_appears_only_with_an_agent_tool() {
 
 #[test]
 fn model_ids_come_from_list_models_when_registered() {
-    for provider in ["openai-compatible", "chatgpt"] {
+    for provider in ["claude", "openai-compatible", "chatgpt"] {
         let prompt = system_prompt_for(
             &definitions(&["read", "list_models", "agent"]),
             off(),
@@ -418,7 +418,7 @@ fn model_ids_come_from_list_models_when_registered() {
 
 #[test]
 fn unavailable_catalog_uses_session_fallback_without_manual_list() {
-    for provider in ["openai-compatible", "chatgpt"] {
+    for provider in ["claude", "openai-compatible", "chatgpt"] {
         let prompt = system_prompt_for(
             &definitions(&["agent"]),
             off(),

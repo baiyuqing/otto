@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use otto_core::config::{PROVIDER_CHATGPT, PROVIDER_OPENAI_COMPATIBLE};
+use otto_core::config::{PROVIDER_CHATGPT, PROVIDER_CLAUDE, PROVIDER_OPENAI_COMPATIBLE};
 
 use super::run::{fail, resolve_home_for};
 
@@ -89,8 +89,12 @@ pub fn run(
     let Some(provider) = ask_choice(
         stdin,
         stdout,
-        "Provider [chatgpt / openai-compatible] (chatgpt): ",
-        &[PROVIDER_CHATGPT, PROVIDER_OPENAI_COMPATIBLE],
+        "Provider [chatgpt / openai-compatible / claude] (chatgpt): ",
+        &[
+            PROVIDER_CHATGPT,
+            PROVIDER_CLAUDE,
+            PROVIDER_OPENAI_COMPATIBLE,
+        ],
         PROVIDER_CHATGPT,
     ) else {
         let _ = writeln!(stdout, "Cancelled; configuration unchanged.");
@@ -124,12 +128,23 @@ pub fn run(
         return 0;
     };
 
-    let (base_url, api_key_env) = if provider == PROVIDER_OPENAI_COMPATIBLE {
+    let (base_url, api_key_env) = if matches!(
+        provider.as_str(),
+        PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CLAUDE
+    ) {
         let Some(base_url) = ask_nonempty(
             stdin,
             stdout,
-            "Base URL (required): ",
-            "",
+            if provider == PROVIDER_CLAUDE {
+                "Base URL (https://api.anthropic.com): "
+            } else {
+                "Base URL (required): "
+            },
+            if provider == PROVIDER_CLAUDE {
+                "https://api.anthropic.com"
+            } else {
+                ""
+            },
             |_| true,
             "A base URL is required.",
         ) else {
@@ -139,8 +154,16 @@ pub fn run(
         let Some(api_key_env) = ask_nonempty(
             stdin,
             stdout,
-            "API key environment variable (OPENAI_API_KEY): ",
-            "OPENAI_API_KEY",
+            if provider == PROVIDER_CLAUDE {
+                "API key environment variable (ANTHROPIC_API_KEY): "
+            } else {
+                "API key environment variable (OPENAI_API_KEY): "
+            },
+            if provider == PROVIDER_CLAUDE {
+                "ANTHROPIC_API_KEY"
+            } else {
+                "OPENAI_API_KEY"
+            },
             valid_environment_name,
             "Use an environment variable name such as OPENAI_API_KEY.",
         ) else {
@@ -267,6 +290,30 @@ mod tests {
 
     fn lookup(home: &std::path::Path) -> HashMap<String, String> {
         HashMap::from([("HOME".to_string(), home.to_string_lossy().into_owned())])
+    }
+
+    #[test]
+    fn creates_claude_with_native_defaults_without_storing_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let mut input = Cursor::new(b"claude\nwork\nfixture-claude\n\n\nsave\n".to_vec());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            &[],
+            &mut input,
+            &mut stdout,
+            &mut stderr,
+            &lookup(home.path()),
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let text = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
+        let file = otto_core::config::parse(&text).unwrap();
+        let profile = &file.profiles["work"];
+        assert_eq!(profile.provider, "claude");
+        assert_eq!(profile.base_url, "https://api.anthropic.com");
+        assert_eq!(profile.api_key_env, "ANTHROPIC_API_KEY");
+        assert_eq!(profile.api_version, "2026-10-21");
+        assert!(profile.workspace_id_env.is_empty());
     }
 
     #[test]

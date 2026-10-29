@@ -116,6 +116,12 @@ pub fn boundary_secret_values(
     }
     for name in sorted_profile_names(inputs.config) {
         let profile = &inputs.config.profiles[&name];
+        if !profile.workspace_id_env.is_empty()
+            && (!collect.add(&profile.workspace_id_env)
+                || !collect.add(environment_value(inputs, &profile.workspace_id_env)))
+        {
+            return (collect.values(), false);
+        }
         if !profile.api_key_env.is_empty()
             && (!collect.add(&profile.api_key_env)
                 || !collect.add(environment_value(inputs, &profile.api_key_env)))
@@ -137,6 +143,9 @@ pub fn boundary_secret_values(
         return (collect.values(), false);
     }
     if let Some(runtime) = runtime {
+        if !collect.add(&runtime.workspace_id_env) || !collect.add(&runtime.workspace_id) {
+            return (collect.values(), false);
+        }
         if !collect.add(&runtime.api_key_env) || !collect.add(&runtime.api_key) {
             return (collect.values(), false);
         }
@@ -447,6 +456,42 @@ mod tests {
             values.iter().any(|value| value == "test-bound-value"),
             "{values:?}"
         );
+    }
+
+    #[test]
+    fn claude_workspace_environment_binding_and_value_are_secrets() {
+        let mut config = File::default();
+        config.profiles.insert(
+            "claude".into(),
+            otto_core::config::Profile {
+                provider: "claude".into(),
+                workspace_id_env: "CLAUDE_WORKSPACE".into(),
+                ..Default::default()
+            },
+        );
+        let environment = environment(&[("CLAUDE_WORKSPACE", "fixture-workspace-secret")]);
+        let inputs = BoundaryInputs {
+            sandbox_secrets: &[],
+            sandbox_secrets_complete: true,
+            config: &config,
+            environment: &environment,
+            overrides_base_url: "",
+        };
+        let runtime = Runtime {
+            workspace_id_env: "RESOLVED_WORKSPACE".into(),
+            workspace_id: "resolved-workspace-secret".into(),
+            ..Default::default()
+        };
+        let (values, complete) = boundary_secret_values(&inputs, Some(&runtime));
+        assert!(complete);
+        for secret in [
+            "CLAUDE_WORKSPACE",
+            "fixture-workspace-secret",
+            "RESOLVED_WORKSPACE",
+            "resolved-workspace-secret",
+        ] {
+            assert!(values.iter().any(|value| value == secret));
+        }
     }
 
     #[test]

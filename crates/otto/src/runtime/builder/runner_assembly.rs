@@ -209,6 +209,12 @@ impl Builder {
                     max_output,
                 )));
             }
+            ProviderClient::Claude { client, .. } => {
+                tools.push(Box::new(models::ListModelsTool::claude(
+                    Arc::clone(client),
+                    max_output,
+                )));
+            }
             ProviderClient::ChatGpt { client, .. } => {
                 tools.push(Box::new(models::ListModelsTool::chatgpt(
                     Arc::clone(client),
@@ -554,6 +560,9 @@ impl Builder {
 
         let request_sizer = match &client {
             ProviderClient::Compat { client, .. } => {
+                Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
+            }
+            ProviderClient::Claude { client, .. } => {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
             ProviderClient::ChatGpt { client, .. } => {

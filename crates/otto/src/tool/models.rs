@@ -58,6 +58,13 @@ impl ListModelsTool {
         }
     }
 
+    pub fn claude(client: Arc<crate::provider::claude::Client>, max_output: usize) -> Self {
+        Self {
+            client: CatalogClient::Claude(client),
+            max_output,
+        }
+    }
+
     pub fn chatgpt(client: Arc<crate::provider::chatgpt::Client>, max_output: usize) -> Self {
         Self {
             client: CatalogClient::ChatGpt(client),
@@ -68,6 +75,7 @@ impl ListModelsTool {
 
 enum CatalogClient {
     Compat(Arc<Client>),
+    Claude(Arc<crate::provider::claude::Client>),
     ChatGpt(Arc<crate::provider::chatgpt::Client>),
 }
 
@@ -144,6 +152,7 @@ impl Tool for ListModelsTool {
         }
         let catalog = match &self.client {
             CatalogClient::Compat(client) => client.catalog(cancel).await,
+            CatalogClient::Claude(client) => client.catalog(cancel).await,
             CatalogClient::ChatGpt(client) => client.catalog(cancel).await,
         };
         match catalog {

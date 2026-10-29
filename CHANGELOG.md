@@ -24,6 +24,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Security
 
+- Updated `rustls-webpki` to 0.103.16 to reject certificate paths through the
+  distrusted emSign intermediate public keys described by CVE-2026-111943.
+  Source installations must rebuild Otto to receive the fix.
 - ChatGPT login, logout and token refresh now serialize credential changes and
   conditionally commit refreshed tokens, so an in-flight refresh cannot restore
   a signed-out account or overwrite a newer login. A request whose current token

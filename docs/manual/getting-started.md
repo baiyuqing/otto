@@ -33,7 +33,10 @@ otto --cwd /path/to/project
 `make install` installs `otto` and `otto-connect` in `~/.local/bin/` and bundled
 skills in `~/.otto/skills/`. Add `~/.local/bin` to `PATH`. For a checkout-local
 binary use `make build`, then `./otto`. Upgrade by updating the checkout,
-rerunning `make install`, and restarting affected runtimes and connectors.
+stopping every Otto process (including `otto serve` and connectors), rerunning
+`make install`, and starting them again. Old and new binaries must not use the
+same `~/.otto/` databases at the same time; the [changelog](../../CHANGELOG.md)
+lists breaking changes that need extra steps.
 Browser UI development/hosting is separate: [otto-plus](https://github.com/baiyuqing/otto-plus).
 
 For Claude or an OpenAI-compatible connection, keep the API key in the

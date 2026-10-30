@@ -33,6 +33,12 @@ otto serve [--socket PATH] [--listen HOST:PORT]
 `--socket` and `--listen`. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
 `--archive`, and `--no-session`.
 
+Release builds abort on panic: a panic in any task, including one handling a
+single request, ends the whole `otto serve` process with SIGABRT (exit status
+134) after Otto kills the sandboxed bash and MCP stdio process groups it
+started. Run a long-lived server under a supervisor that restarts it, such as
+[`scripts/otto-tcp.sh run`](#the-acp-tcp-stack-script). Debug and test builds unwind.
+
 ### Listener
 
 With both `--socket` and `--listen` on the command line, Otto opens both

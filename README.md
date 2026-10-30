@@ -59,8 +59,10 @@ profile). Set that variable privately in the environment before starting
 Try asking Otto to explain a repository, research a question or implement a
 small change. Use `/help` for commands and `/new` to start a fresh session.
 
-To upgrade a source installation, update the checkout, rerun `make install`,
-and restart running Otto/connector processes. See the
+To upgrade a source installation, update the checkout, stop every running Otto
+process (including `otto serve` and connectors), rerun `make install`, and start
+them again; an old and a new binary must not share `~/.otto/` at the same time.
+Check the [changelog](CHANGELOG.md) for breaking changes first. See the
 [getting-started guide](docs/manual/getting-started.md) for configuration,
 one-off CLI flags, the launcher script and Docker setup.
 
@@ -85,7 +87,16 @@ one-off CLI flags, the launcher script and Docker setup.
   and persisted: do not include secrets. Keep API keys and chat secrets in
   environment variables; ChatGPT credentials come from `otto login`.
 - Providers, memory plugins and configured integrations may receive task content.
-  Inspect their configuration before using sensitive data.
+  Inspect their configuration before using sensitive data. Before each provider
+  request Otto locally replaces known credentials, high-confidence secret formats,
+  email addresses, `+` phone numbers, payment cards and Chinese resident
+  identity-card numbers; other personal data is sent unchanged. See the
+  [provider egress guard](docs/manual/safety-and-tools.md#provider-egress-secret-and-pii-guard).
+- `otto serve` listens on a Unix socket by default. A non-loopback TCP listener
+  requires TLS (`[server].tls_cert`, `[server].tls_key`) and `OTTO_SERVER_TOKEN`;
+  see [Listener](docs/manual/servers-and-connectors.md#listener). Release builds
+  abort the whole process on a panic, so run a long-lived server under a
+  supervisor that restarts it.
 - Commands can still have real effects within granted permissions. Review
   proposed changes and keep backups for valuable work.
 

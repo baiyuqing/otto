@@ -54,8 +54,9 @@ OpenAI-compatible profile 还需选择接口地址。启动前在进程环境中
 可以先让 Otto 解释一个仓库、查证一个问题，或完成一个小改动。
 `/help` 查看命令，`/new` 开始新会话。
 
-源码安装的升级方式：更新 checkout，重新执行 `make install`，然后重启运行中的
-Otto 和 connector 进程。配置、单次 CLI 参数、启动脚本与 Docker 用法见
+源码安装的升级方式：更新 checkout，停止所有运行中的 Otto 进程（包括 `otto serve`
+和 connector），重新执行 `make install`，再启动它们；新旧二进制不能同时使用
+`~/.otto/`。升级前先查看[更新日志](CHANGELOG.md)中的不兼容变更。配置、单次 CLI 参数、启动脚本与 Docker 用法见
 [入门指南](docs/manual/getting-started.md)。
 
 ## 按任务查文档
@@ -78,7 +79,14 @@ Otto 和 connector 进程。配置、单次 CLI 参数、启动脚本与 Docker 
   和容器没有这个边界，执行 Shell 需要显式关闭沙箱。
 - 审批不等于沙箱授权。审批内容可能显示并持久化，不要放入秘密。API key 和聊天
   密钥仅放在环境变量中；ChatGPT 凭据通过 `otto login` 获取。
-- 模型服务、远端记忆和配置的集成可能接收任务内容，处理敏感数据前请检查配置。
+- 模型服务、记忆插件和配置的集成可能接收任务内容，处理敏感数据前请检查配置。
+  每次请求模型服务前，Otto 在本地替换已知凭据、高置信度的密钥格式、邮箱地址、
+  以 `+` 开头的电话号码、银行卡号和中国居民身份证号；其他个人信息按原样发送。见
+  [出站密钥与 PII 检查](docs/manual/safety-and-tools.md#provider-egress-secret-and-pii-guard)。
+- `otto serve` 默认监听 Unix socket。非 loopback 的 TCP 监听需要 TLS
+  （`[server].tls_cert`、`[server].tls_key`）和 `OTTO_SERVER_TOKEN`，见
+  [Listener](docs/manual/servers-and-connectors.md#listener)。Release 构建在 panic
+  时终止整个进程，长期运行的服务端应由会自动重启的 supervisor 托管。
 - 已获权限内的命令仍会产生真实影响；重要工作请保留备份并审阅修改。
 
 权限模式与恢复行为见[安全与工具](docs/manual/safety-and-tools.md)。Seatbelt
@@ -87,7 +95,7 @@ Otto 和 connector 进程。配置、单次 CLI 参数、启动脚本与 Docker 
 ## 参与贡献
 
 先读 [`AGENTS.md`](AGENTS.md)、[代码组织](docs/code-organization.md)和
-[开发指南](docs/development.md)。使用独立分支与 worktree，安装 Gitleaks 后运行
+[开发指南](docs/development.md)。使用独立分支与 worktree，安装 Gitleaks 和 Node 后运行
 `make setup-git-hooks`，并执行覆盖改动的检查。仓库没有 CI，PR 必须列出本地验证结果。
 
 [架构图](docs/architecture/otto-architecture.svg) · [许可证](LICENSE)

@@ -295,7 +295,7 @@ impl BashTool {
 
         Ok(Self {
             grant_control: None,
-            output_logs: Arc::default(),
+            output_logs: Arc::new(Logs::for_session(&standalone_log_session_id())),
             workspace_root: workspace.root().to_path_buf(),
             output_root: Arc::new(
                 Root::from_directory(
@@ -325,6 +325,8 @@ impl BashTool {
         })
     }
 
+    /// Production tools get their session's logs here; a tool without them
+    /// writes under a unique per-tool directory, never a shared one.
     pub(crate) fn with_output_logs(mut self, logs: Arc<Logs>) -> Self {
         self.output_logs = logs;
         self
@@ -565,3 +567,9 @@ fn fraction(value: u128, scale: u128) -> String {
 
 #[cfg(test)]
 mod tests;
+
+fn standalone_log_session_id() -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("standalone-{}-{number}", std::process::id())
+}

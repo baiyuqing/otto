@@ -347,13 +347,15 @@ impl Builder {
         max_output: usize,
         redaction_values: &[String],
         skills: &skill::Catalog,
+        session_id: &str,
     ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, BuildError> {
         self.child_tools_with_output_logs(
             runtime,
             max_output,
             redaction_values,
             skills,
-            Arc::default(),
+            session_id,
+            Arc::new(crate::tool::bash_output::Logs::for_session(session_id)),
         )
     }
 
@@ -363,6 +365,7 @@ impl Builder {
         max_output: usize,
         redaction_values: &[String],
         skills: &skill::Catalog,
+        session_id: &str,
         output_logs: Arc<crate::tool::bash_output::Logs>,
     ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, BuildError> {
         let mut tools = self.builtin_file_tools(max_output);
@@ -388,7 +391,7 @@ impl Builder {
                 tool = tool.with_private_home();
             }
             if let Some(approvals) = &self.bash_approvals {
-                tool = tool.with_approvals(String::new(), approvals.clone());
+                tool = tool.with_approvals(session_id.to_owned(), approvals.clone());
             }
             if let Some(control) = &self.grant_control {
                 tool = tool.with_grant_control(self.config_path.clone(), control.clone());

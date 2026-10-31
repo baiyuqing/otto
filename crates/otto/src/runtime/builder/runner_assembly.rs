@@ -14,7 +14,28 @@ impl Builder {
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
         let max_output = output_cap(runtime.max_output_bytes);
-        let output_logs = Arc::new(crate::tool::bash_output::Logs::default());
+        let session_id = session.header().id;
+        let client = self.provider_client(runtime)?;
+        // Disabling conversational delegation must not disable named workflow
+        // execution: the internal workflow runner always has sub-agents.
+        let agents_enabled = !include_parent_tools
+            || otto_core::config::resolve_agents(
+                &self.config,
+                &self.environment,
+                &self.workspace_path,
+            )
+            .map_err(|error| error.to_string())?
+            .enabled;
+        // Resource creation depends on configuration only, not on whether this
+        // runner's provider is available: the first runner of a session may
+        // have a closed redaction boundary while a later profile does not.
+        let resources = self.session_resources(
+            session,
+            agents_enabled,
+            runtime.max_output_bytes.max(0) as usize,
+            warnings,
+        );
+        let output_logs = Arc::clone(resources.output_logs());
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let mut tools = self.builtin_file_tools(max_output);
@@ -38,14 +59,14 @@ impl Builder {
                 runtime.resilience.deadlines.cancellation_grace,
                 max_output,
                 &redaction_values,
+                Arc::clone(&output_logs),
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
-            tool = tool.with_output_logs(Arc::clone(&output_logs));
             if self.sandbox_info.mode == SandboxMode::Seatbelt {
                 tool = tool.with_private_home();
             }
             if let Some(approvals) = &self.bash_approvals {
-                tool = tool.with_approvals(session.header().id, Arc::clone(approvals));
+                tool = tool.with_approvals(session_id.clone(), Arc::clone(approvals));
             }
             if let Some(control) = &self.grant_control {
                 tool = tool.with_grant_control(self.config_path.clone(), control.clone());
@@ -64,7 +85,6 @@ impl Builder {
         {
             let _ = writeln!(warnings, "warning: {reason}");
         }
-        let client = self.provider_client(runtime)?;
         let plugins =
             crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
         let extensions = self.plugin_runtime(&plugins, &redaction_values)?;
@@ -144,7 +164,7 @@ impl Builder {
                 Arc::new(move || session.lease())
             },
             PathBuf::from(&self.workspace_path),
-            session.1.closed.clone(),
+            session.hooks().closed.clone(),
             otto_core::config::resolve_failover(&self.config)
                 .map_err(|e| e.to_string())?
                 .enabled,
@@ -180,26 +200,36 @@ impl Builder {
             }
         }
         mark_build_trace(&mut trace, "runner/catalogs");
-        let (mcp_tools, mcp_connected, mcp_servers) = if connect_mcp {
-            self.connect_mcp_with_plugins(
-                max_output,
-                runtime.resilience.deadlines.cancellation_grace,
-                warnings,
-                &plugins,
-            )
-            .await
-        } else {
-            (Vec::new(), Vec::new(), self.connecting_mcp_servers())
-        };
-        tools.extend(mcp_tools);
-        if let Some(guard) = crate::tool::project_guard::Guard::for_config(
-            &self.config,
-            &self.home,
-            &self.workspace_path,
-        ) && guard.check_trust
-        {
-            guard.watch_mcp(&mcp_servers);
-        }
+        let (mcp_connected, connecting_mcp): (&[crate::runtime::wiring::ConnectedServer], _) =
+            if connect_mcp {
+                let session_mcp = self
+                    .session_mcp(
+                        &resources,
+                        max_output,
+                        runtime.resilience.deadlines.cancellation_grace,
+                        warnings,
+                        &plugins,
+                    )
+                    .await;
+                (session_mcp.connected.as_slice(), None)
+            } else {
+                // A build that does not connect shows the configured servers as
+                // connecting until a later build connects them.
+                let servers = self.connecting_mcp_servers();
+                if let Some(guard) = crate::tool::project_guard::Guard::for_config(
+                    &self.config,
+                    &self.home,
+                    &self.workspace_path,
+                ) && guard.check_trust
+                {
+                    guard.watch_mcp(&servers);
+                }
+                (&[][..], Some(servers))
+            };
+        tools.extend(super::super::wiring::mcp_adapter_tools(
+            mcp_connected,
+            max_output,
+        ));
         mark_build_trace(&mut trace, "runner/mcp");
 
         match &client {
@@ -251,10 +281,11 @@ impl Builder {
             max_output,
             &redaction_values,
             &catalogs.skills,
+            &session_id,
             Arc::clone(&output_logs),
         )?;
-        child_tools.extend(super::super::wiring::mcp_child_tools(
-            &mcp_connected,
+        child_tools.extend(super::super::wiring::mcp_adapter_tools(
+            mcp_connected,
             max_output,
         ));
         if redactor.allows_dynamic_content() {
@@ -267,8 +298,7 @@ impl Builder {
         ) {
             child_tools = guard.tools(child_tools);
         }
-        let mut workflow_binding = None;
-        let mut subagents = self.build_subagents(
+        let subagents = self.build_subagents(
             &mut tools,
             &catalogs,
             &client,
@@ -282,13 +312,14 @@ impl Builder {
             Some(hook_guard.clone()),
             warnings,
         )?;
-        if let Some(runner) = &subagents.runner {
+        if let Some(runner) = &subagents {
             runner.bind_output_logs(Arc::clone(&output_logs));
             runner.bind_scratch_root(
                 self.workspace
                     .root_fs()
                     .try_clone()
                     .map_err(|error| format!("pin child research workspace: {error}"))?,
+                &session_id,
             );
         }
         mark_build_trace(&mut trace, "runner/subagents");
@@ -347,39 +378,19 @@ impl Builder {
                 &redaction_values,
             )));
             if include_parent_tools {
-                if subagents.inbox.is_none() {
-                    let inbox = Arc::new(otto_core::agent::inbox::Inbox::default());
-                    let source = session.clone();
-                    let no_session = self.no_session;
-                    crate::runtime::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
-                        let path = source.path();
-                        (!no_session && !path.is_empty())
-                            .then(|| Path::new(&path).with_extension("inbox.json"))
-                    });
-                    let path = session.path();
-                    if !self.no_session
-                        && !path.is_empty()
-                        && let Some(warning) = crate::runtime::sidecar_mailbox::load(
-                            &inbox,
-                            &Path::new(&path).with_extension("inbox.json"),
-                        )
-                    {
-                        let _ = writeln!(warnings, "warning: {warning}");
-                    }
-                    subagents.inbox = Some(inbox);
-                }
                 let controller = Box::pin(crate::runtime::workflow::shared_controller(
                     self, runtime, warnings,
                 ))
                 .await;
                 if !self.no_session
-                    && let (Ok(controller), Some(mailbox)) = (&controller, &subagents.inbox)
+                    && let Ok(controller) = &controller
                 {
-                    workflow_binding = Some(crate::runtime::workflow_notifications::bind(
+                    crate::runtime::workflow_notifications::bind(
                         controller,
                         session.clone(),
-                        mailbox,
-                    ));
+                        &(Arc::clone(resources.notifications())
+                            as Arc<dyn otto_core::mailbox::Mailbox>),
+                    );
                 }
                 let parent = crate::tool::workflow::Parent::new(
                     controller,
@@ -435,12 +446,12 @@ impl Builder {
             &endpoint_host,
             &runtime.model,
         );
-        let mut model_guidance = if subagents.runner.is_some() {
+        let mut model_guidance = if subagents.is_some() {
             redactor.redact_string(&subagent_model_guidance(&runtime.subagent_models))
         } else {
             String::new()
         };
-        if subagents.runner.is_some()
+        if subagents.is_some()
             && redactor.allows_dynamic_content()
             && let Some(reason) = model_diagnostic
         {
@@ -594,7 +605,7 @@ impl Builder {
                     Some(hook_guard),
                 )
             }),
-            hook_state: session.1.clone(),
+            hook_state: session.hooks().clone(),
             model: runtime.model.clone(),
             provider_name: runtime.provider.clone(),
             system_prompt: system_prompt.clone(),
@@ -621,13 +632,7 @@ impl Builder {
             },
             memory_recall_limit: self.memory.recall_limit,
             memory_recall_token_budget: self.memory.recall_token_budget,
-            tasks: subagents
-                .tasks
-                .clone()
-                .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
-            mailbox: subagents
-                .inbox
-                .unwrap_or_else(|| Arc::new(otto_core::mailbox::InMemoryMailbox::default())),
+            mailbox: Arc::clone(resources.notifications()) as Arc<dyn otto_core::mailbox::Mailbox>,
             steering: task_control.steering(),
             version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()
@@ -643,8 +648,6 @@ impl Builder {
         }
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
         let runner = Runner {
-            workflow_binding,
-            output_logs,
             authorization_run,
             review_context: tokio::sync::Mutex::new(review_context),
             pending_authorization: Mutex::new(Vec::new()),
@@ -666,13 +669,11 @@ impl Builder {
             definitions,
             usage: self.usage_collector(session, runtime),
             logger: self.logger.clone(),
-            tasks: subagents.tasks,
-            subagents: subagents.runner,
-            reminders: subagents.reminders,
+            subagents,
             skills: catalogs.skills.clone(),
             discovered_skills: catalogs.discovered_skills.clone(),
             agents: catalogs.agent_catalog.clone(),
-            mcp: mcp_servers,
+            connecting_mcp,
             task_control,
             memory_client,
             schedule_origin,
@@ -713,14 +714,14 @@ impl Builder {
                 Err(message) => {
                     runner.agent.end_hooks().await;
                     runner.close();
-                    runner.close_mcp().await;
+                    session.close_resources().await;
                     return Err(message);
                 }
             };
             if response.decision == Some(otto_core::agent::hooks::Decision::Deny) {
                 runner.agent.end_hooks().await;
                 runner.close();
-                runner.close_mcp().await;
+                session.close_resources().await;
                 return Err(response
                     .reason
                     .unwrap_or_else(|| "Hook denied session".into()));

@@ -155,7 +155,7 @@ async fn build_runner_without_mcp_reports_connecting_and_skips_mcp_tools() {
         .await
         .expect("runner");
 
-    let status = runner.mcp.status();
+    let status = runner.mcp().status();
     assert_eq!(status.len(), 1);
     assert_eq!(status[0].name, "slow");
     assert_eq!(status[0].state, crate::mcp::ServerState::Connecting);
@@ -196,7 +196,7 @@ async fn a_chatgpt_runtime_registers_catalog_discovery_without_manual_models() {
     assert!(runtime.subagent_models.is_empty());
     assert!(runner.system_prompt().contains("list_models"));
     let child_names: Vec<_> = builder
-        .child_tools(&runtime, 65536, &[], &Catalog::default())
+        .child_tools(&runtime, 65536, &[], &Catalog::default(), "session-x")
         .expect("child tools")
         .into_iter()
         .map(|tool| tool.definition().name)
@@ -242,7 +242,7 @@ async fn bash_advertises_the_private_home_only_under_seatbelt() {
             .find(|definition| definition.name == "bash")
             .expect("built bash");
         let children = builder
-            .child_tools(&runtime(), 65536, &[], &Catalog::default())
+            .child_tools(&runtime(), 65536, &[], &Catalog::default(), "session-x")
             .expect("child tools")
             .iter()
             .map(|tool| tool.definition())
@@ -322,7 +322,7 @@ async fn child_bash_tools_run_excluded_commands_unconfined() {
     )));
 
     let tools = builder
-        .child_tools(&runtime(), 65536, &[], &Catalog::default())
+        .child_tools(&runtime(), 65536, &[], &Catalog::default(), "session-x")
         .expect("child tools");
     let bash = tools
         .iter()
@@ -361,4 +361,44 @@ fn dropping_builder_and_file_tools_frees_the_workspace() {
     );
     drop(tools);
     assert!(workspace.upgrade().is_none(), "the workspace is freed");
+}
+
+#[tokio::test]
+async fn child_bash_approvals_are_keyed_by_the_owning_session() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut builder = builder(dir.path());
+    with_bash(&mut builder, dir.path());
+    let approvals = Arc::new(crate::tool::bash::BashApprovals::new(
+        builder.command_executor.clone().expect("executor"),
+        Vec::new(),
+    ));
+    builder.bash_approvals = Some(Arc::clone(&approvals));
+    // A redaction value turns on the approval gates of the bash tool.
+    let redaction_values = ["redaction-secret-value".to_string()];
+    let tools = builder
+        .child_tools(
+            &runtime(),
+            65536,
+            &redaction_values,
+            &Catalog::default(),
+            "session-x",
+        )
+        .expect("child tools");
+    let bash = tools
+        .iter()
+        .find(|tool| tool.definition().name == "bash")
+        .expect("child bash");
+    let arguments = serde_json::json!({
+        "command": "git push",
+        "sandbox_permissions": "require_escalated",
+        "justification": "push the reviewed branch",
+    })
+    .to_string();
+    let arguments = serde_json::value::RawValue::from_string(arguments).expect("raw arguments");
+    let result = bash
+        .execute(&arguments, &tokio_util::sync::CancellationToken::new())
+        .await;
+    assert!(result.content.contains("/approve"), "{}", result.content);
+    assert_eq!(approvals.pending_count("session-x"), 1);
+    assert_eq!(approvals.pending_count(""), 0);
 }

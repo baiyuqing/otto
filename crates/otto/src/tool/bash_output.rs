@@ -16,14 +16,15 @@ use nix::sys::stat::Mode;
 
 use super::result::{CappedByteCollector, RedactedSink};
 use super::root::Root;
+use super::session_directory::{create_session_directory, session_directory_name};
 
 pub(super) const PREVIEW_BYTES: usize = 4096;
 const DIRECTORY: &str = ".otto/tool-output";
 
 /// One runtime's temporary logs. Parent turns and child tasks share leases so
 /// one completed task cannot delete logs still needed by another task.
-#[derive(Default)]
 pub(crate) struct Logs {
+    session_id: String,
     state: Mutex<LogState>,
 }
 
@@ -46,6 +47,14 @@ impl LogState {
 }
 
 impl Logs {
+    /// Logs of one session are written under `.otto/tool-output/<session_id>/`.
+    pub(crate) fn for_session(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            state: Mutex::default(),
+        }
+    }
+
     pub(crate) fn lease(self: &Arc<Self>) -> LogLease {
         self.state
             .lock()
@@ -103,7 +112,7 @@ pub(super) struct Output {
 impl Output {
     #[cfg(test)]
     pub(super) fn new(root: Arc<Root>, limit: usize) -> Self {
-        Self::with_logs(root, limit, Arc::default())
+        Self::with_logs(root, limit, Arc::new(Logs::for_session("test-session")))
     }
 
     pub(super) fn with_logs(root: Arc<Root>, limit: usize, logs: Arc<Logs>) -> Self {
@@ -120,11 +129,12 @@ impl Output {
     }
 
     fn create_log(&self) -> io::Result<(String, BufWriter<File>)> {
+        let session_directory_name = session_directory_name(&self.logs.session_id)?;
         let parent = self.root.create_child_directory(".otto", Mode::S_IRWXU)?;
-        let directory = parent.create_child_directory("tool-output", Mode::S_IRWXU)?;
+        let output_directory = parent.create_child_directory("tool-output", Mode::S_IRWXU)?;
         // Keep generated logs out of commits without changing repository policy.
         let flags = OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL;
-        match directory.open_file(
+        match output_directory.open_file(
             Path::new(".gitignore"),
             flags,
             Mode::S_IRUSR | Mode::S_IWUSR,
@@ -133,8 +143,9 @@ impl Output {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
+        let directory = create_session_directory(&output_directory, session_directory_name)?;
         let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
-        let path = format!("{DIRECTORY}/{id}.log");
+        let path = format!("{DIRECTORY}/{session_directory_name}/{id}.log");
         let file = directory.open_file(
             Path::new(&format!("{id}.log")),
             flags,
@@ -251,12 +262,12 @@ mod tests {
     fn last_turn_or_child_lease_removes_only_owned_files() {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(Root::open(dir.path()).unwrap());
-        let logs = Arc::new(Logs::default());
+        let logs = Arc::new(Logs::for_session("test-session"));
         let parent = logs.lease();
         // Taken before a child is scheduled, so a queued child protects logs too.
         let child = logs.lease();
         let path = logged_output(&logs, &root);
-        let unrelated = dir.path().join(".otto/tool-output/keep.log");
+        let unrelated = dir.path().join(".otto/tool-output/test-session/keep.log");
         std::fs::write(&unrelated, "not owned by this runtime").unwrap();
         drop(parent);
         assert!(dir.path().join(&path).exists());
@@ -270,8 +281,8 @@ mod tests {
     fn independent_sessions_do_not_clean_each_others_logs() {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(Root::open(dir.path()).unwrap());
-        let first = Arc::new(Logs::default());
-        let second = Arc::new(Logs::default());
+        let first = Arc::new(Logs::for_session("first-session"));
+        let second = Arc::new(Logs::for_session("second-session"));
         let a = first.lease();
         let b = second.lease();
         let first_path = logged_output(&first, &root);
@@ -287,7 +298,7 @@ mod tests {
     fn model_deleted_logs_are_forgotten_and_later_turns_clean_up_normally() {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(Root::open(dir.path()).unwrap());
-        let logs = Arc::new(Logs::default());
+        let logs = Arc::new(Logs::for_session("test-session"));
         let first_turn = logs.lease();
         let path = logged_output(&logs, &root);
         std::fs::remove_file(dir.path().join(path)).unwrap();
@@ -303,7 +314,7 @@ mod tests {
     async fn a_dropped_task_releases_its_log_lease() {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(Root::open(dir.path()).unwrap());
-        let logs = Arc::new(Logs::default());
+        let logs = Arc::new(Logs::for_session("test-session"));
         let lease = logs.lease();
         let path = logged_output(&logs, &root);
         let (ready, started) = tokio::sync::oneshot::channel();
@@ -322,7 +333,7 @@ mod tests {
     fn cleanup_uses_the_pinned_log_directory_after_a_path_swap() {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(Root::open(dir.path()).unwrap());
-        let logs = Arc::new(Logs::default());
+        let logs = Arc::new(Logs::for_session("test-session"));
         let lease = logs.lease();
         let path = logged_output(&logs, &root);
         let name = Path::new(&path).file_name().unwrap();
@@ -332,11 +343,51 @@ mod tests {
         std::fs::create_dir(&original).unwrap();
         std::fs::write(original.join(name), "unrelated replacement").unwrap();
         drop(lease);
-        assert!(!moved.join(name).exists());
+        assert!(!moved.join("test-session").join(name).exists());
         assert_eq!(
             std::fs::read_to_string(original.join(name)).unwrap(),
             "unrelated replacement"
         );
+    }
+
+    #[test]
+    fn overflow_log_path_names_the_owning_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(Root::open(dir.path()).unwrap());
+        let logs = Arc::new(Logs::for_session("session-x"));
+        let path = logged_output(&logs, &root);
+        let prefix = ".otto/tool-output/session-x/";
+        assert!(path.starts_with(prefix) && path.ends_with(".log"), "{path}");
+        assert_eq!(&path[prefix.len()..].len(), &36);
+        assert!(dir.path().join(&path).is_file());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".otto/tool-output/.gitignore")).unwrap(),
+            "*\n"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path().join(".otto/tool-output/session-x"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn invalid_session_ids_create_no_log_and_no_directories() {
+        for id in ["..", "a/b", "", "."] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Arc::new(Root::open(dir.path()).unwrap());
+            let mut output = Output::with_logs(root, 4, Arc::new(Logs::for_session(id)));
+            output.write(b"head complete log tail");
+            output.finish();
+            assert!(
+                output.render("stdout").contains("full_output: unavailable"),
+                "{id:?}"
+            );
+            assert!(!dir.path().join(".otto").exists(), "{id:?}");
+        }
     }
 
     #[test]

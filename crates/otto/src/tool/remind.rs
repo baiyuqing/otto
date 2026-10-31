@@ -499,15 +499,22 @@ impl Reminders {
     }
 }
 
-impl Drop for Reminders {
-    fn drop(&mut self) {
+impl Reminders {
+    /// Stops every armed timer without touching the file, so resuming the
+    /// session re-arms from it. Emptying the list makes `Inner::fire` a no-op
+    /// for a timer whose sleep and cancellation complete in the same moment.
+    /// Idempotent; also runs on drop.
+    pub(crate) fn stop(&self) {
         self.token.cancel();
-        // The file stays, so resuming the session re-arms from it. Emptying
-        // the list makes `Inner::fire` a no-op for a timer whose sleep and
-        // cancellation complete in the same moment.
         if let Ok(mut armed) = self.inner.armed.lock() {
             armed.clear();
         }
+    }
+}
+
+impl Drop for Reminders {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

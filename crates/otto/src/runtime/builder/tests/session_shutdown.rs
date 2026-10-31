@@ -1,9 +1,9 @@
 use super::*;
 
-/// Regression test that the awaited process-exit path observes the same
-/// shared completion as [`Runner::close`]'s background path.
+/// The awaited process-exit path waits for the real MCP close, and the
+/// runner's own `close` afterwards neither panics nor closes anything twice.
 #[tokio::test]
-async fn close_mcp_before_close_actually_waits_for_the_real_close() {
+async fn close_resources_before_close_actually_waits_for_the_real_close() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let closed = Arc::new(AtomicBool::new(false));
@@ -26,14 +26,14 @@ async fn close_mcp_before_close_actually_waits_for_the_real_close() {
     )
     .with_mcp(Arc::new(mcp));
 
-    runner.close_mcp().await;
+    runner.session().close_resources().await;
     assert!(
         closed.load(Ordering::SeqCst),
-        "close_mcp did not wait for the real close"
+        "close_resources did not wait for the real close"
     );
 
-    // `close` now observes the already-completed shared cleanup. It must
-    // remain a harmless no-op, not panic or double-close.
+    // The runner no longer owns the servers: its `close` stays a harmless
+    // no-op for them.
     runner.close();
 }
 
@@ -539,9 +539,12 @@ async fn closing_a_session_cancels_the_owned_startup_hook_after_build_waiter_dro
         tokio::select! {result=&mut build=>panic!("startup returned unexpectedly: {}",result.is_ok()),result=tokio::time::timeout(Duration::from_secs(5),started)=>result.unwrap()}
     }
     session.close().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), session.1.start_done.cancelled())
-        .await
-        .unwrap();
-    assert!(session.1.start.get().unwrap().is_err());
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        session.hooks().start_done.cancelled(),
+    )
+    .await
+    .unwrap();
+    assert!(session.hooks().start.get().unwrap().is_err());
     assert!(!root.join("should-not-finish").exists());
 }

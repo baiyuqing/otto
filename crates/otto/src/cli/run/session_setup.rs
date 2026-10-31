@@ -23,7 +23,7 @@ pub(super) fn spawn_mcp_runner_swap(
         let info = controller.builder().runtime_info(&runtime);
         loop {
             if cancel.is_cancelled() {
-                runner.close_mcp().await;
+                // The session's resources stay: the active runner uses them.
                 runner.close();
                 return;
             }

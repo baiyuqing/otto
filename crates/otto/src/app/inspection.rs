@@ -293,7 +293,7 @@ impl Controller {
         self.lock()
             .current
             .as_ref()
-            .map(|current| current.runner.mcp.status())
+            .map(|current| current.runner.mcp().status())
             .unwrap_or_default()
     }
 

@@ -198,7 +198,7 @@ impl TaskView for Registry {
 
 /// The task registry of one runner, or `None` when it tracks no tasks.
 pub fn task_view(runner: &Runner) -> Option<Arc<dyn TaskView>> {
-    let tasks = runner.tasks.clone()?;
+    let tasks = runner.tasks().cloned()?;
     Some(tasks as Arc<dyn TaskView>)
 }
 

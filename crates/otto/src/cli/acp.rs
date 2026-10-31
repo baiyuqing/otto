@@ -71,7 +71,7 @@ pub async fn run(
                 let _ = writeln!(stderr, "warning: {warning}");
             }
         }
-        controller.close_mcp().await;
+        controller.close_resources().await;
         let closing = Arc::clone(&controller);
         match tokio::task::spawn_blocking(move || closing.close()).await {
             Ok(Ok(())) => {}

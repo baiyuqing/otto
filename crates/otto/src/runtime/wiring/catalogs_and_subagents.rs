@@ -123,7 +123,16 @@ impl Builder {
             ProviderClient::ChatGpt { client, .. } => Arc::clone(client) as _,
             ProviderClient::Unavailable => return Ok(None),
             #[cfg(test)]
-            ProviderClient::Scripted(_) => return Ok(None),
+            ProviderClient::Scripted(provider) => {
+                let opted_in = crate::runtime::builder::TEST_SCRIPTED_SUBAGENT_HOMES
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(&self.home);
+                if !opted_in {
+                    return Ok(None);
+                }
+                Arc::clone(provider)
+            }
         };
         if !catalogs.agents.enabled {
             return Ok(None);

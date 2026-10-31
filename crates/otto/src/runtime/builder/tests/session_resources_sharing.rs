@@ -138,3 +138,62 @@ async fn a_first_runner_without_a_subagent_executor_still_creates_the_task_regis
     scripted.close();
     provider_backed.close();
 }
+
+/// The second runner build on a session spawns no MCP server process: both
+/// runners hold the same `SessionMcp` and the start log is unchanged.
+#[tokio::test]
+async fn second_runner_build_spawns_no_further_mcp_server_process() {
+    use crate::runtime::mcp_server_fixture_tests::shell_mcp_server_with_start_log;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let start_log = dir.path().join("mcp-starts.log");
+    let mut builder = builder(dir.path());
+    builder.mcp = McpRuntime {
+        enabled: true,
+        call_timeout_secs: 5,
+        connect_timeout_secs: 5,
+        servers: vec![shell_mcp_server_with_start_log(
+            "fixture",
+            dir.path(),
+            Some(&start_log),
+        )],
+    };
+    let session = SharedSession::memory(Header::default());
+
+    let first = builder
+        .build_runner_quiet(&session, &runtime())
+        .await
+        .expect("first runner");
+    // One connect may spawn the server more than once (the protocol probe
+    // falls back to the legacy handshake), so compare counts across builds.
+    let starts_after_first = std::fs::read_to_string(&start_log).expect("start log");
+    assert!(starts_after_first.lines().count() >= 1);
+    let second = builder
+        .build_runner_quiet(&session, &runtime())
+        .await
+        .expect("second runner");
+
+    assert!(Arc::ptr_eq(&first.mcp(), &second.mcp()));
+    let starts_after_second = std::fs::read_to_string(&start_log).expect("start log");
+    assert_eq!(starts_after_second, starts_after_first);
+    let status = first.mcp().status();
+    assert_eq!(status.len(), 1);
+    assert!(
+        matches!(
+            status[0].state,
+            crate::mcp::ServerState::Connected { tools: 1 }
+        ),
+        "{:?}",
+        status[0].state
+    );
+    // MCP tools are offered through the router tools, not one tool each.
+    for runner in [&first, &second] {
+        let names: Vec<String> = runner.definitions().into_iter().map(|d| d.name).collect();
+        for router in ["mcp_search_tools", "mcp_call_tool"] {
+            assert!(
+                names.iter().any(|name| name == router),
+                "{router} in {names:?}"
+            );
+        }
+    }
+    session.close_resources().await;
+}

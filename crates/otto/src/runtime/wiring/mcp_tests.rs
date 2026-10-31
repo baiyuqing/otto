@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::mcp_server_fixture_tests::shell_mcp_server;
 use otto_core::config::{McpRuntime, McpServerRuntime};
 
 fn builder_with_servers(root: &std::path::Path, servers: Vec<McpServerRuntime>) -> Builder {
@@ -126,34 +127,6 @@ impl Write for CapturedLog {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
-    }
-}
-
-/// A stdio server in `/bin/sh` that answers the legacy handshake and lists
-/// one tool. It uses only shell builtins, because the child's environment
-/// has no `PATH`.
-fn shell_mcp_server(name: &str, cwd: &std::path::Path) -> McpServerRuntime {
-    let script = format!(
-        r#"while IFS= read -r line; do
-  id=${{line#*'"id":'}}; id=${{id%%[,\}}]*}}
-  case "$line" in
-    *'"method":"server/discover"'*) printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32601,"message":"no"}}}}\n' "$id";;
-    *'"method":"initialize"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"{}"}}}}\n' "$id";;
-    *'"method":"tools/list"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"echo","inputSchema":{{"type":"object"}}}}]}}}}\n' "$id";;
-  esac
-done"#,
-        mcp::LEGACY_VERSION
-    );
-    McpServerRuntime {
-        name: name.to_string(),
-        enabled: true,
-        transport: McpTransport::Stdio {
-            command: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), script],
-            env: Vec::new(),
-            cwd: cwd.to_string_lossy().into_owned(),
-        },
-        secrets: Vec::new(),
     }
 }
 

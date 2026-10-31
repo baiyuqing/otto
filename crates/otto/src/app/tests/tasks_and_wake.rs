@@ -60,8 +60,7 @@ async fn a_pending_notification_claims_a_wake_turn() {
     controller
         .current_runner()
         .expect("runner")
-        .tasks
-        .as_ref()
+        .tasks()
         .expect("registry")
         .notifications()
         .push(otto_core::agent::inbox::Notification {

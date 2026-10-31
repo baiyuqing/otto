@@ -7,6 +7,24 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Fixes
+
+- A profile, model or reasoning-effort switch no longer cancels the session's
+  running sub-agents, overwrites its pending notifications, restarts its stdio
+  MCP servers or stops `otto serve` from waking the session on sub-agent
+  notifications. The sub-agent registry, inbox, timers, MCP servers and
+  workflow delivery worker belong to the session and are stopped by `/new`,
+  `/load`, session close and process exit. Sub-agent bash tools now use the
+  owning session id as the approval key instead of one key shared by every
+  session of a workspace. `[agents].max_parallel` caps the running sub-agents
+  of the session, including those started before the switch.
+
+### Changes
+
+- Bash overflow logs, research scratch files and sub-agent reports are written
+  under `.otto/tool-output/<session-id>/` and `.otto/reports/<session-id>/`
+  instead of directly under `.otto/tool-output/` and `.otto/reports/`.
+
 ### Providers
 
 - Added a first-party Claude Messages API provider with environment-only API-key

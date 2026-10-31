@@ -557,8 +557,8 @@ pub async fn run_with_extensions(
     startup_trace.extend(runner_trace);
     startup_trace.mark("runner/build");
     if let Err(message) = builder.update_session_runtime(&initial_session, &resolved) {
-        runner.close_mcp().await;
         runner.close();
+        initial_session.close_resources().await;
         let _ = initial_session.close();
         let _ = control.close().await;
         if cancel.is_cancelled() {
@@ -567,8 +567,8 @@ pub async fn run_with_extensions(
         return fail(stderr, &message);
     }
     if cancel.is_cancelled() {
-        runner.close_mcp().await;
         runner.close();
+        initial_session.close_resources().await;
         let _ = initial_session.close();
         let _ = control.close().await;
         return 130;
@@ -685,7 +685,7 @@ pub async fn run_with_extensions(
             let _ = writeln!(stderr, "warning: {warning}");
         }
     }
-    controller.close_mcp().await;
+    controller.close_resources().await;
     if let Some(reporter) = &herdr {
         // Tell Herdr this pane no longer holds an agent before the session
         // closes, so it keeps no stale row.

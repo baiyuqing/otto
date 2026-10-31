@@ -93,8 +93,8 @@ impl Executor for AgentExecutor {
     }
 
     async fn close(&self) {
-        self.owner.close_mcp().await;
         self.owner.close();
+        self.owner.session().close_resources().await;
     }
 }
 

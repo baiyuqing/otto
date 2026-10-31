@@ -288,7 +288,7 @@ impl Controller {
     }
 
     pub(crate) fn subagent_tasks(&self) -> Option<Arc<crate::subagent::tasks::Tasks>> {
-        self.current_runner()?.tasks.clone()
+        self.current_runner()?.tasks().cloned()
     }
 
     /// `/remember` against a selected memory service. The caller is a

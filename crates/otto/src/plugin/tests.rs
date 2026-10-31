@@ -445,7 +445,7 @@ done
         result_text(&call.execute(&raw, &CancellationToken::new()).await)
             .contains("fixture response")
     );
-    let child = crate::runtime::wiring::mcp_child_tools(&connected, 4096);
+    let child = crate::runtime::wiring::mcp_adapter_tools(&connected, 4096);
     f.service().change("example", "revoke").unwrap();
     for call in [
         call,

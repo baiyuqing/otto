@@ -333,7 +333,7 @@ async fn create_in_a_named_workspace_uses_that_workspaces_builder() {
         .reload_sandbox()
         .await
         .expect("reload B when startup has no reloader");
-    controller.close_mcp().await;
+    controller.close_resources().await;
     controller.close().expect("close");
     other_host
         .reloader

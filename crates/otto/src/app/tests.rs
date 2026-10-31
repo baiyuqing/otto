@@ -90,5 +90,6 @@ mod permissions_command;
 mod resume_and_archive;
 mod sandbox_amendment;
 mod session_creation;
+mod session_owned_resources;
 mod session_replacement;
 mod tasks_and_wake;

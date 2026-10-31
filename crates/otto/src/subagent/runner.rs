@@ -9,7 +9,9 @@
 //!
 //! Concurrency and cancellation: every child runs in its own Tokio task,
 //! admitted by a semaphore that caps [`Config::max_parallel`] concurrent
-//! children. Each task's [`CancellationToken`] is held by the registry, so
+//! children. The semaphore belongs to the session's [`Tasks`]
+//! ([`Tasks::child_slots`]), so runners rebuilt on one session share the cap.
+//! Each task's [`CancellationToken`] is held by the registry, so
 //! cancelling it either releases a queued child before it starts or stops a
 //! running one mid-turn. [`Runner::start`] itself never blocks.
 //!
@@ -273,6 +275,8 @@ pub struct StartRequest {
 pub struct Runner {
     reports: super::reports::Reports,
     scratch_root: std::sync::OnceLock<crate::tool::root::Root>,
+    /// Owning session of the scratch and report directories.
+    scratch_session_id: std::sync::OnceLock<String>,
     output_logs: std::sync::OnceLock<Arc<crate::tool::bash_output::Logs>>,
     config: Config,
     child_registry: Arc<Registry>,
@@ -376,12 +380,15 @@ impl Runner {
             }
         }
 
-        let semaphore = Arc::new(Semaphore::new(config.max_parallel));
+        // The session's registry owns the permits, so every runner of the
+        // session shares one `max_parallel` cap.
+        let semaphore = config.tasks.child_slots(config.max_parallel);
         Ok((
             Self {
                 reports: super::reports::Reports::default(),
                 output_logs: std::sync::OnceLock::new(),
                 scratch_root: std::sync::OnceLock::new(),
+                scratch_session_id: std::sync::OnceLock::new(),
                 config,
                 child_registry,
                 semaphore,
@@ -390,10 +397,14 @@ impl Runner {
         ))
     }
 
-    pub(crate) fn bind_scratch_root(&self, root: crate::tool::root::Root) {
+    pub(crate) fn bind_scratch_root(&self, root: crate::tool::root::Root, session_id: &str) {
         assert!(
             self.scratch_root.set(root).is_ok(),
             "scratch root already bound"
+        );
+        assert!(
+            self.scratch_session_id.set(session_id.to_owned()).is_ok(),
+            "scratch session already bound"
         );
     }
 

@@ -620,7 +620,9 @@ original-source references, uncertainty and decisions needed from the parent.
 Parent-facing previews remain bounded to 4 KiB (or the smaller configured
 budget), plus truncation and report-file metadata. For longer research, a child
 with permitted `write` access saves `report.md` with Markdown section headings
-in its assigned `.otto/reports/<task-id>-<unique-id>/` directory. Its final
+in its assigned `.otto/reports/<session-id>/<task-id>-<unique-id>/` directory.
+The per-session directory separates names between sessions only; it is not
+access control. Its final
 handoff contains a concise summary, uncertainty, the report path and a section
 index with line numbers. This does not grant additional write permissions or
 expand an assigned file scope.
@@ -653,7 +655,7 @@ an authored report file for longer interim content. Automatic file capture
 applies to final answers.
 
 A native child with `bash` receives a private workspace-relative directory under
-`.otto/tool-output/research-<id>/`. Download each pinned upstream source once
+`.otto/tool-output/<session-id>/research-<id>/`. Download each pinned upstream source once
 there, then analyze it with scripts instead of fetching repeated large snippets.
 This directory is deleted when the child task exits, including error, queued
 cancellation and normal cancellation. Cleanup operates through pinned directory
@@ -984,7 +986,9 @@ count and omitted bytes, and gives a workspace-relative `full_output` path.
 Exit code, signal, timeout/cancellation and sandbox denials remain visible.
 
 Overflow logs are streamed after UTF-8 normalization and secret redaction into
-exclusive `0600` files under `.otto/tool-output/`, with a local `.gitignore`.
+exclusive `0600` files under `.otto/tool-output/<session-id>/`, with a local
+`.gitignore` in `.otto/tool-output/`. The per-session directory separates names
+between sessions only; it is not access control.
 The model is instructed to remove specific temporary logs as soon as analysis
 is finished and no task needs them. As a fallback, the runtime automatically deletes its own
 logs once the current turn and all outstanding child tasks have ended, including

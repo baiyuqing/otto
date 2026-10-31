@@ -35,12 +35,13 @@ fn completion_is_visible_without_socket_eof() {
     assert!(!assembler.is_done());
     let ending = stop("end_turn");
     let stop_offset = ending.find("event: message_stop").unwrap();
+    let ending_bytes = ending.as_bytes();
     assembler
-        .push(ending[..stop_offset].as_bytes(), &mut |_| {})
+        .push(&ending_bytes[..stop_offset], &mut |_| {})
         .unwrap();
     assert!(!assembler.is_done());
     assembler
-        .push(ending[stop_offset..].as_bytes(), &mut |_| {})
+        .push(&ending_bytes[stop_offset..], &mut |_| {})
         .unwrap();
     assert!(assembler.is_done());
     assembler

@@ -245,6 +245,7 @@ impl BashTool {
     /// `output_logs` is the owning session's overflow-log set; the tool leases
     /// and writes its logs through it.
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         workspace: &Workspace,
         executor: Arc<dyn CommandExecutor>,

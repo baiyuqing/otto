@@ -428,12 +428,11 @@ fn resolve_impl(
                 .policy
                 .as_ref()
                 .and_then(|policy| policy.allowed_credential_variables.as_ref())
+                && !allowed.contains(&workspace_id_env)
             {
-                if !allowed.contains(&workspace_id_env) {
-                    return Err(ConfigError::new(
-                        "provider workspace credential binding is prohibited by managed policy",
-                    ));
-                }
+                return Err(ConfigError::new(
+                    "provider workspace credential binding is prohibited by managed policy",
+                ));
             }
             env_value(env, &workspace_id_env)
         } else {

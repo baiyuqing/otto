@@ -7,7 +7,7 @@ async fn workflow_tools_and_durable_mailbox_exist_with_conversational_agents_dis
     builder.shared_mut().config = toml::from_str("[agents]\nenabled = false\n").unwrap();
     let source = crate::workflow::conversation_tests::session("source");
     let runner = builder.build_runner(&source, &runtime()).await.unwrap();
-    assert!(runner.tasks.is_none());
+    assert!(runner.tasks().is_none());
     for name in crate::tool::workflow::NAMES {
         assert!(tool_names(&runner).contains(&name.to_string()));
     }
@@ -84,6 +84,13 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
         ],
     );
     let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+    // A binding is held by the session's resources, so they exist before it.
+    source.install_test_resources(
+        crate::runtime::session_resources::SessionResources::for_tests(
+            &source_id,
+            Some(Arc::clone(&tasks)),
+        ),
+    );
     let inbox = tasks.notifications_inbox().clone();
     let sidecar = Path::new(&path).with_extension("inbox.json");
     let sidecar_path = sidecar.clone();
@@ -223,6 +230,7 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
         .unwrap();
     owner.wait(&outstanding.id).await.unwrap();
     let replacement = crate::workflow::conversation_tests::session("replacement");
+    install_resources(&replacement);
     let replacement_inbox: Arc<dyn Mailbox> = Arc::new(otto_core::mailbox::Inbox::default());
     let replacement_binding = crate::runtime::workflow_notifications::bind(
         &owner,
@@ -242,6 +250,7 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
     let (reopened, warnings) = crate::session::Store::open(&path).unwrap();
     assert!(warnings.is_empty());
     let reopened = SharedSession::new(Arc::new(reopened));
+    install_resources(&reopened);
     assert!(reopened.has_input(&terminal_id));
     let catchup = Arc::new(otto_core::mailbox::Inbox::default());
     let catchup_mailbox: Arc<dyn Mailbox> = catchup.clone();
@@ -276,6 +285,16 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
     .await
     .expect("stopped adapter must release saved session even with old mailbox/controller retained");
     reopened.close().unwrap();
+}
+
+/// Gives `session` resources, which hold its workflow delivery worker.
+fn install_resources(session: &SharedSession) {
+    session.install_test_resources(
+        crate::runtime::session_resources::SessionResources::for_tests(
+            &session.header().id,
+            Some(Arc::new(crate::subagent::tasks::Tasks::new())),
+        ),
+    );
 }
 
 #[tokio::test]
@@ -357,7 +376,7 @@ async fn parent_tool_factory_is_fresh_per_parent_runner_and_absent_from_children
     );
 
     let child_names = builder
-        .child_tools(&runtime(), 65536, &[], &Catalog::default())
+        .child_tools(&runtime(), 65536, &[], &Catalog::default(), "session-x")
         .expect("child tools")
         .into_iter()
         .map(|tool| tool.definition().name)

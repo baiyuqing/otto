@@ -44,7 +44,6 @@ mod step_control;
 pub mod summary;
 pub mod summary_details;
 pub mod summary_validate;
-pub mod tasks;
 mod tool_dispatch;
 mod turn_run;
 
@@ -92,7 +91,6 @@ use overflow::{
 };
 use progress::{ProgressGuard, ProgressPolicy};
 use redactor::Redactor;
-use tasks::TaskRegistry;
 
 /// Turn settings and the two injected capabilities the core cannot provide
 /// itself: the clock and the identifier generator. Keeping them here is what
@@ -139,8 +137,6 @@ pub struct Options {
     pub mailbox: Arc<dyn Mailbox>,
     /// Turn-bound guidance accepted by a frontend while a run is active.
     pub steering: Arc<steering::Steering>,
-    /// The subagent task registry, closed by [`Agent::close`].
-    pub tasks: Option<Arc<dyn TaskRegistry + Send + Sync>>,
     /// The running Otto package version, recorded with the tool set. Empty
     /// when unknown.
     pub version: String,
@@ -176,7 +172,6 @@ impl Default for Options {
             memory_recall_token_budget: DEFAULT_RECALL_TOKEN_BUDGET,
             mailbox: Arc::new(InMemoryMailbox::default()),
             steering: Arc::new(steering::Steering::default()),
-            tasks: None,
             version: String::new(),
         }
     }
@@ -318,23 +313,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self.options.steering
     }
 
-    /// The task registry, if one was configured.
-    pub fn tasks(&self) -> Option<&Arc<dyn TaskRegistry + Send + Sync>> {
-        self.options.tasks.as_ref()
-    }
-
     /// The mailbox shared with producers that can add context to this agent.
     pub fn mailbox(&self) -> &Arc<dyn Mailbox> {
         &self.options.mailbox
     }
 
-    /// Releases the memory binding and cancels every tracked task.
-    ///
-    /// Returns the memory binding's error; the tasks are closed either way.
+    /// Releases the memory binding. Returns the memory binding's error.
     pub fn close(&self) -> Result<(), memory::MemoryError> {
-        if let Some(tasks) = &self.options.tasks {
-            tasks.close();
-        }
         match &self.options.memory {
             Some(memory) => memory.close(),
             None => Ok(()),

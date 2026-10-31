@@ -126,7 +126,7 @@ impl PromptRunner for FactoryRunner {
         };
         let _ = crate::app::scheduled::inherit_authority(&controller, item).await;
         let outcome = crate::app::scheduled::run(&controller, text, cancel).await;
-        controller.close_mcp().await;
+        controller.close_resources().await;
         let _ = controller.close();
         outcome
     }
@@ -144,7 +144,7 @@ impl PromptRunner for FactoryRunner {
             Err(error) => return RunOutcome::FailedBeforeTools(error),
         };
         let outcome = crate::app::scheduled::run(&controller, text, cancel).await;
-        controller.close_mcp().await;
+        controller.close_resources().await;
         let _ = controller.close();
         outcome
     }

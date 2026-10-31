@@ -346,6 +346,11 @@ Shared commands:
   the current selection, including reasoning effort; it does not restore that
   session's historical model settings. In the REPL, use
   `/model PROFILE --thinking LEVEL [--save]`.
+  Changing the profile, model or reasoning effort keeps the session's running
+  sub-agents, pending notifications, timers and MCP servers; only the model
+  connection and system prompt are rebuilt. `/new`, `/load`, closing the
+  session and exiting the process cancel its sub-agents and stop its MCP
+  servers.
 - `/thinking [LEVEL] [--save]` shows or changes the current reasoning effort.
   Use `unset` or `default` to omit the provider reasoning-effort field.
 - `/compact [focus]` creates a manual context checkpoint, or reports

@@ -475,36 +475,3 @@ async fn a_later_dispatch_over_the_hard_trigger_reports_the_used_attempt() {
     assert_eq!(agent.provider().summary_requests().len(), 1);
     assert_eq!(agent.provider().normal_requests().len(), 1);
 }
-
-/// Records whether the agent closed it.
-#[derive(Default)]
-struct CountingTasks {
-    closes: AtomicUsize,
-}
-
-impl crate::agent::tasks::TaskRegistry for CountingTasks {
-    fn close(&self) {
-        self.closes.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn close_closes_the_task_registry() {
-    let tasks = Arc::new(CountingTasks::default());
-    let agent = Agent::new(
-        FakeProvider::new(Vec::new()),
-        EchoExecutor::default(),
-        MemorySession::new(),
-        Options {
-            tasks: Some(tasks.clone()),
-            ..options()
-        },
-    );
-    agent.close().expect("close");
-    assert_eq!(tasks.closes.load(Ordering::SeqCst), 1);
-    assert!(
-        agent.tasks().is_some(),
-        "the registry is still reachable after close"
-    );
-}

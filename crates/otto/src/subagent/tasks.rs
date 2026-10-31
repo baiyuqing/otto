@@ -2,9 +2,9 @@
 //!
 //! A [`Tasks`] registry tracks one record per delegated task, the cancellation
 //! token and history hook that belong to it, and the parent's notification
-//! inbox. It is the real implementation behind
-//! [`otto_core::agent::tasks::TaskRegistry`], whose only method the turn loop
-//! calls is `close`.
+//! inbox. It belongs to the session (see
+//! [`crate::runtime::session_resources`]), not to one runner: a profile switch
+//! keeps it, and only the session's end calls [`Tasks::close`].
 //!
 //! Ownership: the registry owns its records. Every accessor returns a clone, so
 //! a caller never holds a reference into the locked state.
@@ -31,14 +31,13 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, NotificationKind};
-use otto_core::agent::tasks::TaskRegistry;
 use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Usage};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::record::{Recorder, TaskContext};
@@ -67,7 +66,7 @@ struct Entry {
 struct State {
     closed: bool,
     /// Set once by [`Tasks::begin_migration`]. Distinct from `closed`
-    /// (which migration also sets, via [`TaskRegistry::close`]) so
+    /// (which migration also sets, via [`Tasks::close`]) so
     /// [`Tasks::is_migrating`] answers "is this a migration close" rather
     /// than just "is this registry closed".
     migrating: bool,
@@ -105,6 +104,9 @@ pub struct Tasks {
     updates: Arc<Updates>,
     updates_receiver: watch::Receiver<u64>,
     recorder: Option<(Arc<dyn Recorder>, TaskContext)>,
+    /// Permits for running children, shared by every sub-agent runner built
+    /// on this registry; see [`Tasks::child_slots`].
+    child_slots: OnceLock<Arc<Semaphore>>,
 }
 
 impl std::fmt::Debug for Tasks {
@@ -177,7 +179,19 @@ impl Tasks {
             updates,
             updates_receiver: receiver,
             recorder,
+            child_slots: OnceLock::new(),
         }
+    }
+
+    /// The semaphore that caps how many children of this registry run at
+    /// once. The first caller sets the permit count to `max_parallel`; later
+    /// callers get the same semaphore and their `max_parallel` is ignored, so
+    /// a replaced runner and its successor admit children against one cap.
+    pub fn child_slots(&self, max_parallel: usize) -> Arc<Semaphore> {
+        Arc::clone(
+            self.child_slots
+                .get_or_init(|| Arc::new(Semaphore::new(max_parallel))),
+        )
     }
 
     /// Calls the recorder, if any, with `id`'s current state. A no-op for an
@@ -519,7 +533,7 @@ impl Tasks {
     }
 
     /// Begins a migration: marks the registry migrating, closes it the same
-    /// way [`TaskRegistry::close`] does (cancels every non-final task's
+    /// way [`Tasks::close`] does (cancels every non-final task's
     /// token, admits no more tasks, drops the update sender), and returns
     /// the ids that were not yet final at that moment. Idempotent: a second
     /// call returns an empty list.
@@ -609,9 +623,9 @@ impl Tasks {
     }
 }
 
-impl TaskRegistry for Tasks {
+impl Tasks {
     /// Cancels every non-final task and closes the update channel. Idempotent.
-    fn close(&self) {
+    pub fn close(&self) {
         let cancels = {
             let mut state = self.lock();
             if state.closed {

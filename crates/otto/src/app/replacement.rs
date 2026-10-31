@@ -191,8 +191,8 @@ async fn attach_runner(
         }
     };
     if let Err(error) = builder.update_session_runtime(&session, runtime) {
-        runner.close_mcp().await;
         runner.close();
+        session.close_resources().await;
         let _ = session.close();
         return Err(error);
     }

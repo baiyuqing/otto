@@ -283,9 +283,9 @@ impl Otto {
     }
 }
 
-/// `close_mcp`, then the blocking `close` on the blocking pool.
+/// `close_resources`, then the blocking `close` on the blocking pool.
 pub(super) async fn close_controller(controller: Arc<Controller>) -> Result<(), String> {
-    controller.close_mcp().await;
+    controller.close_resources().await;
     match tokio::task::spawn_blocking(move || controller.close()).await {
         Ok(result) => result,
         Err(join) => Err(join.to_string()),

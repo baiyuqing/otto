@@ -122,29 +122,33 @@ struct MemoryState {
     custom_data: HashMap<String, String>,
 }
 
-/// A session shared by the agent and the frontend.
+/// A session shared by the agent and the frontend: a cloneable handle to one
+/// [`SessionState`].
 ///
 /// Both need `&self` access to the same transcript for the whole run, which
 /// is what `Arc` buys; every [`SessionHandle`] method already takes `&self`.
 #[derive(Clone)]
-pub struct SharedSession(
-    Arc<dyn SessionHandle>,
-    Arc<otto_core::agent::hooks::State>,
-    Arc<Mutex<Option<Arc<super::workflow_notifications::Binding>>>>,
-);
+pub struct SharedSession(Arc<SessionState>);
 
-pub(crate) struct WeakWorkflowSession(
-    std::sync::Weak<dyn SessionHandle>,
-    std::sync::Weak<otto_core::agent::hooks::State>,
-    std::sync::Weak<Mutex<Option<Arc<super::workflow_notifications::Binding>>>>,
-);
-impl WeakWorkflowSession {
+/// A non-owning reference to a session, held by background workers that must
+/// not keep it alive.
+pub(crate) struct WeakSharedSession(std::sync::Weak<SessionState>);
+
+/// Everything one session owns. A runner borrows it and never closes it; see
+/// [`super::session_resources`].
+pub(crate) struct SessionState {
+    transcript: Arc<dyn SessionHandle>,
+    hooks: Arc<otto_core::agent::hooks::State>,
+    /// Created by the first runner build for this session
+    /// ([`Builder::session_resources`]); every later build reuses it.
+    resources: std::sync::OnceLock<Arc<super::session_resources::SessionResources>>,
+    /// Serializes the first creation of `resources` across concurrent builds.
+    resources_creation: Mutex<()>,
+}
+
+impl WeakSharedSession {
     pub(crate) fn upgrade(&self) -> Option<SharedSession> {
-        Some(SharedSession(
-            self.0.upgrade()?,
-            self.1.upgrade()?,
-            self.2.upgrade()?,
-        ))
+        self.0.upgrade().map(SharedSession)
     }
 }
 
@@ -192,6 +196,12 @@ struct ScriptedSizer;
 pub(crate) static TEST_PROVIDERS: std::sync::Mutex<Vec<(String, Arc<dyn Provider + Send + Sync>)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Builder homes whose scripted provider also backs a sub-agent runner.
+/// Without an entry here a scripted runner has no sub-agent executor.
+#[cfg(test)]
+pub(crate) static TEST_SCRIPTED_SUBAGENT_HOMES: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(test)]
 impl RequestSizer for ScriptedSizer {
     fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {
@@ -207,8 +217,6 @@ impl RequestSizer for ScriptedSizer {
 pub struct Runner {
     /// The memory client of this runner; `/remember` uses it.
     pub(crate) memory_client: Option<Arc<crate::memory::client::Client>>,
-    workflow_binding: Option<Arc<super::workflow_notifications::Binding>>,
-    output_logs: Arc<crate::tool::bash_output::Logs>,
     authorization_run: Arc<Mutex<String>>,
     approvals: Option<(Arc<crate::approval::Service>, otto_core::approval::Scope)>,
     /// Reviewer registered for this runner; `close` unregisters it.
@@ -224,23 +232,17 @@ pub struct Runner {
     definitions: Vec<ToolDefinition>,
     usage: Option<crate::usage::Collector>,
     logger: Arc<crate::log::Logger>,
-    /// The sub-agent task registry, absent when sub-agents are off. `/tasks`
-    /// and `/task` read the active runner's task registry.
-    pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
     /// The child executor shared with durable workflows.
     pub(crate) subagents: Option<Arc<crate::subagent::runner::Runner>>,
-    /// The timer registry, absent when the timer tools are not registered.
-    /// `/timers` lists it and archiving the session clears it.
-    pub(crate) reminders: Option<Arc<crate::tool::remind::Reminders>>,
     /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
     pub(crate) skills: Catalog,
     pub(crate) discovered_skills: Catalog,
     /// Named child definitions used by durable workflow discovery.
     pub(crate) agents: crate::subagent::Catalog,
-    /// The MCP servers connected for this runner. `/mcp` reads its status
-    /// rows; `Runner::close` (best-effort, backgrounded) and
-    /// `Runner::close_mcp` (awaited, bounded) shut its clients down.
-    pub(crate) mcp: Arc<crate::mcp::Servers>,
+    /// Status rows shown until the session's MCP servers are connected: set
+    /// when this runner was built without connecting MCP. Once the session
+    /// holds connected servers, [`Runner::mcp`] reads those instead.
+    connecting_mcp: Option<Arc<crate::mcp::Servers>>,
     pub(crate) task_control: Arc<crate::app::task_control::TaskControl>,
     /// The origin of the current user turn, read by the schedule tools.
     pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
@@ -310,8 +312,8 @@ pub struct Shared {
     /// collection from affecting an otherwise usable runtime.
     pub usage: Option<Arc<dyn crate::usage::repository::UsageRepository>>,
     /// Process-wide sub-agent task recorder (`~/.otto/tasks.db`). `None` keeps
-    /// `build_subagents` from recording task history, matching today's
-    /// behaviour; `build_subagents` injects it into every `Tasks` registry it
+    /// `Builder::session_resources` from recording task history, matching today's
+    /// behaviour; `Builder::session_resources` injects it into every `Tasks` registry it
     /// builds.
     pub task_recorder: Option<Arc<dyn crate::subagent::record::TaskRepository>>,
     /// The scheduled-delivery store (`~/.otto/schedule.db`). `None` when it
@@ -319,7 +321,7 @@ pub struct Shared {
     pub schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     /// The automatic skill contract check. `None` when the feature is disabled
     /// or its database could not be opened; either way
-    /// `build_subagents` wires no checker in and delegation is unaffected.
+    /// `Builder::session_resources` wires no checker in and delegation is unaffected.
     pub skill_checker: Option<Arc<crate::skill::check::Checker>>,
     /// The process-wide memory service, its user scope, and the recall
     /// limits: one file store for the whole process, shared by every

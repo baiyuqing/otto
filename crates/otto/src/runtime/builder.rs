@@ -182,18 +182,6 @@ pub enum ProviderClient {
     Scripted(Arc<dyn Provider + Send + Sync>),
 }
 
-impl ProviderClient {
-    /// True for a client that calls a real provider, which is the condition
-    /// for running sub-agents; false for the closed-boundary refusal and the
-    /// test double.
-    pub(crate) fn is_provider_backed(&self) -> bool {
-        matches!(
-            self,
-            Self::Compat { .. } | Self::Claude { .. } | Self::ChatGpt { .. }
-        )
-    }
-}
-
 /// One composed agent, plus the two fixed strings a frontend may show.
 /// The request sizer a [`Runner::scripted`] runner uses: the bytes of text, so
 /// compaction can size its summary request without a real provider client.

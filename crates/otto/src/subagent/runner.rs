@@ -273,6 +273,8 @@ pub struct StartRequest {
 pub struct Runner {
     reports: super::reports::Reports,
     scratch_root: std::sync::OnceLock<crate::tool::root::Root>,
+    /// Owning session of the scratch and report directories.
+    scratch_session_id: std::sync::OnceLock<String>,
     output_logs: std::sync::OnceLock<Arc<crate::tool::bash_output::Logs>>,
     config: Config,
     child_registry: Arc<Registry>,
@@ -382,6 +384,7 @@ impl Runner {
                 reports: super::reports::Reports::default(),
                 output_logs: std::sync::OnceLock::new(),
                 scratch_root: std::sync::OnceLock::new(),
+                scratch_session_id: std::sync::OnceLock::new(),
                 config,
                 child_registry,
                 semaphore,
@@ -390,10 +393,14 @@ impl Runner {
         ))
     }
 
-    pub(crate) fn bind_scratch_root(&self, root: crate::tool::root::Root) {
+    pub(crate) fn bind_scratch_root(&self, root: crate::tool::root::Root, session_id: &str) {
         assert!(
             self.scratch_root.set(root).is_ok(),
             "scratch root already bound"
+        );
+        assert!(
+            self.scratch_session_id.set(session_id.to_owned()).is_ok(),
+            "scratch session already bound"
         );
     }
 

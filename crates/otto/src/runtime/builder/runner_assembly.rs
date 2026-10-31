@@ -14,7 +14,8 @@ impl Builder {
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
         let max_output = output_cap(runtime.max_output_bytes);
-        let output_logs = Arc::new(crate::tool::bash_output::Logs::default());
+        let session_id = session.header().id;
+        let output_logs = Arc::new(crate::tool::bash_output::Logs::for_session(&session_id));
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let mut tools = self.builtin_file_tools(max_output);
@@ -45,7 +46,7 @@ impl Builder {
                 tool = tool.with_private_home();
             }
             if let Some(approvals) = &self.bash_approvals {
-                tool = tool.with_approvals(session.header().id, Arc::clone(approvals));
+                tool = tool.with_approvals(session_id.clone(), Arc::clone(approvals));
             }
             if let Some(control) = &self.grant_control {
                 tool = tool.with_grant_control(self.config_path.clone(), control.clone());
@@ -251,6 +252,7 @@ impl Builder {
             max_output,
             &redaction_values,
             &catalogs.skills,
+            &session_id,
             Arc::clone(&output_logs),
         )?;
         child_tools.extend(super::super::wiring::mcp_child_tools(
@@ -289,6 +291,7 @@ impl Builder {
                     .root_fs()
                     .try_clone()
                     .map_err(|error| format!("pin child research workspace: {error}"))?,
+                &session_id,
             );
         }
         mark_build_trace(&mut trace, "runner/subagents");

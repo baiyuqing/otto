@@ -514,9 +514,12 @@ impl Runner {
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         let inbox = tasks.notifications().clone();
         let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = inbox.clone();
+        let output_logs = Arc::new(crate::tool::bash_output::Logs::for_session(
+            &session.header().id,
+        ));
         Self {
             workflow_binding: None,
-            output_logs: Arc::default(),
+            output_logs,
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
                 registry,

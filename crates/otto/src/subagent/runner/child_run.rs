@@ -170,14 +170,17 @@ impl Runner {
                 .unwrap_or_else(|| Arc::new(AtomicUsize::new(REPORT_BUDGET))),
         };
 
+        let scratch_session_id = self.scratch_session_id.get().map_or("", String::as_str);
         let scratch = self
             .scratch_root
             .get()
             .filter(|_| tools.permits("bash") && self.child_registry.lookup("bash").is_some())
-            .map(super::super::scratch::Scratch::new)
+            .map(|root| super::super::scratch::Scratch::new(root, scratch_session_id))
             .transpose()
             .map_err(|_| StartError::ScratchUnavailable)?;
-        let report_path = self.reports.prepare(self.scratch_root.get(), &task.id);
+        let report_path =
+            self.reports
+                .prepare(self.scratch_root.get(), scratch_session_id, &task.id);
         let report_policy = report_path.map_or_else(String::new, |path| {
             format!(
                 "\n<research_report>For research too detailed for the handoff, use \

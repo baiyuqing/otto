@@ -30,9 +30,9 @@ use serde_json::value::RawValue;
 use sha2::Digest;
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::{
-    CommandExecutor, DEFAULT_CANCELLATION_GRACE, Error, ExitStatus, Request, Streams,
-};
+#[cfg(test)]
+use crate::sandbox::DEFAULT_CANCELLATION_GRACE;
+use crate::sandbox::{CommandExecutor, Error, ExitStatus, Request, Streams};
 use otto_core::safetext::{dynamic_redaction_marker, secret_forms};
 
 use super::bash_output::{Logs, Output, PREVIEW_BYTES};
@@ -241,7 +241,11 @@ impl BashTool {
     /// Errors: [`InvalidConfiguration`] when the workspace root no longer
     /// resolves to itself as a directory, the shell is blank or contains NUL,
     /// the timeout or cancellation grace is zero, or the output cap is zero.
-    pub fn new(
+    ///
+    /// `output_logs` is the owning session's overflow-log set; the tool leases
+    /// and writes its logs through it.
+    #[cfg(test)]
+    pub(crate) fn new(
         workspace: &Workspace,
         executor: Arc<dyn CommandExecutor>,
         shell: &str,
@@ -249,6 +253,7 @@ impl BashTool {
         timeout: Duration,
         max_output_bytes: usize,
         redaction_values: &[String],
+        output_logs: Arc<Logs>,
     ) -> Result<Self, InvalidConfiguration> {
         Self::new_with_grace(
             workspace,
@@ -259,13 +264,14 @@ impl BashTool {
             DEFAULT_CANCELLATION_GRACE,
             max_output_bytes,
             redaction_values,
+            output_logs,
         )
     }
 
     /// Binds the tool to one executor with a caller-selected process
     /// termination grace.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_grace(
+    pub(crate) fn new_with_grace(
         workspace: &Workspace,
         executor: Arc<dyn CommandExecutor>,
         shell: &str,
@@ -274,6 +280,7 @@ impl BashTool {
         cancellation_grace: Duration,
         max_output_bytes: usize,
         redaction_values: &[String],
+        output_logs: Arc<Logs>,
     ) -> Result<Self, InvalidConfiguration> {
         if !valid_workspace(workspace)
             || shell.trim().is_empty()
@@ -295,7 +302,7 @@ impl BashTool {
 
         Ok(Self {
             grant_control: None,
-            output_logs: Arc::new(Logs::for_session(&standalone_log_session_id())),
+            output_logs,
             workspace_root: workspace.root().to_path_buf(),
             output_root: Arc::new(
                 Root::from_directory(
@@ -323,13 +330,6 @@ impl BashTool {
             excluded: None,
             private_home: false,
         })
-    }
-
-    /// Production tools get their session's logs here; a tool without them
-    /// writes under a unique per-tool directory, never a shared one.
-    pub(crate) fn with_output_logs(mut self, logs: Arc<Logs>) -> Self {
-        self.output_logs = logs;
-        self
     }
 
     /// Enables explicit, one-shot elevation for this session.
@@ -567,9 +567,3 @@ fn fraction(value: u128, scale: u128) -> String {
 
 #[cfg(test)]
 mod tests;
-
-fn standalone_log_session_id() -> String {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("standalone-{}-{number}", std::process::id())
-}

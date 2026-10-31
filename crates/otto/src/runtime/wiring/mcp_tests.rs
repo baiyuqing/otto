@@ -284,8 +284,8 @@ fn a_secret_in_a_connect_failure_message_is_redacted() {
 }
 
 #[test]
-fn mcp_child_tools_is_empty_for_no_connected_servers() {
-    assert!(mcp_child_tools(&[], 65536).is_empty());
+fn mcp_adapter_tools_is_empty_for_no_connected_servers() {
+    assert!(mcp_adapter_tools(&[], 65536).is_empty());
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn lazy_mcp_exposes_router_tools_instead_of_remote_tool_schemas() {
         ],
     }];
 
-    let names = mcp_child_tools(&connected, 65536)
+    let names = mcp_adapter_tools(&connected, 65536)
         .into_iter()
         .map(|tool| tool.definition().name)
         .collect::<Vec<_>>();

@@ -33,7 +33,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::builder::{BuildError, Builder, ProviderClient, SharedSession};
 use super::info::SandboxMode;
-use crate::failover;
 use crate::mcp;
 use crate::memory::files::FileStore;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
@@ -48,11 +47,10 @@ use crate::subagent::runner::{
     ChildSession, Config as RunnerConfig, OptionsTemplate, PromptFor, Runner as SubagentRunner,
     Transcript,
 };
-use crate::subagent::tasks::Tasks;
 use crate::tool::Tool;
 use crate::tool::mcp::{McpCatalogEntry, McpTool, router_tools, tools_for};
 use crate::tool::memory::{ForgetTool, MemorySearchTool, RememberTool};
-use crate::tool::remind::{self, Reminders};
+use crate::tool::remind;
 use crate::tool::result::redact_exact_text;
 use crate::tool::skill::SkillTool;
 
@@ -505,17 +503,6 @@ pub struct CatalogWiring {
     pub agent_section: String,
 }
 
-/// What the sub-agent runner contributes to the parent's agent options.
-#[derive(Default)]
-pub struct SubagentWiring {
-    pub runner: Option<Arc<SubagentRunner>>,
-    pub tasks: Option<Arc<Tasks>>,
-    pub inbox: Option<Arc<dyn otto_core::mailbox::Mailbox>>,
-    /// The session's timer registry, absent when the timer tools are not
-    /// registered. `/timers` and archiving read the active runner's.
-    pub reminders: Option<Arc<Reminders>>,
-}
-
 /// `"stdio"` or `"http"`, for [`mcp::ServerStatus::transport`].
 fn transport_label(transport: &McpTransport) -> &'static str {
     match transport {
@@ -526,7 +513,7 @@ fn transport_label(transport: &McpTransport) -> &'static str {
 
 /// One MCP server `connect_mcp` connected: its client, the secrets to redact
 /// from its tool results (its configured secrets plus, for an OAuth server,
-/// its bearer's tokens), the bearer itself (so [`mcp_child_tools`] can build
+/// its bearer's tokens), the bearer itself (so [`mcp_adapter_tools`] can build
 /// the same dynamically-redacting tools `connect_mcp` did), and the
 /// server-prefixed names of the tools that survived cross-server
 /// deduplication.
@@ -538,23 +525,16 @@ pub struct ConnectedServer {
     tool_names: Vec<String>,
 }
 
-/// A second set of tool adapters for the connected MCP clients, for the
-/// sub-agent registry. Mirrors [`Builder::child_tools`]: `mcp::tool::McpTool`
-/// cannot be cloned, so the children get their own adapters over the same
-/// `Arc<client::Client>` connections `connect_mcp` already opened. Re-runs
-/// [`tools_for`] per server (it deterministically reproduces the same
-/// within-server-deduped candidate list from the same `client.tools()`) and
-/// keeps only the names `connect_mcp` recorded as registered, so the child
-/// set exactly matches the parent's without re-running the cross-server
-/// warnings a second time.
-pub fn mcp_child_tools(
-    connected: &[ConnectedServer],
-    max_output: usize,
-) -> Vec<Box<dyn Tool + Send + Sync>> {
-    mcp_router_tools(connected, max_output)
-}
-
-fn mcp_router_tools(
+/// Builds one set of tool adapters over the connected MCP clients. Each
+/// runner builds its own for its parent registry (with its own output cap) and
+/// one for its sub-agent registry, because `mcp::tool::McpTool` cannot be
+/// cloned; all sets share the `Arc<client::Client>` connections the session
+/// opened once. Re-runs [`tools_for`] per server (it deterministically
+/// reproduces the same within-server-deduped candidate list from the same
+/// `client.tools()`) and keeps only the names `connect_mcp` recorded as
+/// registered, so every set matches without repeating the cross-server
+/// warnings.
+pub fn mcp_adapter_tools(
     connected: &[ConnectedServer],
     max_output: usize,
 ) -> Vec<Box<dyn Tool + Send + Sync>> {

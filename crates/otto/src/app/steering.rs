@@ -206,7 +206,7 @@ impl Controller {
         if state.closed {
             return None;
         }
-        state.current.as_ref()?.runner.reminders.clone()
+        state.current.as_ref()?.runner.reminders().cloned()
     }
 
     /// Claims a turn only when the runner has pending inbox messages.

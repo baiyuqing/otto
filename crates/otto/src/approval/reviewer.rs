@@ -312,6 +312,7 @@ mod tests {
             Duration::from_secs(3),
             1024,
             &[],
+            Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
         )
         .unwrap()
         .with_approvals(

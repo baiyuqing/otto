@@ -97,7 +97,9 @@ impl Builder {
         })
     }
 
-    /// Builds the sub-agent runner and appends the agent tools and `remind`.
+    /// Builds the sub-agent runner over the session's task registry and
+    /// appends the agent tools and `remind`. Returns `None`, and appends
+    /// nothing, when the provider is unavailable or sub-agents are off.
     #[allow(clippy::too_many_arguments)]
     pub fn build_subagents(
         &self,
@@ -113,54 +115,33 @@ impl Builder {
         extensions: Option<Arc<crate::plugin::hooks::Runtime>>,
         hook_guard: Option<Arc<crate::plugin::hooks::SessionGuard>>,
         stderr: &mut dyn Write,
-    ) -> Result<SubagentWiring, BuildError> {
+    ) -> Result<Option<Arc<SubagentRunner>>, BuildError> {
         let provider: Arc<dyn otto_core::provider::Provider + Send + Sync> = match client {
             ProviderClient::Compat { client, .. } => Arc::clone(client) as _,
             ProviderClient::Claude { client, .. } => Arc::clone(client) as _,
             ProviderClient::ChatGpt { client, .. } => Arc::clone(client) as _,
-            ProviderClient::Unavailable => return Ok(SubagentWiring::default()),
+            ProviderClient::Unavailable => return Ok(None),
             #[cfg(test)]
-            ProviderClient::Scripted(_) => return Ok(SubagentWiring::default()),
+            ProviderClient::Scripted(_) => return Ok(None),
         };
         if !catalogs.agents.enabled {
-            return Ok(SubagentWiring::default());
+            return Ok(None);
         }
-
-        let persist = self.sidecar_path(session, "reminders.json");
-        // A task id must stay unique within the session across resumes, so
-        // the counter picks up after the highest `t<k>` already used by a
-        // child transcript file, rather than always starting at `t1`.
-        let children_dir = PathBuf::from(session.path()).with_extension("");
-        let starting_counter = subagent::tasks::highest_task_counter(&children_dir);
-        let inbox_persist = self.sidecar_path(session, "inbox.json");
-        let tasks = Arc::new(match &self.task_recorder {
-            Some(store) => {
-                let (pid, process_started_at) = subagent::record::current_process();
-                let parent_session = if self.no_session {
-                    format!("memory:{pid}:{process_started_at}")
-                } else {
-                    session.header().id
-                };
-                Tasks::with_recorder_from(
-                    Arc::clone(store) as Arc<dyn subagent::record::Recorder>,
-                    subagent::record::TaskContext {
-                        parent_session,
-                        parent_session_path: session.path(),
-                        workspace: self.workspace_path.clone(),
-                        pid,
-                        process_started_at,
-                    },
-                    starting_counter,
-                )
-            }
-            None => Tasks::new_from(starting_counter),
-        });
+        let resources = self.session_resources(
+            session,
+            true,
+            runtime.max_output_bytes.max(0) as usize,
+            stderr,
+        );
+        let (Some(tasks), Some(reminders)) = (resources.tasks(), resources.reminders()) else {
+            return Ok(None);
+        };
+        let tasks = Arc::clone(tasks);
+        let reminders = Arc::clone(reminders);
         let usage = self.usage_collector(session, runtime);
         let session_for_children = session.clone();
         let session_for_resume = session_for_children.clone();
         let session_for_lease = session_for_children.clone();
-        let session_for_recovery = session_for_children.clone();
-        let session_for_inbox = session_for_children.clone();
         let session_for_fork = session_for_children.clone();
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
@@ -210,7 +191,7 @@ impl Builder {
                 ..OptionsTemplate::default()
             },
             prompt_for,
-            tasks: Arc::clone(&tasks),
+            tasks,
             catalog: catalogs.agent_catalog.clone(),
             parent_session: Some(Arc::new(move || {
                 otto_core::session::Session::messages(&session)
@@ -251,50 +232,10 @@ impl Builder {
         }
 
         let runner = Arc::new(runner);
-        let inbox = Arc::clone(tasks.notifications_inbox());
-        // The persist hook resolves the sidecar path at write time rather than
-        // capturing `inbox_persist` here: a lazy session store's `path()` is
-        // still empty at this point (nothing has been written to it yet), so
-        // gating the hook on `inbox_persist` would permanently skip
-        // persistence for a session that gets its first write only after this
-        // function returns (see `Store::path`).
-        let no_session = self.no_session;
-        super::super::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
-            let path = session_for_inbox.path();
-            (!no_session && !path.is_empty()).then(|| Path::new(&path).with_extension("inbox.json"))
-        });
-        // A session with no persisted inbox path (`--no-session`, or nothing
-        // written yet) never takes over a lease either, so it never has a
-        // takeover to report; the recovery scan lives in this branch rather
-        // than running unconditionally.
-        if let Some(path) = inbox_persist {
-            if let Some(warning) = super::super::sidecar_mailbox::load(&inbox, &path) {
-                let _ = writeln!(stderr, "warning: {warning}");
-            }
-            let recovery_warnings = failover::recovery::notify(
-                inbox.as_ref(),
-                session_for_recovery.take_recovery(),
-                &children_dir,
-                runtime.max_output_bytes.max(0) as usize,
-                &otto_core::session::Session::messages(&session_for_recovery),
-            );
-            for warning in &recovery_warnings {
-                let _ = writeln!(stderr, "warning: {warning}");
-            }
-        }
         tools.extend(subagent::tools::tools(&runner));
         // Parent-only; the child registry drops the timer tools by name.
-        let reminders = Arc::new(match persist {
-            Some(path) => Reminders::with_persist(inbox.clone(), path),
-            None => Reminders::new(inbox.clone()),
-        });
         tools.extend(remind::tools(&reminders));
-        Ok(SubagentWiring {
-            runner: Some(runner),
-            tasks: Some(tasks),
-            inbox: Some(inbox),
-            reminders: Some(reminders),
-        })
+        Ok(Some(runner))
     }
 
     /// A durable journal beside the session file, `<id>.<extension>`, for
@@ -331,7 +272,7 @@ impl Builder {
     /// `remind::session_file_exists` checks for the session file there. `None`
     /// for `--no-session`. Child inboxes are never persisted: only the
     /// registry built for the top-level session installs the hook.
-    fn sidecar_path(&self, session: &SharedSession, extension: &str) -> Option<PathBuf> {
+    pub(crate) fn sidecar_path(&self, session: &SharedSession, extension: &str) -> Option<PathBuf> {
         let path = session.path();
         if self.no_session || path.is_empty() {
             return None;
@@ -384,9 +325,9 @@ impl Builder {
                 runtime.resilience.deadlines.cancellation_grace,
                 max_output,
                 redaction_values,
+                output_logs,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
-            tool = tool.with_output_logs(output_logs);
             if self.sandbox_info.mode == SandboxMode::Seatbelt {
                 tool = tool.with_private_home();
             }

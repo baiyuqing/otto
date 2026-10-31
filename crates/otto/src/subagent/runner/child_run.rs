@@ -298,7 +298,6 @@ impl Runner {
             // parent's notifications, but the parent can send messages into
             // this private queue with agent_send.
             memory: None,
-            tasks: None,
             mailbox: child_inbox,
             version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()

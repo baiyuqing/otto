@@ -44,7 +44,7 @@ impl Builder {
     /// blanking every tool result with an empty marker (Finding 5b).
     ///
     /// Returns the parent's tools, the connected servers (for
-    /// [`mcp_child_tools`], since [`mcp::client::Client`] tools cannot be
+    /// [`mcp_adapter_tools`], since [`mcp::client::Client`] tools cannot be
     /// cloned into a second registry), and the status handle.
     pub async fn connect_mcp(
         &self,
@@ -345,7 +345,7 @@ impl Builder {
                 }
             }
         }
-        tools.extend(mcp_router_tools(&connected, max_output));
+        tools.extend(mcp_adapter_tools(&connected, max_output));
         (tools, connected, servers)
     }
 

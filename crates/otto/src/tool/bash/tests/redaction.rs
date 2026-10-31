@@ -205,6 +205,7 @@ async fn invalid_redactions_are_canonicalized_separately_from_the_environment() 
             Duration::from_secs(3),
             max_output,
             &[invalid_ff.clone(), invalid_overlong.clone()],
+            Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
         )
         .expect("the configuration is valid");
         let result = run(&tool, "ignored").await;

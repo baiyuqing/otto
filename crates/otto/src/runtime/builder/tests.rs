@@ -12,6 +12,7 @@ use std::time::Duration;
 mod authorization;
 mod provider_turns;
 mod runtime_info;
+mod session_resources_sharing;
 mod session_shutdown;
 mod tool_sets;
 mod turn_limits;
@@ -191,7 +192,7 @@ impl ParentToolFactory for CountingParentToolFactory {
 }
 
 /// A provider `Runner::scripted` needs a value for but this test never
-/// calls: `close_mcp`/`close` never send a turn.
+/// calls: `close_resources`/`close` never send a turn.
 struct UnusedProvider;
 
 #[async_trait::async_trait]

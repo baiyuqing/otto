@@ -130,7 +130,7 @@ async fn a_wake_turn_resuming_an_interrupted_turn_reports_trigger_recovery() {
 }
 
 /// R13: `failover::recovery::notify` pushes through the same
-/// `tasks.notifications()` inbox `build_subagents` wires the recovery
+/// `tasks.notifications()` inbox `Builder::session_resources` wires the recovery
 /// push into, so it starts a wake turn the same way any other pending
 /// notification does; no separate signaling code exists for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -271,4 +271,45 @@ async fn closing_the_server_ends_the_wake_loop() {
         .await
         .expect("close did not return; the wake loop leaked")
         .expect("close");
+}
+
+/// The wake loop opened with the session keeps waking after a profile switch
+/// builds a new runner, because the inbox and registry belong to the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_notification_starts_a_wake_turn_after_a_profile_switch() {
+    let (harness, tasks) = wake_harness(Script {
+        deltas: vec!["ok".to_string()],
+        ..Script::default()
+    });
+    let id = harness.create().await;
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/profile"),
+            Some(r#"{"profile":"beta"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    tasks.notifications().push(notification());
+
+    // The rebuilt runner has the real provider client, which the offline
+    // test cannot reach, so the wake turn is observed through the session's
+    // turn record instead of the scripted provider.
+    let started = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = harness
+                .send("GET", &format!("/v1/sessions/{id}"), None)
+                .await;
+            if reply.json()["turn"]["trigger"] == turn::TRIGGER_TASK {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        started.is_ok(),
+        "the notification did not start a wake turn after the profile switch"
+    );
 }

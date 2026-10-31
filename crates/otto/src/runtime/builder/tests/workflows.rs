@@ -357,7 +357,7 @@ async fn parent_tool_factory_is_fresh_per_parent_runner_and_absent_from_children
     );
 
     let child_names = builder
-        .child_tools(&runtime(), 65536, &[], &Catalog::default())
+        .child_tools(&runtime(), 65536, &[], &Catalog::default(), "session-x")
         .expect("child tools")
         .into_iter()
         .map(|tool| tool.definition().name)

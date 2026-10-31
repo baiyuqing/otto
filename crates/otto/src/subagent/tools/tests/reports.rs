@@ -45,7 +45,7 @@ async fn long_final_report_is_readable_after_child_exit_without_another_model_ca
     provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
     let tasks = Arc::new(Tasks::new());
     let runner = runner(test_config(&provider, &tasks, Vec::new()));
-    runner.bind_scratch_root(Root::open(dir.path()).unwrap());
+    runner.bind_scratch_root(Root::open(dir.path()).unwrap(), "session-x");
     runner
         .start(StartRequest {
             prompt: "research".into(),
@@ -126,7 +126,7 @@ async fn tiny_preview_keeps_the_read_pointer_and_persisted_report_is_redacted() 
     config.max_output_bytes = 1;
     config.redaction_values = vec![private.to_owned()];
     let runner = runner(config);
-    runner.bind_scratch_root(Root::open(dir.path()).unwrap());
+    runner.bind_scratch_root(Root::open(dir.path()).unwrap(), "session-x");
     runner
         .start(StartRequest {
             prompt: "research".into(),
@@ -166,7 +166,7 @@ async fn report_storage_failure_preserves_success_and_reports_the_missing_artifa
     provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
     let tasks = Arc::new(Tasks::new());
     let runner = runner(test_config(&provider, &tasks, Vec::new()));
-    runner.bind_scratch_root(Root::open(dir.path()).unwrap());
+    runner.bind_scratch_root(Root::open(dir.path()).unwrap(), "session-x");
     runner
         .start(StartRequest {
             prompt: "research".into(),

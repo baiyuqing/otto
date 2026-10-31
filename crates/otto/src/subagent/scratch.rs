@@ -1,6 +1,7 @@
 //! A child's private workspace-local research directory. Its pinned handles
 //! survive path swaps; drop removes only this generated tree, never siblings.
 use crate::tool::root::Root;
+use crate::tool::session_directory::{create_session_directory, session_directory_name};
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 use std::io::{self, Write};
@@ -10,13 +11,16 @@ pub(super) struct Scratch {
     parent: Root,
     directory: Root,
     name: String,
+    path: String,
 }
 
 impl Scratch {
-    pub(super) fn new(workspace: &Root) -> io::Result<Self> {
+    /// Creates `.otto/tool-output/<session_id>/research-<hex>/`.
+    pub(super) fn new(workspace: &Root, session_id: &str) -> io::Result<Self> {
+        let session_directory_name = session_directory_name(session_id)?;
         let otto = workspace.create_child_directory(".otto", Mode::S_IRWXU)?;
-        let parent = otto.create_child_directory("tool-output", Mode::S_IRWXU)?;
-        match parent.open_file(
+        let output = otto.create_child_directory("tool-output", Mode::S_IRWXU)?;
+        match output.open_file(
             Path::new(".gitignore"),
             OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL,
             Mode::S_IRUSR | Mode::S_IWUSR,
@@ -25,18 +29,20 @@ impl Scratch {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
+        let parent = create_session_directory(&output, session_directory_name)?;
         let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
         let name = format!("research-{id}");
         let directory = parent.create_new_child_directory(&name, Mode::S_IRWXU)?;
         Ok(Self {
             parent,
             directory,
+            path: format!(".otto/tool-output/{session_directory_name}/{name}"),
             name,
         })
     }
 
     pub(super) fn path(&self) -> String {
-        format!(".otto/tool-output/{}", self.name)
+        self.path.clone()
     }
 }
 
@@ -75,11 +81,11 @@ mod tests {
     fn exit_removes_nested_research_but_not_siblings_or_symlink_targets() {
         let dir = tempfile::tempdir().unwrap();
         let root = Root::open(dir.path()).unwrap();
-        let scratch = Scratch::new(&root).unwrap();
+        let scratch = Scratch::new(&root, "session-x").unwrap();
         let path = dir.path().join(scratch.path());
         std::fs::create_dir(path.join("source")).unwrap();
         std::fs::write(path.join("source/code.rs"), "source").unwrap();
-        let sibling = dir.path().join(".otto/tool-output/other.log");
+        let sibling = dir.path().join(".otto/tool-output/session-x/other.log");
         std::fs::write(&sibling, "keep").unwrap();
         symlink(dir.path(), path.join("outside")).unwrap();
         drop(scratch);
@@ -91,7 +97,7 @@ mod tests {
     async fn cancellation_drops_the_temporary_directory() {
         let dir = tempfile::tempdir().unwrap();
         let root = Root::open(dir.path()).unwrap();
-        let scratch = Scratch::new(&root).unwrap();
+        let scratch = Scratch::new(&root, "session-x").unwrap();
         let path = dir.path().join(scratch.path());
         let (ready, started) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -111,7 +117,29 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), dir.path().join(".otto")).unwrap();
         let root = Root::open(dir.path()).unwrap();
-        assert!(Scratch::new(&root).is_err());
+        assert!(Scratch::new(&root, "session-x").is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn scratch_path_names_the_owning_session_and_rejects_invalid_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root::open(dir.path()).unwrap();
+        let scratch = Scratch::new(&root, "session-x").unwrap();
+        assert!(
+            scratch
+                .path()
+                .starts_with(".otto/tool-output/session-x/research-")
+        );
+        assert!(dir.path().join(scratch.path()).is_dir());
+        for id in ["..", "a/b", ""] {
+            assert!(Scratch::new(&root, id).is_err(), "{id:?}");
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(".otto/tool-output"))
+                .unwrap()
+                .count(),
+            2
+        );
     }
 }

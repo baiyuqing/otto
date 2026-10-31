@@ -26,9 +26,12 @@ impl Builder {
             )
             .map_err(|error| error.to_string())?
             .enabled;
+        // Resource creation depends on configuration only, not on whether this
+        // runner's provider is available: the first runner of a session may
+        // have a closed redaction boundary while a later profile does not.
         let resources = self.session_resources(
             session,
-            agents_enabled && client.is_provider_backed(),
+            agents_enabled,
             runtime.max_output_bytes.max(0) as usize,
             warnings,
         );

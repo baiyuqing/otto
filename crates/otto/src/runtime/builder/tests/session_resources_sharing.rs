@@ -82,3 +82,59 @@ async fn dropping_the_session_and_runner_releases_the_transcript() {
 
     assert!(transcript.upgrade().is_none());
 }
+
+/// Whether a session has a task registry depends on `[agents]` only. A first
+/// runner without a sub-agent executor (here the scripted test provider, like
+/// a closed redaction boundary in production) still creates the registry, so
+/// a later runner with a real provider can start sub-agents.
+#[tokio::test]
+async fn a_first_runner_without_a_subagent_executor_still_creates_the_task_registry() {
+    use crate::runtime::builder::TEST_PROVIDERS;
+    use crate::subagent::doubles_tests::FakeProvider;
+    struct ProviderGuard(String);
+    impl Drop for ProviderGuard {
+        fn drop(&mut self) {
+            TEST_PROVIDERS
+                .lock()
+                .unwrap()
+                .retain(|(home, _)| home != &self.0);
+        }
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let builder = builder(dir.path());
+    let session = SharedSession::memory(Header::default());
+    let home = dir.path().to_string_lossy().into_owned();
+    TEST_PROVIDERS
+        .lock()
+        .unwrap()
+        .push((home.clone(), FakeProvider::new()));
+    let provider_guard = ProviderGuard(home);
+
+    let scripted = builder
+        .build_runner_quiet(&session, &runtime())
+        .await
+        .expect("scripted runner");
+    let tasks_first = session
+        .resources()
+        .and_then(|resources| resources.tasks().cloned())
+        .expect("task registry created by a runner without an executor");
+    drop(provider_guard);
+    let provider_backed = builder
+        .build_runner_quiet(&session, &runtime())
+        .await
+        .expect("provider-backed runner");
+
+    assert!(Arc::ptr_eq(
+        &tasks_first,
+        &provider_backed.tasks().expect("tasks of the second runner")
+    ));
+    assert!(
+        provider_backed
+            .definitions()
+            .iter()
+            .any(|definition| definition.name == "agent"),
+        "the provider-backed runner offers the agent tool"
+    );
+    scripted.close();
+    provider_backed.close();
+}

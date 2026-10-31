@@ -196,6 +196,12 @@ struct ScriptedSizer;
 pub(crate) static TEST_PROVIDERS: std::sync::Mutex<Vec<(String, Arc<dyn Provider + Send + Sync>)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Builder homes whose scripted provider also backs a sub-agent runner.
+/// Without an entry here a scripted runner has no sub-agent executor.
+#[cfg(test)]
+pub(crate) static TEST_SCRIPTED_SUBAGENT_HOMES: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(test)]
 impl RequestSizer for ScriptedSizer {
     fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {

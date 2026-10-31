@@ -12,6 +12,8 @@ pub mod advice;
 pub mod boundary;
 pub mod builder;
 pub mod info;
+#[cfg(test)]
+pub(crate) mod mcp_server_fixture_tests;
 pub mod prompt;
 pub mod sandbox_config;
 pub mod sandbox_runtime;

@@ -135,6 +135,12 @@ options, reviewer registration, memory binding and the sub-agent executor
 model, child tools) and holds an `Arc` of the session's `Tasks`; a child keeps
 the executor objects it started with until it finishes.
 
+The semaphore that admits running children (`[agents].max_parallel` permits)
+belongs to the session's `Tasks` (`Tasks::child_slots`), not to the executor.
+Children of a replaced runner keep running, so an executor-owned semaphore
+would let each new runner admit another `max_parallel` children. The first
+executor built on the registry sets the permit count.
+
 `otto_core::agent::Agent::close` stops closing `Options::tasks`; it releases
 the memory binding only. The task registry is closed by its owner.
 

@@ -16,7 +16,8 @@ commit ledger; Git and release tags retain the full history. See the
   workflow delivery worker belong to the session and are stopped by `/new`,
   `/load`, session close and process exit. Sub-agent bash tools now use the
   owning session id as the approval key instead of one key shared by every
-  session of a workspace.
+  session of a workspace. `[agents].max_parallel` caps the running sub-agents
+  of the session, including those started before the switch.
 
 ### Changes
 

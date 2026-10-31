@@ -9,7 +9,9 @@
 //!
 //! Concurrency and cancellation: every child runs in its own Tokio task,
 //! admitted by a semaphore that caps [`Config::max_parallel`] concurrent
-//! children. Each task's [`CancellationToken`] is held by the registry, so
+//! children. The semaphore belongs to the session's [`Tasks`]
+//! ([`Tasks::child_slots`]), so runners rebuilt on one session share the cap.
+//! Each task's [`CancellationToken`] is held by the registry, so
 //! cancelling it either releases a queued child before it starts or stops a
 //! running one mid-turn. [`Runner::start`] itself never blocks.
 //!
@@ -378,7 +380,9 @@ impl Runner {
             }
         }
 
-        let semaphore = Arc::new(Semaphore::new(config.max_parallel));
+        // The session's registry owns the permits, so every runner of the
+        // session shares one `max_parallel` cap.
+        let semaphore = config.tasks.child_slots(config.max_parallel);
         Ok((
             Self {
                 reports: super::reports::Reports::default(),

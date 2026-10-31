@@ -5,8 +5,8 @@ use super::*;
 impl Runner {
     /// Keep temporary output across all provider steps of one logical turn,
     /// including approval retries and queued follow-ups.
-    pub(crate) fn retain_temporary_outputs(&self) -> crate::tool::bash_output::LogLease {
-        self.output_logs.lease()
+    pub(crate) fn retain_temporary_outputs(&self) -> Option<crate::tool::bash_output::LogLease> {
+        Some(self.session().resources()?.output_logs().lease())
     }
 
     pub(crate) fn set_scheduled_authorization_run(&self, label: &str) {

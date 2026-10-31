@@ -195,7 +195,7 @@ impl Server {
         session.cancel_work();
         // Awaited before the blocking close, exactly as `Server::close` does:
         // `Controller::close` only spawns the MCP shutdown.
-        session.ctrl.close_mcp().await;
+        session.ctrl.close_resources().await;
         let ctrl = Arc::clone(&session.ctrl);
         match tokio::task::spawn_blocking(move || ctrl.close()).await {
             Ok(result) => result,

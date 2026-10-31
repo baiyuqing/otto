@@ -164,6 +164,7 @@ fn bash(
         Duration::from_secs(3),
         max_output_bytes,
         &strings(redactions),
+        Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
     )
     .expect("the fixture configuration is valid")
 }

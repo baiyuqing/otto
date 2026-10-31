@@ -393,6 +393,7 @@ async fn it_runs_a_real_command_through_the_direct_driver() {
         Duration::from_secs(3),
         4096,
         &[],
+        Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
     )
     .expect("the configuration is valid");
     let result = run(
@@ -445,6 +446,7 @@ async fn a_driver_launch_failure_is_not_started_and_runs_nothing() {
         Duration::from_secs(3),
         4096,
         &[],
+        Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
     )
     .expect("the configuration is valid");
 
@@ -510,6 +512,7 @@ fn the_constructor_rejects_every_invalid_boundary_with_one_safe_error() {
             *timeout,
             *max_output_bytes,
             &strings(&["must-not-appear"]),
+            Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
         );
         let Err(error) = outcome else {
             panic!("{name} should be rejected");
@@ -535,6 +538,7 @@ fn the_constructor_handles_former_byte_marker_exhaustion() {
         Duration::from_secs(1),
         1024,
         &[all_bytes],
+        Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
     )
     .expect("an exhausted byte set still constructs safely");
 }

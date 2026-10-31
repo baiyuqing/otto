@@ -183,8 +183,8 @@ impl DeliveryRun for DeliveryRuntime {
     }
 
     async fn close(self: Box<Self>) {
-        self.worktree_runner.close_mcp().await;
         self.worktree_runner.close();
+        self.worktree_session.close_resources().await;
         let _ = self.worktree_session.close();
         let _ = self.worktree_sandbox.control.close().await;
     }

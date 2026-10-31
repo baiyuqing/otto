@@ -266,6 +266,7 @@ async fn linked_worktree_git_and_script_previews_bind_the_effective_branch_and_p
         Duration::from_secs(3),
         1024,
         &[],
+        Arc::new(crate::tool::bash_output::Logs::for_session("test-session")),
     )
     .unwrap()
     .with_approvals(

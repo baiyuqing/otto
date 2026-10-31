@@ -2,9 +2,9 @@
 //!
 //! A [`Tasks`] registry tracks one record per delegated task, the cancellation
 //! token and history hook that belong to it, and the parent's notification
-//! inbox. It is the real implementation behind
-//! [`otto_core::agent::tasks::TaskRegistry`], whose only method the turn loop
-//! calls is `close`.
+//! inbox. It belongs to the session (see
+//! [`crate::runtime::session_resources`]), not to one runner: a profile switch
+//! keeps it, and only the session's end calls [`Tasks::close`].
 //!
 //! Ownership: the registry owns its records. Every accessor returns a clone, so
 //! a caller never holds a reference into the locked state.
@@ -35,7 +35,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, NotificationKind};
-use otto_core::agent::tasks::TaskRegistry;
 use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Usage};
 use tokio::sync::{Notify, watch};
@@ -67,7 +66,7 @@ struct Entry {
 struct State {
     closed: bool,
     /// Set once by [`Tasks::begin_migration`]. Distinct from `closed`
-    /// (which migration also sets, via [`TaskRegistry::close`]) so
+    /// (which migration also sets, via [`Tasks::close`]) so
     /// [`Tasks::is_migrating`] answers "is this a migration close" rather
     /// than just "is this registry closed".
     migrating: bool,
@@ -519,7 +518,7 @@ impl Tasks {
     }
 
     /// Begins a migration: marks the registry migrating, closes it the same
-    /// way [`TaskRegistry::close`] does (cancels every non-final task's
+    /// way [`Tasks::close`] does (cancels every non-final task's
     /// token, admits no more tasks, drops the update sender), and returns
     /// the ids that were not yet final at that moment. Idempotent: a second
     /// call returns an empty list.
@@ -609,9 +608,9 @@ impl Tasks {
     }
 }
 
-impl TaskRegistry for Tasks {
+impl Tasks {
     /// Cancels every non-final task and closes the update channel. Idempotent.
-    fn close(&self) {
+    pub fn close(&self) {
         let cancels = {
             let mut state = self.lock();
             if state.closed {

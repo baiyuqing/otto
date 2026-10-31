@@ -16,6 +16,7 @@ pub mod prompt;
 pub mod sandbox_config;
 pub mod sandbox_runtime;
 pub mod sandbox_switch;
+pub(crate) mod session_resources;
 pub(crate) mod sidecar_mailbox;
 pub(crate) mod startup;
 pub mod storage;

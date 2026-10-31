@@ -107,7 +107,10 @@ REPL and owns process lifecycle; it is the primary starting point for a new
 command or startup behavior. `src/runtime/` assembles one runnable agent from
 resolved configuration (`builder.rs` holds `Builder` and `Runner`,
 `wiring.rs` connects memory, MCP and sub-agents, `prompt.rs` builds the system
-prompt). `runtime/startup.rs` holds the startup composition, from environment
+prompt, `session_resources.rs` holds what a session owns across runner
+replacement: sub-agent registry, inbox, timers, bash output logs, MCP servers
+and workflow delivery worker). A `Runner` borrows these resources and never
+stops them; `SharedSession::close` and `close_resources` do. `runtime/startup.rs` holds the startup composition, from environment
 capture to the memory service, as phase functions; `cli::run`, `otto serve`
 (`load_workspace`) and `embed` all call it. `runtime/workspace_admission.rs`
 admits a workspace path for `otto serve`, delivery and `embed`. `src/app/`

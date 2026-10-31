@@ -19,11 +19,11 @@ async fn two_runner_builds_on_one_session_share_its_resources() {
         .expect("second runner");
     let resources_second = session.resources().expect("resources after second build");
 
-    assert!(Arc::ptr_eq(&resources_first, &resources_second));
+    assert!(Arc::ptr_eq(resources_first, resources_second));
     assert!(Arc::ptr_eq(&first.mcp(), &second.mcp()));
     assert!(Arc::ptr_eq(
-        &first.tasks().expect("first tasks"),
-        &second.tasks().expect("second tasks")
+        first.tasks().expect("first tasks"),
+        second.tasks().expect("second tasks")
     ));
     assert!(Arc::ptr_eq(first.mailbox(), second.mailbox()));
     // Closing a superseded runner leaves the session's resources open.
@@ -51,10 +51,10 @@ async fn two_sessions_of_one_builder_own_separate_resources() {
 
     let resources_a = session_a.resources().expect("resources a");
     let resources_b = session_b.resources().expect("resources b");
-    assert!(!Arc::ptr_eq(&resources_a, &resources_b));
+    assert!(!Arc::ptr_eq(resources_a, resources_b));
     assert!(!Arc::ptr_eq(
-        &runner_a.tasks().expect("tasks a"),
-        &runner_b.tasks().expect("tasks b")
+        runner_a.tasks().expect("tasks a"),
+        runner_b.tasks().expect("tasks b")
     ));
     assert!(!Arc::ptr_eq(runner_a.mailbox(), runner_b.mailbox()));
     assert!(!Arc::ptr_eq(&runner_a.mcp(), &runner_b.mcp()));
@@ -126,7 +126,7 @@ async fn a_first_runner_without_a_subagent_executor_still_creates_the_task_regis
 
     assert!(Arc::ptr_eq(
         &tasks_first,
-        &provider_backed.tasks().expect("tasks of the second runner")
+        provider_backed.tasks().expect("tasks of the second runner")
     ));
     assert!(
         provider_backed

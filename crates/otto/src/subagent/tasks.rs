@@ -31,13 +31,13 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, NotificationKind};
 use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Usage};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::record::{Recorder, TaskContext};
@@ -104,6 +104,9 @@ pub struct Tasks {
     updates: Arc<Updates>,
     updates_receiver: watch::Receiver<u64>,
     recorder: Option<(Arc<dyn Recorder>, TaskContext)>,
+    /// Permits for running children, shared by every sub-agent runner built
+    /// on this registry; see [`Tasks::child_slots`].
+    child_slots: OnceLock<Arc<Semaphore>>,
 }
 
 impl std::fmt::Debug for Tasks {
@@ -176,7 +179,19 @@ impl Tasks {
             updates,
             updates_receiver: receiver,
             recorder,
+            child_slots: OnceLock::new(),
         }
+    }
+
+    /// The semaphore that caps how many children of this registry run at
+    /// once. The first caller sets the permit count to `max_parallel`; later
+    /// callers get the same semaphore and their `max_parallel` is ignored, so
+    /// a replaced runner and its successor admit children against one cap.
+    pub fn child_slots(&self, max_parallel: usize) -> Arc<Semaphore> {
+        Arc::clone(
+            self.child_slots
+                .get_or_init(|| Arc::new(Semaphore::new(max_parallel))),
+        )
     }
 
     /// Calls the recorder, if any, with `id`'s current state. A no-op for an

@@ -99,7 +99,8 @@ impl Builder {
 
     /// Builds the sub-agent runner over the session's task registry and
     /// appends the agent tools and `remind`. Returns `None`, and appends
-    /// nothing, when the provider is unavailable or sub-agents are off.
+    /// nothing, when the provider is unavailable, sub-agents are off, or the
+    /// session has no task registry ([`Builder::session_resources`] creates it).
     #[allow(clippy::too_many_arguments)]
     pub fn build_subagents(
         &self,
@@ -127,12 +128,9 @@ impl Builder {
         if !catalogs.agents.enabled {
             return Ok(None);
         }
-        let resources = self.session_resources(
-            session,
-            true,
-            runtime.max_output_bytes.max(0) as usize,
-            stderr,
-        );
+        let Some(resources) = session.resources() else {
+            return Ok(None);
+        };
         let (Some(tasks), Some(reminders)) = (resources.tasks(), resources.reminders()) else {
             return Ok(None);
         };

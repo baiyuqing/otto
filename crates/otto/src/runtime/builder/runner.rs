@@ -39,7 +39,7 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        let _output_lease = self.output_logs.lease();
+        let _output_lease = self.retain_temporary_outputs();
         let control = Control::new(self.turn_deadline());
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
@@ -74,7 +74,7 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        let _output_lease = self.output_logs.lease();
+        let _output_lease = self.retain_temporary_outputs();
         let control = Control::new(self.turn_deadline());
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
@@ -109,7 +109,7 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        let _output_lease = self.output_logs.lease();
+        let _output_lease = self.retain_temporary_outputs();
         let control = Control::new(self.turn_deadline());
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
@@ -403,53 +403,38 @@ impl Runner {
         self.subagents.clone()
     }
 
-    /// Releases the agent's own resources and best-effort starts MCP
-    /// shutdown in the background. The session is closed separately, by
-    /// whoever owns it. A running Tokio runtime spawns
-    /// [`crate::mcp::Servers::close`] in the background (closes stdio
-    /// children, drops HTTP connections); its absence (a scripted test
-    /// runner, or a caller outside `#[tokio::main]`) just skips it, since
-    /// there is nothing to release for `Servers::default()` and no runtime to
-    /// block on for a real one.
-    ///
-    /// This is enough for a runner displaced by `/new`, `/load`, or
-    /// `/model`: nothing downstream needs its MCP servers gone by any
-    /// particular deadline. It is not enough at process exit, where a
-    /// dropped runtime can cancel the spawned task before it runs; call
-    /// [`Self::close_mcp`] there too. Both paths await the same detached MCP
-    /// cleanup owner, so cancellation or timeout of either waiter cannot lose
-    /// the clients being closed.
+    /// Releases what this runner owns: its approval reviewer registration
+    /// and the agent's memory binding. The session's resources (sub-agent
+    /// tasks, notifications, timers, MCP servers, workflow delivery) belong to
+    /// the session and outlive the runner; they end through
+    /// [`SharedSession::close`] or [`SharedSession::close_resources`].
     pub fn close(&self) {
-        if let Some(binding) = &self.workflow_binding {
-            binding.stop();
-            let binding = binding.clone();
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    binding.join().await;
-                });
-            }
-        }
         if let (Some((service, scope)), Some(provider)) = (&self.approvals, &self.review_provider) {
             let _ = service.unregister_reviewer(&scope.workspace, &scope.session_id, provider);
         }
         let _ = self.agent.close();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let mcp = Arc::clone(&self.mcp);
-            handle.spawn(async move { mcp.close().await });
-        }
     }
 
-    /// Shuts every connected MCP server down, waiting up to 5 seconds.
-    /// Idempotent with [`Self::close`]'s background close: all callers wait
-    /// for the same detached cleanup owner. If this caller times out, cleanup
-    /// continues and a later caller can await the same completion. There is
-    /// nothing to release for `Servers::default()`, so this returns
-    /// immediately for a runner built without MCP servers.
-    pub async fn close_mcp(&self) {
-        if let Some(binding) = &self.workflow_binding {
-            binding.join().await;
+    /// The session's sub-agent task registry, absent when sub-agents are off.
+    /// `/tasks` and `/task` read it; it is the same value for every runner of
+    /// the session.
+    pub(crate) fn tasks(&self) -> Option<&Arc<crate::subagent::tasks::Tasks>> {
+        self.session().resources()?.tasks()
+    }
+
+    /// The session's timer registry, absent when sub-agents are off. `/timers`
+    /// lists it and archiving the session clears it.
+    pub(crate) fn reminders(&self) -> Option<&Arc<crate::tool::remind::Reminders>> {
+        self.session().resources()?.reminders()
+    }
+
+    /// The MCP servers whose status `/mcp` shows: the session's connected
+    /// servers, or the placeholder rows of a runner built without connecting.
+    pub(crate) fn mcp(&self) -> Arc<crate::mcp::Servers> {
+        if let Some(mcp) = self.session().resources().and_then(|r| r.mcp()) {
+            return Arc::clone(&mcp.servers);
         }
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.mcp.close()).await;
+        self.connecting_mcp.clone().unwrap_or_default()
     }
 
     /// Runs during a SIGTERM migration, after this session's turn was
@@ -457,10 +442,10 @@ impl Runner {
     /// each to reach a final status, and leaves one notification describing
     /// what moved (see [`crate::failover::recovery::notify_moved`]).
     /// Returns no warnings and does nothing when sub-agents are off
-    /// (`self.tasks` is `None`) or the session has no persisted path
+    /// (`self.tasks()` is `None`) or the session has no persisted path
     /// (`--no-session`, so there is no children directory to scan).
     pub async fn migrate(&self) -> Vec<String> {
-        let Some(tasks) = self.tasks.as_ref() else {
+        let Some(tasks) = self.tasks() else {
             return Vec::new();
         };
         let ids = tasks.begin_migration();
@@ -512,14 +497,14 @@ impl Runner {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
-        let inbox = tasks.notifications().clone();
-        let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = inbox.clone();
-        let output_logs = Arc::new(crate::tool::bash_output::Logs::for_session(
-            &session.header().id,
-        ));
+        let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = tasks.notifications().clone();
+        session.install_test_resources(
+            super::super::session_resources::SessionResources::for_tests(
+                &session.header().id,
+                Some(Arc::clone(&tasks)),
+            ),
+        );
         Self {
-            workflow_binding: None,
-            output_logs,
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
                 registry,
@@ -531,8 +516,6 @@ impl Runner {
                     now: Box::new(Utc::now),
                     mailbox: Arc::clone(&mailbox),
                     steering: task_control.steering(),
-                    tasks: Some(Arc::clone(&tasks)
-                        as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
                     ..Options::default()
                 },
             ),
@@ -548,13 +531,11 @@ impl Runner {
             definitions,
             usage: None,
             logger: Arc::new(crate::log::Logger::discard()),
-            reminders: Some(Arc::new(crate::tool::remind::Reminders::new(inbox))),
-            tasks: Some(tasks),
             subagents: None,
             skills: Catalog::default(),
             discovered_skills: Catalog::default(),
             agents: crate::subagent::Catalog::default(),
-            mcp: Arc::new(crate::mcp::Servers::default()),
+            connecting_mcp: None,
             task_control,
             memory_client: None,
             schedule_origin: Default::default(),
@@ -562,12 +543,13 @@ impl Runner {
         }
     }
 
-    /// Replaces the MCP servers a [`Self::scripted`] runner was built with.
-    /// Test-only: lets a close-ordering test inject a [`crate::mcp::Servers`]
-    /// with a fake connected client instead of the empty default.
+    /// Gives the session of a [`Self::scripted`] runner the MCP servers a
+    /// test injects, in place of none. Test-only: lets a close-ordering test
+    /// use a [`crate::mcp::Servers`] with a fake connected client.
     #[cfg(test)]
-    pub fn with_mcp(mut self, mcp: Arc<crate::mcp::Servers>) -> Self {
-        self.mcp = mcp;
+    pub fn with_mcp(self, mcp: Arc<crate::mcp::Servers>) -> Self {
+        let resources = self.session().resources().expect("scripted resources");
+        resources.set_test_mcp(mcp);
         self
     }
 }

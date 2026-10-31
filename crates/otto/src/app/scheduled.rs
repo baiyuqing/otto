@@ -178,7 +178,7 @@ pub async fn run_new_session(
         Err(error) => return RunOutcome::FailedBeforeTools(error),
     };
     let outcome = run(&controller, text, cancel).await;
-    controller.close_mcp().await;
+    controller.close_resources().await;
     let _ = controller.close();
     outcome
 }
@@ -204,7 +204,7 @@ impl PromptRunner for ControllerRunner {
         };
         let _ = inherit_authority(&controller, item).await;
         let outcome = run(&controller, text, cancel).await;
-        controller.close_mcp().await;
+        controller.close_resources().await;
         let _ = controller.close();
         outcome
     }

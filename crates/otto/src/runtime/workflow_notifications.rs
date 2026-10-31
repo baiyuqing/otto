@@ -64,7 +64,7 @@ pub(crate) fn bind(
     session.replace_workflow_binding(binding.clone());
     controller.register_delivery(binding.clone());
     let weak_controller = Arc::downgrade(controller);
-    let weak_session = session.downgrade_workflow();
+    let weak_session = session.downgrade();
     let weak_mailbox = Arc::downgrade(mailbox);
     let closed = session.workflow_closed();
     let worker = binding.clone();

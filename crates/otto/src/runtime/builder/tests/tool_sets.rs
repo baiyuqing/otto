@@ -155,7 +155,7 @@ async fn build_runner_without_mcp_reports_connecting_and_skips_mcp_tools() {
         .await
         .expect("runner");
 
-    let status = runner.mcp.status();
+    let status = runner.mcp().status();
     assert_eq!(status.len(), 1);
     assert_eq!(status[0].name, "slow");
     assert_eq!(status[0].state, crate::mcp::ServerState::Connecting);

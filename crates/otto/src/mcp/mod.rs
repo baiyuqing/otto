@@ -7,10 +7,12 @@
 //! `tools/list` and `tools/call`. The `Tool` adapter that presents one MCP
 //! tool to the model lives in `crate::tool::mcp`.
 //!
-//! Ownership: every server's client is created at runner build, shared by
-//! `Arc` between the tools that use it, and shut down by [`Servers::close`],
-//! called in the background from `Runner::close` (runner swap: `/new`,
-//! `/load`, `/model`) or awaited from `Runner::close_mcp` (process exit).
+//! Ownership: every server's client is created once per session by the first
+//! runner build that connects MCP, shared by `Arc` between the tools of every
+//! runner of that session, and shut down by [`Servers::close`], called when the
+//! session ends: in the background from `SharedSession::close` (`/new`,
+//! `/load`) or awaited from `SharedSession::close_resources` (process exit).
+//! A runner swap (`/model`, profile switch) does not close it.
 //! The first caller starts a detached cleanup owner; every caller waits for
 //! that same completion, so cancellation of a waiter cannot lose the clients.
 //! Concurrency: [`ToolServer::call`] takes `&self` and
@@ -230,8 +232,8 @@ struct CloseCompletion {
     changed: Notify,
 }
 
-/// The connected servers of one runner: their status rows for `/mcp` and the
-/// handles `Runner::close`/`Runner::close_mcp` shut down.
+/// The connected servers of one session: their status rows for `/mcp` and the
+/// handles `SharedSession::close`/`SharedSession::close_resources` shut down.
 #[derive(Default)]
 pub struct Servers {
     status: Mutex<Vec<ServerStatus>>,

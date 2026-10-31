@@ -313,7 +313,7 @@ fn the_workspace_scope_is_derived_from_the_path_without_an_override() {
 }
 
 // -----------------------------------------------------------------
-// R12: build_subagents reports a takeover through the recovery push.
+// R12: the session resources report a takeover through the recovery push.
 //
 // A takeover is simulated the same way `session::tests` does: a lease
 // directory is written by hand (no live `Lease` of this process's own),
@@ -434,11 +434,12 @@ fn recovery_call_build_subagents(
     client: &ProviderClient,
     catalogs: &CatalogWiring,
     session: &SharedSession,
-) -> SubagentWiring {
+) -> Arc<crate::runtime::session_resources::SessionResources> {
     let mut tools = Vec::new();
     let mut stderr = Vec::new();
     let redactor = Redactor::with_completeness(&[], true);
     let prompt_for = builder.child_prompt_for(runtime, "host", "");
+    let resources = builder.session_resources(session, true, 4096, &mut stderr);
     builder
         .build_subagents(
             &mut tools,
@@ -454,7 +455,8 @@ fn recovery_call_build_subagents(
             None,
             &mut stderr,
         )
-        .expect("build_subagents")
+        .expect("build_subagents");
+    resources
 }
 
 #[test]
@@ -536,9 +538,9 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
     let session = SharedSession::new(Arc::new(activated));
 
     let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
-    let wiring = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+    let resources = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
 
-    let inbox = wiring.inbox.expect("inbox");
+    let inbox = resources.notifications().clone();
     let queued = inbox.queued();
     assert_eq!(queued.len(), 2, "{queued:?}");
     assert_eq!(queued[0].notification.text, "already queued");
@@ -638,9 +640,9 @@ fn a_plain_reopen_after_process_loss_notifies_and_marks_children_interrupted() {
         crate::session::Store::open(Path::new(&parent_path)).expect("reopen");
     let session = SharedSession::new(Arc::new(activated));
     let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
-    let wiring = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+    let resources = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
 
-    let queued = wiring.inbox.expect("inbox").queued();
+    let queued = resources.notifications().queued();
     assert_eq!(queued.len(), 1, "{queued:?}");
     let text = &queued[0].notification.text;
     assert!(text.contains("previous Otto process"), "{text}");
@@ -693,9 +695,9 @@ fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
 
     let session = SharedSession::new(Arc::new(activated));
     let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
-    let wiring = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+    let resources = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
 
-    let inbox = wiring.inbox.expect("inbox");
+    let inbox = resources.notifications().clone();
     assert!(inbox.is_empty(), "{:?}", inbox.queued());
 }
 
@@ -727,17 +729,15 @@ fn a_second_build_subagents_for_the_same_store_pushes_nothing_more() {
 
     let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
     let first = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
-    assert_eq!(first.inbox.expect("inbox").len(), 1);
+    assert_eq!(first.notifications().len(), 1);
 
-    // The second call builds a fresh `Tasks`/`Inbox` that reloads the
-    // sidecar the first call persisted, so it still shows that one
-    // entry; the assertion is that the count does not grow to 2, which
-    // it would if `notify` pushed again from a takeover that
-    // `take_recovery()` had already consumed on the first call.
+    // The second call returns the session's existing resources, so no
+    // second recovery scan runs; the count stays 1 rather than growing to 2.
     let second = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+    assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(
-        second.inbox.expect("inbox").len(),
+        second.notifications().len(),
         1,
-        "take_recovery() already consumed the record on the first call, so the second call must not push again"
+        "the session's resources are created once, so the recovery notice is pushed once"
     );
 }

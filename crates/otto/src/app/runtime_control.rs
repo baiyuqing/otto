@@ -81,16 +81,15 @@ impl Controller {
         crate::runtime::workflow::close(&self.builder).await;
     }
 
-    /// Shuts every connected MCP server down, waiting up to 5 seconds. A
-    /// no-op on a controller with no current runner (already closed, or
-    /// never opened). [`Self::close`] also starts an MCP close, but only in
-    /// the background (`Runner::close`, via `Current::discard`): a process
-    /// exiting right after `close` returns would drop the runtime before
-    /// that spawned close ran. At a process-exit site, call this *before*
-    /// `close`, not after: [`crate::mcp::Servers::close`] uses `mem::take`
-    /// internally, so whichever of this awaited call or `close`'s
-    /// background one runs first is the one that actually closes anything.
-    pub async fn close_mcp(&self) {
+    /// Ends the current session's resources and waits for them: session-end
+    /// hooks run, sub-agent tasks are cancelled, the workflow delivery worker
+    /// exits and MCP servers close (up to 5 seconds). A no-op on a controller
+    /// with no current runner (already closed, or never opened).
+    /// [`Self::close`] also stops the resources, but without waiting
+    /// (`SharedSession::close`, via `Current::discard`): a process exiting
+    /// right after `close` returns would drop the runtime before the spawned
+    /// MCP close ran. At a process-exit site, call this before `close`.
+    pub async fn close_resources(&self) {
         let runner = self
             .lock()
             .current
@@ -98,7 +97,7 @@ impl Controller {
             .map(|current| Arc::clone(&current.runner));
         if let Some(runner) = runner {
             runner.end_session_hooks().await;
-            runner.close_mcp().await;
+            runner.session().close_resources().await;
         }
     }
 
@@ -114,7 +113,7 @@ impl Controller {
     /// [`CLOSED`] (nothing left to migrate). Requests a close while the
     /// admission is still held, so dropping it runs [`Self::finish_close`]
     /// (closes the runner and the session, which writes the lease's
-    /// `released: true`); the caller's own `close_mcp`/`close` pair still
+    /// `released: true`); the caller's own `close_resources`/`close` pair still
     /// runs afterward and finds the controller already closed.
     pub async fn migrate(&self) -> Vec<String> {
         let admission = loop {
@@ -131,7 +130,7 @@ impl Controller {
         };
         let warnings = runner.migrate().await;
         runner.end_session_hooks().await;
-        runner.close_mcp().await;
+        runner.session().close_resources().await;
         self.request_close();
         drop(admission);
         warnings

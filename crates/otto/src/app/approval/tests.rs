@@ -226,7 +226,8 @@ async fn schedule_controller(
 ) -> Controller {
     let (controller, _, _) =
         crate::app::controller_with_approvals_and_schedule(workspace, sessions, store).await;
-    let tasks = Arc::new(Tasks::new());
+    // The session owns its registry and inbox; the replacement runner uses them.
+    let tasks = controller.subagent_tasks().expect("session registry");
     tasks
         .notifications()
         .push(otto_core::agent::inbox::Notification {
@@ -272,8 +273,7 @@ fn queue_wake(controller: &Controller) {
     controller
         .runner()
         .unwrap()
-        .tasks
-        .as_ref()
+        .tasks()
         .expect("task registry")
         .notifications()
         .push(otto_core::agent::inbox::Notification {

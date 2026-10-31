@@ -1,6 +1,6 @@
 # Session-owned runtime resources
 
-Status: proposed, 2026-10-31.
+Status: approved, 2026-10-31.
 
 ## Rule: a session owns its resources; a runner borrows them
 

@@ -93,12 +93,18 @@ impl From<crate::sandbox::UnavailableReason> for SandboxReason {
 }
 
 /// The sandbox status of one process run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SandboxInfo {
     pub mode: SandboxMode,
     pub network: SandboxNetwork,
     pub bash_available: bool,
     pub reason: SandboxReason,
+    /// Configured `read_paths` entries, as written, that lie below no denied
+    /// path; the profile omits them.
+    pub inert_read_paths: Vec<String>,
+    /// Built-in read denylist entries, as `~/...` text, that contain a
+    /// writable root; the profile omits them.
+    pub skipped_deny_paths: Vec<String>,
 }
 
 impl SandboxInfo {
@@ -145,6 +151,8 @@ impl SandboxInfo {
             network: SandboxNetwork::Unconfined,
             bash_available: false,
             reason,
+            inert_read_paths: Vec::new(),
+            skipped_deny_paths: Vec::new(),
         }
     }
 }
@@ -160,6 +168,7 @@ mod tests {
             network: SandboxNetwork::Allowed,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         };
         assert_eq!(
             seatbelt_allowed.summary(),
@@ -170,7 +179,7 @@ mod tests {
 
         let denied = SandboxInfo {
             network: SandboxNetwork::Denied,
-            ..seatbelt_allowed
+            ..seatbelt_allowed.clone()
         };
         assert_eq!(
             denied.summary(),
@@ -183,6 +192,7 @@ mod tests {
             network: SandboxNetwork::Unconfined,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         };
         assert_eq!(off.summary(), "sandbox off · WARNING: bash is unsandboxed");
         assert_eq!(
@@ -216,6 +226,7 @@ mod tests {
             network: SandboxNetwork::Unconfined,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         };
         assert_eq!(bogus.summary(), "bash disabled · sandbox unavailable");
     }

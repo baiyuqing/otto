@@ -16,6 +16,7 @@ fn seatbelt(network: SandboxNetwork) -> SandboxInfo {
         network,
         bash_available: true,
         reason: SandboxReason::None,
+        ..Default::default()
     }
 }
 
@@ -25,6 +26,7 @@ fn off() -> SandboxInfo {
         network: SandboxNetwork::Unconfined,
         bash_available: true,
         reason: SandboxReason::None,
+        ..Default::default()
     }
 }
 
@@ -144,6 +146,7 @@ fn sandbox_policies_and_registered_tool_order() {
                 network: SandboxNetwork::Denied,
                 bash_available: false,
                 reason: SandboxReason::SelfTestFailed,
+                ..Default::default()
             },
             "<available_tools>read, edit</available_tools>",
             "<sandbox_policy mode=\"unavailable\">\nBash is unavailable.",
@@ -157,7 +160,7 @@ fn sandbox_policies_and_registered_tool_order() {
         ),
     ];
     for (info, want_tools, want_policy, forbidden) in cases {
-        let prompt = system_prompt_for(&definitions, *info, "", "", "");
+        let prompt = system_prompt_for(&definitions, info.clone(), "", "", "");
         assert!(prompt.contains(want_tools), "{prompt}");
         assert!(prompt.contains(want_policy), "{prompt}");
         let sandbox_policy = prompt
@@ -336,12 +339,14 @@ fn an_inconsistent_sandbox_state_fails_closed() {
             network: SandboxNetwork::Denied,
             bash_available: false,
             reason: SandboxReason::RuntimeFailure,
+            ..Default::default()
         },
         SandboxInfo {
             mode: SandboxMode::Seatbelt,
             network: SandboxNetwork::Unconfined,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         },
     ] {
         let prompt = system_prompt_for(&definitions, info, "", "", "");

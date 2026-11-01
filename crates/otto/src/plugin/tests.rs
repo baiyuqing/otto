@@ -240,7 +240,7 @@ fn legacy_inline_mcp_and_custom_skill_paths_load_with_diagnostics() {
         snapshot
             .diagnostics
             .iter()
-            .any(|s| s.contains("unsupported component hooks"))
+            .any(|s| s.contains("cannot read hooks file ./hooks.json"))
     );
     let mut catalog = crate::skill::Catalog::default();
     assert!(snapshot.extend_skills(&mut catalog).is_empty());

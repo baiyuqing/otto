@@ -593,6 +593,7 @@ mod tests {
             home: canonical(&home),
             host_entries: vec![
                 b"PATH=/usr/bin:/bin".to_vec(),
+                format!("HOME={}", canonical(&home)).into_bytes(),
                 b"GH_TOKEN=token-value".to_vec(),
             ],
             provider_names: vec!["OTTO_API_KEY".to_string()],
@@ -657,12 +658,17 @@ mod tests {
                 runtime.redaction_values.clone(),
             )
         };
-        let private_home = environment
+        let child_home = environment
             .iter()
             .find_map(|entry| entry.strip_prefix("HOME="))
-            .map(std::path::PathBuf::from)
             .expect("HOME entry");
-        assert!(private_home.is_dir());
+        assert_eq!(child_home, fixture.options.home, "HOME is the host home");
+        let private_temp = environment
+            .iter()
+            .find_map(|entry| entry.strip_prefix("TMPDIR="))
+            .map(std::path::PathBuf::from)
+            .expect("TMPDIR entry");
+        assert!(private_temp.is_dir());
         let list = excluded(Arc::clone(&control), &[]);
         let path = fixture.home.path().join("config.toml");
         let reload_with = |config: &str| {
@@ -698,7 +704,7 @@ mod tests {
             &control,
             &fixture.workspace,
             &environment,
-            r#"printf reloaded > "$HOME/probe" && cat "$HOME/probe""#,
+            r#"printf reloaded > "$TMPDIR/probe" && cat "$TMPDIR/probe""#,
         )
         .await;
         assert_eq!(output, "reloaded");
@@ -717,7 +723,7 @@ mod tests {
 
         control.close().await.expect("close");
         assert!(
-            !private_home.exists(),
+            !private_temp.exists(),
             "closing the switch removes the private tree"
         );
     }

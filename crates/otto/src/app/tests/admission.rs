@@ -16,19 +16,24 @@ async fn a_closed_boundary_refuses_every_replacement() {
     let info = builder.runtime_info(&runtime);
     let controller = Controller::new(builder, false, session, runner, info);
 
-    assert_eq!(controller.profiles(), Vec::<String>::new());
+    assert_eq!(controller.models(), Vec::<String>::new());
     assert_eq!(controller.info().model, "");
     assert_eq!(
         controller.new_session().await.expect_err("new"),
         PERSISTENCE_DISABLED
     );
     assert_eq!(
-        controller.switch_profile("beta").await.expect_err("switch"),
-        PROFILE_SWITCH_UNAVAILABLE
+        controller
+            .switch_model("beta/gpt-beta")
+            .await
+            .expect_err("switch"),
+        MODEL_SWITCH_UNAVAILABLE
     );
     assert_eq!(
-        controller.set_default_profile("beta").expect_err("default"),
-        PROFILE_SWITCH_UNAVAILABLE
+        controller
+            .set_default_model("beta/gpt-beta")
+            .expect_err("default"),
+        MODEL_SWITCH_UNAVAILABLE
     );
     assert_eq!(
         controller.rename_session("name").expect_err("rename"),

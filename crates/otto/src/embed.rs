@@ -228,7 +228,7 @@ pub struct SessionSummary {
     pub created: SystemTime,
     /// When the session file was last written.
     pub updated: SystemTime,
-    /// Profile, provider and model the session last ran with.
+    /// Model selector, provider type and model id the session last ran with.
     pub profile: String,
     /// See `profile`.
     pub provider: String,
@@ -321,7 +321,7 @@ impl OttoBuilder {
         self
     }
 
-    /// The values of the `--profile`, `--model`, `--provider`, `--base-url`,
+    /// The values of the `--model`, `--provider`, `--profile`, `--base-url`,
     /// `--thinking` and related flags.
     pub fn overrides(mut self, overrides: Overrides) -> Self {
         self.overrides = overrides;

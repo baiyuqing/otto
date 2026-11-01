@@ -28,7 +28,7 @@ impl Builder {
             .enabled;
         // Resource creation depends on configuration only, not on whether this
         // runner's provider is available: the first runner of a session may
-        // have a closed redaction boundary while a later profile does not.
+        // have a closed redaction boundary while a later model does not.
         let resources = self.session_resources(
             session,
             agents_enabled,
@@ -120,7 +120,7 @@ impl Builder {
                         self.boundary_redactor(Some(runtime)),
                     ),
                     model: runtime.model.clone(),
-                    provider_name: runtime.provider.clone(),
+                    provider_name: runtime.provider_type.clone(),
                     thinking: runtime.thinking.clone(),
                     now: Box::new(Utc::now),
                     new_operation_id: Box::new(new_operation_id),
@@ -442,7 +442,7 @@ impl Builder {
         let base_prompt = system_prompt_for(
             &definitions,
             self.effective_sandbox_info(),
-            &runtime.provider,
+            &runtime.provider_type,
             &endpoint_host,
             &runtime.model,
         );
@@ -483,17 +483,14 @@ impl Builder {
             .map_err(|error| error.to_string())?;
         let mut review_provider: Option<Arc<dyn crate::approval::reviewer::ReviewProvider>> = None;
         if !session.header().id.is_empty() {
-            let review_runtime = match self.config.approval.reviewer_profile.as_deref() {
-                Some(profile) => {
-                    if !self.config.profiles.contains_key(profile) {
-                        return Err("approval reviewer profile does not exist".into());
-                    }
-                    self.resolve_profile(profile)?
-                }
+            let review_runtime = match self.config.approval.reviewer_model.as_deref() {
+                Some(selector) => self
+                    .resolve_model(selector)
+                    .map_err(|_| "approval reviewer model does not exist".to_string())?,
                 None => runtime.clone(),
             };
             let review_agent = Agent::with_redactor(
-                match self.config.approval.reviewer_profile {
+                match self.config.approval.reviewer_model {
                     Some(_) => self.provider_client(&review_runtime)?,
                     None => client.clone(),
                 },
@@ -506,7 +503,7 @@ impl Builder {
                         self.boundary_redactor(Some(&review_runtime)),
                     ),
                     model: review_runtime.model.clone(),
-                    provider_name: review_runtime.provider.clone(),
+                    provider_name: review_runtime.provider_type.clone(),
                     thinking: review_runtime.thinking.clone(),
                     now: Box::new(Utc::now),
                     new_operation_id: Box::new(new_operation_id),
@@ -607,7 +604,7 @@ impl Builder {
             }),
             hook_state: session.hooks().clone(),
             model: runtime.model.clone(),
-            provider_name: runtime.provider.clone(),
+            provider_name: runtime.provider_type.clone(),
             system_prompt: system_prompt.clone(),
             system_prompt_parts,
             thinking: runtime.thinking.clone(),

@@ -30,6 +30,7 @@ mod approval;
 mod execution;
 mod facts;
 mod output;
+mod read_denylist;
 mod redaction;
 
 #[test]

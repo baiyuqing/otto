@@ -108,6 +108,14 @@ impl BashTool {
             if status.denials_omitted > 0 {
                 denied.push_str(&format!("[{} more omitted]\n", status.denials_omitted));
             }
+            if status
+                .denials
+                .iter()
+                .any(|denial| denial.operation.starts_with("file-read"))
+            {
+                denied.push_str(READ_DENIAL_HINT);
+                denied.push('\n');
+            }
         }
         let formatted = format!("{}\n{}\n{denied}{summary}", stdout, stderr);
         ToolResult {
@@ -117,7 +125,22 @@ impl BashTool {
     }
 }
 
+/// Appended to the `sandbox_denied:` section when a read was denied.
+const READ_DENIAL_HINT: &str = "hint: a denied read is on the sandbox read denylist; request a persistent exception with sandbox_read_path, or an elevated run with sandbox_permissions";
+
 impl BashTool {
+    /// The refusal text when `canonical_path` is not covered by the read
+    /// denylist in effect, so a read grant would change nothing.
+    ///
+    /// Returns `None` when no denylist is known: the grant is then accepted as
+    /// before.
+    pub(super) fn already_readable(&self, canonical_path: &Path) -> Option<&'static str> {
+        let (_, control) = self.grant_control.as_ref()?;
+        let denylist = control.read_denylist()?;
+        (!denylist.covers(canonical_path))
+            .then_some("path is already readable; run the command without sandbox_read_path")
+    }
+
     /// The effect class and command words when this call needs approval for
     /// its effect: approvals are available and it changes external state or
     /// deletes content. An excluded command is gated whatever its
@@ -174,6 +197,9 @@ impl BashTool {
             let Ok(path) = path.canonicalize() else {
                 return self.argument_error("sandbox_read_path must be an absolute existing path");
             };
+            if let Some(message) = self.already_readable(&path) {
+                return self.argument_error(message);
+            }
             let Some(path) = path.to_str() else {
                 return self.argument_error("sandbox_read_path must be valid UTF-8");
             };

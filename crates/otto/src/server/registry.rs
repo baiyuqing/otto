@@ -361,7 +361,7 @@ impl Server {
                 let info = session.ctrl.info();
                 SessionContext {
                     session_id: info.session_id,
-                    provider: info.provider,
+                    provider: info.provider_type,
                     model: info.model,
                     context_window: info.context_window,
                     context_input_tokens: info.context_input_tokens,

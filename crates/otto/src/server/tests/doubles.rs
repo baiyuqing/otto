@@ -439,8 +439,9 @@ impl TestFactory {
             session,
             runner,
             RuntimeInfo {
-                provider: "openai-compatible".to_string(),
-                profile: "alpha".to_string(),
+                provider: "alpha".to_string(),
+                provider_type: "openai-compatible".to_string(),
+                model_selector: "alpha/test-model".to_string(),
                 model: "test-model".to_string(),
                 thinking: "high".to_string(),
                 context_window: 128_000,

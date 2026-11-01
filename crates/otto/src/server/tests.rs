@@ -27,6 +27,7 @@ mod approval_cases;
 mod doubles;
 mod endpoint_cases;
 mod harness;
+mod model_config_cases;
 mod queue_cases;
 mod remote_listener_cases;
 mod scoped_route_cases;

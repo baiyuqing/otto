@@ -31,7 +31,7 @@ commit ledger; Git and release tags retain the full history. See the
   `set_model`, `set_model_field` and `remove_model`. `POST /v1/sessions/{id}/model`
   with `{"model":"<selector>"}` replaces `POST /v1/sessions/{id}/profile`. The
   old routes are removed and return `404`, without aliases. Response objects
-  drop `profile`, add `provider_type` and `model_selector`, and `provider` is
+  drop `profile`, add `provider_type`, and `provider` is
   the provider name; `profiles` in `GET /v1/info` is now `models`, a list of
   selectors.
 - Existing `[profiles.*]`, `default_profile`, `approval.reviewer_profile`,

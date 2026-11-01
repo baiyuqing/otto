@@ -11,11 +11,21 @@ commit ledger; Git and release tags retain the full history. See the
 
 - LLM access is configured as providers and models instead of
   `[profiles.<name>]`. `[providers.<name>]` holds `type`, `base_url`,
-  `api_key_env`, `api_version` and `workspace_id_env`;
-  `[providers.<name>.models."<model_id>"]` holds `thinking`, `context_window`
-  and `compaction_window`. `claude`, `openai-compatible` and `chatgpt` are
-  built-in providers, so a ChatGPT model needs only an empty model table. See
+  `api_key_env`, `api_version` and `workspace_id_env`, and one line per model,
+  `models."<model_id>" = { thinking = ..., context_window = ..., compaction_window = ... }`
+  (the table form `[providers.<name>.models."<model_id>"]` is also accepted).
+  `claude`, `openai-compatible` and `chatgpt` are built-in providers, so a
+  ChatGPT model needs only `models."<model_id>" = {}` under
+  `[providers.chatgpt]`. See
   [provider and model configuration](docs/manual/getting-started.md#providers-and-models).
+- `otto setup`, `otto config set` and `POST /v1/config/changes` write a new
+  model as a `models."<model_id>"` line inside `[providers.<name>]`, creating
+  that table when the file does not hold it, and edit or remove an existing
+  model in either form in place; a provider whose models are all written as
+  `[providers.<name>.models."<model_id>"]` tables receives a new model in that
+  form. `otto config set` accepts a quoted model ID in the key
+  (`providers.chatgpt.models."gpt-5.6-luna".thinking`). The legacy-profile
+  diagnostic prints the one-line form.
 - [examples/config.example.toml](examples/config.example.toml) is a commented
   sample user configuration in the new format; an otto-core test parses it and
   resolves each of its models.
@@ -23,7 +33,7 @@ commit ledger; Git and release tags retain the full history. See the
   `OTTO_MODEL`, `/model` and `approval.reviewer_model`. `--model` requires this
   form; a bare model ID is an error unless `--provider` is also given.
   Projects may set `default_model` and the `thinking`, `context_window` and
-  `compaction_window` of model tables, not providers.
+  `compaction_window` of model entries, not providers.
 - HTTP: `GET /v1/config/providers`, `GET /v1/config/providers/{name}` and
   `GET /v1/config/models?provider=<name>` replace `/v1/config/profiles[/{name}]`.
   Configuration writes go through `POST /v1/config/changes` with the kinds

@@ -3,6 +3,8 @@ use crate::skill::check_repository::{
     CheckStore, NewRow, ResultJson, Row, StoreError, StoreResult,
 };
 use crate::storage::{Connection, params};
+#[cfg(any(test, feature = "test-support"))]
+use crate::storage::{OpenOptions, SqlRequirements, drivers::sqlite::SqliteDriver};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -25,13 +27,22 @@ ON skill_checks(content_sha256, questions_sha256, id);
 "#;
 
 #[derive(Debug)]
-pub(crate) struct Store {
+pub struct Store {
     connection: Mutex<Connection>,
 }
 impl Store {
-    #[cfg(test)]
-    pub(crate) fn open(filename: &std::path::Path) -> StoreResult<Self> {
-        Self::from_connection(Connection::open(filename).map_err(|_| StoreError::Io)?)
+    /// Opens the store at `filename` through the default SQLite driver.
+    /// Production code receives its connection from the storage registry.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open(filename: &std::path::Path) -> StoreResult<Self> {
+        let connection = Connection::open_with_driver(
+            &SqliteDriver,
+            filename,
+            OpenOptions::default(),
+            SqlRequirements::DURABLE,
+        )
+        .map_err(|_| StoreError::Io)?;
+        Self::from_connection(connection)
     }
     pub(crate) fn from_connection(connection: Connection) -> StoreResult<Self> {
         connection

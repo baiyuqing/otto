@@ -54,8 +54,8 @@ async fn new_session_keeps_runtime_changed_in_the_current_session() {
 
 #[tokio::test]
 async fn resume_keeps_process_selection_and_appends_without_rewriting_history() {
+    use crate::fixtures::subagent_doubles::{FakeProvider, assistant_text, match_any};
     use crate::runtime::builder::TEST_PROVIDERS;
-    use crate::subagent::doubles_tests::{FakeProvider, assistant_text, match_any};
     struct ProviderGuard(String);
     impl Drop for ProviderGuard {
         fn drop(&mut self) {
@@ -294,7 +294,7 @@ async fn a_session_resumed_from_the_archive_keeps_its_timers_beside_it() {
         .await
         .expect("append");
     let archived = controller.archive_current_session().await.expect("archive");
-    // The same open sequence as `--resume PATH` in `cli::run`.
+    // The same open sequence as `--resume PATH` in `otto_cli::run`.
     let builder = builder(workspace.path(), sessions.path());
     let runtime = initial_runtime(&builder);
     let (store, _) = crate::session::Prepared::prepare(Path::new(&archived.path), None)

@@ -400,7 +400,7 @@ impl Controller {
         );
     }
 
-    /// The number of runs currently executing. Used by `cli::serve`'s
+    /// The number of runs currently executing. Used by `otto_cli::serve`'s
     /// workspace removal to refuse unloading a workspace with work in
     /// flight.
     pub fn active_runs(&self) -> usize {

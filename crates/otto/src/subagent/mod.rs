@@ -11,8 +11,6 @@
 //! tools.
 
 pub mod definition;
-#[cfg(test)]
-pub(crate) mod doubles_tests;
 pub mod format;
 pub mod inherit;
 pub mod interrupted;

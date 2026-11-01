@@ -130,11 +130,7 @@ static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// interrupted write leaves the previous file intact. A backup that cannot be
 /// written fails the whole call, because the previous version would otherwise
 /// be lost exactly when it is needed.
-pub(crate) fn write_bytes(
-    path: &Path,
-    replacing: &[u8],
-    updated: &[u8],
-) -> Result<(), &'static str> {
+pub fn write_bytes(path: &Path, replacing: &[u8], updated: &[u8]) -> Result<(), &'static str> {
     write_bytes_with(path, replacing, updated, &PosixPublish)
 }
 
@@ -362,7 +358,7 @@ fn io_error(message: &'static str) -> NativeConfigError {
 /// The destination must not exist, including as an empty file or symlink. The
 /// final install is create-only, so a non-Otto writer that wins a race is never
 /// overwritten.
-pub(crate) fn create_initial_config(
+pub fn create_initial_config(
     path: &Path,
     provider: &str,
     model_id: &str,
@@ -376,7 +372,7 @@ pub(crate) fn create_initial_config(
 /// Renders and validates the complete non-secret configuration `otto setup`
 /// proposes before a user confirms its creation: `default_model`, and a
 /// provider table that names the model as an inline entry.
-pub(crate) fn initial_config_content(
+pub fn initial_config_content(
     provider: &str,
     model_id: &str,
     base_url: &str,

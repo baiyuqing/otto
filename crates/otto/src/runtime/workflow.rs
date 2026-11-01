@@ -208,7 +208,7 @@ fn workflow_roots(home: &str, workspace: &str) -> Vec<PathBuf> {
     roots
 }
 
-pub(crate) fn lock_workspace(home: &str, workspace: &str) -> Result<Flock<std::fs::File>, String> {
+pub fn lock_workspace(home: &str, workspace: &str) -> Result<Flock<std::fs::File>, String> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let directory = Path::new(home).join(".otto/workflow-locks");

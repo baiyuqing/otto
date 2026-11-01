@@ -3,7 +3,7 @@
 //! Loading, in-place edits, and the default path; the pure schema, parsing, and
 //! resolution logic lives in `otto_core::config`.
 //!
-//! ponytail: `default_path`, `load`, and `set_default_profile_file` each
+//! ponytail: `default_path`, `load`, and `set_default_model_file` each
 //! have a private `_for_home`/`_impl` twin that takes the otherwise-implicit
 //! `HOME` value or default path as an explicit argument. This workspace's
 //! `unsafe_code` lint (denied by `make rust-lint`'s `-D warnings`) forbids the
@@ -357,29 +357,28 @@ fn io_error(message: &'static str) -> NativeConfigError {
     NativeConfigError::Io(io::Error::other(message))
 }
 
-/// Creates a new configuration file containing one default provider profile.
+/// Creates a new configuration file that selects one default model.
 ///
 /// The destination must not exist, including as an empty file or symlink. The
 /// final install is create-only, so a non-Otto writer that wins a race is never
 /// overwritten.
-pub(crate) fn create_initial_profile(
+pub(crate) fn create_initial_config(
     path: &Path,
-    profile: &str,
     provider: &str,
-    model: &str,
+    model_id: &str,
     base_url: &str,
     api_key_env: &str,
 ) -> Result<(), String> {
-    let content = initial_profile_content(profile, provider, model, base_url, api_key_env)?;
+    let content = initial_config_content(provider, model_id, base_url, api_key_env)?;
     create_bytes_if_absent(path, content.as_bytes()).map_err(str::to_string)
 }
 
 /// Renders and validates the complete non-secret configuration `otto setup`
-/// proposes before a user confirms its creation.
-pub(crate) fn initial_profile_content(
-    profile: &str,
+/// proposes before a user confirms its creation: `default_model`, and a
+/// built-in provider table only when the built-in defaults do not fit.
+pub(crate) fn initial_config_content(
     provider: &str,
-    model: &str,
+    model_id: &str,
     base_url: &str,
     api_key_env: &str,
 ) -> Result<String, String> {
@@ -389,39 +388,36 @@ pub(crate) fn initial_profile_content(
     ) {
         return Err("unsupported provider; no changes made".to_string());
     }
-    let mut profile_table = toml::Table::new();
-    profile_table.insert(
-        "provider".to_string(),
-        toml::Value::String(provider.to_string()),
-    );
-    profile_table.insert("model".to_string(), toml::Value::String(model.to_string()));
-    if matches!(provider, PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CLAUDE) {
-        profile_table.insert(
-            "base_url".to_string(),
-            toml::Value::String(base_url.to_string()),
-        );
-        profile_table.insert(
-            "api_key_env".to_string(),
+    let mut provider_table = toml::Table::new();
+    let claude_default_url = otto_core::config::providers::CLAUDE_DEFAULT_BASE_URL;
+    let claude_default_key = otto_core::config::providers::CLAUDE_DEFAULT_API_KEY_ENV;
+    if provider == PROVIDER_OPENAI_COMPATIBLE
+        || (provider == PROVIDER_CLAUDE && base_url != claude_default_url)
+    {
+        provider_table.insert("base_url".into(), toml::Value::String(base_url.to_string()));
+    }
+    if provider == PROVIDER_OPENAI_COMPATIBLE
+        || (provider == PROVIDER_CLAUDE && api_key_env != claude_default_key)
+    {
+        provider_table.insert(
+            "api_key_env".into(),
             toml::Value::String(api_key_env.to_string()),
         );
     }
-    if provider == PROVIDER_CLAUDE {
-        profile_table.insert(
-            "api_version".into(),
-            toml::Value::String(otto_core::config::DEFAULT_CLAUDE_API_VERSION.into()),
-        );
-    }
-    let mut profiles = toml::Table::new();
-    profiles.insert(profile.to_string(), toml::Value::Table(profile_table));
+    let mut model_table = toml::Table::new();
+    model_table.insert(model_id.to_string(), toml::Value::Table(toml::Table::new()));
+    provider_table.insert("models".into(), toml::Value::Table(model_table));
+    let mut providers = toml::Table::new();
+    providers.insert(provider.to_string(), toml::Value::Table(provider_table));
     let mut root = toml::Table::new();
     root.insert(
-        "default_profile".to_string(),
-        toml::Value::String(profile.to_string()),
+        "default_model".to_string(),
+        toml::Value::String(format!("{provider}/{model_id}")),
     );
-    root.insert("profiles".to_string(), toml::Value::Table(profiles));
+    root.insert("providers".to_string(), toml::Value::Table(providers));
     let content = toml::to_string(&root).map_err(|_| "cannot create configuration".to_string())?;
     let parsed = otto_core::config::parse(&content)
-        .map_err(|_| "cannot create configuration".to_string())?;
+        .map_err(|error| format!("invalid setup values: {error}"))?;
     let mut environment = HashMap::new();
     if matches!(provider, PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CLAUDE) {
         environment.insert(api_key_env.to_string(), "configured".to_string());
@@ -511,64 +507,55 @@ pub fn set_skill_disabled_file(
     write_bytes(path, &original, updated.as_bytes()).map_err(io_error)
 }
 
-/// Sets `path`'s `default_profile` to `profile`, after checking the profile
-/// exists in the file, changing only that value.
-pub fn set_default_profile_file(path: &Path, profile: &str) -> Result<(), NativeConfigError> {
-    set_default_profile_file_impl(path, &default_path(), profile)
+/// Sets `path`'s `default_model` to the selector `model`, after checking its
+/// provider exists in the file, changing only that value.
+pub fn set_default_model_file(path: &Path, model: &str) -> Result<(), NativeConfigError> {
+    set_default_model_file_impl(path, &default_path(), model)
 }
 
-fn set_default_profile_file_impl(
+fn set_default_model_file_impl(
     path: &Path,
     default_path: &Path,
-    profile: &str,
+    model: &str,
 ) -> Result<(), NativeConfigError> {
-    if profile.is_empty() {
-        return Err(ConfigError::new("missing profile").into());
-    }
-    let (original, file) = load_with_bytes(path, default_path)?;
-    if !file.profiles.contains_key(profile) {
-        return Err(ConfigError::new(format!("profile {profile:?} not found")).into());
-    }
-    let content = String::from_utf8_lossy(&original);
-    let updated = otto_core::config::set_default_profile(&content, profile)?;
-    write_bytes(path, &original, updated.as_bytes()).map_err(io_error)
+    let change = ModelChange::SetDefaultModel {
+        model: model.to_string(),
+    };
+    let preview = preview_model_change_impl(path, default_path, &change).map_err(native_error)?;
+    commit_model_change(path, &preview)
 }
 
-/// Sets the `thinking` key of `path`'s `[profiles.<profile>]` table, or
-/// removes it when `thinking` is empty, changing only that statement.
-pub fn set_profile_thinking_file(
+/// Sets the `thinking` key of the model table `model` (a selector), creating
+/// the table when absent, or removes the key when `thinking` is empty.
+pub fn set_model_thinking_file(
     path: &Path,
-    profile: &str,
+    model: &str,
     thinking: &str,
 ) -> Result<(), NativeConfigError> {
-    if profile.is_empty() {
-        return Err(ConfigError::new("missing profile").into());
-    }
-    if !matches!(thinking, "" | "low" | "medium" | "high" | "xhigh" | "max") {
-        return Err(ConfigError::new(
-            "invalid thinking: must be one of low, medium, high, xhigh, max",
-        )
-        .into());
-    }
-    let (original, file) = load_with_bytes(path, &default_path())?;
-    if !file.profiles.contains_key(profile) {
-        return Err(ConfigError::new(format!("profile {profile:?} not found")).into());
-    }
-    let content = String::from_utf8_lossy(&original);
-    let value = (!thinking.is_empty()).then(|| format!("{thinking:?}"));
-    let updated = otto_core::config::edit::set_value(
-        &content,
-        &["profiles", profile],
-        "thinking",
-        value.as_deref(),
-    )?;
-    write_bytes(path, &original, updated.as_bytes()).map_err(io_error)
+    let change = ModelChange::SetModelField {
+        model: model.to_string(),
+        field: ModelField::Thinking,
+        value: thinking.to_string(),
+    };
+    let preview =
+        preview_model_change_impl(path, &default_path(), &change).map_err(native_error)?;
+    commit_model_change(path, &preview)
 }
 
-/// A provider permitted in a profile change. This intentionally has no
-mod profile_change;
+fn native_error(error: ModelChangeError) -> NativeConfigError {
+    match error {
+        ModelChangeError::Native(error) => error,
+        ModelChangeError::InUse(message) => ConfigError::new(message).into(),
+    }
+}
 
-pub use profile_change::*;
+mod model_change;
+mod model_listing;
 
+pub use model_change::*;
+pub use model_listing::configured_model_selectors;
+
+#[cfg(test)]
+mod model_change_tests;
 #[cfg(test)]
 mod tests;

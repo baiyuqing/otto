@@ -1,6 +1,6 @@
-//! Profile changes retain typed operations and hashes, not whole config copies.
+//! Model and provider changes retain typed operations and hashes, not whole config copies.
 use super::{Domain, Error, Result};
-use crate::config::{ProfileChange, ProfileChangePreview};
+use crate::config::{ModelChange, ModelChangePreview};
 use crate::hex::to_hex;
 use otto_core::approval::{Request, State};
 use serde::{Deserialize, Serialize};
@@ -8,19 +8,19 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
-    pub change: ProfileChange,
+    pub change: ModelChange,
     pub before: String,
     pub after: String,
     pub diff: String,
 }
 impl Artifact {
     pub fn authority(&self) -> otto_core::approval::Authority {
-        use crate::config::{ProfileChange, ProfileField};
+        use crate::config::{ModelChange, ProviderField};
         if matches!(
             &self.change,
-            ProfileChange::Create { .. }
-                | ProfileChange::SetField {
-                    field: ProfileField::BaseUrl | ProfileField::ApiKeyEnv,
+            ModelChange::SetProvider { .. }
+                | ModelChange::SetProviderField {
+                    field: ProviderField::BaseUrl | ProviderField::ApiKeyEnv,
                     ..
                 }
         ) {
@@ -29,7 +29,7 @@ impl Artifact {
             otto_core::approval::Authority::Durable
         }
     }
-    pub fn prepare(change: ProfileChange, preview: &ProfileChangePreview) -> Self {
+    pub fn prepare(change: ModelChange, preview: &ModelChangePreview) -> Self {
         Self {
             change,
             before: hash(&preview.original),
@@ -57,7 +57,7 @@ impl Domain for Adapter {
     fn details(&self, request: &Request) -> Result<String> {
         let artifact = self.artifact(request)?;
         Ok(format!(
-            "{}\n\nOperation: {}\nRestart Otto after saving to apply profile changes.",
+            "{}\n\nOperation: {}\nRestart Otto after saving to apply model and provider changes.",
             artifact.diff,
             serde_json::to_string_pretty(&artifact.change).map_err(|_| Error::Unavailable)?
         ))
@@ -78,11 +78,11 @@ impl Domain for Adapter {
         if hash(&current) != artifact.before {
             return Err(Error::Conflict);
         }
-        let preview = crate::config::preview_profile_change(&self.path, &artifact.change)
+        let preview = crate::config::preview_model_change(&self.path, &artifact.change)
             .map_err(|_| Error::Conflict)?;
         if hash(&preview.original) != artifact.before || hash(&preview.updated) != artifact.after {
             return Err(Error::Conflict);
         }
-        crate::config::commit_profile_change(&self.path, &preview).map_err(|_| Error::Conflict)
+        crate::config::commit_model_change(&self.path, &preview).map_err(|_| Error::Conflict)
     }
 }

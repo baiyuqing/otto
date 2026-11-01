@@ -100,10 +100,9 @@ impl Builder {
         definitions.extend(self.boundary_memory_definitions(max_output));
         definitions.push(crate::tool::approval::request_definition());
         if self.planned_bash_available() {
-            let private_home = self.sandbox_info.mode == SandboxMode::Seatbelt;
             definitions.push(match self.bash_approvals.is_some() {
-                true => bash::bash_definition_with_approvals(private_home),
-                false => bash::bash_definition(private_home),
+                true => bash::bash_definition_with_approvals(),
+                false => bash::bash_definition(),
             });
         }
         if runtime.is_some() {

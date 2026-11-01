@@ -11,9 +11,9 @@ impl Tool for BashTool {
 
     fn definition(&self) -> ToolDefinition {
         if self.approvals.is_some() {
-            bash_definition_with_approvals(self.private_home)
+            bash_definition_with_approvals()
         } else {
-            bash_definition(self.private_home)
+            bash_definition()
         }
     }
 
@@ -55,8 +55,13 @@ impl Tool for BashTool {
             if !path.is_absolute() {
                 return Err(self.argument_error("read path must be absolute"));
             }
-            path.canonicalize()
-                .map_err(|_| self.argument_error("read path is unavailable"))?
+            let canonical = path
+                .canonicalize()
+                .map_err(|_| self.argument_error("read path is unavailable"))?;
+            if let Some(message) = self.already_readable(&canonical) {
+                return Err(self.argument_error(message));
+            }
+            canonical
                 .to_str()
                 .ok_or_else(|| self.argument_error("read path must be UTF-8"))?
                 .to_string()

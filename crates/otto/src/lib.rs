@@ -6,7 +6,6 @@
 /// variable is set, or `X.Y.Z+unknown`. `+` starts SemVer build metadata.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("OTTO_BUILD_METADATA"));
 
-pub mod acp;
 pub mod app;
 pub mod approval;
 pub mod auth;
@@ -24,10 +23,10 @@ pub mod faults;
 /// see the `test-support` feature.
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixtures;
-pub(crate) mod fsops;
+pub mod fsops;
 mod gourl;
 pub mod herdr;
-mod hex;
+pub mod hex;
 pub mod log;
 pub mod mcp;
 pub mod memory;
@@ -39,7 +38,6 @@ pub mod retry;
 pub mod runtime;
 pub mod sandbox;
 pub mod schedule;
-pub mod server;
 pub mod session;
 pub mod skill;
 pub mod storage;

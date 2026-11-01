@@ -72,13 +72,13 @@ fn launch_browser(url: &str) {
 /// the `Send + Sync` bound on [`Opener`], and the lock is only ever held
 /// inside the synchronous closure body, never across an await point.
 ///
-/// `pub(crate)` so `repl_commands.rs`'s `/mcp login` can reuse the same
+/// Public so `repl_commands.rs`'s `/mcp login` and `otto mcp login` reuse the same
 /// URL-printing convention instead of duplicating it.
-pub(crate) type SharedWriter<'a> = Mutex<&'a mut (dyn Write + Send)>;
+pub type SharedWriter<'a> = Mutex<&'a mut (dyn Write + Send)>;
 
 /// Print the URL, which is the reliable path, then also try to launch the
-/// default browser. `pub(crate)` for the same reason as [`SharedWriter`].
-pub(crate) fn browser_opener<'a, 'w: 'a>(
+/// default browser. Public for the same reason as [`SharedWriter`].
+pub fn browser_opener<'a, 'w: 'a>(
     stdout: &'a SharedWriter<'w>,
 ) -> impl Fn(&str) -> Result<(), String> + Send + Sync + 'a {
     move |url: &str| {

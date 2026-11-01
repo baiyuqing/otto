@@ -82,9 +82,10 @@ mod tests {
             for entry in std::fs::read_dir(dir).expect("source directory") {
                 let path = entry.expect("source entry").path();
                 let name = path.file_name().unwrap().to_string_lossy();
-                // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`.
+                // Out-of-line test modules: `tests`, `tests.rs`, `*_tests`, `*_tests.rs`;
+                // `fixtures` is test support compiled under `cfg(test)` or `test-support`.
                 let stem = name.trim_end_matches(".rs");
-                if stem == "tests" || stem.ends_with("_tests") {
+                if stem == "tests" || stem.ends_with("_tests") || stem == "fixtures" {
                     continue;
                 }
                 if path.is_dir() {

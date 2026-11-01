@@ -1,6 +1,6 @@
 //! The terminal frontend (ratatui + crossterm).
 //!
-//! [`run`] is the entry point `cli::run` dispatches to for `--ui tui` (or `--ui
+//! [`run`] is the entry point `otto_cli::run` dispatches to for `--ui tui` (or `--ui
 //! auto` on a terminal). It owns the alternate screen / raw mode lifecycle,
 //! reads keys on a background task the way `cli::repl`'s `spawn_reader` reads
 //! lines, and drives [`app::App`] against the same [`Controller`] the REPL
@@ -12,7 +12,7 @@
 
 mod app;
 mod approval_display;
-pub(crate) mod attach;
+pub mod attach;
 mod backend;
 mod commands;
 mod entries;
@@ -54,7 +54,7 @@ mod operations;
 mod terminal_input;
 mod turns;
 use operations::*;
-pub(crate) use terminal_input::reset_terminal_input_modes_after_panic;
+pub use terminal_input::reset_terminal_input_modes_after_panic;
 use terminal_input::*;
 use turns::*;
 
@@ -62,7 +62,7 @@ use turns::*;
 ///
 /// Enters the alternate screen, raw mode, and mouse capture, all restored on
 /// return and panic.
-pub(crate) async fn run(
+pub async fn run(
     controller: &Arc<Controller>,
     cancel: &CancellationToken,
 ) -> Result<(), ReplError> {

@@ -43,7 +43,7 @@ impl Controller {
 
     /// The runner currently in force. `/tasks` and `/task` read its sub-agent
     /// task registry.
-    pub(crate) fn current_runner(&self) -> Option<Arc<Runner>> {
+    pub fn current_runner(&self) -> Option<Arc<Runner>> {
         self.runner().ok()
     }
 
@@ -134,7 +134,7 @@ impl Controller {
     }
 
     /// The session's durable turn queue; `None` under `--no-session`.
-    pub(crate) fn turn_queue(&self) -> Option<Arc<turn_queue::TurnQueue>> {
+    pub fn turn_queue(&self) -> Option<Arc<turn_queue::TurnQueue>> {
         self.current_runner()?.task_control().turn_queue()
     }
 
@@ -142,7 +142,7 @@ impl Controller {
     /// first. A saved prompt whose user message is already in the transcript
     /// started before Otto stopped: its entry is removed, and the
     /// interrupted turn's recovery covers it.
-    pub(crate) fn restorable_prompts(&self) -> Vec<turn_queue::QueuedPrompt> {
+    pub fn restorable_prompts(&self) -> Vec<turn_queue::QueuedPrompt> {
         let Some(queue) = self.turn_queue() else {
             return Vec::new();
         };
@@ -162,7 +162,7 @@ impl Controller {
     /// Queues the context notice that `prompts` were restored, for the
     /// first of them to deliver before its user message. Its id is stable,
     /// so a second restore of the same prompts does not repeat it.
-    pub(crate) fn announce_restored_prompts(&self, prompts: &[turn_queue::QueuedPrompt]) {
+    pub fn announce_restored_prompts(&self, prompts: &[turn_queue::QueuedPrompt]) {
         let (Some(first), Some(tasks)) = (prompts.first(), self.subagent_tasks()) else {
             return;
         };
@@ -259,7 +259,7 @@ impl Controller {
             .unwrap_or_default()
     }
 
-    pub(crate) fn managed_skills(&self) -> Result<management::SkillManager, String> {
+    pub fn managed_skills(&self) -> Result<management::SkillManager, String> {
         let config = crate::config::load(&self.builder().config_path)
             .map_err(|e| format!("cannot read skill configuration: {e}"))?;
         let active = self.skills();

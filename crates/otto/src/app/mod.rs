@@ -16,7 +16,7 @@
 //!
 //! Errors: every failure is already-redacted text, matching
 //! [`Builder::redact_error`]. Callers that must distinguish a cause compare
-//! against the constants below, the way `cli::run` already compares
+//! against the constants below, the way `otto_cli::run` already compares
 //! [`SESSION_OPERATION_UNAVAILABLE`].
 
 /// Add read-only identity to pending transcript calls from durable facts.
@@ -75,22 +75,22 @@ fn project_invocation_identity(
 pub mod approval;
 pub mod approval_control;
 pub mod channel;
-pub(crate) mod management;
-pub(crate) mod task_control;
-pub(crate) mod turn_queue;
+pub mod management;
+pub mod task_control;
+pub mod turn_queue;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 mod inspection;
 mod model_selection;
-pub(crate) mod notices;
+pub mod notices;
 mod prompt;
 mod replacement;
 mod reporting;
 mod runtime_control;
 pub mod sandbox;
 mod sandbox_approval;
-pub(crate) mod scheduled;
+pub mod scheduled;
 mod session_ops;
 mod steering;
 pub mod tasks;
@@ -431,7 +431,7 @@ impl Drop for Admission<'_> {
 }
 
 impl Controller {
-    /// The composition-root constructor `cli::run` uses.
+    /// The composition-root constructor `otto_cli::run` uses.
     pub fn new(
         builder: Builder,
         dynamic_content: bool,

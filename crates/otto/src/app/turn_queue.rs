@@ -24,11 +24,11 @@ use super::Channel;
 use crate::schedule::Origin;
 
 /// The error text of a prompt whose durable copy could not be saved.
-pub(crate) const PROMPT_NOT_PERSISTED: &str = "the prompt could not be saved; nothing was queued";
+pub const PROMPT_NOT_PERSISTED: &str = "the prompt could not be saved; nothing was queued";
 
 /// One prompt waiting for the active turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct QueuedPrompt {
+pub struct QueuedPrompt {
     /// The input id its user message will carry.
     pub input_id: String,
     /// The serve turn id; empty for a local ACP prompt.
@@ -56,7 +56,7 @@ struct Saved {
 }
 
 /// The `turns.json` journal of one session.
-pub(crate) struct TurnQueue {
+pub struct TurnQueue {
     journal: Arc<dyn Mailbox>,
 }
 
@@ -67,7 +67,7 @@ impl TurnQueue {
 
     /// Saves `prompt`. On failure nothing stays queued and the caller must
     /// not admit the prompt.
-    pub(crate) fn save(&self, prompt: &QueuedPrompt) -> Result<(), String> {
+    pub fn save(&self, prompt: &QueuedPrompt) -> Result<(), String> {
         let saved = Saved {
             text: prompt.text.clone(),
             channel: prompt.channel,
@@ -93,7 +93,7 @@ impl TurnQueue {
     }
 
     /// Removes the entry with `input_id`, if any.
-    pub(crate) fn forget(&self, input_id: &str) {
+    pub fn forget(&self, input_id: &str) {
         for entry in self.journal.queued() {
             if entry.notification.id == input_id {
                 self.journal.ack(entry.seq);
@@ -102,7 +102,7 @@ impl TurnQueue {
     }
 
     /// Removes every entry.
-    pub(crate) fn clear(&self) {
+    pub fn clear(&self) {
         for entry in self.journal.queued() {
             self.journal.ack(entry.seq);
         }
@@ -110,7 +110,7 @@ impl TurnQueue {
 
     /// The saved prompts, oldest first. An entry that no longer decodes is
     /// removed rather than run with wrong content.
-    pub(crate) fn pending(&self) -> Vec<QueuedPrompt> {
+    pub fn pending(&self) -> Vec<QueuedPrompt> {
         let mut prompts = Vec::new();
         for entry in self.journal.queued() {
             let saved = serde_json::from_str::<Saved>(&entry.notification.text);

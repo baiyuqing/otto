@@ -230,8 +230,8 @@ impl Store {
         Self::initialize(connection)
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_in_memory() -> Result<Self> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_in_memory() -> Result<Self> {
         Self::initialize(Connection::open_in_memory().map_err(|_| Error)?)
     }
 

@@ -1403,7 +1403,7 @@ paths:
       responses:
         "200": { description: "{id, expires_in_seconds, operation, target, field, diff} with a redacted diff and a one-time confirmation token" }
         "400": { description: "invalid_provider, invalid_field or invalid_change" }
-        "409": { description: "model_in_use: default_model or approval.reviewer_model selects the provider or model" }
+        "409": { description: "model_in_use: default_model or approval.reviewer_model selects the provider or model; legacy_profiles_config: the file holds profiles, default_profile or approval.reviewer_profile" }
   /v1/config/changes/{id}:
     post:
       summary: Confirm a one-time provider or model change preview

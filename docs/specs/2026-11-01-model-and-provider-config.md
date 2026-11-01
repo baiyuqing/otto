@@ -139,24 +139,53 @@ has the same type, and otherwise on the built-in provider of that type.
 - Chat connector `/model` and `/model <selector>`; replies say "model", not
   "profile". `chat-connector/internal/ottoconfig` reads `default_model` and
   `[providers.*.models]` (and the legacy tables).
-- HTTP:
-  - `GET /v1/config/providers` returns providers with their model tables.
-    `PUT|DELETE /v1/config/providers/{name}` and
-    `PUT|DELETE /v1/config/providers/{name}/models/{model_id}` (model ID
-    percent-encoded) replace `/v1/config/profiles[/{name}]`. Deleting a
-    provider or model that `default_model` or `reviewer_model` selects returns
-    `409`.
+- HTTP (writes keep today's typed-change flow: `POST /v1/config/changes`
+  previews and creates an approval, `POST|DELETE /v1/config/changes/{id}`
+  confirms or cancels):
+  - `GET /v1/config/providers` replaces `GET /v1/config/profiles` and returns
+    `{"default_model": "<selector>", "providers": [<provider>]}`. A provider
+    object is `{"name", "type", "builtin", "base_url"?, "api_key_env"?,
+    "api_version"?, "workspace_id_env"?, "models": [<model>]}` and a model
+    object is `{"model_id", "selector", "default", "thinking"?,
+    "context_window"?, "compaction_window"?}`. The three built-in providers are
+    always listed. `GET /v1/config/providers/{name}` returns one provider
+    object or `404 provider_not_found`; it replaces
+    `GET /v1/config/profiles/{name}`.
+  - `GET /v1/config/models?provider=<name>` lists the model IDs the provider
+    API reports, as `{"provider": "<name>", "models": [...]}`; the `profile`
+    query parameter is removed.
+  - Change kinds for `POST /v1/config/changes` (field `kind`):
+    `set_default_model {model}`; `set_provider {provider, type, base_url?,
+    api_key_env?, api_version?, workspace_id_env?}` (create, or replace the
+    connection fields; model tables are kept); `set_provider_field {provider,
+    field, value}` with `field` one of `base_url`, `api_key_env`,
+    `api_version`, `workspace_id_env`; `remove_provider {provider}` (removes
+    its model tables; for a built-in name it removes the overrides);
+    `set_model {model, thinking?}`; `set_model_field {model, field, value}`
+    with `field` = `thinking`; `remove_model {model}`. `model` is a selector.
+    Removing a provider or model that `default_model` or `reviewer_model`
+    selects returns `409 model_in_use`. They replace `set_default_profile`,
+    `create_profile`, `set_profile_field` and `remove_profile`. Change
+    metadata reports `operation`, `target` (provider name or selector) and
+    `field`, replacing `profile`.
   - `POST /v1/sessions/{id}/model` with `{"model":"<selector>"}` replaces
-    `POST /v1/sessions/{id}/profile`.
-  - In response objects, `provider` is the provider name (for the built-in
-    providers it equals today's value), `provider_type` is added, `model` is
-    the model ID, and `profile` is removed. `profiles` in `GET /v1/info`
-    becomes `models`, a list of selectors.
+    `POST /v1/sessions/{id}/profile`. Errors: `400` for a missing or invalid
+    selector or unknown provider; `409 turn_active`; `409
+    model_switch_unavailable` (was `profile_switch_unavailable`).
+  - In session, info and usage response objects, `provider` is the provider
+    name (for the built-in providers it equals today's value),
+    `provider_type` is added, `model` is the model ID, and `profile` is
+    removed. `profiles` in `GET /v1/info` becomes `models`, a list of
+    selectors.
   - otto-plus does not call these routes (checked 2026-11-01), so the old
-    routes are removed without aliases.
+    routes and change kinds are removed without aliases.
+- ACP and chat `/model` replies: bare `/model` answers
+  `Model <selector> (type <type>, thinking <effort>)`, then
+  `Configured models: <selectors>` and
+  `Switch with /model <provider>/<model_id>.`; `/model <selector>` answers
+  `Switched to model <selector> (type <type>).`
 - Approval-gated configuration changes: `ProfileChange` becomes `ModelChange`
-  (`SetDefault`, `SetProvider`, `SetProviderField`, `RemoveProvider`,
-  `SetModel`, `SetModelField`, `RemoveModel`). The approval artifact still
+  with one variant per change kind above. The approval artifact still
   contains no API-key values.
 - `otto setup` writes `default_model`, the provider table only when the
   built-in defaults do not fit, and one model table.
@@ -254,7 +283,7 @@ unrelated and stay.
   `reviewer_profile` mapping.
 - Project-scope filter: allowed model fields, rejected provider fields and
   provider definitions.
-- HTTP routes and response fields, percent-encoded model IDs; `/model` in
+- HTTP routes, change kinds and response fields; `/model` in
   TUI/REPL and chat connector; `ModelChange` approval preview contains no key
   values.
 - Session history and usage records written before the change load and show

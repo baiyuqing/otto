@@ -69,8 +69,14 @@ const SETTLE_INTERVAL: Duration = Duration::from_millis(10);
 pub(crate) struct Fixture {
     pub(crate) base: PathBuf,
     pub(crate) workspace: PathBuf,
+    /// A directory the driver is configured to deny reading.
+    pub(crate) denied_dir: PathBuf,
+    /// A file in `denied_dir` that no read exception covers.
     pub(crate) outside_file: PathBuf,
+    /// A file in `denied_dir` that a read exception covers.
     pub(crate) allowed_read: PathBuf,
+    /// A file outside every denied path.
+    pub(crate) visible_file: PathBuf,
     pub(crate) unix_socket: PathBuf,
     pub(crate) environment: Vec<String>,
     pub(crate) policy: Policy,

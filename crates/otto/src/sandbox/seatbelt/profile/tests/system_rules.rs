@@ -78,19 +78,49 @@ fn denies_system_volumes_read_aliases() {
             && !profile.contains("(allow file-read-data\n  (subpath \"/System/Volumes\"))"),
         "profile grants the /System/Volumes alias subtree"
     );
+    assert!(
+        profile
+            .find("(allow file-read*)\n")
+            .expect("global read allow")
+            < profile.find(CARVE_OUT).expect("/System/Volumes deny"),
+        "the /System/Volumes deny precedes the global read allow, which would override it"
+    );
 }
 
 #[test]
-fn grants_only_the_root_inode_for_process_cwd_resolution() {
+fn allows_every_read_before_the_denies_and_drops_rules_the_allow_makes_redundant() {
     let profile = new_fixture().render();
+    let global_allow = profile
+        .find("(allow file-read*)\n")
+        .expect("global read allow");
+    assert_eq!(count(&profile, "(allow file-read*)\n"), 1);
     assert!(
-        profile.contains("(allow file-read-data\n  (literal \"/\"))"),
-        "profile lacks the exact root-inode data operation required by process cwd resolution"
+        profile.find("(deny default").expect("default deny") < global_allow,
+        "the global read allow precedes the default deny"
     );
+    for deny in profile.match_indices("(deny file-read*").map(|(at, _)| at) {
+        assert!(
+            global_allow < deny,
+            "a read deny precedes the global read allow"
+        );
+    }
+    for removed in [
+        "(allow file-read-data\n  (literal \"/\"))",
+        "(literal \"/private/var/select/sh\")",
+        "(literal \"/var/select/developer_dir\")",
+        "(literal \"/etc\")",
+        "(literal \"/dev/null\")\n  (literal \"/dev/random\")",
+        "(allow file-read-metadata",
+    ] {
+        assert!(
+            !profile.contains(removed),
+            "profile keeps a rule the global read allow makes redundant: {removed}"
+        );
+    }
     assert!(
-        !profile.contains("(allow file-read*\n  (literal \"/\"))")
-            && !profile.contains("(subpath \"/\")"),
-        "process cwd compatibility broadened the exact root operation or path"
+        profile
+            .contains("(allow file-write*\n  (literal \"/dev/null\")\n  (literal \"/dev/stdout\")"),
+        "the /dev write rules are gone"
     );
 }
 
@@ -169,6 +199,37 @@ fn template_has_only_reviewed_ipc_and_process_rules() {
         assert!(
             !lowered.contains(forbidden),
             "profile contains forbidden IPC/process rule {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn network_allow_grants_certificate_trust_broker() {
+    let mut fixture = new_fixture();
+    fixture.options.network = Some(NetworkMode::Allow);
+    let allow = fixture.render();
+    const TRUST_LOOKUP: &str = "(allow mach-lookup\n  (global-name \"com.apple.trustd\")\n  (global-name \"com.apple.trustd.agent\"))";
+    let allow_network = section(&allow, "NETWORK");
+    assert!(
+        count(&allow, TRUST_LOOKUP) == 1 && allow_network.contains(TRUST_LOOKUP),
+        "NetworkAllow does not contain exactly one marker-scoped trustd broker lookup"
+    );
+
+    fixture.options.network = Some(NetworkMode::Deny);
+    let deny = fixture.render();
+    assert!(
+        !deny.contains("com.apple.trustd"),
+        "NetworkDeny emitted a trustd broker grant"
+    );
+}
+
+#[test]
+fn embedded_template_has_four_unique_markers() {
+    for marker in [READ_MARKER, WRITE_MARKER, NETWORK_MARKER, SHELL_MARKER] {
+        assert_eq!(
+            count(super::super::super::TEMPLATE, marker),
+            1,
+            "template marker {marker} does not appear exactly once"
         );
     }
 }

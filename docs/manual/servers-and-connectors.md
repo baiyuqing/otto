@@ -461,10 +461,12 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/trace` | Return the session's turns, provider requests, tool calls, compactions and sub-agent tasks as nested spans with start and end times, status, provider timing and token usage. The JSON holds no message or result text; tool labels carry an argument preview of at most 60 characters and sub-agent labels the first 40 characters of the task description. `404` for an unknown session; `409 trace_unavailable` when the redaction boundary is closed, the session has no file (`--no-session`), or the session file cannot be read. |
 | `GET /v1/sessions/{id}/trace/{span_id}` | Return the text of one span from the trace as titled sections: a turn's `input`; a provider request's `input`, `request` (token estimates) and `reply`; a tool's `arguments` and `result`; a compaction's `summary`; a sub-agent's `prompt` and `result`. Empty sections are omitted. The text is the session content as stored, which the agent redacts before writing it. `404` for an unknown session or span; `409 trace_unavailable` as above. |
-| `POST /v1/sessions/{id}/model` | With `{"model":"<provider>/<model_id>"}`, rebuild the session on that model and return the session; it makes no model request and never writes the configuration file, so other sessions and the next start keep their model. `400` for a missing, empty, malformed or unknown selector; `409 turn_active` while a turn runs, or `409 model_switch_unavailable` when the session withholds dynamic content or policy forbids a dynamic model. |
+| `POST /v1/sessions/{id}/model` | With `{"model":"<provider>/<model_id>"}`, rebuild the session on that model and return the session; it makes no model request and never writes the configuration file, so other sessions and the next start keep their model. `400` for a missing, empty, malformed or unknown selector; `409 turn_active` while a turn runs, or `409 model_switch_unavailable` when the session withholds dynamic content or policy forbids a dynamic model. `/v1/sessions/{id}/profile` and `/v1/config/profiles*` are removed and return `404`. |
+| `GET /v1/config/providers` | Return `{"default_model","providers":[...]}`. Each provider has `name`, `type`, `builtin`, the optional `base_url`, `api_key_env`, `api_version` and `workspace_id_env`, and `models`, a list of `{model_id, selector, default, thinking?, context_window?, compaction_window?}`. Built-in providers are always listed. API keys appear only as environment variable names. |
+| `GET /v1/config/providers/{name}` | Return one provider in the same shape; `404 provider_not_found`. |
+| `GET /v1/config/models?provider=<name>` | Query the provider's model catalog: `{"provider","models":[ids]}`. `501 models_unsupported` for `chatgpt`, `400 api_key_unavailable` when the key variable is unset, `502 models_failed` when the endpoint request fails. |
+| `POST /v1/config/changes` | Prepare an approval-gated change to the user configuration. Body `{"kind":...}` with `set_default_model{model}`, `set_provider{provider,type,base_url?,api_key_env?,api_version?,workspace_id_env?}`, `set_provider_field{provider,field,value}`, `remove_provider{provider}`, `set_model{model,thinking?}`, `set_model_field{model,field:"thinking",value}` or `remove_model{model}`. Returns `{"id","expires_in_seconds","operation","target","field"?,"diff"}`; the preview holds no API-key values. `400 invalid_change`; `409 model_in_use` when `default_model` or `approval.reviewer_model` selects the target; `409 legacy_profiles_config` while the host file still holds `profiles`, `default_profile` or `approval.reviewer_profile` (convert it first, see [migration](getting-started.md#migrating-from-profiles)); `422` for removed change kinds. A prepared change is confirmed with `POST /v1/config/changes/{id}` or cancelled with `DELETE /v1/config/changes/{id}`. |
 | `GET /v1/config/providers` | List providers with their model tables. API keys appear only as environment variable names, never as values. |
-| `PUT /v1/config/providers/{name}`, `DELETE /v1/config/providers/{name}` | Create or replace, or delete, one provider in the user configuration. `409` when `default_model` or `approval.reviewer_model` selects a model of the provider being deleted. |
-| `PUT /v1/config/providers/{name}/models/{model_id}`, `DELETE /v1/config/providers/{name}/models/{model_id}` | Create or replace, or delete, one model table. `{model_id}` is percent-encoded. `409` when `default_model` or `approval.reviewer_model` selects the model being deleted. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
@@ -546,6 +548,7 @@ and no later request re-opens it. Use `POST /v1/sessions` with
   "provider": "...",
   "provider_type": "...",
   "model": "...",
+  "model_selector": "...",
   "context_window": 0,
   "usage": {
     "input_tokens": 0,
@@ -865,10 +868,13 @@ JSON-only, separate from the running prompt's updates.
   summary, memory, messages). It never includes the text of any part. When
   the session withholds dynamic content, the reply is "The context report is
   not available in this session."
-- `/model` replies with the session's `provider/model_id` and effort, then
-  `Configured models: <selectors>` and `Switch with /model <provider>/<model_id>.`
+- `/model` replies `Model <selector> (type <type>[, thinking <effort>])`,
+  then `Configured models: <selectors>` and
+  `Switch with /model <provider>/<model_id>.`; with no configured models the
+  last two lines are `No models are configured; add one on the host to switch.`
 - `/model <provider>/<model_id>` rebuilds this session's runner on that model
-  and replies `Switched to model <provider>/<model_id>.` It makes no model
+  and replies `Switched to model <selector> (type <type>).` A bare model ID
+  answers ``model `X` has no provider; use /model <provider>/<model_id>``. It makes no model
   request and never writes the configuration file, so other sessions and the
   next start keep their model; an unknown selector answers with an error
   instead of a model turn. This is the same session-level switch as the TUI's
@@ -1371,35 +1377,42 @@ progress; the message was not queued." A failed `session/list` call in
 ### Provider and model management
 
 When the connector starts `otto acp --attach`, the same admitted chat senders
-can manage Otto's providers and models ([format](getting-started.md#providers-and-models)) through the running `otto serve`:
+can manage models ([format](getting-started.md#providers-and-models)) through
+the running `otto serve`:
 
 ```text
 /config
 /config models
-/config show <provider>/<model_id>
+/config show <provider>
 /models <provider>
 /config add <provider>/<model_id> [--thinking <level>]
-/config set <provider>/<model_id> thinking <value>
+/config set <provider>/<model_id> thinking <level>
 /config use <provider>/<model_id>
 /config remove <provider>/<model_id>
-/config confirm <token>
-/config cancel
+/config confirm <id>
+/config cancel <id>
 ```
 
-`/config` lists providers, `provider/model_id` selectors and the default model; `show` adds endpoint and API-key
-**variable name**, never its value. `/models <provider>` queries the model
-IDs of an OpenAI-compatible provider; this connector command does not enumerate ChatGPT models.
+`/config` and `/config models` list the default model and each
+`provider/model_id`. `show <provider>` adds the endpoint and API-key
+**variable name**, never its value. `/models <provider>` queries the provider's
+model IDs through `GET /v1/config/models`; it reports an error for `chatgpt`.
+`add` creates a model table, `set` changes its `thinking`, `use` sets
+`default_model`, and `remove` deletes the table.
 
 Management requires `otto acp --attach` and a running server. Direct ACP rejects
-these commands without sending them to the model; `/model <provider>/<model_id>` still
-switches the current conversation in either deployment without saving config.
+these commands without sending them to the model; `/model <provider>/<model_id>`
+still switches the current conversation in either deployment without saving
+config.
 
-Mutations return a redacted preview and one-time token. The same chat/sender
-must `/config confirm <token>` within ten minutes, or `/config cancel`. No raw
-TOML, arbitrary writes, credential values or unsupported providers are accepted.
-Base URL and API-key binding are **host-only**: chat cannot change where server
-environment credentials are sent. Thus Creating an OpenAI-compatible provider and
-changing its `base_url` or `api_key_env` must be performed on the host.
+Each mutation calls `POST /v1/config/changes` and returns a redacted preview
+and an id. The same chat and sender must `/config confirm <id>` within ten
+minutes, or `/config cancel <id>`. No raw TOML, arbitrary writes or credential
+values are accepted. Chat cannot create or edit providers: creating a provider
+or changing its `base_url`, `api_key_env`, `api_version` or `workspace_id_env`
+is host-only, so chat cannot change where server environment credentials are
+sent. A change is refused with `legacy_profiles_config` while the host file
+still uses `[profiles]`.
 
 Restart `otto serve` after saving; existing sessions never silently switch.
 On failed previews search connector/server logs for `request_id`. Logs contain

@@ -24,14 +24,16 @@ commit ledger; Git and release tags retain the full history. See the
   form; a bare model ID is an error unless `--provider` is also given.
   Projects may set `default_model` and the `thinking`, `context_window` and
   `compaction_window` of model tables, not providers.
-- HTTP: `GET /v1/config/providers`,
-  `PUT|DELETE /v1/config/providers/{name}` and
-  `PUT|DELETE /v1/config/providers/{name}/models/{model_id}` replace
-  `/v1/config/profiles[/{name}]`, and `POST /v1/sessions/{id}/model` with
-  `{"model":"<selector>"}` replaces `POST /v1/sessions/{id}/profile`. The old
-  routes are removed without aliases. Response objects drop `profile`, add
-  `provider_type`, and `provider` is the provider name; `profiles` in
-  `GET /v1/info` is now `models`, a list of selectors.
+- HTTP: `GET /v1/config/providers`, `GET /v1/config/providers/{name}` and
+  `GET /v1/config/models?provider=<name>` replace `/v1/config/profiles[/{name}]`.
+  Configuration writes go through `POST /v1/config/changes` with the kinds
+  `set_default_model`, `set_provider`, `set_provider_field`, `remove_provider`,
+  `set_model`, `set_model_field` and `remove_model`. `POST /v1/sessions/{id}/model`
+  with `{"model":"<selector>"}` replaces `POST /v1/sessions/{id}/profile`. The
+  old routes are removed and return `404`, without aliases. Response objects
+  drop `profile`, add `provider_type` and `model_selector`, and `provider` is
+  the provider name; `profiles` in `GET /v1/info` is now `models`, a list of
+  selectors.
 - Existing `[profiles.*]`, `default_profile`, `approval.reviewer_profile`,
   `--profile`, `OTTO_PROFILE` and `--provider` with a bare `--model` still
   work. Each legacy file produces a diagnostic with the equivalent new TOML;

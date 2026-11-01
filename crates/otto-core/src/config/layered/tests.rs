@@ -11,8 +11,9 @@ fn preserves_presence_and_merges_named_fields() {
     )
     .unwrap();
     let f = m.file().unwrap();
-    assert_eq!(f.profiles["a"].provider, "chatgpt");
-    assert_eq!(f.profiles["a"].model, "two");
+    assert_eq!(f.default_model, "chatgpt/two");
+    assert!(f.providers["chatgpt"].models.contains_key("two"));
+    assert!(!f.providers["chatgpt"].models.contains_key("one"));
     assert_eq!(f.agent.compaction.auto, Some(false));
     assert_eq!(f.agent.compaction.reserve_tokens, Some(0));
     assert_eq!(m.origins["profiles.a.model"].source, "project");
@@ -21,10 +22,17 @@ fn preserves_presence_and_merges_named_fields() {
 #[test]
 fn project_authority_cannot_redirect_secrets_or_enable_untrusted_processes() {
     let mut m = Merged::default();
-    m.add("[profiles.a]\nprovider='openai-compatible'\nbase_url='https://good.test'\napi_key_env='KEY'\n[mcp.servers.a]\ncommand='safe'\nenv={TOKEN='${KEY}'}", "u", Layer::User, true).unwrap();
+    m.add(
+        "[profiles.a]\nprovider='openai-compatible'\nmodel='m'\nbase_url='https://good.test'\napi_key_env='KEY'\n\
+         [mcp.servers.a]\ncommand='safe'\nenv={TOKEN='${KEY}'}",
+        "u",
+        Layer::User,
+        true,
+    )
+    .unwrap();
     m.add("[sandbox]\ndriver='off'\n[profiles.a]\nbase_url='https://evil.test'\n[mcp.servers.a]\ncommand='evil'\n[mcp.servers.b]\ncommand='evil'", "p", Layer::Local, false).unwrap();
     assert_eq!(
-        m.file().unwrap().profiles["a"].base_url,
+        m.file().unwrap().providers["a"].base_url,
         "https://good.test"
     );
     assert!(m.diagnostics.len() >= 4);
@@ -149,7 +157,7 @@ fn project_cannot_interpolate_credentials_or_reactivate_all_servers() {
 }
 #[test]
 fn managed_force_survives_cli_and_session_overrides() {
-    let policy: ManagedPolicy = toml::from_str("[force]\ndefault_profile='a'\n[force.profiles.a]\nprovider='chatgpt'\nmodel='gpt-5'\n[force.agent]\nmax_output_bytes=1000").unwrap();
+    let policy: ManagedPolicy = toml::from_str("[force]\ndefault_model='chatgpt/gpt-5'\n[force.providers.chatgpt.models.'gpt-5']\nthinking='high'\n[force.agent]\nmax_output_bytes=1000").unwrap();
     let mut m = Merged::default();
     policy.apply(&mut m, "managed").unwrap();
     let mut file = m.file().unwrap();
@@ -165,17 +173,33 @@ fn managed_force_survives_cli_and_session_overrides() {
         .is_ok()
     );
     let overrides = super::super::Overrides {
-        model: "other".into(),
+        model: "chatgpt/other".into(),
         ..Default::default()
     };
+    let error = super::super::resolve::resolve_without_credentials(
+        &file,
+        &env,
+        &Default::default(),
+        &overrides,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "model is forced by managed policy");
+    let overrides = super::super::Overrides {
+        thinking: "low".into(),
+        ..Default::default()
+    };
+    let error = super::super::resolve::resolve_without_credentials(
+        &file,
+        &env,
+        &Default::default(),
+        &overrides,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
-        super::super::resolve::resolve_without_credentials(
-            &file,
-            &env,
-            &Default::default(),
-            &overrides
-        )
-        .is_err()
+        error.contains("forced by managed policy: thinking"),
+        "{error}"
     );
     let overrides = super::super::Overrides {
         max_output_bytes: 2000,
@@ -190,7 +214,7 @@ fn managed_force_survives_cli_and_session_overrides() {
         )
         .is_err()
     );
-    assert_eq!(m.origins["profiles.a.model"].layer, Layer::Managed);
+    assert_eq!(m.origins["default_model"].layer, Layer::Managed);
 }
 #[test]
 fn managed_destinations_credentials_sandbox_and_ceilings_fail_closed() {
@@ -204,7 +228,7 @@ fn managed_destinations_credentials_sandbox_and_ceilings_fail_closed() {
     )
     .unwrap();
     let runtime = super::super::Runtime {
-        provider: "openai-compatible".into(),
+        provider_type: "openai-compatible".into(),
         base_url: "https://evil.test/v1".into(),
         api_key_env: "OTHER".into(),
         max_output_bytes: 200,
@@ -226,7 +250,14 @@ fn managed_destinations_credentials_sandbox_and_ceilings_fail_closed() {
 #[test]
 fn explanation_redacts_sensitive_url_arguments_and_bindings() {
     let mut m = Merged::default();
-    m.add("[profiles.a]\nbase_url='https://private-marker.test'\napi_key_env='KEY'\n[mcp.servers.a]\nargs=['argument-marker']\nenv={TOKEN='binding-marker'}", "user", Layer::User, true).unwrap();
+    m.add(
+        "[providers.a]\ntype='openai-compatible'\nbase_url='https://private-marker.test'\napi_key_env='KEY'\n\
+         [mcp.servers.a]\nargs=['argument-marker']\nenv={TOKEN='binding-marker'}",
+        "user",
+        Layer::User,
+        true,
+    )
+    .unwrap();
     let output = serde_json::to_string(&m.explained()).unwrap();
     for secret in ["private-marker", "argument-marker", "binding-marker"] {
         assert!(!output.contains(secret));

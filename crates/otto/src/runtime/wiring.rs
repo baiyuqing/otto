@@ -32,7 +32,6 @@ use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;
 
 use super::builder::{BuildError, Builder, ProviderClient, SharedSession};
-use super::info::SandboxMode;
 use crate::mcp;
 use crate::memory::files::FileStore;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};

@@ -43,9 +43,15 @@ pub fn set_value(
         None => target.remove(key),
     };
 
-    let (start, end) = block(text, table).ok_or_else(|| unsupported(table))?;
+    let Some((start, end)) = block(text, table) else {
+        let updated = set_in_inline_statement(text, table, key, parsed)?;
+        verify(&updated, &expected, table)?;
+        return Ok(updated);
+    };
     let statements = statements(text, start, end)?;
-    let existing = statements.iter().find(|statement| statement.key == key);
+    let existing = statements
+        .iter()
+        .find(|statement| statement.key.len() == 1 && statement.key[0] == key);
     let updated = match (existing, value) {
         (Some(statement), Some(value)) => {
             let (from, to) = value_span(text, statement)?;
@@ -62,6 +68,179 @@ pub fn set_value(
     };
     verify(&updated, &expected, table)?;
     Ok(updated)
+}
+
+/// Whether `table` is written as its own `[header]` line.
+pub fn has_header(text: &str, table: &[&str]) -> bool {
+    !table.is_empty() && block(text, table).is_some()
+}
+
+/// Whether some table header lies below `table`: its decoded path starts with
+/// `table` and is longer.
+pub fn has_header_below(text: &str, table: &[&str]) -> bool {
+    table_headers(text).iter().any(|header| {
+        header
+            .path()
+            .is_some_and(|path| path.len() > table.len() && starts_with(&path, table))
+    })
+}
+
+/// Sets, replaces or removes the dotted inline-table statement
+/// `<key_path> = { ... }` inside the block of `[header]`.
+///
+/// `Some(body)` replaces the value of an existing statement (its key spelling
+/// and trailing comment stay) or inserts the statement after the block's last
+/// statement; when `[header]` is absent it is appended at the end of `text`
+/// with the statement. `None` removes the statement. In the written key path
+/// the last part is always quoted and earlier parts are bare when TOML allows.
+///
+/// Errors: `text` is not a valid document, the target is written as its own
+/// `[header.key_path]` table, the statement to remove does not exist, or the
+/// result does not parse to the original plus exactly this change.
+pub fn set_inline_table(
+    text: &str,
+    header: &[&str],
+    key_path: &[&str],
+    body: Option<toml::Table>,
+) -> Result<String, ConfigError> {
+    let (last, parents) = key_path.split_last().ok_or_else(|| unsupported(header))?;
+    if header.is_empty() {
+        return Err(unsupported(header));
+    }
+    let mut expected = parse(text)?;
+    let mut target = &mut expected;
+    for part in header.iter().chain(parents) {
+        target = target
+            .entry(part.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| unsupported(header))?;
+    }
+    match &body {
+        Some(body) => {
+            target.insert(last.to_string(), toml::Value::Table(body.clone()));
+        }
+        None => {
+            target.remove(*last).ok_or_else(|| unsupported(header))?;
+        }
+    }
+    let full: Vec<&str> = header.iter().chain(key_path).copied().collect();
+    let written_as_header = table_headers(text).iter().any(|candidate| {
+        candidate
+            .path()
+            .is_some_and(|path| starts_with(&path, &full))
+    });
+    if written_as_header {
+        return Err(unsupported(&full));
+    }
+
+    let rendered = body.map(|body| toml::Value::Table(body).to_string());
+    let Some((start, end)) = block(text, header) else {
+        let Some(rendered) = rendered else {
+            return Err(unsupported(header));
+        };
+        let statement = format!("{} = {rendered}\n", key_text(key_path));
+        let section = format!("[{}]\n{statement}", header_text(header));
+        let lead = if text.is_empty() || text.ends_with("\n\n") {
+            ""
+        } else {
+            "\n"
+        };
+        let updated = insert(text, text.len(), &format!("{lead}{section}"));
+        verify(&updated, &expected, header)?;
+        return Ok(updated);
+    };
+    let statements = statements(text, start, end)?;
+    let existing = statements
+        .iter()
+        .find(|statement| statement.key.iter().eq(key_path.iter().copied()));
+    let updated = match (existing, rendered) {
+        (Some(statement), Some(rendered)) => {
+            let (from, to) = value_span(text, statement)?;
+            format!("{}{rendered}{}", &text[..from], &text[to..])
+        }
+        (Some(statement), None) => {
+            format!("{}{}", &text[..statement.start], &text[statement.end..])
+        }
+        (None, Some(rendered)) => {
+            let at = statements.last().map_or(start, |statement| statement.end);
+            insert(text, at, &format!("{} = {rendered}\n", key_text(key_path)))
+        }
+        (None, None) => return Err(unsupported(header)),
+    };
+    verify(&updated, &expected, header)?;
+    Ok(updated)
+}
+
+/// Sets or removes `key` inside an inline-table statement that holds the
+/// table at `table`, written in the block of its nearest ancestor header.
+fn set_in_inline_statement(
+    text: &str,
+    table: &[&str],
+    key: &str,
+    value: Option<toml::Value>,
+) -> Result<String, ConfigError> {
+    for depth in (1..table.len()).rev() {
+        let Some((start, end)) = block(text, &table[..depth]) else {
+            continue;
+        };
+        let rest = &table[depth..];
+        let statements = statements(text, start, end)?;
+        let Some(statement) = statements
+            .iter()
+            .find(|statement| statement.key.iter().eq(rest.iter().copied()))
+        else {
+            continue;
+        };
+        let (from, to) = value_span(text, statement)?;
+        let toml::Value::Table(mut inline) = parse_value(&text[from..to])? else {
+            continue;
+        };
+        match value {
+            Some(value) => inline.insert(key.to_string(), value),
+            None => inline.remove(key),
+        };
+        let rendered = toml::Value::Table(inline).to_string();
+        return Ok(format!("{}{rendered}{}", &text[..from], &text[to..]));
+    }
+    Err(unsupported(table))
+}
+
+fn is_bare_key(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn header_text(header: &[&str]) -> String {
+    let parts: Vec<String> = header
+        .iter()
+        .map(|part| {
+            if is_bare_key(part) {
+                part.to_string()
+            } else {
+                toml::Value::String(part.to_string()).to_string()
+            }
+        })
+        .collect();
+    parts.join(".")
+}
+
+fn key_text(key_path: &[&str]) -> String {
+    let last = key_path.len().saturating_sub(1);
+    let parts: Vec<String> = key_path
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            if index < last && is_bare_key(part) {
+                part.to_string()
+            } else {
+                toml::Value::String(part.to_string()).to_string()
+            }
+        })
+        .collect();
+    parts.join(".")
 }
 
 /// Appends `body` as the new table at `table`, rendered with its own
@@ -227,7 +406,8 @@ fn block(text: &str, table: &[&str]) -> Option<(usize, usize)> {
 struct Statement {
     start: usize,
     end: usize,
-    key: String,
+    /// The decoded dotted key path before the `=`.
+    key: Vec<String>,
 }
 
 /// Every statement in `text[start..end]`, which must begin at a statement
@@ -246,9 +426,9 @@ fn statements(text: &str, start: usize, end: usize) -> Result<Vec<Statement>, Co
         let mut stop = line_end;
         let key = loop {
             if let Ok(parsed) = toml::from_str::<toml::Table>(&text[position..stop])
-                && let Some(key) = parsed.keys().next()
+                && let Some(first) = parsed.keys().next()
             {
-                break key.clone();
+                break key_path_of(&text[position..stop]).unwrap_or_else(|| vec![first.clone()]);
             }
             if stop == end {
                 return Err(invalid());
@@ -263,6 +443,29 @@ fn statements(text: &str, start: usize, end: usize) -> Result<Vec<Statement>, Co
         position = stop;
     }
     Ok(found)
+}
+
+/// The decoded key path of the statement `source`: the text before its first
+/// `=` outside quotes, decoded the way a header path is.
+fn key_path_of(source: &str) -> Option<Vec<String>> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut end = None;
+    for (index, ch) in source.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if ch == '\\' => escaped = true,
+            Some(open) if ch == open => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '=' => {
+                end = Some(index);
+                break;
+            }
+            None => {}
+        }
+    }
+    decode_path(&format!("[{}]\n", source[..end?].trim()))
 }
 
 fn next_line(text: &str, position: usize, end: usize) -> usize {
@@ -307,21 +510,27 @@ impl Header<'_> {
     /// The decoded key path of a `[a.b]` header; `None` for an
     /// array-of-tables `[[a.b]]` header.
     fn path(&self) -> Option<Vec<String>> {
-        let mut table = toml::from_str::<toml::Table>(self.text).ok()?;
-        let mut path = Vec::new();
-        while !table.is_empty() {
-            if table.len() != 1 {
-                return None;
-            }
-            let (key, value) = table.into_iter().next()?;
-            let toml::Value::Table(inner) = value else {
-                return None;
-            };
-            path.push(key);
-            table = inner;
-        }
-        (!path.is_empty()).then_some(path)
+        decode_path(self.text)
     }
+}
+
+/// The decoded key path of the header text `[a.b]`; `None` for an
+/// array-of-tables header or text that is not a header.
+fn decode_path(header: &str) -> Option<Vec<String>> {
+    let mut table = toml::from_str::<toml::Table>(header).ok()?;
+    let mut path = Vec::new();
+    while !table.is_empty() {
+        if table.len() != 1 {
+            return None;
+        }
+        let (key, value) = table.into_iter().next()?;
+        let toml::Value::Table(inner) = value else {
+            return None;
+        };
+        path.push(key);
+        table = inner;
+    }
+    (!path.is_empty()).then_some(path)
 }
 
 /// Every table header in `text`, in document order.
@@ -347,6 +556,9 @@ fn table_headers(text: &str) -> Vec<Header<'_>> {
     }
     headers
 }
+
+#[cfg(test)]
+mod inline_edit_tests;
 
 #[cfg(test)]
 mod tests {

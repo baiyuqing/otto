@@ -425,3 +425,157 @@ fn a_bad_thinking_value_is_rejected_at_preview_time() {
     let error = preview(&path, &change).expect_err("invalid thinking");
     assert!(error.to_string().contains("invalid thinking"), "{error}");
 }
+
+const INLINE_CONFIG: &str = "# retained\ndefault_model = \"local/big\"\n\n\
+    [providers.local]\ntype = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\n\
+    models.\"big\" = { thinking = \"low\" } # cheap\nmodels.\"small\" = {}\n\n\
+    [ui]\nmode = \"repl\"\n";
+
+fn model_change_text(content: &str, change: ModelChange) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), content);
+    updated_text(&preview(&path, &change).expect("preview"))
+}
+
+#[test]
+fn new_model_in_a_provider_with_a_header_adds_one_inline_line_in_its_block() {
+    let updated = model_change_text(
+        INLINE_CONFIG,
+        ModelChange::SetModel {
+            model: "local/new".into(),
+            thinking: None,
+        },
+    );
+    assert_eq!(
+        updated,
+        INLINE_CONFIG.replace(
+            "models.\"small\" = {}\n",
+            "models.\"small\" = {}\nmodels.\"new\" = {}\n"
+        )
+    );
+    let with_thinking = model_change_text(
+        INLINE_CONFIG,
+        ModelChange::SetModel {
+            model: "local/new".into(),
+            thinking: Some("high".into()),
+        },
+    );
+    assert!(
+        with_thinking.contains("models.\"new\" = { thinking = \"high\" }\n"),
+        "{with_thinking}"
+    );
+}
+
+#[test]
+fn new_model_for_a_built_in_provider_without_a_header_appends_the_header_and_one_line() {
+    let content = "default_model = \"local/big\"\n\n[providers.local]\ntype = \"openai-compatible\"\n\
+                   base_url = \"https://example.test/v1\"\nmodels.\"big\" = {}\n";
+    let updated = model_change_text(
+        content,
+        ModelChange::SetModel {
+            model: "chatgpt/gpt-5.6-sol".into(),
+            thinking: None,
+        },
+    );
+    assert_eq!(
+        updated,
+        format!("{content}\n[providers.chatgpt]\nmodels.\"gpt-5.6-sol\" = {{}}\n")
+    );
+}
+
+#[test]
+fn new_model_for_a_provider_with_only_header_style_tables_is_written_as_a_header_table() {
+    let content = "[providers.chatgpt.models.\"a\"]\nthinking = \"low\"\n";
+    let updated = model_change_text(
+        content,
+        ModelChange::SetModel {
+            model: "chatgpt/b".into(),
+            thinking: Some("high".into()),
+        },
+    );
+    assert!(
+        updated.contains("[providers.chatgpt.models.b]\nthinking = \"high\"\n"),
+        "{updated}"
+    );
+    let parsed = otto_core::config::parse(&updated).expect("parse");
+    assert_eq!(parsed.providers["chatgpt"].models["b"].thinking, "high");
+    assert_eq!(parsed.providers["chatgpt"].models["a"].thinking, "low");
+}
+
+#[test]
+fn set_thinking_and_remove_edit_an_inline_model_where_it_is_written() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), INLINE_CONFIG);
+
+    set_model_thinking_file(&path, "local/big", "high").expect("replace");
+    set_model_thinking_file(&path, "local/small", "max").expect("insert");
+    let edited = fs::read_to_string(&path).expect("read back");
+    assert!(
+        edited.contains("models.\"big\" = { thinking = \"high\" } # cheap\n"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("models.\"small\" = { thinking = \"max\" }\n"),
+        "{edited}"
+    );
+    set_model_thinking_file(&path, "local/small", "").expect("clear");
+    assert_eq!(
+        fs::read_to_string(&path).expect("read back"),
+        edited.replace("{ thinking = \"max\" }", "{}")
+    );
+
+    let removed = model_change_text(
+        INLINE_CONFIG,
+        ModelChange::RemoveModel {
+            model: "local/small".into(),
+        },
+    );
+    assert_eq!(
+        removed,
+        INLINE_CONFIG.replace("models.\"small\" = {}\n", "")
+    );
+}
+
+#[test]
+fn set_thinking_and_remove_still_edit_a_header_style_model() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), CONFIG);
+    set_model_thinking_file(&path, "local/small", "max").expect("set");
+    assert!(
+        fs::read_to_string(&path)
+            .expect("read")
+            .contains("[providers.local.models.small]\nthinking = \"max\"\n")
+    );
+    let removed = model_change_text(
+        CONFIG,
+        ModelChange::RemoveModel {
+            model: "local/small".into(),
+        },
+    );
+    assert!(!removed.contains("models.small"), "{removed}");
+    assert!(
+        removed.contains("[providers.local.models.big]"),
+        "{removed}"
+    );
+}
+
+#[test]
+fn initial_config_names_the_provider_and_writes_the_model_as_an_inline_entry() {
+    assert_eq!(
+        initial_config_content(PROVIDER_CHATGPT, "gpt-5.6-sol", "", "").expect("chatgpt"),
+        "default_model = \"chatgpt/gpt-5.6-sol\"\n\n[providers.chatgpt]\ntype = \"chatgpt\"\n\
+         models.\"gpt-5.6-sol\" = {}\n"
+    );
+    assert_eq!(
+        initial_config_content(
+            PROVIDER_OPENAI_COMPATIBLE,
+            "m",
+            "https://api.example/v1",
+            "K"
+        )
+        .expect("openai-compatible"),
+        "default_model = \"openai-compatible/m\"\n\n[providers.openai-compatible]\n\
+         type = \"openai-compatible\"\nbase_url = \"https://api.example/v1\"\n\
+         api_key_env = \"K\"\nmodels.\"m\" = {}\n"
+    );
+}

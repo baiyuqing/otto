@@ -232,7 +232,7 @@ Providers merge by name, then model ID, then field; MCP servers merge by name th
 MCP transport removes its former transport's fields.
 
 Projects may set `default_model`, UI mode, agent limits/deadlines and the
-`thinking`, `context_window` and `compaction_window` fields of a model table
+`thinking`, `context_window` and `compaction_window` fields of a model entry
 of a built-in or host-defined provider. A project cannot define a provider or
 set a provider-level field. Provider type/URL, credentials,
 sandbox grants, listeners, admission, storage and catalog roots
@@ -293,13 +293,12 @@ default_model = "claude/MODEL_ID"
 mode = "tui"
 
 [providers.claude]
+type = "claude"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 api_version = "2026-10-21"
 # workspace_id_env = "ANTHROPIC_WORKSPACE_ID"  # only when the key requires it
-
-[providers.claude.models."MODEL_ID"]
-thinking = "high"
+models."MODEL_ID" = { thinking = "high" }
 
 [sandbox]
 driver = "auto"
@@ -331,25 +330,24 @@ socket = "~/.otto/otto.sock"
 ### Providers and models
 
 A provider is one endpoint and credential binding of one API type. A model is
-one model of a provider. A model is selected by `<provider>/<model_id>`, split
-at the first `/`, so the model ID may contain `/`. Otto has no model aliases.
+one model of a provider, written as one line in the provider's table. A model
+is selected by `<provider>/<model_id>`, split at the first `/`, so the model
+ID may contain `/`. Otto has no model aliases.
 
 ```toml
 default_model = "chatgpt/gpt-5.6-luna"
 
-[providers.chatgpt.models."gpt-5.6-luna"]
-[providers.chatgpt.models."gpt-5.6-terra"]
-[providers.chatgpt.models."gpt-5.6-sol"]
+[providers.chatgpt]
+type = "chatgpt"
+models."gpt-5.6-luna" = {}
+models."gpt-5.6-terra" = {}
+models."gpt-5.6-sol" = {}
 
 [providers.gateway]
 type = "openai-compatible"
 base_url = "https://llm.example.com/v1"
 api_key_env = "LLM_GATEWAY_API_KEY"
-
-[providers.gateway.models."model-a"]
-thinking = "high"
-context_window = 128000
-compaction_window = 100000
+models."model-a" = { thinking = "high", context_window = 128000, compaction_window = 100000 }
 ```
 
 `[providers.<name>]` fields:
@@ -362,10 +360,17 @@ compaction_window = 100000
 | `api_version` | Claude only. |
 | `workspace_id_env` | Claude only; environment variable holding the workspace ID. |
 
-`[providers.<name>.models."<model_id>"]` fields: `thinking` (`low`, `medium`,
-`high`, `xhigh` or `max`), `context_window`, and `compaction_window`, which
-requires `context_window`. A model ID containing `.` must be quoted. An empty
-model table lists the model in the `/model` picker and uses built-in limits.
+`models."<model_id>" = { ... }` fields: `thinking` (`low`, `medium`, `high`,
+`xhigh` or `max`), `context_window`, and `compaction_window`, which requires
+`context_window`. The model ID is quoted. `models."<model_id>" = {}` lists the
+model in the `/model` picker and uses built-in limits. A model may also be
+written as its own table, `[providers.<name>.models."<model_id>"]`; both forms
+produce the same configuration. `otto setup`, `otto config set` and
+`POST /v1/config/changes` write a new model as a `models."<id>"` line inside
+`[providers.<name>]`, create that table when it is absent, and edit or remove
+an existing model in the form it is written in. A provider whose models are
+all written as `[providers.<name>.models."<id>"]` tables receives a new model
+in that form, so one provider never holds both forms.
 
 A provider name uses ASCII letters, digits, `_` and `-`. Three providers are
 built in and named after the API types: `claude`, `openai-compatible` and
@@ -432,9 +437,11 @@ After:
 ```toml
 default_model = "chatgpt/gpt-5.6-luna"
 
-[providers.chatgpt.models."gpt-5.6-luna"]
-[providers.chatgpt.models."gpt-5.6-terra"]
-[providers.chatgpt.models."gpt-5.6-sol"]
+[providers.chatgpt]
+type = "chatgpt"
+models."gpt-5.6-luna" = {}
+models."gpt-5.6-terra" = {}
+models."gpt-5.6-sol" = {}
 ```
 
 A managed policy that forces `default_profile` or `profiles.*` fails to load

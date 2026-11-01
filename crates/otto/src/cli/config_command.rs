@@ -137,10 +137,8 @@ fn execute(
                     .into_bytes()
             };
             let text = std::str::from_utf8(&old).map_err(|_| "configuration is not UTF-8")?;
-            let keys: Vec<_> = words[0].split('.').collect();
-            if keys.iter().any(|k| k.is_empty()) {
-                return Err("invalid configuration key".into());
-            }
+            let owned_keys = split_config_key(words[0]).ok_or("invalid configuration key")?;
+            let keys: Vec<&str> = owned_keys.iter().map(String::as_str).collect();
             let table = &keys[..keys.len() - 1];
             let key = keys[keys.len() - 1];
             let raw: toml::Table =
@@ -156,7 +154,12 @@ fn execute(
             } else {
                 let body: toml::Table = toml::from_str(&format!("{key} = {}", words[1]))
                     .map_err(|_| "invalid configuration value")?;
-                otto_core::config::edit::insert_table(text, table, body)
+                match table {
+                    ["providers", provider, "models", model_id] => {
+                        crate::config::add_model_entry(text, provider, model_id, body)
+                    }
+                    _ => otto_core::config::edit::insert_table(text, table, body),
+                }
             }
             .map_err(|_| "invalid configuration edit")?;
             otto_core::config::parse(&updated).map_err(|_| "configuration edit is invalid")?;
@@ -216,6 +219,30 @@ fn execute(
         _ => return Err(USAGE.into()),
     }
     Ok(())
+}
+
+/// Splits a dotted configuration key such as
+/// `providers.chatgpt.models."gpt-5.6-luna".thinking` into its parts, decoding
+/// quoted parts the way a TOML table header does. `None` when the key is not
+/// valid TOML key syntax, has an empty part, or spans several lines.
+pub(crate) fn split_config_key(key: &str) -> Option<Vec<String>> {
+    if key.contains(['\n', '\r']) {
+        return None;
+    }
+    let mut table: toml::Table = toml::from_str(&format!("[{key}]")).ok()?;
+    let mut parts = Vec::new();
+    while !table.is_empty() {
+        let (part, value) = table.into_iter().next()?;
+        let toml::Value::Table(inner) = value else {
+            return None;
+        };
+        if part.is_empty() {
+            return None;
+        }
+        parts.push(part);
+        table = inner;
+    }
+    (!parts.is_empty()).then_some(parts)
 }
 
 #[cfg(test)]
@@ -376,5 +403,79 @@ mod tests {
         .map(str::to_string);
         assert_eq!(run(&args, &mut out, &mut err, &env), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+    #[test]
+    fn set_writes_a_new_model_key_as_an_inline_entry_with_a_quoted_model_id() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".config/otto");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[providers.chatgpt]\ntype = 'chatgpt'\n").unwrap();
+        let env = HashMap::from([("HOME".into(), home.path().display().to_string())]);
+        let args = [
+            "set",
+            "providers.chatgpt.models.\"gpt-5.6-luna\".thinking",
+            "'high'",
+            "--scope",
+            "user",
+        ]
+        .map(str::to_string);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(
+            run(&args, &mut out, &mut err, &env),
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[providers.chatgpt]\ntype = 'chatgpt'\nmodels.\"gpt-5.6-luna\" = { thinking = \"high\" }\n"
+        );
+    }
+    #[test]
+    fn set_keeps_header_style_models_of_a_provider_in_header_style() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".config/otto");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.chatgpt.models.\"a\"]\nthinking = 'low'\n",
+        )
+        .unwrap();
+        let env = HashMap::from([("HOME".into(), home.path().display().to_string())]);
+        let args = [
+            "set",
+            "providers.chatgpt.models.\"b\".thinking",
+            "\"high\"",
+            "--scope",
+            "user",
+        ]
+        .map(str::to_string);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            run(&args, &mut out, &mut err, &env),
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[providers.chatgpt.models.b]\nthinking = \"high\""),
+            "{text}"
+        );
+        assert!(!text.contains("[providers.chatgpt]"), "{text}");
+    }
+    #[test]
+    fn config_keys_split_at_dots_outside_quotes() {
+        assert_eq!(
+            split_config_key("providers.chatgpt.models.\"gpt-5.6-luna\".thinking").unwrap(),
+            ["providers", "chatgpt", "models", "gpt-5.6-luna", "thinking"]
+        );
+        assert_eq!(split_config_key("ui.mode").unwrap(), ["ui", "mode"]);
+        assert!(split_config_key("a..b").is_none());
+        assert!(split_config_key("a\n[b").is_none());
+        assert!(split_config_key("").is_none());
     }
 }

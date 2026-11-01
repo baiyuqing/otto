@@ -151,6 +151,21 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Development
 
+- The Cargo workspace has five crates instead of two: `otto-core`, `otto`,
+  `otto-server` (the former `otto::server`), `otto-acp` (the former
+  `otto::acp`) and `otto-cli` (the former `main.rs` and `otto::cli` command
+  modules, which now owns the `otto` binary). `otto` stays the library with
+  the `embed` API; `cli::{login, repl, repl_commands}` stay in it because the
+  TUI uses them. Dependencies are one-way, `otto-core` <- `otto` <-
+  `otto-server` <- `otto-acp` <- `otto-cli`, so a change in a frontend crate
+  no longer rebuilds the `otto` library test binary. The process integration
+  tests moved to `crates/otto-cli/tests/`. `otto::fixtures` gained
+  `embed_harness`, `plugin_package` and `subagent_doubles`, and test-only
+  items that dependent crates use are public under
+  `cfg(any(test, feature = "test-support"))`. Build with
+  `cargo build -p otto-cli` and run moved tests with
+  `cargo test -p otto-cli --test <name>`; `cargo test -p otto --test tui_pty`
+  is no longer valid.
 - The test scaffolding shared by the crate's tests is `otto::fixtures`, compiled
   under `cfg(test)` or the new `test-support` feature (which implies
   `fault-injection`); it holds the former `cli::fixture_tests` and the scripted

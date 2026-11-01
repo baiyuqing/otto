@@ -27,7 +27,7 @@ pub mod memory;
 pub mod memory_service;
 pub mod models;
 pub mod otto;
-pub(crate) mod plan;
+pub mod plan;
 pub mod project_guard;
 pub mod read;
 pub mod registry;
@@ -155,11 +155,7 @@ where
 }
 
 /// Builds a tool definition from a JSON schema literal.
-pub(crate) fn definition(
-    name: &str,
-    description: &str,
-    parameters: serde_json::Value,
-) -> ToolDefinition {
+pub fn definition(name: &str, description: &str, parameters: serde_json::Value) -> ToolDefinition {
     ToolDefinition {
         name: name.to_owned(),
         description: description.to_owned(),
@@ -187,40 +183,40 @@ pub(crate) fn text_result(content: impl Into<String>) -> ToolResult {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testutil {
+#[cfg(any(test, feature = "test-support"))]
+pub mod testutil {
     use super::*;
     use std::path::Path;
 
     /// The default output cap every tool constructor is given.
-    pub(crate) const MAX_OUTPUT_BYTES: usize = 51200;
+    pub const MAX_OUTPUT_BYTES: usize = 51200;
 
-    pub(crate) fn raw(json: &str) -> Box<RawValue> {
+    pub fn raw(json: &str) -> Box<RawValue> {
         RawValue::from_string(json.to_owned()).expect("test JSON is valid")
     }
 
     /// Runs `tool` with `arguments` and no cancellation.
-    pub(crate) async fn run(tool: &dyn Tool, arguments: &str) -> ToolResult {
+    pub async fn run(tool: &dyn Tool, arguments: &str) -> ToolResult {
         tool.execute(&raw(arguments), &CancellationToken::new())
             .await
     }
 
     /// Runs `tool` with an already-cancelled token.
-    pub(crate) async fn run_cancelled(tool: &dyn Tool, arguments: &str) -> ToolResult {
+    pub async fn run_cancelled(tool: &dyn Tool, arguments: &str) -> ToolResult {
         let cancel = CancellationToken::new();
         cancel.cancel();
         tool.execute(&raw(arguments), &cancel).await
     }
 
     /// Creates a file and its parent directories under `root`.
-    pub(crate) fn write_search_file(root: &Path, name: &str, contents: &str) {
+    pub fn write_search_file(root: &Path, name: &str, contents: &str) {
         let path = root.join(name);
         std::fs::create_dir_all(path.parent().expect("the path has a parent"))
             .expect("test directories are creatable");
         std::fs::write(path, contents).expect("test files are writable");
     }
 
-    pub(crate) fn workspace(root: &Path) -> std::sync::Arc<workspace::Workspace> {
+    pub fn workspace(root: &Path) -> std::sync::Arc<workspace::Workspace> {
         std::sync::Arc::new(workspace::Workspace::new(root).expect("workspace should open"))
     }
 }

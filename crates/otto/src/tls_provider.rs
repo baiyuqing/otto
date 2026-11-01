@@ -17,12 +17,13 @@ pub fn install() -> Arc<CryptoProvider> {
     if let Some(installed) = CryptoProvider::get_default() {
         return Arc::clone(installed);
     }
-    if let Err(installed) = ring::default_provider().install_default() {
-        // Another thread installed its provider between the check and this
-        // call; that one is the process default.
-        return installed;
-    }
-    Arc::clone(CryptoProvider::get_default().expect("the provider installed above"))
+    // `install_default` returns `Err` with the rejected provider when another
+    // thread installed one between the check above and this call; the process
+    // default is then that other provider, so it is read back in both cases.
+    let _ = ring::default_provider().install_default();
+    Arc::clone(
+        CryptoProvider::get_default().expect("a provider is installed above or by another thread"),
+    )
 }
 
 /// `reqwest::Client::builder()` after [`install`].
@@ -42,6 +43,9 @@ pub fn http_client() -> reqwest::Client {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::thread;
+
     use super::*;
 
     #[test]
@@ -49,6 +53,35 @@ mod tests {
         let installed = install();
         let default = CryptoProvider::get_default().expect("a process default provider");
         assert!(Arc::ptr_eq(&installed, default));
+    }
+
+    /// Threads that call `install()` at the same time all get the one provider
+    /// that won the installation. Without the fix, the losing threads got the
+    /// provider that `install_default` rejected, so `Arc::ptr_eq` fails here
+    /// when this test is the first in the process to install a provider.
+    #[test]
+    fn concurrent_installs_all_return_the_process_default() {
+        const THREADS: usize = 8;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    install()
+                })
+            })
+            .collect();
+        let installed: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("install() does not panic"))
+            .collect();
+        // Read the default only after every worker returned: before that, no
+        // provider may exist yet.
+        let default = CryptoProvider::get_default().expect("a process default provider");
+        for provider in &installed {
+            assert!(Arc::ptr_eq(provider, default));
+        }
     }
 
     #[test]

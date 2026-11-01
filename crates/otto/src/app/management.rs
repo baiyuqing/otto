@@ -34,7 +34,7 @@ const SEARCH_LIMIT: usize = 20;
 const SEARCH_TOKEN_BUDGET: usize = 4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScopeSelector {
+pub enum ScopeSelector {
     Current,
     User,
     Workspace,
@@ -42,7 +42,7 @@ pub(crate) enum ScopeSelector {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum Request {
+pub enum Request {
     MemoryList {
         scope: ScopeSelector,
         limit: usize,
@@ -85,7 +85,7 @@ pub(crate) enum Request {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum Reply {
+pub enum Reply {
     MemoryList(memory::RecordPage),
     MemoryRecord(memory::Record),
     MemorySearch(SearchResult),
@@ -271,7 +271,7 @@ impl Request {
 }
 
 impl Controller {
-    pub(crate) fn memory_manager(&self) -> Option<(Arc<Service>, Scope, Scope)> {
+    pub fn memory_manager(&self) -> Option<(Arc<Service>, Scope, Scope)> {
         let wiring = self.memory_wiring();
         (self.dynamic_content() && wiring.usable && !wiring.external()).then(|| {
             (
@@ -282,12 +282,12 @@ impl Controller {
         })
     }
     /// Exact current session destination; never redirects a producer after /new.
-    pub(crate) fn notification_mailbox(&self) -> Option<Arc<dyn otto_core::mailbox::Mailbox>> {
+    pub fn notification_mailbox(&self) -> Option<Arc<dyn otto_core::mailbox::Mailbox>> {
         self.current_runner()
             .map(|runner| Arc::clone(runner.mailbox()))
     }
 
-    pub(crate) fn subagent_tasks(&self) -> Option<Arc<crate::subagent::tasks::Tasks>> {
+    pub fn subagent_tasks(&self) -> Option<Arc<crate::subagent::tasks::Tasks>> {
         self.current_runner()?.tasks().cloned()
     }
 
@@ -397,7 +397,7 @@ impl Controller {
         Ok(Reply::Notice(line))
     }
 
-    pub(crate) fn management(&self, request: Request) -> Result<Reply, String> {
+    pub fn management(&self, request: Request) -> Result<Reply, String> {
         use Request::*;
         if self.memory_wiring().external() {
             if let Remember {

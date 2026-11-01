@@ -7,8 +7,14 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT_RUST = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'];
-const FULL_FILES = [...ROOT_RUST, 'crates/otto/Cargo.toml', 'crates/otto/build.rs', 'crates/otto/src/lib.rs', 'crates/otto/src/main.rs'];
+// Crate manifests, build scripts and crate roots affect every test target of the crate.
+const CRATE_ENTRY = /^crates\/[^/]+\/(?:Cargo\.toml|build\.rs|src\/lib\.rs|src\/main\.rs)$/;
 const FIXTURES = /^crates\/otto\/src\/fixtures(?:\/|\.rs$)/;
+// Lib crates whose `src/<module>` paths map to a `--lib -- <module>::` filter;
+// their lib tests share one `cargo test --workspace --lib` invocation.
+const LIB_CRATES = ['otto', 'otto-server', 'otto-acp', 'otto-cli'];
+const MODULE_PATH = new RegExp(`^crates/(?:${LIB_CRATES.join('|')})/src/([^/.]+)(?:/|\\.rs$)`);
+const TEST_PATH = new RegExp(`^crates/(?:${LIB_CRATES.join('|')})/tests/([^/]+)\\.rs$`);
 const LICENSE_INPUTS = /^(Cargo\.toml|Cargo\.lock|crates\/[^/]+\/Cargo\.toml|scripts\/license-check\.mjs)$/;
 
 // plan maps repo-relative POSIX paths to the ordered commands that check them
@@ -24,11 +30,11 @@ export function plan(paths) {
     const known =
       inRust || ROOT_RUST.includes(p) || /^(connect|scripts|docs)\//.test(p) || p === 'LICENSE' || p.endsWith('.md');
     if (!known) unchecked.push(p);
-    if (ROOT_RUST.includes(p) || p.startsWith('testdata/') || p.startsWith('crates/otto-core/') || FULL_FILES.includes(p)) full = true;
-    else if (FIXTURES.test(p)) full = true; // `otto::fixtures` backs tests in every module
+    if (ROOT_RUST.includes(p) || p.startsWith('testdata/') || p.startsWith('crates/otto-core/') || CRATE_ENTRY.test(p)) full = true;
+    else if (FIXTURES.test(p)) full = true; // `otto::fixtures` backs tests in every crate
     else if (inRust) {
-      const mod = p.match(/^crates\/otto\/src\/([^/.]+)(?:\/|\.rs$)/);
-      const test = p.match(/^crates\/otto\/tests\/([^/]+)\.rs$/);
+      const mod = p.match(MODULE_PATH);
+      const test = p.match(TEST_PATH);
       if (mod) modules.add(mod[1]);
       else if (test) tests.add(test[1]);
       else full = true; // conservative: any other crates/ path
@@ -42,7 +48,9 @@ export function plan(paths) {
   if (has((p) => ROOT_RUST.includes(p)) || under('crates/otto-core/')) steps.push('make rust-wasm-check');
   if (full) steps.push('cargo test --workspace');
   else {
-    // --workspace, not -p otto: -p resolves other features and rebuilds dependencies.
+    // --workspace, not -p <crate>: -p unifies features differently and rebuilds dependencies.
+    // `--lib -- <module>::` filters the lib tests of every crate; `--test <name>` selects the
+    // target in whichever crate owns it.
     if (modules.size) steps.push(`cargo test --workspace --lib -- ${[...modules].sort().map((m) => `${m}::`).join(' ')}`);
     if (tests.size) steps.push(`cargo test --workspace ${[...tests].sort().map((t) => `--test ${t}`).join(' ')}`);
   }

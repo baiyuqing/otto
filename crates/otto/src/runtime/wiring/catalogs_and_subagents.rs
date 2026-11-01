@@ -122,7 +122,7 @@ impl Builder {
             ProviderClient::Claude { client, .. } => Arc::clone(client) as _,
             ProviderClient::ChatGpt { client, .. } => Arc::clone(client) as _,
             ProviderClient::Unavailable => return Ok(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             ProviderClient::Scripted(provider) => {
                 let opted_in = crate::runtime::builder::TEST_SCRIPTED_SUBAGENT_HOMES
                     .lock()
@@ -250,7 +250,7 @@ impl Builder {
     /// steering, `followups.json` for model follow-ups. `None` for
     /// `--no-session`. The path is resolved at write time, as for the inbox,
     /// because a new session has no file until its first write.
-    pub(crate) fn session_journal(
+    pub fn session_journal(
         &self,
         session: &SharedSession,
         extension: &'static str,

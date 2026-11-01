@@ -1,9 +1,9 @@
 //! The `[projects]` table: per-directory trust records.
 //!
-//! `otto trust` (`crates/otto/src/cli/trust.rs`) is the only writer, appending
+//! `otto trust` (`crates/otto-cli/src/trust.rs`) is the only writer, appending
 //! a `[projects."<canonical dir>"]` table as text rather than through this
 //! schema, so existing comments survive. `otto serve`'s admission
-//! (`crates/otto/src/cli/serve.rs`) is the only reader.
+//! (`crates/otto-cli/src/serve.rs`) is the only reader.
 
 use serde::{Deserialize, Serialize};
 

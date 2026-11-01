@@ -1,7 +1,7 @@
 //! The line-oriented frontend.
 //!
 //! `/sandbox reload` goes through [`Controller::reload_sandbox`], which the
-//! composition root in [`super::run`] wires to the process sandbox switch, so
+//! composition root in `otto_cli::run` wires to the process sandbox switch, so
 //! it re-points bash without restarting.
 //!
 //! Input: one blocking reader task feeds a bounded channel, so a parent

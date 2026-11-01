@@ -1,0 +1,37 @@
+[package]
+name = "otto-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+otto.workspace = true
+otto-core.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+# Native-only: the routes timestamp task and wake records from the wall clock.
+chrono = { workspace = true, features = ["clock", "std"] }
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time", "sync", "fs", "net"] }
+tokio-util.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+# `otto::faults` and `otto::fixtures` for the route and listener tests.
+otto = { workspace = true, features = ["fault-injection", "test-support"] }
+# `tokio::time::pause` drives the approval timeout test without real waits.
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+tower.workspace = true
+# Self-signed certificates for the TLS listener tests; a key must not live in
+# a fixture.
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }

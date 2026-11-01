@@ -1,8 +1,8 @@
 //! Sub-agent registry, inbox, admission cap and MCP servers survive a runner swap.
 
 use super::*;
+use crate::fixtures::subagent_doubles::{FakeProvider, Hook, assistant_text, match_any};
 use crate::runtime::builder::{TEST_PROVIDERS, TEST_SCRIPTED_SUBAGENT_HOMES};
-use crate::subagent::doubles_tests::{FakeProvider, Hook, assistant_text, match_any};
 use crate::subagent::runner::StartRequest;
 use crate::subagent::tasks::TaskStatus;
 

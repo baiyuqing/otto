@@ -62,11 +62,7 @@ impl ReplyCollector {
 
 /// Runs `text` as a user turn on `controller`'s current session and maps the
 /// end of the turn to an outcome.
-pub(crate) async fn run(
-    controller: &Controller,
-    text: &str,
-    cancel: &CancellationToken,
-) -> RunOutcome {
+pub async fn run(controller: &Controller, text: &str, cancel: &CancellationToken) -> RunOutcome {
     if let Ok(runner) = controller.runner() {
         runner.set_scheduled_authorization_run("unbound");
     }
@@ -100,7 +96,7 @@ pub(crate) async fn run(
 
 /// Installs creation-time original user evidence, bound to the immutable item.
 /// Generated scheduled prompt text itself supplies no authorization.
-pub(crate) async fn inherit_authority(
+pub async fn inherit_authority(
     controller: &Controller,
     item: &crate::schedule::Item,
 ) -> Result<(), String> {

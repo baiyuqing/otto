@@ -15,7 +15,10 @@ guide rather than being copied into those instruction files.
 | Path | Owns | Start here |
 | --- | --- | --- |
 | `crates/otto-core/` | WebAssembly-safe shared domain logic and protocol codecs | `src/lib.rs` |
-| `crates/otto/` | Native Otto executable, runtime, persistence, integrations, and terminal/server frontends | `src/main.rs`, then `src/cli/` |
+| `crates/otto/` | Native runtime library: services, persistence, integrations, tools, sandbox, `embed` and the terminal UI | `src/lib.rs`, `src/runtime/`, `src/app/` |
+| `crates/otto-server/` | `otto serve` HTTP frontend: routes, listeners, TLS, workspaces, tasks, timers, workflows | `src/lib.rs` (`otto_server::Server`) |
+| `crates/otto-acp/` | ACP stdio and attach frontends | `src/lib.rs` |
+| `crates/otto-cli/` | The `otto` executable: command parsing, process lifecycle and composition root | `src/main.rs`, then `otto_cli::run` in `src/run.rs` |
 | `chat-connector/` | Independent Go Telegram and Feishu connector that communicates with Otto through ACP | `chat-connector/cmd/otto-connect/` and `chat-connector/internal/` |
 | `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
@@ -24,16 +27,23 @@ guide rather than being copied into those instruction files.
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-tcp.sh` supervises the ACP TCP pair (`otto serve --acp-listen` plus `otto-connect`) | `Makefile` |
 
-The root Cargo workspace contains `otto-core` and `otto` only.
+The root Cargo workspace contains `otto-core`, `otto`, `otto-server`,
+`otto-acp` and `otto-cli`.
 `chat-connector/` has its own build definition and is not a root workspace crate.
 
 ## Rust layers
 
 ```text
-CLI / TUI / HTTP server / ACP
+crates/otto-cli: `otto` binary, composition root
               │
               ▼
-       crates/otto: app and native services
+crates/otto-acp: ACP stdio and attach frontends
+              │
+              ▼
+crates/otto-server: HTTP serve frontend
+              │
+              ▼
+crates/otto: app, native services, TUI, embed
               │
               ▼
  crates/otto-core: I/O-free contracts, formats and agent loop
@@ -71,7 +81,7 @@ modules are:
 - `view_tree`: the summary-tree context view: log messages from session
   history, tree nodes and build scheduling, due-ordered view selection, zoom
   lookup, compressor prompts and the cache cost model. Its only native caller
-  today is `otto eval view-tree` (`crates/otto/src/cli/eval_command/`).
+  today is `otto eval view-tree` (`crates/otto-cli/src/eval_command/`).
 - `agent`: provider/tool turn orchestration and emitted events.
 - `mailbox`: WASM-safe FIFO notification contract, delivery acknowledgement semantics, and the default in-memory adapter. Native runtime code composes persistence or external implementations.
 - `memory`: service-neutral capabilities, scoped requests, context projections,
@@ -82,7 +92,7 @@ modules are:
 
 `config/layered.rs` owns presence-preserving merge, field authority,
 provenance and managed constraints. Native `config/layered.rs` discovers
-workspace sources and content-bound executable trust; `cli/config_command.rs`
+workspace sources and content-bound executable trust; `otto-cli/src/config_command.rs`
 composes offline inspection/scoped editing, and `tool/project_guard.rs`
 rechecks authorization at tool effects and requests cancellation on revocation.
 
@@ -100,18 +110,18 @@ contract or format and `otto` holds the implementation:
 
 Keep provider transport and credential behavior out of this crate.
 
-### `crates/otto`: native application
+### `crates/otto`: native runtime library
 
-`src/main.rs` starts the executable. `src/cli/` parses commands, runs the
-REPL and owns process lifecycle; it is the primary starting point for a new
-command or startup behavior. `src/runtime/` assembles one runnable agent from
+`crates/otto` is a library. Its dependency chain is one-way:
+`otto-core` <- `otto` <- `otto-server` <- `otto-acp` <- `otto-cli`.
+`src/runtime/` assembles one runnable agent from
 resolved configuration (`builder.rs` holds `Builder` and `Runner`,
 `wiring.rs` connects memory, MCP and sub-agents, `prompt.rs` builds the system
 prompt, `session_resources.rs` holds what a session owns across runner
 replacement: sub-agent registry, inbox, timers, bash output logs, MCP servers
 and workflow delivery worker). A `Runner` borrows these resources and never
 stops them; `SharedSession::close` and `close_resources` do. `runtime/startup.rs` holds the startup composition, from environment
-capture to the memory service, as phase functions; `cli::run`, `otto serve`
+capture to the memory service, as phase functions; `otto_cli::run`, `otto serve`
 (`load_workspace`) and `embed` all call it. `runtime/workspace_admission.rs`
 admits a workspace path for `otto serve`, delivery and `embed`. `src/app/`
 exposes the shared application lifecycle used by frontends. `src/embed.rs` is
@@ -119,16 +129,66 @@ the public in-process API (`otto::embed::Otto`) that builds the `otto acp`
 runtime for another Rust program; see the
 [embedding API contract](development/architecture.md#embedding-api).
 
-The frontends (`cli/`, `tui/`, `acp/`, `server/` and `client/`) build on every
-other module, and no other module may import a frontend:
+`src/cli/` keeps only `login`, `repl` and `repl_commands`, because `tui/`
+uses them; `cli/mod.rs` also re-exports `app` as `controller` and
+`runtime::sandbox_switch`. The `tui/` and `client/` frontends stay in `otto`.
+Items that `otto-server`, `otto-acp` and `otto-cli` call are `pub` in `otto`
+(for example `runtime::startup`, `app::{management, task_control,
+turn_queue, scheduled, notices}`, `fsops`, `hex`); widening visibility is the
+mechanism, and new frontend code goes into the frontend crates, not into `otto`.
+
+`otto` does not depend on the frontend crates, and within `otto` the runtime
+modules do not import the frontend modules `cli/`, `tui/` and `client/`:
 `crates/otto/tests/runtime_boundary.rs` fails when one does.
 `crates/otto/tests/storage_boundary.rs` checks storage ownership, dependency
 direction, and that no `otto` source re-exports an `otto-core` item. `crates/otto/tests/faults_boundary.rs` keeps `faults` out of
 production code. See [package boundaries](development/architecture.md#package-boundaries).
 
+Integration tests that need no frontend stay in `crates/otto/tests/`:
+`definition_parity`, `fault_*`, `faults_boundary`, `herdr_report`,
+`mcp_stdio`, `memory_plugin_source`, `memory_review_boundary`,
+`memory_service_conformance`, `runtime_boundary`, `session_conformance`,
+`smart_approval`, `sqlite_storage`, `storage_boundary`,
+`tool_argument_contract`, `tui_boundary`, and `testdata/`.
+
+### `crates/otto-server`: HTTP serve frontend
+
+`src/lib.rs` defines `otto_server::Server` and its `Options`; the modules
+beside it hold routes (`session_routes.rs`, `turn_routes.rs`,
+`config_routes.rs`), `listen.rs`, `tls.rs`, `workspaces.rs`, `tasks.rs`,
+`timers.rs`, `workflows.rs`, `schedule.rs` and middleware. It depends on `otto`
+and `otto-core`. HTTP/SSE DTOs stay here, separate from internal types.
+Its tests are in the crate (`src/tests/`).
+
+### `crates/otto-acp`: ACP frontends
+
+`src/lib.rs` implements ACP over stdio and TCP (`serve`); `attach.rs` is the
+attach client mode, `dispatcher.rs` and `command.rs` route requests, and
+`schedule/` handles `_otto/schedule/deliver`. It depends on `otto`,
+`otto-server` and `otto-core`. Its tests are in the crate (`channel_tests.rs`).
+
+### `crates/otto-cli`: the `otto` executable
+
+`src/main.rs` starts the process and calls `otto_cli::run` (`src/run.rs`),
+the composition root. Command modules: `acp`, `config_command`,
+`eval_command/`, `flags/`, `mcp/`, `memory_command/`, `panic_cleanup`,
+`plugin`, `run/`, `sandbox_setup`, `serve/`, `setup`, `storage`,
+`storage_transfer/`, `terminate`, `trust`, `workflow`, `workspace_command`.
+The crate depends on all four other crates and owns the `[[bin]] name = "otto"`
+target. Feature `storage-conformance` (default) gates
+`tests/external_storage_backend.rs`.
+
+Its integration tests in `crates/otto-cli/tests/` drive the built binary or
+`otto_cli::run`: `acp_attach`, `acp_stdio`, `binary_e2e`,
+`binary_e2e_unconfined`, `serve_listen`, `sigkill`, `sigterm`,
+`sqlite_migration`, `tui_attach_pty`, `tui_pty`, `version`,
+`external_storage_backend`, `embed_parity`, `plugin_cli`, with support code in
+`binary_harness/` and `external_storage/`. Run one with
+`cargo test -p otto-cli --test <name>`.
+
 The other modules group native responsibilities:
 
-- **User entry points:** `cli/`, `tui/`, `server/`, and `acp/`.
+- **User entry points in `otto`:** `tui/`, `cli/{login,repl,repl_commands}` and `embed`; the binary, HTTP server and ACP frontends are the other three crates.
 - **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
@@ -142,7 +202,7 @@ The other modules group native responsibilities:
   `plugin/hooks/claude_binding.rs` runs those hooks through the shared
   sandboxed process runner; `otto-core/src/agent/hooks.rs` is the neutral
   lifecycle port.
-  `cli/plugin.rs` exposes management commands; shared runner construction loads
+  `otto-cli/src/plugin.rs` exposes management commands; shared runner construction loads
   packages for every native frontend.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
   `sandbox/read_denylist.rs` owns the built-in read denylist constants and
@@ -156,7 +216,7 @@ The other modules group native responsibilities:
   `otto-core/src/agent/mod.rs` settles batches and yields safely, while
   `agent/progress.rs` owns the bounded per-turn edit-batching advisory.
 - **Runtime assembly:** `runtime/`, and `metrics.rs` (the HTTP and turn
-  metrics `server/` exposes and the schedule worker records).
+  metrics `otto-server` exposes and the schedule worker records).
 - **Test-only fault injection:** `faults/` (compiled under `cfg(test)` or the
   `fault-injection` feature; `faults/http.rs` is the scripted loopback HTTP
   server; see [Fault injection](development/testing.md#fault-injection)).
@@ -166,10 +226,16 @@ The other modules group native responsibilities:
   `fixtures/scripted_provider.rs`, the scripted OpenAI-compatible origin
   server on `faults/http.rs` that the binary, `embed` and controller tests
   talk to. Dependent crates enable `test-support` through a dev-dependency.
+  It also holds `embed_harness`, `plugin_package` and `subagent_doubles`, and
+  exposes test-only constructors the dependent crates use (`Runner::scripted`,
+  `Controller::push_notice`, `tool::testutil`, `memory::advice::testing`,
+  `memory::files::testsupport`, in-memory SQLite store constructors,
+  `workflow::Catalog::from_definitions`). Such items are public and gated
+  `#[cfg(any(test, feature = "test-support"))]`, not `#[cfg(test)]`.
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
   `urlprivacy.rs`, `tls_provider.rs` (installs `ring` as the process-wide
   rustls crypto provider; every reqwest client is built through its
-  `http_client_builder()` or `http_client()`, and `server/tls.rs` takes its
+  `http_client_builder()` or `http_client()`, and `otto-server/src/tls.rs` takes its
   provider from `install()`), and `log.rs` (the process logger: one instance
   built at the composition root and passed to its consumers). `log/diagnostics.rs` owns the
   private rotating execution files; `otto-core/src/diagnostics.rs` supplies the
@@ -198,11 +264,11 @@ audits); approval envelopes also belong to their domains. Backend packages retai
 The default registry uses the local SQLite driver for SQL-backed
 state and the confined POSIX file driver for sessions. The repository registry
 has a public extension entry point in `runtime/storage/backend.rs` and
-`cli::run::run_with_backends`. Linked extensions implement `RepositoryFactory`;
+`otto_cli::run::run_with_backends`. Linked extensions implement `RepositoryFactory`;
 `config/storage.rs` in core supplies pure configuration. The shipped binary
 includes only its existing local backends. `storage/worker.rs` owns optional
 async adapter I/O, `storage/conformance.rs` exposes contract checks, and
-`tests/external_storage_backend.rs` is an independently compiled acceptance
+`crates/otto-cli/tests/external_storage_backend.rs` is an independently compiled acceptance
 crate using a different JSON repository. See the [storage contract](development/architecture.md#native-storage-contracts)
 for capability, migration, and compatibility boundaries.
 
@@ -236,7 +302,7 @@ guards these dependency directions.
 
 | If you are changing… | Start with… | Then check… |
 | --- | --- | --- |
-| A CLI command, flag, REPL command, or process lifecycle behavior | `crates/otto/src/cli/` | `app/` and the relevant frontend tests |
+| A CLI command, flag, REPL command, or process lifecycle behavior | `crates/otto-cli/src/` | `app/` and the relevant frontend tests |
 | Shared agent turn behavior, messages, tool schemas, or session encoding | `crates/otto-core/src/agent/`, `model.rs`, `tool.rs`, or `session/` | Native callers and WASM compatibility |
 | Provider HTTP behavior | `crates/otto/src/provider/` | The matching wire module in `otto-core` |
 | Shared approvals and model-initiated consent | `approval/`, `otto-core/src/approval.rs`, `tool/approval.rs` | Domain adapters, TUI, HTTP, ACP and chat connector |
@@ -246,19 +312,19 @@ guards these dependency directions.
 | Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | `runtime/builder/runner_entry.rs` (`web_tools`) |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Bash command parsing for approval rules, review facts and effect classification | `crates/otto/src/tool/shell.rs` | `tool/bash.rs`, `approval/policy.rs`, `otto-core/src/approval/rules.rs` |
-| Web API or browser behavior | `crates/otto/src/server/` or external otto-plus | `otto-core` for shared wire codecs |
-| ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `chat-connector/` for chat connector behavior |
-| Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | the `wake-replies` HTTP route, `client/`, `chat-connector/internal/bridge` |
-| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | turn origin in `app/approval.rs`, the worker spawn in `cli/run/process.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `chat-connector/internal/bridge`, external otto-plus |
+| Web API or browser behavior | `crates/otto-server/src/` or external otto-plus | `otto-core` for shared wire codecs |
+| ACP integrations | `crates/otto-acp/src/` | `client/` for attach mode; `chat-connector/` for chat connector behavior |
+| Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `crates/otto-acp/src/lib.rs` wake loop | the `wake-replies` HTTP route, `client/`, `chat-connector/internal/bridge` |
+| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | turn origin in `app/approval.rs`, the worker spawn in `otto-cli/src/run/process.rs` and `serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `chat-connector/internal/bridge`, external otto-plus |
 | Persistent memories, sessions, workflow runs, or token aggregates | The matching native state module | Its store and lifecycle tests |
-| Cross-workspace delivery tasks (target admission, approval, worktree setup, handoff) | `crates/otto/src/delivery.rs`, then `cli/serve/delivery.rs` (`DeliveryManager`, `DeliveryBroker`, `DeliveryToolFactory`) | [user manual](manual/servers-and-connectors.md#cross-workspace-deliveries), `runtime/workspace_admission.rs`, `ParentToolSlot` in `runtime/builder.rs`, the receipt/task ledger tests |
+| Cross-workspace delivery tasks (target admission, approval, worktree setup, handoff) | `crates/otto/src/delivery.rs`, then `crates/otto-cli/src/serve/delivery.rs` (`DeliveryManager`, `DeliveryBroker`, `DeliveryToolFactory`) | [user manual](manual/servers-and-connectors.md#cross-workspace-deliveries), `runtime/workspace_admission.rs`, `ParentToolSlot` in `runtime/builder.rs`, the receipt/task ledger tests |
 
 ## Dependency and documentation rules
 
 - Keep dependencies pointed toward shared contracts: frontends and native
   integrations depend on `otto-core`; `otto-core` does not depend on native
   services or browser UI code.
-- Keep HTTP/SSE DTOs in `crates/otto/src/server` separate from internal types;
+- Keep HTTP/SSE DTOs in `crates/otto-server/src` separate from internal types;
   share only the wire types that genuinely cross frontend boundaries.
 - Treat `docs/specs/` as design rationale unless a document says otherwise.
   Current behavior belongs in the README and user manual; implementation

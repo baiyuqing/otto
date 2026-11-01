@@ -15,8 +15,7 @@ use std::sync::Arc;
 
 use otto_core::config::resolve::{Overrides, Runtime};
 use otto_core::config::{
-    File, MemoryRuntime, SandboxSettings, resolve_agents, resolve_mcp, resolve_memory,
-    resolve_sandbox, resolve_skills,
+    File, MemoryRuntime, SandboxSettings, resolve_mcp, resolve_memory, resolve_sandbox,
 };
 use otto_core::session::RuntimeMetadata;
 use tokio_util::sync::CancellationToken;

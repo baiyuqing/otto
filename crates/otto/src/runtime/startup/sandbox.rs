@@ -24,59 +24,14 @@ pub(crate) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
     names.into_iter().collect()
 }
 
-/// Existing skill and agent roots become read paths so discovery can reach them
-/// from inside the sandbox. A root is only promoted when it is a real
-/// directory: `read_paths` are canonicalized into `(subpath <target>)` grants,
-/// so promoting a symlink would widen the sandbox to whatever the link points
-/// at, and the default roots include the workspace-relative `.otto/skills`,
-/// which anything that writes to the workspace controls.
+/// Resolves `[sandbox]` with the CLI driver override and checks the result
+/// against the managed policy.
 pub(crate) fn resolve_sandbox_settings(
     file: &File,
-    environment: &HashMap<String, String>,
-    workspace_path: &str,
     driver_override: Option<&str>,
 ) -> Result<SandboxSettings, String> {
-    let mut raw = file.sandbox.clone();
-    let agents =
-        resolve_agents(file, environment, workspace_path).map_err(|error| error.to_string())?;
-    let home = Path::new(environment.get("HOME").map(String::as_str).unwrap_or(""));
-    let workspace = Path::new(workspace_path);
-    let skill_roots = crate::config::layered::catalog_roots(
-        file,
-        home,
-        workspace,
-        &resolve_skills(file, environment, workspace_path).roots,
-        "skills",
-    )?;
-    let agent_roots =
-        crate::config::layered::catalog_roots(file, home, workspace, &agents.roots, "agents")?;
-    let plugin_roots = if file.plugins.enabled != Some(false) {
-        let mut discovery = file.clone();
-        discovery.mcp.enabled = Some(false);
-        let service = crate::plugin::Service::new(home);
-        crate::plugin::Snapshot::load(home, &discovery, environment)
-            .packages
-            .into_iter()
-            .map(|p| {
-                service
-                    .package_path(&p.digest)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let roots = skill_roots
-        .into_iter()
-        .chain(agent_roots)
-        .chain(plugin_roots);
-    for root in roots {
-        if std::fs::symlink_metadata(&root).is_ok_and(|info| info.is_dir()) {
-            raw.read_paths.push(root);
-        }
-    }
-    let settings = resolve_sandbox(&raw, driver_override).map_err(|error| error.to_string())?;
+    let settings =
+        resolve_sandbox(&file.sandbox, driver_override).map_err(|error| error.to_string())?;
     if let Some(policy) = &file.policy {
         policy.sandbox(&settings).map_err(|e| e.to_string())?;
     }
@@ -221,7 +176,6 @@ pub(crate) async fn compose_workspace_sandbox(
             config_path: config_path.to_path_buf(),
             explicit_config,
             driver_override: driver_override.map(str::to_string),
-            environment: builder.environment.clone(),
             api_key_env: api_key_env.to_string(),
             reopen: open_options,
             cancel: cancel.child_token(),

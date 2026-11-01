@@ -55,6 +55,90 @@ async fn sandbox_shows_the_current_state_without_reloading() {
 }
 
 #[tokio::test]
+async fn sandbox_lists_inert_read_paths_and_skipped_deny_paths() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let mut info = fixtures::seatbelt_info(SandboxNetwork::Allowed);
+    info.inert_read_paths = vec!["~/.otto".to_string()];
+    info.skipped_deny_paths = vec!["~/.config/gh".to_string()];
+    let (control, _) = fixtures::FakeSandbox::new(info.clone(), info, None);
+    let controller = controller(workspace.path(), sessions.path())
+        .await
+        .with_sandbox_control(control);
+
+    let (stdout, _, result) = session("/sandbox\n/exit\n", &controller).await;
+
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        stdout.contains(
+            "Sandbox: seatbelt · workspace-write · network allowed\n\
+Sandbox read_paths ~/.otto: not below any denied path; remove it from read_paths\n\
+Sandbox deny_read_paths ~/.config/gh: contains a writable root; not applied\n"
+        ),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_prints_no_path_lines_when_none_apply() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let (controller, _) = reloading_controller(workspace.path(), sessions.path(), None).await;
+
+    let (stdout, _, _) = session("/sandbox\n/exit\n", &controller).await;
+
+    assert!(!stdout.contains("Sandbox read_paths"), "{stdout}");
+    assert!(!stdout.contains("Sandbox deny_read_paths"), "{stdout}");
+}
+
+#[tokio::test]
+async fn sandbox_allow_refuses_a_path_the_denylist_does_not_cover() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let home = tempfile::tempdir().expect("home");
+    let denied = home.path().join("secrets");
+    let readable = workspace.path().join("cache");
+    std::fs::create_dir(&denied).expect("denied");
+    std::fs::create_dir(&readable).expect("readable");
+    let denylist = crate::sandbox::read_denylist::ReadDenylist::new(
+        home.path(),
+        vec![denied.to_string_lossy().into_owned()],
+    );
+    let (control, calls) = fixtures::FakeSandbox::with_read_denylist(
+        fixtures::seatbelt_info(SandboxNetwork::Allowed),
+        denylist,
+    );
+    let controller = controller(workspace.path(), sessions.path())
+        .await
+        .with_sandbox_control(control);
+
+    let (_, _, result) = session(
+        &format!("/sandbox allow {}\n", readable.display()),
+        &controller,
+    )
+    .await;
+
+    let error = result.expect_err("already readable");
+    assert_eq!(
+        error.to_string(),
+        "path is already readable; no read_paths entry is needed"
+    );
+    assert_eq!(*calls.lock().expect("calls"), 0);
+    assert!(!workspace.path().join("config.toml").exists());
+
+    let (_, stderr, result) = session(
+        &format!("/sandbox allow {}\n/exit\n", denied.display()),
+        &controller,
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(stderr, "");
+    assert_eq!(*calls.lock().expect("calls"), 1);
+    let written = std::fs::read_to_string(workspace.path().join("config.toml")).expect("config");
+    assert!(written.contains("secrets"), "{written}");
+}
+
+#[tokio::test]
 async fn sandbox_reload_reports_the_new_state() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");

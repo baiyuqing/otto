@@ -10,6 +10,12 @@ pub struct SandboxWire {
     pub network: String,
     pub bash_available: bool,
     pub summary: String,
+    /// Configured `read_paths` entries below no denied path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inert_read_paths: Vec<String>,
+    /// Built-in denylist entries that contain a writable root and are not applied.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_deny_paths: Vec<String>,
 }
 
 pub fn sandbox_wire(info: &SandboxInfo) -> SandboxWire {
@@ -18,6 +24,8 @@ pub fn sandbox_wire(info: &SandboxInfo) -> SandboxWire {
         network: info.network.as_str().to_string(),
         bash_available: info.bash_available,
         summary: info.summary().to_string(),
+        inert_read_paths: info.inert_read_paths.clone(),
+        skipped_deny_paths: info.skipped_deny_paths.clone(),
     }
 }
 

@@ -3,36 +3,21 @@
 use super::*;
 
 #[tokio::test]
-async fn the_private_home_note_is_advertised_only_when_requested() {
-    let note = "HOME and ~ are a private sandbox directory, not the user's home directory; use absolute paths for the user's files.";
-    for (plain, private) in [
-        (bash_definition(false), bash_definition(true)),
-        (
-            bash_definition_with_approvals(false),
-            bash_definition_with_approvals(true),
-        ),
-    ] {
-        assert!(!plain.description.contains("HOME"));
+async fn the_definitions_describe_the_read_denylist_and_no_private_home() {
+    let read_note = "Sandboxed commands read every path except the sandbox read denylist (credential and personal-data locations).";
+    let read_path_description = "Request user approval to permanently allow reading one absolute existing path that the sandbox read denylist covers, before running this command inside the sandbox";
+    for definition in [bash_definition(), bash_definition_with_approvals()] {
         assert!(
-            private.description.ends_with(note),
+            definition.description.ends_with(read_note),
             "{}",
-            private.description
+            definition.description
         );
-        assert!(
-            private
-                .description
-                .starts_with(&plain.description.trim_end_matches('.').to_owned())
-        );
+        assert!(!definition.description.contains("HOME"));
+        assert!(!definition.description.contains("private sandbox directory"));
     }
-    let (_dir, workspace) = temp_workspace();
-    let tool = bash(&workspace, Arc::new(FakeExecutor::default()), &[], 1, &[]);
-    assert!(!tool.definition().description.contains(note));
-    assert!(
-        tool.with_private_home()
-            .definition()
-            .description
-            .ends_with(note)
-    );
+    let schema = serde_json::to_value(bash_definition_with_approvals()).unwrap();
+    let schema = schema.to_string();
+    assert!(schema.contains(read_path_description), "{schema}");
 }
 
 #[tokio::test]
@@ -41,7 +26,7 @@ async fn the_definition_is_the_shared_schema() {
     let tool = bash(&workspace, Arc::new(FakeExecutor::default()), &[], 1, &[]);
     assert_eq!(
         serde_json::to_value(tool.definition()).unwrap(),
-        serde_json::to_value(bash_definition(false)).unwrap()
+        serde_json::to_value(bash_definition()).unwrap()
     );
 }
 
@@ -243,7 +228,9 @@ async fn denials_render_between_stderr_and_the_summary() {
     let result = run(&tool, "ignored").await;
     assert_eq!(
         result.content,
-        "stdout:\n\nstderr:\n\nsandbox_denied:\nfile-read-data /x/0\nfile-read-data /x/1\nexit_code: 1"
+        "stdout:\n\nstderr:\n\nsandbox_denied:\nfile-read-data /x/0\nfile-read-data /x/1\n\
+hint: a denied read is on the sandbox read denylist; request a persistent exception with sandbox_read_path, or an elevated run with sandbox_permissions\n\
+exit_code: 1"
     );
 }
 
@@ -256,9 +243,37 @@ async fn omitted_denials_are_counted() {
     assert!(
         result
             .content
-            .contains("file-read-data /x/0\n[3 more omitted]\nexit_code: 1"),
+            .contains("file-read-data /x/0\n[3 more omitted]\nhint: a denied read is on the sandbox read denylist"),
         "{result:?}"
     );
+}
+
+#[tokio::test]
+async fn a_denied_write_renders_no_read_hint() {
+    let (_dir, workspace) = temp_workspace();
+    let status = ExitStatus {
+        code: 1,
+        denials: vec![crate::sandbox::Denial {
+            operation: "file-write-create".to_owned(),
+            target: "/x/out".to_owned(),
+        }],
+        ..Default::default()
+    };
+    let tool = bash(
+        &workspace,
+        Arc::new(FakeExecutor::default().with_status(status)),
+        &[],
+        1024,
+        &[],
+    );
+    let result = run(&tool, "ignored").await;
+    assert!(
+        result
+            .content
+            .contains("file-write-create /x/out\nexit_code: 1"),
+        "{result:?}"
+    );
+    assert!(!result.content.contains("hint:"), "{result:?}");
 }
 
 #[tokio::test]

@@ -396,7 +396,7 @@ fn recovery_write_lease_dir_by_hand(session_path: &Path, host: &str, pid: u32) {
 /// workspace/session root, with sub-agents unconditionally enabled.
 fn recovery_test_builder(root: &Path) -> (Builder, Runtime, ProviderClient, CatalogWiring) {
     let session_root = root.join("sessions");
-    let builder = crate::cli::fixture_tests::builder(root, &session_root);
+    let builder = crate::fixtures::builder(root, &session_root);
     let runtime = Runtime {
         provider_type: "openai-compatible".to_string(),
         base_url: "http://127.0.0.1:0".to_string(),

@@ -126,7 +126,7 @@ fn resuming_another_session_recalls_its_prompts() {
         OperationReceipt {
             message: String::new(),
             info,
-            history: Some(vec![crate::cli::fixture_tests::user("resumed prompt")]),
+            history: Some(vec![crate::fixtures::user("resumed prompt")]),
             prompt: None,
             draft: None,
         },

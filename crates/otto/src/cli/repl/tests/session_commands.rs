@@ -57,7 +57,7 @@ async fn approve_fails_closed_when_temporary_elevation_is_unavailable() {
 async fn skill_commands_list_and_show_discovered_skills() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    fixture_tests::write_skill(
+    fixtures::write_skill(
         workspace.path(),
         "rust-helper",
         "Rust guidance",

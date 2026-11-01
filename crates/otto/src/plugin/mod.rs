@@ -515,7 +515,7 @@ fn permissions_tree(path: &Path, writable: bool) -> Result<(), String> {
 fn freeze(path: &Path) -> Result<(), String> {
     permissions_tree(path, false)
 }
-fn thaw(path: &Path) -> Result<(), String> {
+pub fn thaw(path: &Path) -> Result<(), String> {
     permissions_tree(path, true)
 }
 

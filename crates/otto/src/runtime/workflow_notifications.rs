@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-pub(crate) fn updates(mailbox: &dyn Mailbox) -> tokio::sync::watch::Receiver<u64> {
+pub fn updates(mailbox: &dyn Mailbox) -> tokio::sync::watch::Receiver<u64> {
     let (sender, receiver) = tokio::sync::watch::channel(0_u64);
     mailbox.on_change(Box::new(move || {
         sender.send_modify(|version| *version = version.wrapping_add(1))

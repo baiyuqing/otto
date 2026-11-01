@@ -1,0 +1,51 @@
+[package]
+name = "otto-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["storage-conformance"]
+# Gates the external storage backend conformance test; forwards to `otto`.
+storage-conformance = ["otto/storage-conformance"]
+
+# The shipped binary keeps its name; the package name tells it apart from the
+# `otto` library crate it composes.
+[[bin]]
+name = "otto"
+path = "src/main.rs"
+
+[dependencies]
+otto.workspace = true
+otto-core.workspace = true
+otto-server.workspace = true
+otto-acp.workspace = true
+async-trait.workspace = true
+chrono = { workspace = true, features = ["clock", "std"] }
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal", "net"] }
+tokio-util.workspace = true
+# Save() serializes, so the config commands need "display" on top of
+# otto-core's parse-only feature set.
+toml = { workspace = true, features = ["display"] }
+
+[dev-dependencies]
+# `otto::faults` and `otto::fixtures` for the command and binary tests.
+otto = { workspace = true, features = ["fault-injection", "test-support"] }
+# `pty` for the TUI's PTY smoke test (tests/tui_pty.rs).
+nix = { workspace = true, features = ["term"] }
+# `start_paused` drives the bash timeout deterministically without real waits.
+tokio = { workspace = true, features = ["test-util", "net"] }
+reqwest.workspace = true
+# The PTY harness measures rendered columns by display width.
+unicode-width = "=0.2.2"
+# Self-signed certificates for the `otto serve --listen` TLS tests.
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }

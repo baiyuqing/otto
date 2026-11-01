@@ -15,7 +15,10 @@ the owning code instead of restating it.
 | Work | Instructions and entry point |
 | --- | --- |
 | I/O-free contracts, formats and agent loop | [otto-core rules](crates/otto-core/AGENTS.md), `crates/otto-core/src/` |
-| Native runtime, tools and frontends | [otto rules](crates/otto/AGENTS.md), `crates/otto/src/cli/` |
+| Native runtime, tools, TUI and `embed` | [otto rules](crates/otto/AGENTS.md), `crates/otto/src/runtime/startup.rs` |
+| HTTP serve frontend | [otto-server rules](crates/otto-server/AGENTS.md), `crates/otto-server/src/lib.rs` (`Server`) |
+| ACP stdio and attach frontends | [otto-acp rules](crates/otto-acp/AGENTS.md), `crates/otto-acp/src/lib.rs` |
+| `otto` binary, commands, composition root | [otto-cli rules](crates/otto-cli/AGENTS.md), `crates/otto-cli/src/run.rs` (`otto_cli::run`) |
 | Documentation | [documentation rules](docs/AGENTS.md), `docs/user-manual.md` |
 | Browser frontend | [otto-plus](https://github.com/baiyuqing/otto-plus); separate client of Otto HTTP APIs |
 | Chat connector | `chat-connector/`; independent Go ACP client; [guide](docs/manual/servers-and-connectors.md#chat-connector) |

@@ -52,7 +52,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const DISCONNECTED: &str = "disconnected from otto serve";
 
 /// Which session `otto --attach` opens at startup.
-pub(crate) enum Start {
+pub enum Start {
     /// A new session in the working directory's workspace.
     New,
     /// The newest session of that workspace, or a new one when it has none.
@@ -187,7 +187,7 @@ async fn connect(socket: &Path, workspace: &str, start: &Start) -> Result<Remote
 }
 
 /// Runs the attached terminal UI to completion and returns the exit status.
-pub(crate) async fn run(
+pub async fn run(
     socket: &Path,
     workspace: &str,
     start: Start,

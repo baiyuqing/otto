@@ -7,7 +7,7 @@ use super::*;
 ///
 /// Reuses the startup sequence's pieces rather than duplicating them:
 /// `Workspace::new` and `resolve_mcp` resolve against `canonical_path`
-/// instead of the ones `cli::run` resolved for the startup workspace, then
+/// instead of the ones `otto_cli::run` resolved for the startup workspace, then
 /// `compose_workspace_sandbox` opens this workspace's own sandbox, elevated
 /// bash-approval executor, and `/sandbox reload` state the same way startup
 /// does for its own workspace — always elevating (`elevate: true`) since
@@ -17,7 +17,7 @@ use super::*;
 /// stays the one already on `shared`; only this workspace's `workspace_scope`
 /// is computed. Returns the reloader alongside the `Builder` so
 /// `serve.rs`'s `WorkspaceHost` can wire its own `/sandbox reload`.
-pub(crate) async fn load_workspace(
+pub async fn load_workspace(
     shared: Arc<Shared>,
     canonical_path: &Path,
     disabled: &Disabled,
@@ -99,23 +99,23 @@ pub(crate) async fn load_workspace(
 /// Components the embedding API switched off. Each disabled state is one the
 /// CLI already reaches through a config key, a flag or a failed store open.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Disabled {
-    pub(crate) bash: bool,
-    pub(crate) mcp: bool,
-    pub(crate) memory: bool,
-    pub(crate) skills: bool,
-    pub(crate) plugins: bool,
-    pub(crate) subagents: bool,
-    pub(crate) schedule: bool,
-    pub(crate) session_persistence: bool,
-    pub(crate) usage: bool,
-    pub(crate) task_history: bool,
+pub struct Disabled {
+    pub bash: bool,
+    pub mcp: bool,
+    pub memory: bool,
+    pub skills: bool,
+    pub plugins: bool,
+    pub subagents: bool,
+    pub schedule: bool,
+    pub session_persistence: bool,
+    pub usage: bool,
+    pub task_history: bool,
 }
 
 impl Disabled {
     /// Sets `[mcp]`, `[memory]`, `[skills]`, `[plugins]`, `[agents]` and
     /// `enabled = false` in memory for each disabled one.
-    pub(crate) fn apply(&self, file: &mut File) {
+    pub fn apply(&self, file: &mut File) {
         if self.mcp {
             file.mcp.enabled = Some(false);
         }
@@ -138,16 +138,16 @@ impl Disabled {
 
 /// The process environment snapshot, the boundary that exists before a
 /// profile is resolved, the home directory and the layered configuration.
-pub(crate) struct Loaded {
-    pub(crate) boundary: StartupBoundary,
-    pub(crate) home: String,
-    pub(crate) config_path: String,
-    pub(crate) config: File,
+pub struct Loaded {
+    pub boundary: StartupBoundary,
+    pub home: String,
+    pub config_path: String,
+    pub config: File,
 }
 
 /// Process snapshot, boundary, home and layered config. `Err` is the exact
 /// text the CLI passes to `fail`.
-pub(crate) fn load(
+pub fn load(
     host_entries: &[Vec<u8>],
     lookup: &EnvironmentLookup,
     config_path: &str,
@@ -181,7 +181,7 @@ pub(crate) fn load(
 
 /// Opens the storage backend the configuration selects. The error is already
 /// redacted by the boundary.
-pub(crate) async fn open_storage(
+pub async fn open_storage(
     loaded: &Loaded,
     lookup: &EnvironmentLookup,
     backends: &crate::runtime::storage::BackendRegistry,
@@ -200,15 +200,15 @@ pub(crate) async fn open_storage(
 }
 
 /// The configuration environment and the captured ChatGPT credentials.
-pub(crate) struct Configured {
-    pub(crate) environment: HashMap<String, String>,
-    pub(crate) auth: CapturedAuth,
+pub struct Configured {
+    pub environment: HashMap<String, String>,
+    pub auth: CapturedAuth,
 }
 
 /// Prints the configuration diagnostics to `stderr`, builds the configuration
 /// environment, completes the redaction boundary and captures the ChatGPT
 /// credentials. Infallible.
-pub(crate) fn configure(
+pub fn configure(
     loaded: &mut Loaded,
     host_entries: &[Vec<u8>],
     lookup: &EnvironmentLookup,
@@ -252,7 +252,7 @@ pub(crate) fn configure(
 }
 
 /// The canonical workspace directory. The error is already redacted.
-pub(crate) fn canonical_workspace(cwd: &str, boundary: &StartupBoundary) -> Result<String, String> {
+pub fn canonical_workspace(cwd: &str, boundary: &StartupBoundary) -> Result<String, String> {
     match canonical_directory(Path::new(cwd)) {
         Ok(path) => Ok(path.to_string_lossy().into_owned()),
         Err(error) => Err(boundary.redact(&format!("resolve cwd: {error}"))),
@@ -260,15 +260,15 @@ pub(crate) fn canonical_workspace(cwd: &str, boundary: &StartupBoundary) -> Resu
 }
 
 /// The workspace initialized on disk and the session root.
-pub(crate) struct PreparedWorkspace {
-    pub(crate) memory_config: MemoryRuntime,
-    pub(crate) workspace: Arc<Workspace>,
-    pub(crate) session_root: PathBuf,
+pub struct PreparedWorkspace {
+    pub memory_config: MemoryRuntime,
+    pub workspace: Arc<Workspace>,
+    pub session_root: PathBuf,
 }
 
 /// Resolves the memory configuration, initializes the workspace directory and
 /// the session root. Errors are already redacted.
-pub(crate) fn prepare_workspace(
+pub fn prepare_workspace(
     loaded: &Loaded,
     environment: &HashMap<String, String>,
     storage: &crate::runtime::storage::Storage,

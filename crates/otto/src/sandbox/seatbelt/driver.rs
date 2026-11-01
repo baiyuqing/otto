@@ -467,10 +467,10 @@ const WRITE_PROBE_SCRIPT: &str = concat!(
     r#"close($fh) or exit 70; }"#,
 );
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// The availability probe: a nested or Linux host has `sandbox-exec` absent
 /// or refusing the most permissive profile there is.
-pub(crate) fn unavailable_reason() -> Option<String> {
+pub fn unavailable_reason() -> Option<String> {
     if !std::path::Path::new(SANDBOX_EXEC_PATH).exists() {
         return Some(format!("{SANDBOX_EXEC_PATH} is absent"));
     }

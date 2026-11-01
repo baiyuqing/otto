@@ -51,7 +51,7 @@ pub(crate) struct Followup {
 /// ([`TaskControl::set_followup_journal`]) they also survive process loss for
 /// that turn's automatic resume.
 #[derive(Default)]
-pub(crate) struct TaskControl {
+pub struct TaskControl {
     steering: Arc<Steering>,
     state: Mutex<State>,
     journal: OnceLock<Arc<dyn Mailbox>>,
@@ -93,7 +93,7 @@ impl TaskControl {
     }
 
     /// Installs the durable turn-queue journal. A later call is ignored.
-    pub(crate) fn set_turn_queue_journal(&self, journal: Arc<dyn Mailbox>) {
+    pub fn set_turn_queue_journal(&self, journal: Arc<dyn Mailbox>) {
         let _ = self
             .turn_queue
             .set(Arc::new(super::turn_queue::TurnQueue::new(journal)));
@@ -491,12 +491,12 @@ fn submit_error(error: SubmitError) -> String {
 /// The error text of guidance whose durable copy could not be saved. The
 /// guidance was not accepted; the HTTP API answers `503
 /// input_not_persisted`.
-pub(crate) const INPUT_NOT_PERSISTED: &str = "the input could not be saved and was not accepted";
+pub const INPUT_NOT_PERSISTED: &str = "the input could not be saved and was not accepted";
 
 /// The error text of an input whose `input_id` the session transcript
 /// already holds: a client retry after the input was delivered. The HTTP API
 /// answers `409 duplicate_input`.
-pub(crate) const DUPLICATE_INPUT: &str = "an input with this input_id was already delivered";
+pub const DUPLICATE_INPUT: &str = "an input with this input_id was already delivered";
 
 #[derive(Default)]
 pub(crate) struct ControlRoute(Mutex<Option<Route>>);

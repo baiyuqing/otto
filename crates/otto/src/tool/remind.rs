@@ -441,14 +441,10 @@ impl Reminders {
         }
     }
 
-    /// Arms a new timer and records it. `pub(crate)` so lifecycle tests can
-    /// put one in flight without going through the tool.
-    #[cfg(test)]
-    pub(crate) fn schedule(
-        &self,
-        delay: Duration,
-        message: String,
-    ) -> Result<StoredReminder, String> {
+    /// Arms a new timer and records it, so lifecycle tests can put one in
+    /// flight without going through the tool.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn schedule(&self, delay: Duration, message: String) -> Result<StoredReminder, String> {
         self.schedule_typed(delay, message)
             .map_err(|error| error.to_string())
     }

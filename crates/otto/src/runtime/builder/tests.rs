@@ -185,7 +185,7 @@ impl ParentToolFactory for CountingParentToolFactory {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.contexts.lock().unwrap().push(context.clone());
         Ok(vec![
-            crate::subagent::doubles_tests::StubTool::new(
+            crate::fixtures::subagent_doubles::StubTool::new(
                 "parent_factory_tool",
                 otto_core::tool::ToolResult::default(),
             )

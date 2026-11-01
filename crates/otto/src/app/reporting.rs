@@ -4,7 +4,7 @@ use super::*;
 
 impl Controller {
     /// Starts reporting this session's lifecycle to the Herdr pane that
-    /// started the process. `cli::run` calls this for the frontends that are
+    /// started the process. `otto_cli::run` calls this for the frontends that are
     /// the pane's agent; without it nothing is reported.
     ///
     /// The pane is announced here, not at the first turn: a Herdr pane is

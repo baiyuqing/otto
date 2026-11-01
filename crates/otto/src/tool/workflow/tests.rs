@@ -1,5 +1,5 @@
 use super::*;
-use crate::subagent::doubles_tests::{
+use crate::fixtures::subagent_doubles::{
     FakeProvider, assistant_text, assistant_tool_call, match_any,
 };
 use crate::workflow::conversation_tests::{controller, fixture, session};

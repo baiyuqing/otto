@@ -1,13 +1,13 @@
 use super::*;
 use crate::faults::files::{FaultyFileDriver, FileOp};
 use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
-use crate::storage::drivers::posix::PosixDriver;
-use crate::storage::files::FileDriver;
-use crate::subagent::doubles_tests::{
+use crate::fixtures::subagent_doubles::{
     FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, last_user_text,
     match_any, match_prompt, raw, redaction, redactor, stub, test_config, test_prompt_for,
     tool_names, wait_status,
 };
+use crate::storage::drivers::posix::PosixDriver;
+use crate::storage::files::FileDriver;
 use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role, Usage};
 use otto_core::provider::Response;

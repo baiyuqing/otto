@@ -4,7 +4,7 @@ use super::*;
 
 /// `OTTO_API_KEY`, the selected key name and every configured one, deduplicated
 /// and sorted.
-pub(crate) fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<String> {
+pub fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<String> {
     let mut names: BTreeSet<String> = BTreeSet::new();
     names.insert("OTTO_API_KEY".to_string());
     names.insert("ANTHROPIC_API_KEY".to_string());
@@ -30,7 +30,7 @@ pub(crate) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
 /// so promoting a symlink would widen the sandbox to whatever the link points
 /// at, and the default roots include the workspace-relative `.otto/skills`,
 /// which anything that writes to the workspace controls.
-pub(crate) fn resolve_sandbox_settings(
+pub fn resolve_sandbox_settings(
     file: &File,
     environment: &HashMap<String, String>,
     workspace_path: &str,
@@ -89,14 +89,14 @@ pub(crate) fn resolve_sandbox_settings(
 /// sandbox is not Seatbelt or the unconfined executor could not be built),
 /// and the reloader `/sandbox reload` uses to reopen this workspace's own
 /// sandbox (`None` without a usable sandbox).
-pub(crate) struct WorkspaceSandbox {
-    pub(crate) control: Arc<SandboxSwitch>,
-    pub(crate) approval_executor: Option<Arc<Executor>>,
+pub struct WorkspaceSandbox {
+    pub control: Arc<SandboxSwitch>,
+    pub approval_executor: Option<Arc<Executor>>,
     /// The exact resolved environment paired with `approval_executor`. A
     /// constrained delivery setup must use this snapshot, never borrow the
     /// target's ordinary sandbox environment.
-    pub(crate) approval_environment: Option<Vec<String>>,
-    pub(crate) reloader: Option<Arc<SandboxReloader>>,
+    pub approval_environment: Option<Vec<String>>,
+    pub reloader: Option<Arc<SandboxReloader>>,
 }
 
 /// Opens one workspace's sandbox and, when eligible, its elevated
@@ -114,7 +114,7 @@ pub(crate) struct WorkspaceSandbox {
 /// session's metadata, `load_workspace` from `Shared` alone), so they stay
 /// parameters rather than being resolved inside this function.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn compose_workspace_sandbox(
+pub async fn compose_workspace_sandbox(
     builder: &mut Builder,
     sandbox_settings: &SandboxSettings,
     config_path: &Path,

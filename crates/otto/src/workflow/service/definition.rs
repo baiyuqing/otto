@@ -10,8 +10,8 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    #[cfg(test)]
-    pub(crate) fn from_definitions(definitions: Vec<Definition>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_definitions(definitions: Vec<Definition>) -> Self {
         Self {
             definitions,
             diagnostics: Vec::new(),

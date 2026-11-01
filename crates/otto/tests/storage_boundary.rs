@@ -295,9 +295,8 @@ fn session_legacy_violations(source: &str) -> Vec<String> {
         "crate::app::",
         "crate::runtime::",
         "crate::cli::",
-        "crate::server::",
         "crate::tui::",
-        "crate::acp::",
+        "crate::client::",
     ] {
         if source.contains(forbidden) {
             problems.push(format!("forbidden compatibility dependency `{forbidden}`"));

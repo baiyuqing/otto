@@ -1,0 +1,89 @@
+# Sample Otto user configuration.
+#
+# Copy it to ~/.config/otto/config.toml and keep the parts you need. Every
+# setting is optional; an omitted setting uses Otto's default. API keys never
+# go in this file: `api_key_env` names the environment variable that holds the
+# key, and ChatGPT credentials come from `otto login`.
+#
+# The full reference is "Configuration" in docs/manual/getting-started.md.
+
+# The model a new session uses, as "<provider>/<model_id>". The text before
+# the first "/" is a provider name defined below or a built-in provider; the
+# rest is the model ID the provider API expects. Override it for one run with
+# `otto --model PROVIDER/MODEL_ID` or the OTTO_MODEL environment variable.
+default_model = "chatgpt/gpt-5.6-sol"
+
+# ---------------------------------------------------------------------------
+# Providers and models
+#
+# [providers.<name>] is one endpoint and credential binding of one API type.
+# `type` is claude, openai-compatible or chatgpt. Three providers are built
+# in and named after their type: `claude`, `openai-compatible` and `chatgpt`.
+# A table with a built-in name adds models to it or overrides its fields and
+# may omit `type`.
+#
+# [providers.<name>.models."<model_id>"] is one model of that provider. Quote
+# a model ID that contains "." or "/". An empty table lists the model in the
+# /model picker and uses Otto's built-in limits for that model ID. Fields:
+#   thinking           low, medium, high, xhigh or max
+#   context_window     tokens the model accepts as input
+#   compaction_window  token count at which Otto compacts the conversation;
+#                      requires context_window
+# ---------------------------------------------------------------------------
+
+# ChatGPT subscription models. Credentials come from `otto login`; this
+# provider accepts no base_url or api_key_env. Selectors:
+# chatgpt/gpt-5.6-sol, chatgpt/gpt-5.6-terra, chatgpt/gpt-5.6-luna.
+[providers.chatgpt.models."gpt-5.6-sol"]
+[providers.chatgpt.models."gpt-5.6-terra"]
+[providers.chatgpt.models."gpt-5.6-luna"]
+thinking = "medium"
+
+# Anthropic Messages API. The built-in defaults are
+# base_url = "https://api.anthropic.com" and api_key_env = "ANTHROPIC_API_KEY";
+# the table below only adds models. Selectors: claude/claude-opus-5-5,
+# claude/claude-sonnet-5-5.
+[providers.claude.models."claude-opus-5-5"]
+thinking = "high"
+
+[providers.claude.models."claude-sonnet-5-5"]
+
+# A custom provider: any endpoint that implements the OpenAI-compatible API.
+# The provider name is chosen freely (ASCII letters, digits, "_" and "-").
+# Selector: local/local-model.
+[providers.local]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+api_key_env = "LOCAL_LLM_API_KEY"
+
+[providers.local.models."local-model"]
+context_window = 131072
+compaction_window = 100000
+
+# ---------------------------------------------------------------------------
+# Other common settings
+# ---------------------------------------------------------------------------
+
+[ui]
+mode = "tui"
+
+[agent]
+shell_timeout = "120s"
+max_output_bytes = 51200
+
+[agent.compaction]
+auto = true
+
+[sandbox]
+driver = "auto"
+network = "allow"
+read_paths = []
+allow_env = []
+
+[skills]
+enabled = true
+paths = ["~/.otto/skills", ".otto/skills"]
+
+# Use a reviewer model for approval decisions, as a selector:
+# [approval]
+# reviewer_model = "chatgpt/gpt-5.6-luna"

@@ -16,6 +16,9 @@ commit ledger; Git and release tags retain the full history. See the
   and `compaction_window`. `claude`, `openai-compatible` and `chatgpt` are
   built-in providers, so a ChatGPT model needs only an empty model table. See
   [provider and model configuration](docs/manual/getting-started.md#providers-and-models).
+- [examples/config.example.toml](examples/config.example.toml) is a commented
+  sample user configuration in the new format; an otto-core test parses it and
+  resolves each of its models.
 - A model is selected as `<provider>/<model_id>` by `default_model`, `--model`,
   `OTTO_MODEL`, `/model` and `approval.reviewer_model`. `--model` requires this
   form; a bare model ID is an error unless `--provider` is also given.

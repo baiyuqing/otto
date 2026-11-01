@@ -327,6 +327,9 @@ fn go_quote(value: &str) -> String {
 mod legacy_profiles_tests;
 
 #[cfg(test)]
+mod sample_config_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

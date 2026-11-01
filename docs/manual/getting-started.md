@@ -281,7 +281,10 @@ an untrusted project file there. It can constrain lower configuration and
 permission rules. Use `config explain` to diagnose constraints rather than
 weakening the policy or trying another project scope.
 
-A small user configuration illustrates the common settings:
+A small user configuration illustrates the common settings. A longer,
+commented sample with ChatGPT, Claude and custom OpenAI-compatible providers
+is [examples/config.example.toml](../../examples/config.example.toml).
+
 
 ```toml
 default_model = "claude/MODEL_ID"

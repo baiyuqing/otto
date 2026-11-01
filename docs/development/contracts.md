@@ -98,8 +98,9 @@ dialogue to the exact session/request; withdrawal cannot affect a newer one.
 
 `sandbox_read_path` requests persistent read access to one absolute existing
 path that the sandbox read denylist covers (otherwise the tool returns `path is
-already readable; run the command without sandbox_read_path`), with a justification and `use_default` permissions. This durable authority
-always requires a person. Bind canonical path and exact command to the session's
+already readable; run the command without sandbox_read_path`), with a
+justification and `use_default` permissions. This durable authority always
+requires a person. Bind canonical path and exact command to the session's
 latest approval, separately from unsandboxed grants. Apply the backed-up config
 amendment and sandbox reload before one confined retry; reload failure rolls
 back, and denial/cancellation discards the request. Changed canonical paths
@@ -110,8 +111,8 @@ The `bash` capability description states: `Sandboxed commands read every path
 except the sandbox read denylist (credential and personal-data locations)`. The
 `sandbox_read_path` description states: `Request user approval to permanently
 allow reading one absolute existing path that the sandbox read denylist covers,
-before running this command inside the sandbox`. Change both with the denylist
-in `sandbox/read_denylist.rs`.
+before running this command inside the sandbox`. Update both texts when the
+denylist model in `sandbox/read_denylist.rs` changes.
 
 ## Plugin execution contracts
 

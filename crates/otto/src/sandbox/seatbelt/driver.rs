@@ -2,7 +2,7 @@
 //!
 //! Every child is run as `/usr/bin/sandbox-exec -f <profile> -- <argv>` with a
 //! profile generated from the session's workspace, its private state tree and
-//! the reviewed read roots.
+//! the read denylist.
 //!
 //! Ownership: [`SeatbeltDriver`] owns the private state tree and the process
 //! manager, and releases both exactly once in [`SeatbeltDriver::close`]. The
@@ -232,19 +232,18 @@ impl SeatbeltDriver {
             directories: private.directories.clone(),
             shell,
             home,
-            host_entries: Vec::new(),
             read_paths: options.read_paths.clone(),
             deny_read_paths: options.deny_read_paths.clone(),
             network: Some(network),
         };
         let generated = profile::generate(&profile_options);
-        let Ok(text) = generated else {
+        let Ok(generated) = generated else {
             return Err((
                 private,
                 Error::unavailable(UnavailableReason::SelfTestFailed),
             ));
         };
-        if private.write_profile(text.as_bytes()).is_err() {
+        if private.write_profile(generated.text.as_bytes()).is_err() {
             return Err((
                 private,
                 Error::unavailable(UnavailableReason::SelfTestFailed),
@@ -265,9 +264,9 @@ impl SeatbeltDriver {
             workspace,
             profile: Mutex::new(Active {
                 options: profile_options,
-                text,
-                inert_read_paths: Vec::new(),
-                skipped_deny_paths: Vec::new(),
+                text: generated.text,
+                inert_read_paths: generated.inert_read_paths,
+                skipped_deny_paths: generated.skipped_deny_paths,
             }),
             state: private,
             profile_path,
@@ -394,8 +393,9 @@ impl SeatbeltDriver {
             network: Some(network),
             ..previous_options
         };
-        let next_text = profile::generate(&next_options)
+        let generated = profile::generate(&next_options)
             .map_err(|_| Error::unavailable(UnavailableReason::SelfTestFailed))?;
+        let next_text = generated.text;
         if next_text != previous_text {
             let restore = |driver: &Self| {
                 if driver
@@ -421,13 +421,14 @@ impl SeatbeltDriver {
             .unwrap_or_else(|poison| poison.into_inner()) = Active {
             options: next_options,
             text: next_text,
-            inert_read_paths: Vec::new(),
-            skipped_deny_paths: Vec::new(),
+            inert_read_paths: generated.inert_read_paths,
+            skipped_deny_paths: generated.skipped_deny_paths,
         };
         Ok(())
     }
 
-    /// The private directories the child sees as `HOME` and `TMPDIR`.
+    /// The private directories the child sees as `TMPDIR` and the cache
+    /// roots. `HOME` is the user's home directory.
     pub fn private_directories(&self) -> PrivateDirectories {
         self.state.directories.clone()
     }

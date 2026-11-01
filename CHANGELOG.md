@@ -7,9 +7,38 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Configuration
+
+- LLM access is configured as providers and models instead of
+  `[profiles.<name>]`. `[providers.<name>]` holds `type`, `base_url`,
+  `api_key_env`, `api_version` and `workspace_id_env`;
+  `[providers.<name>.models."<model_id>"]` holds `thinking`, `context_window`
+  and `compaction_window`. `claude`, `openai-compatible` and `chatgpt` are
+  built-in providers, so a ChatGPT model needs only an empty model table. See
+  [provider and model configuration](docs/manual/getting-started.md#providers-and-models).
+- A model is selected as `<provider>/<model_id>` by `default_model`, `--model`,
+  `OTTO_MODEL`, `/model` and `approval.reviewer_model`. `--model` requires this
+  form; a bare model ID is an error unless `--provider` is also given.
+  Projects may set `default_model` and the `thinking`, `context_window` and
+  `compaction_window` of model tables, not providers.
+- HTTP: `GET /v1/config/providers`,
+  `PUT|DELETE /v1/config/providers/{name}` and
+  `PUT|DELETE /v1/config/providers/{name}/models/{model_id}` replace
+  `/v1/config/profiles[/{name}]`, and `POST /v1/sessions/{id}/model` with
+  `{"model":"<selector>"}` replaces `POST /v1/sessions/{id}/profile`. The old
+  routes are removed without aliases. Response objects drop `profile`, add
+  `provider_type`, and `provider` is the provider name; `profiles` in
+  `GET /v1/info` is now `models`, a list of selectors.
+- Existing `[profiles.*]`, `default_profile`, `approval.reviewer_profile`,
+  `--profile`, `OTTO_PROFILE` and `--provider` with a bare `--model` still
+  work. Each legacy file produces a diagnostic with the equivalent new TOML;
+  Otto does not rewrite it. A managed policy that forces `default_profile` or
+  `profiles.*` fails to load and names the new keys. Existing sessions, usage
+  records and workflows load unchanged.
+
 ### Fixes
 
-- A profile, model or reasoning-effort switch no longer cancels the session's
+- A model or reasoning-effort switch no longer cancels the session's
   running sub-agents, overwrites its pending notifications, restarts its stdio
   MCP servers or stops `otto serve` from waking the session on sub-agent
   notifications. The sub-agent registry, inbox, timers, MCP servers and
@@ -30,7 +59,7 @@ commit ledger; Git and release tags retain the full history. See the
 - Added a first-party Claude Messages API provider with environment-only API-key
   authentication, streaming text and local tool calls, model discovery, typed
   context-overflow recovery, bounded retries and diagnostic redaction. Claude
-  profiles work in terminal, server, ACP and `otto-connect` sessions; the key
+  providers work in terminal, server, ACP and `otto-connect` sessions; the key
   remains in the Otto runtime and is never stored by the connector.
 
 ### Development

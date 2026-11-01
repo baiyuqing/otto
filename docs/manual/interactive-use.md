@@ -339,14 +339,16 @@ Shared commands:
 - `/rename <name>` renames the current session. The new name is written as
   append-only session metadata and is shown in session lists. It is rejected
   while a turn is in flight.
-- `/model` shows the current profile/model and effort. In the TUI, bare
-  `/model` opens a profile picker followed by a reasoning-effort picker whose
+- `/model` shows the current `provider/model_id` and effort. In the TUI, bare
+  `/model` opens a picker that lists `provider/model_id` for every configured
+  model table, grouped by provider, followed by a reasoning-effort picker whose
   default selection is the current effective effort; `Enter` applies it for the
-  process and `s` saves it to the profile. Resuming another session keeps
+  process and `s` saves the selection as `default_model`
+  ([selectors](getting-started.md#providers-and-models)). Resuming another session keeps
   the current selection, including reasoning effort; it does not restore that
   session's historical model settings. In the REPL, use
-  `/model PROFILE --thinking LEVEL [--save]`.
-  Changing the profile, model or reasoning effort keeps the session's running
+  `/model PROVIDER/MODEL_ID --thinking LEVEL [--save]`.
+  Changing the model or reasoning effort keeps the session's running
   sub-agents, pending notifications, timers and MCP servers; only the model
   connection and system prompt are rebuilt. `/new`, `/load`, closing the
   session and exiting the process cancel its sub-agents and stop its MCP
@@ -526,7 +528,7 @@ Notes:
 - `--resume PATH` reopens a specific valid Pi v3 session only when its recorded
   workspace matches the current `--cwd`.
 - Resuming restores conversation history, not model selection. `/resume` keeps
-  the running process's current profile, model and reasoning effort. Starting
+  the running process's current model and reasoning effort. Starting
   Otto with `--resume` or `--continue` uses the resolved startup configuration
   and command-line overrides, not the historical session's model settings.
   Historical model changes remain in the append-only session for tracing.
@@ -770,7 +772,7 @@ and exits nonzero for an invalid session.
 ## Context compaction
 
 Compaction is configured in `[agent.compaction]` and, when needed, with
-per-profile context metadata.
+per-model context metadata.
 
 Rules and defaults:
 
@@ -852,7 +854,7 @@ so it can size compaction conservatively.
 If a model ID is unknown, proactive automation is disabled (no trustworthy local
 window), but reactive one-shot recovery can still happen after a typed provider
 overflow. For private deployments, set `context_window` and optionally
-`compaction_window` on the selected profile.
+`compaction_window` on the selected model's table (`[providers.<name>.models."<model_id>"]`).
 
 ## Headless mode
 

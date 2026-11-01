@@ -41,8 +41,10 @@ and installs bundled skills under `~/.otto/skills/`. Add `~/.local/bin` to your
 
 ## First use
 
-`otto setup` creates a profile without storing an API key. Choose a model
-available to your account or provider.
+`otto setup` writes a default model and, when the built-in defaults do not fit,
+a provider table, without storing an API key. Choose a model available to your
+account or provider. Models are selected as `<provider>/<model_id>`; see
+[provider and model configuration](docs/manual/getting-started.md#providers-and-models).
 
 For ChatGPT:
 
@@ -53,7 +55,7 @@ otto
 
 For Claude or an OpenAI-compatible endpoint, select its model and API-key
 environment variable during setup (and the endpoint URL for an OpenAI-compatible
-profile). Set that variable privately in the environment before starting
+provider). Set that variable privately in the environment before starting
 `otto`; never put its value in a config file or prompt.
 
 Try asking Otto to explain a repository, research a question or implement a

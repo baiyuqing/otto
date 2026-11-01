@@ -51,6 +51,16 @@ commit ledger; Git and release tags retain the full history. See the
   `profiles.*` fails to load and names the new keys. Existing sessions, usage
   records and workflows load unchanged.
 
+### Plugins
+
+- Hook protocol v1 payloads carry `session.history_path` (the session file
+  path, empty while a new session has no file yet) and a top-level `headless`
+  flag (true for `otto --prompt` runs), and every event accepts a `notice`
+  response field that Otto shows to the user as a notification and never to
+  the model. Package hook and custom-tool commands receive `PLUGIN_ROOT` and
+  `PLUGIN_DATA` in their environment. See
+  [hook protocol v1](docs/manual/memory-and-extensions.md#hook-protocol-v1).
+
 ### Fixes
 
 - A model or reasoning-effort switch no longer cancels the session's

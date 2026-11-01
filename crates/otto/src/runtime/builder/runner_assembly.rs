@@ -590,14 +590,20 @@ impl Builder {
                 && extensions.has_hooks()
                 && redactor.allows_dynamic_content())
             .then(|| {
+                let history_handle = session.handle().clone();
                 extensions.bind(
-                    session.header().id,
-                    None,
-                    String::new(),
-                    if session.path().is_empty() {
-                        "new"
-                    } else {
-                        "resume"
+                    crate::plugin::hooks::SessionBinding {
+                        session_id: session.header().id,
+                        parent_session_id: None,
+                        task_id: String::new(),
+                        mode: if session.path().is_empty() {
+                            "new"
+                        } else {
+                            "resume"
+                        }
+                        .into(),
+                        headless: self.headless,
+                        history_path: Arc::new(move || history_handle.path()),
                     },
                     Some(hook_guard),
                 )

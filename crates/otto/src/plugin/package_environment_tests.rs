@@ -64,9 +64,15 @@ fn package_binding_rejects_mcp_only_fields_literals_and_bad_names() {
 }
 
 fn install_hook_package(home: &Path, name: &str) {
+    install_hook_package_with_script(
+        home,
+        name,
+        "read input; printf '{\"context\":\"%s\"}' \"$BOUND_NAME\"",
+    );
+}
+fn install_hook_package_with_script(home: &Path, name: &str, script: &str) {
     let source = home.join(format!("source-{name}"));
     fs::create_dir_all(&source).unwrap();
-    let script = "read input; printf '{\"context\":\"%s\"}' \"$BOUND_NAME\"";
     let hooks = json!({"version":1,"hooks":{"before_prompt":[{
         "command":["/bin/sh","-c",script]
     }]}});
@@ -124,7 +130,7 @@ async fn package_binding_reaches_only_its_own_package_commands() {
     )
     .unwrap();
     let response = runtime
-        .bind("s".into(), None, String::new(), "new", None)
+        .bind(super::hooks::tests::binding(), None)
         .run("before_prompt", json!({}), &CancellationToken::new())
         .await
         .unwrap();
@@ -136,4 +142,82 @@ async fn package_binding_reaches_only_its_own_package_commands() {
         "{contexts}"
     );
     assert_eq!(execution.environment, base_environment);
+}
+
+const LOCATIONS_SCRIPT: &str =
+    "read input; printf '{\"notice\":\"%s|%s\"}' \"$PLUGIN_ROOT\" \"$PLUGIN_DATA\"";
+
+fn unconfined_execution(workspace: &Path) -> hooks::Execution {
+    let root = fs::canonicalize(workspace).unwrap();
+    let executor = Executor::new(
+        Arc::new(DirectDriver::new()),
+        Policy {
+            filesystem: FilesystemMode::Unconfined,
+            network: NetworkMode::Allow,
+        },
+        &root,
+    )
+    .unwrap();
+    hooks::Execution {
+        executor: Some(Arc::new(executor)),
+        workspace: root,
+        environment: vec!["PATH=/usr/bin:/bin".to_string()],
+        package_environment: Default::default(),
+        guard: None,
+        secrets: Vec::new(),
+        logger: Arc::new(crate::log::Logger::discard()),
+    }
+}
+
+#[tokio::test]
+async fn package_commands_receive_plugin_root_and_data_but_standalone_hooks_do_not() {
+    let home = tempfile::tempdir().unwrap();
+    install_hook_package_with_script(home.path(), "gamma", LOCATIONS_SCRIPT);
+    let workspace = tempfile::tempdir().unwrap();
+    let snapshot = Snapshot::load(home.path(), &File::default(), &HashMap::new());
+    let installed = &snapshot.packages[0];
+    let service = Service::new(home.path());
+    let expected_root = service.package_path(&installed.digest);
+    let expected_data = service.ensure_data("gamma").unwrap();
+    let runtime = hooks::Runtime::new(
+        &snapshot,
+        home.path(),
+        &Default::default(),
+        unconfined_execution(workspace.path()),
+    )
+    .unwrap();
+    let response = runtime
+        .bind(super::hooks::tests::binding(), None)
+        .run("before_prompt", json!({}), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        response.notice,
+        Some(format!(
+            "{}|{}",
+            expected_root.display(),
+            expected_data.display()
+        ))
+    );
+    let standalone = otto_core::config::plugins::Hooks {
+        before_prompt: vec![otto_core::config::plugins::Hook {
+            command: vec!["/bin/sh".into(), "-c".into(), LOCATIONS_SCRIPT.into()],
+            timeout: "5s".into(),
+            matcher: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    let runtime = hooks::Runtime::new(
+        &Snapshot::default(),
+        home.path(),
+        &standalone,
+        unconfined_execution(workspace.path()),
+    )
+    .unwrap();
+    let response = runtime
+        .bind(super::hooks::tests::binding(), None)
+        .run("before_prompt", json!({}), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(response.notice.as_deref(), Some("|"));
 }

@@ -265,10 +265,13 @@ components:
           type: string
         provider:
           type: string
-        profile:
+          description: Provider name from the model selector.
+        provider_type:
           type: string
+          enum: [claude, openai-compatible, chatgpt]
         model:
           type: string
+          description: Model ID the provider API receives.
         thinking:
           type: string
         context_window:
@@ -984,19 +987,21 @@ components:
           type: string
         provider:
           type: string
-        profile:
+        provider_type:
           type: string
+          enum: [claude, openai-compatible, chatgpt]
         model:
           type: string
         thinking:
           type: string
         sandbox:
           type: string
-        profiles:
+        models:
           type: array
+          description: Configured model selectors, `<provider>/<model_id>`.
           items:
             type: string
-      required: [workspace, provider, profile, model, thinking, sandbox, profiles]
+      required: [workspace, provider, provider_type, model, thinking, sandbox, models]
     WorkflowStep:
       type: object
       properties:
@@ -1336,59 +1341,72 @@ paths:
                 $ref: '#/components/schemas/SharedApproval'
         '409':
           description: Already decided differently, stale version, expired or unauthorized scope.
-  /v1/config/profiles:
+  /v1/config/providers:
     get:
-      summary: List non-sensitive Otto provider-profile settings
+      summary: List non-sensitive provider and model settings
+      description: >-
+        Returns `default_model` and every provider, including the built-in
+        providers `claude`, `openai-compatible` and `chatgpt` when they have no
+        table. Each provider carries its type, connection field names and
+        model tables. Credential values are never returned.
       responses:
         "200":
-          description: Profile summaries; credential values are never returned
+          description: "{default_model, providers: [{name, type, builtin, base_url?, api_key_env?, api_version?, workspace_id_env?, models: [{model_id, selector, default, thinking?, context_window?, compaction_window?}]}]}"
         "401":
           description: Missing or invalid bearer token when the server listens on TCP
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /v1/config/profiles/{name}:
+  /v1/config/providers/{name}:
     get:
-      summary: Get one non-sensitive provider-profile setting
+      summary: Get one provider with its model tables
       parameters:
         - name: name
           in: path
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Profile summary without credential values }
-        "404": { description: Profile not found }
+        "200": { description: Provider summary without credential values }
+        "404": { description: "provider_not_found" }
   /v1/config/models:
     get:
-      summary: List model IDs from an OpenAI-compatible profile endpoint
+      summary: List model IDs from a provider endpoint
       parameters:
-        - name: profile
+        - name: provider
           in: query
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Sorted model IDs }
-        "400": { description: Invalid profile or unavailable API-key environment variable }
-        "404": { description: Profile not found }
-        "501": { description: ChatGPT profiles cannot enumerate models }
-        "502": { description: Model endpoint request failed }
+        "200": { description: "{provider, models: [model ID]} sorted" }
+        "400": { description: "invalid_provider (unsupported type) or api_key_unavailable" }
+        "404": { description: "provider_not_found" }
+        "501": { description: "models_unsupported: ChatGPT cannot enumerate models" }
+        "502": { description: "models_failed: the model endpoint request failed" }
   /v1/config/changes:
     post:
-      summary: Preview a typed, non-secret provider-profile change
+      summary: Preview a typed, non-secret provider or model change
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              description: "Typed operation: set_default_profile, create_profile, set_profile_field, or remove_profile. Raw TOML and credential values are not accepted."
+              description: >-
+                `kind` is one of set_default_model {model}, set_provider
+                {provider, type, base_url?, api_key_env?, api_version?,
+                workspace_id_env?}, set_provider_field {provider, field,
+                value}, remove_provider {provider}, set_model {model,
+                thinking?}, set_model_field {model, field, value} or
+                remove_model {model}. `model` is `<provider>/<model_id>`.
+                Raw TOML and credential values are not accepted.
       responses:
-        "200": { description: Redacted preview and one-time 10-minute confirmation capability token }
-        "400": { description: Invalid or unsupported profile change }
+        "200": { description: "{id, expires_in_seconds, operation, target, field, diff} with a redacted diff and a one-time confirmation token" }
+        "400": { description: "invalid_provider, invalid_field or invalid_change" }
+        "409": { description: "model_in_use: default_model or approval.reviewer_model selects the provider or model" }
   /v1/config/changes/{id}:
     post:
-      summary: Confirm a one-time provider-profile change preview
+      summary: Confirm a one-time provider or model change preview
       parameters:
         - name: id
           in: path
@@ -1400,7 +1418,7 @@ paths:
         "409": { description: Configuration changed since preview }
         "410": { description: Confirmation token expired }
     delete:
-      summary: Cancel a pending provider-profile change preview
+      summary: Cancel a pending provider or model change preview
       parameters:
         - name: id
           in: path
@@ -1792,16 +1810,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /v1/sessions/{id}/profile:
+  /v1/sessions/{id}/model:
     parameters:
       - $ref: "#/components/parameters/sessionID"
     post:
-      summary: Run this session on another configured profile
+      summary: Run this session on another configured model
       description: >-
-        Rebuilds the session's runner on the named profile and returns the
+        Rebuilds the session's runner on the selected model and returns the
         session. The configuration file is not written, so every other session
-        and the next serve start keep the profile they had. The switch makes no
-        model request.
+        and the next serve start keep their model. The switch makes no model
+        request.
       requestBody:
         required: true
         content:
@@ -1809,10 +1827,10 @@ paths:
             schema:
               type: object
               properties:
-                profile:
+                model:
                   type: string
-                  description: A configured profile name.
-              required: [profile]
+                  description: A `<provider>/<model_id>` selector.
+              required: [model]
       responses:
         "200":
           description: Switched session
@@ -1821,7 +1839,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Session"
         "400":
-          description: Missing, empty or unknown profile
+          description: Missing, empty, malformed or unknown-provider selector
           content:
             application/json:
               schema:
@@ -1834,9 +1852,9 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: >-
-            turn_active (a turn is running), or profile_switch_unavailable
+            turn_active (a turn is running), or model_switch_unavailable
             (the session withholds dynamic content, or policy forbids a
-            dynamic profile)
+            dynamic model)
           content:
             application/json:
               schema:

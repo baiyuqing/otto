@@ -324,7 +324,7 @@ pub struct Server {
     factory: Arc<dyn Factory>,
     info: Info,
     config_path: std::path::PathBuf,
-    /// One-time, in-memory profile-change previews keyed by their capability
+    /// One-time, in-memory model-change previews keyed by their capability
     /// token. Tokens expire in the config route before a write can occur.
     approvals: Option<Arc<crate::approval::Service>>,
     token: String,
@@ -371,7 +371,7 @@ impl Server {
                 .register_domain(
                     &options.info.workspace,
                     "config",
-                    Arc::new(crate::approval::profile_change::Adapter {
+                    Arc::new(crate::approval::model_change::Adapter {
                         path: options.config_path.clone(),
                     }),
                 )
@@ -518,10 +518,10 @@ impl Server {
                 "/v1/approvals/{id}/withdraw",
                 post(approvals::withdraw_shared),
             )
-            .route("/v1/config/profiles", get(config_routes::profiles))
+            .route("/v1/config/providers", get(config_routes::providers))
             .route(
-                "/v1/config/profiles/{name}",
-                get(config_routes::get_profile),
+                "/v1/config/providers/{name}",
+                get(config_routes::get_provider),
             )
             .route("/v1/config/models", get(config_routes::models))
             .route("/v1/config/changes", post(config_routes::preview))
@@ -537,7 +537,7 @@ impl Server {
                     .delete(delete_session),
             )
             .route("/v1/sessions/{id}/fork", post(fork_session))
-            .route("/v1/sessions/{id}/profile", post(set_session_profile))
+            .route("/v1/sessions/{id}/model", post(set_session_model))
             .route("/v1/sessions/{id}/fork-points", get(fork_points))
             .route("/v1/sessions/{id}/history", get(history))
             .route("/v1/sessions/{id}/context", get(context))

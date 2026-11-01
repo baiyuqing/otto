@@ -97,3 +97,14 @@ codegen-units = 1
 opt-level = "s"
 panic = "abort"
 strip = "symbols"
+
+# Dev-profile debuginfo. Measured 2026-11-01 on macOS arm64 with Rust 1.99.1
+# (`cargo build --timings`, 10 cores): a clean dev build took 58.1 s with the
+# default `debug = 2` and 52.2 s with line tables only; a one-line body edit in
+# crates/otto/src/cli/acp.rs rebuilt in 8.5 s (otto codegen 3.4 s, bin link
+# 1.7 s) against 6.1 s (1.8 s, 0.8 s). Backtraces and panic locations keep
+# file:line; a debugger shows no local variables or types. A developer who
+# needs them sets `[profile.dev] debug = 2` in `~/.cargo/config.toml`, which
+# overrides this manifest profile.
+[profile.dev]
+debug = "line-tables-only"

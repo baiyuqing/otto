@@ -142,15 +142,19 @@ pub fn system_prompt_for(
         info.reason,
     ) {
         (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true, SandboxReason::None) => (
-            "Bash is confined to workspace-write with network allowed. When a Bash \
-                command fails because the sandbox denied reading a path, request \
-                approval by retrying Bash with sandbox_read_path set to that absolute \
-                path and a justification; keep sandbox_permissions as use_default. \
+            "Bash is confined to workspace-write with network allowed. Sandboxed \
+                commands read every path except the read denylist of credential and \
+                personal-data locations; HOME is the real home directory, TMPDIR and \
+                tool caches are private to the session, and writes stay limited to the \
+                workspace. When a Bash command fails because the sandbox denied \
+                reading a path on the denylist, request a persistent exception by \
+                retrying Bash with sandbox_read_path set to that absolute path and a \
+                justification; keep sandbox_permissions as use_default. \
                 Commands the user listed in `[sandbox] excluded_commands` run outside \
                 the sandbox only when written as one simple command (no pipes, \
                 redirections, `;`, `&&`, comments, `$` or backticks); when a program \
-                fails because it needs its real home directory or keychain, tell the \
-                user to run /sandbox exclude '&lt;program&gt; *'. The workspace's \
+                fails because it needs the keychain or another resource the sandbox \
+                blocks, tell the user to run /sandbox exclude '&lt;program&gt; *'. The workspace's \
                 `.git` entry, `.git/config`, `.git/config.worktree`, `.git/commondir` \
                 and `.git/hooks` are read-only in the sandbox, as are configuration \
                 files and hooks below `.git/modules`; a git command that writes them \
@@ -158,7 +162,7 @@ pub fn system_prompt_for(
                 add`, `git push -u`, `git submodule update`, or a hook installer) must \
                 be run with `sandbox_permissions` set to `require_escalated`. A failed command's \
                 result can end with a `sandbox_denied:` list of operations the sandbox \
-                refused: for a denied read outside the workspace, retry Bash with \
+                refused: for a denied read on the read denylist, retry Bash with \
                 sandbox_read_path set to that absolute path and a justification \
                 (sandbox_permissions use_default) to request persistent read access; \
                 for a denied write to `.git` metadata or outside the workspace, retry \
@@ -167,16 +171,20 @@ pub fn system_prompt_for(
             true,
         ),
         (SandboxMode::Seatbelt, SandboxNetwork::Denied, true, SandboxReason::None) => (
-            "Bash is confined to workspace-write with network denied. When a Bash \
-                command fails because the sandbox denied reading a path or a network \
-                connection, request approval by retrying Bash with sandbox_read_path \
-                set to that absolute path and a justification; keep sandbox_permissions \
-                as use_default, or tell the user to run /sandbox network allow to \
-                permit network access. Commands the user listed in `[sandbox] \
+            "Bash is confined to workspace-write with network denied. Sandboxed \
+                commands read every path except the read denylist of credential and \
+                personal-data locations; HOME is the real home directory, TMPDIR and \
+                tool caches are private to the session, and writes stay limited to the \
+                workspace. When a Bash command fails because the sandbox denied \
+                reading a path on the denylist, request a persistent exception by \
+                retrying Bash with sandbox_read_path set to that absolute path and a \
+                justification; keep sandbox_permissions as use_default. When it fails \
+                because of a network connection, tell the user to run /sandbox network \
+                allow to permit network access. Commands the user listed in `[sandbox] \
                 excluded_commands` run outside the sandbox only when written as one \
                 simple command (no pipes, redirections, `;`, `&&`, comments, `$` or \
-                backticks); when a program fails because it needs its real home \
-                directory or keychain, tell the user to run /sandbox exclude \
+                backticks); when a program fails because it needs the keychain or \
+                another resource the sandbox blocks, tell the user to run /sandbox exclude \
                 '&lt;program&gt; *'. The workspace's `.git` entry, `.git/config`, \
                 `.git/config.worktree`, `.git/commondir` and `.git/hooks` are read-only \
                 in the sandbox, as are configuration files and hooks below \
@@ -185,7 +193,7 @@ pub fn system_prompt_for(
                 submodule update`, or a hook installer) must be run with \
                 `sandbox_permissions` set to `require_escalated`. A failed command's result can end with a \
                 `sandbox_denied:` list of operations the sandbox refused: for a denied \
-                read outside the workspace, retry Bash with sandbox_read_path set to \
+                read on the read denylist, retry Bash with sandbox_read_path set to \
                 that absolute path and a justification (sandbox_permissions \
                 use_default) to request persistent read access; for a denied write to \
                 `.git` metadata or outside the workspace, retry with \

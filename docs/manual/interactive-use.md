@@ -864,7 +864,9 @@ so it can size compaction conservatively.
 If a model ID is unknown, proactive automation is disabled (no trustworthy local
 window), but reactive one-shot recovery can still happen after a typed provider
 overflow. For private deployments, set `context_window` and optionally
-`compaction_window` on the selected model's table (`[providers.<name>.models."<model_id>"]`).
+`compaction_window` on the selected model's entry
+(`models."<model_id>" = { context_window = N, compaction_window = M }` in
+`[providers.<name>]`).
 
 ## Headless mode
 

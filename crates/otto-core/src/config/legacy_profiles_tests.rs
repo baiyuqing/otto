@@ -133,6 +133,11 @@ fn diagnostic_prints_the_equivalent_configuration_and_skipped_profiles() {
     assert!(reason.contains("default_model = \"main/m\""), "{reason}");
     assert!(reason.contains("[providers.main]"), "{reason}");
     assert!(
+        reason.contains("models.\"m\" = { thinking = \"low\" }"),
+        "{reason}"
+    );
+    assert!(!reason.contains("[providers.main.models"), "{reason}");
+    assert!(
         reason.contains("base_url = \"https://x.example/v1\""),
         "{reason}"
     );
@@ -145,6 +150,16 @@ fn diagnostic_prints_the_equivalent_configuration_and_skipped_profiles() {
         "{reason}"
     );
     assert!(!reason.contains("api_key ="), "{reason}");
+}
+
+#[test]
+fn diagnostic_writes_built_in_providers_with_their_own_header() {
+    let file = converted("[profiles.a]\nprovider='chatgpt'\nmodel='m'\n");
+    let reason = deprecation_reason(&file);
+    assert!(
+        reason.contains("[providers.chatgpt]\ntype = \"chatgpt\"\nmodels.\"m\" = {}\n"),
+        "{reason}"
+    );
 }
 
 #[test]

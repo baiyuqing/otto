@@ -19,34 +19,39 @@ default_model = "chatgpt/gpt-5.6-sol"
 # [providers.<name>] is one endpoint and credential binding of one API type.
 # `type` is claude, openai-compatible or chatgpt. Three providers are built
 # in and named after their type: `claude`, `openai-compatible` and `chatgpt`.
-# A table with a built-in name adds models to it or overrides its fields and
-# may omit `type`.
+# A table with a built-in name adds models to it or overrides its fields; its
+# `type`, when written, equals the name.
 #
-# [providers.<name>.models."<model_id>"] is one model of that provider. Quote
-# a model ID that contains "." or "/". An empty table lists the model in the
-# /model picker and uses Otto's built-in limits for that model ID. Fields:
+# Each model of a provider is one line inside the provider's table:
+#   models."<model_id>" = { <fields> }
+# The model ID is quoted and is the ID the provider API expects. `{}` lists
+# the model in the /model picker with Otto's built-in limits for that ID.
+# Fields:
 #   thinking           low, medium, high, xhigh or max
 #   context_window     tokens the model accepts as input
 #   compaction_window  token count at which Otto compacts the conversation;
 #                      requires context_window
+# A model may also be written as its own table,
+# [providers.<name>.models."<model_id>"]; both forms mean the same.
 # ---------------------------------------------------------------------------
 
 # ChatGPT subscription models. Credentials come from `otto login`; this
 # provider accepts no base_url or api_key_env. Selectors:
 # chatgpt/gpt-5.6-sol, chatgpt/gpt-5.6-terra, chatgpt/gpt-5.6-luna.
-[providers.chatgpt.models."gpt-5.6-sol"]
-[providers.chatgpt.models."gpt-5.6-terra"]
-[providers.chatgpt.models."gpt-5.6-luna"]
-thinking = "medium"
+[providers.chatgpt]
+type = "chatgpt"
+models."gpt-5.6-sol" = {}
+models."gpt-5.6-terra" = {}
+models."gpt-5.6-luna" = { thinking = "medium" }
 
 # Anthropic Messages API. The built-in defaults are
 # base_url = "https://api.anthropic.com" and api_key_env = "ANTHROPIC_API_KEY";
 # the table below only adds models. Selectors: claude/claude-opus-5-5,
 # claude/claude-sonnet-5-5.
-[providers.claude.models."claude-opus-5-5"]
-thinking = "high"
-
-[providers.claude.models."claude-sonnet-5-5"]
+[providers.claude]
+type = "claude"
+models."claude-opus-5-5" = { thinking = "high" }
+models."claude-sonnet-5-5" = {}
 
 # A custom provider: any endpoint that implements the OpenAI-compatible API.
 # The provider name is chosen freely (ASCII letters, digits, "_" and "-").
@@ -55,10 +60,7 @@ thinking = "high"
 type = "openai-compatible"
 base_url = "http://127.0.0.1:8000/v1"
 api_key_env = "LOCAL_LLM_API_KEY"
-
-[providers.local.models."local-model"]
-context_window = 131072
-compaction_window = 100000
+models."local-model" = { context_window = 131072, compaction_window = 100000 }
 
 # ---------------------------------------------------------------------------
 # Other common settings

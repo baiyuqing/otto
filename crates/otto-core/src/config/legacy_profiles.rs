@@ -301,6 +301,28 @@ fn push_field(out: &mut String, key: &str, value: &str) {
     }
 }
 
+/// The inline table of one converted model: `{}` when it sets nothing, else
+/// `{ thinking = "high", context_window = 1 }`.
+fn inline_model(model: &ModelEntry) -> String {
+    let mut fields = Vec::new();
+    if !model.thinking.is_empty() {
+        fields.push(format!("thinking = {}", go_quote(&model.thinking)));
+    }
+    for (key, value) in [
+        ("context_window", model.context_window),
+        ("compaction_window", model.compaction_window),
+    ] {
+        if let Some(value) = value {
+            fields.push(format!("{key} = {value}"));
+        }
+    }
+    if fields.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", fields.join(", "))
+    }
+}
+
 fn equivalent_toml(
     default_model: Option<&str>,
     reviewer_model: Option<&str>,
@@ -319,28 +341,34 @@ fn equivalent_toml(
         push_field(&mut out, "reviewer_model", selector);
         out.push('\n');
     }
-    for (_, name, entry) in custom_groups {
-        out.push_str(&format!("[providers.{name}]\n"));
-        push_field(&mut out, "type", &entry.type_);
-        push_field(&mut out, "base_url", &entry.base_url);
-        push_field(&mut out, "api_key_env", &entry.api_key_env);
-        push_field(&mut out, "api_version", &entry.api_version);
-        push_field(&mut out, "workspace_id_env", &entry.workspace_id_env);
-        out.push('\n');
+    let mut provider_names: Vec<&str> = custom_groups
+        .iter()
+        .map(|(_, name, _)| name.as_str())
+        .collect();
+    for selector in models.keys() {
+        if !provider_names.contains(&selector.provider.as_str()) {
+            provider_names.push(&selector.provider);
+        }
     }
-    for (selector, (_, model)) in models {
-        out.push_str(&format!(
-            "[providers.{}.models.{}]\n",
-            selector.provider,
-            go_quote(&selector.model_id)
-        ));
-        push_field(&mut out, "thinking", &model.thinking);
-        for (key, value) in [
-            ("context_window", model.context_window),
-            ("compaction_window", model.compaction_window),
-        ] {
-            if let Some(value) = value {
-                out.push_str(&format!("{key} = {value}\n"));
+    for name in provider_names {
+        out.push_str(&format!("[providers.{name}]\n"));
+        match custom_groups.iter().find(|(_, custom, _)| custom == name) {
+            Some((_, _, entry)) => {
+                push_field(&mut out, "type", &entry.type_);
+                push_field(&mut out, "base_url", &entry.base_url);
+                push_field(&mut out, "api_key_env", &entry.api_key_env);
+                push_field(&mut out, "api_version", &entry.api_version);
+                push_field(&mut out, "workspace_id_env", &entry.workspace_id_env);
+            }
+            None => push_field(&mut out, "type", name),
+        }
+        for (selector, (_, model)) in models {
+            if selector.provider == name {
+                out.push_str(&format!(
+                    "models.{} = {}\n",
+                    go_quote(&selector.model_id),
+                    inline_model(model)
+                ));
             }
         }
         out.push('\n');

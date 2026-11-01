@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/logo.svg?v=2" alt="Otto logo" width="320">
-</p>
-
 # Otto — a local-first personal AI agent
 
 [简体中文](README.zh-CN.md) · [Documentation](docs/README.md) · [Changelog](CHANGELOG.md)

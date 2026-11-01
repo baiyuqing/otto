@@ -145,6 +145,13 @@ The other modules group native responsibilities:
   `cli/plugin.rs` exposes management commands; shared runner construction loads
   packages for every native frontend.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
+  `sandbox/read_denylist.rs` owns the built-in read denylist constants and
+  `ReadDenylist`, which decides whether a path is covered; the Seatbelt profile
+  module renders the read denylist and the `read_paths` exceptions
+  (`sandbox/seatbelt/profile/deny_roots.rs` builds the deny set and filters the
+  exceptions) instead of discovering read roots.
+  `runtime/sandbox_runtime/child_environment.rs` resolves the host and child
+  environment of a sandboxed command (real `HOME`, `ZDOTDIR`, `CARGO_HOME`).
   `subagent/tools.rs` owns the nonblocking `agent_yield` capability;
   `otto-core/src/agent/mod.rs` settles batches and yields safely, while
   `agent/progress.rs` owns the bounded per-turn edit-batching advisory.

@@ -75,9 +75,10 @@ checkpoint for a typed context overflow. If still failing:
 
 - `/compact [focus]` creates a manual checkpoint; `/new` starts fresh.
 - Reduce large pasted inputs/tool output.
-- Set `context_window`/`compaction_window` in the model table
-  (`[providers.<name>.models."<model_id>"]`) for private/unknown models, or
-  select a model with a larger window.
+- Set `context_window`/`compaction_window` on the model entry
+  (`models."<model_id>" = { context_window = N, compaction_window = M }` in
+  `[providers.<name>]`) for private/unknown models, or select a model with a
+  larger window.
 
 See [context compaction](interactive-use.md#context-compaction); compaction does
 not erase the append-only session history.

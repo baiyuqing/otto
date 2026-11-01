@@ -41,8 +41,8 @@ and installs bundled skills under `~/.otto/skills/`. Add `~/.local/bin` to your
 
 ## First use
 
-`otto setup` writes a default model and, when the built-in defaults do not fit,
-a provider table, without storing an API key. Choose a model available to your
+`otto setup` writes a default model and its provider table with one model
+entry, without storing an API key. Choose a model available to your
 account or provider. Models are selected as `<provider>/<model_id>`; see
 [provider and model configuration](docs/manual/getting-started.md#providers-and-models).
 

@@ -1,6 +1,8 @@
 # Provider and model configuration
 
-Status: approved, 2026-11-01.
+Status: approved, 2026-11-01. Amended 2026-11-01: a model is written as one
+`models."<model_id>" = { ... }` line in its provider table (section
+[Written form of a model](#written-form-of-a-model)).
 
 ## Rule: a provider has an API type; a model belongs to a provider
 
@@ -10,8 +12,8 @@ LLM access has three levels:
    protocol and authentication. It is a field of a provider, not a table.
 2. Provider, `[providers.<name>]`: one endpoint and credential binding of one
    API type.
-3. Model, `[providers.<name>.models."<model_id>"]`: one model of that
-   provider. The table key is the model ID the provider API receives.
+3. Model, `models."<model_id>" = { ... }` in `[providers.<name>]`: one model
+   of that provider. The key is the model ID the provider API receives.
 
 A model is selected by `<provider>/<model_id>`, for example
 `chatgpt/gpt-5.6-luna`. Every selector (`default_model`, `--model`,
@@ -44,9 +46,11 @@ The same three ChatGPT models:
 ```toml
 default_model = "chatgpt/gpt-5.6-luna"
 
-[providers.chatgpt.models."gpt-5.6-luna"]
-[providers.chatgpt.models."gpt-5.6-terra"]
-[providers.chatgpt.models."gpt-5.6-sol"]
+[providers.chatgpt]
+type = "chatgpt"
+models."gpt-5.6-luna" = {}
+models."gpt-5.6-terra" = {}
+models."gpt-5.6-sol" = {}
 ```
 
 A provider with its own endpoint and per-model settings:
@@ -56,11 +60,7 @@ A provider with its own endpoint and per-model settings:
 type = "openai-compatible"
 base_url = "https://api.deepseek.com/v1"
 api_key_env = "DEEPSEEK_API_KEY"
-
-[providers.deepseek.models."deepseek-chat"]
-thinking = "high"
-context_window = 128000
-compaction_window = 100000
+models."deepseek-chat" = { thinking = "high", context_window = 128000, compaction_window = 100000 }
 ```
 
 ### `[providers.<name>]`
@@ -80,7 +80,7 @@ A provider name uses ASCII letters, digits, `_` and `-`, so it never contains
 built-in name adds models to the built-in provider or overrides its fields;
 its `type` may be omitted and, when present, must equal the name.
 
-### `[providers.<name>.models."<model_id>"]`
+### `models."<model_id>"`
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -88,11 +88,38 @@ its `type` may be omitted and, when present, must equal the name.
 | `context_window` | no | Same meaning and validation as today. |
 | `compaction_window` | no | Same meaning and validation as today; requires `context_window`. |
 
-A model ID that contains `.` must be quoted in TOML, which is the case for most
-IDs. A model table may be empty; it then lists the model in the `/model`
-picker and uses built-in limits. One model ID has one table per provider, so
-it has one set of settings; a different thinking effort for one session is
-chosen with `--thinking` or the `/model` effort picker.
+The model ID is quoted. A model entry may be empty (`{}`); it then lists the
+model in the `/model` picker and uses built-in limits. One model ID has one
+entry per provider, so it has one set of settings; a different thinking effort
+for one session is chosen with `--thinking` or the `/model` effort picker.
+
+### Written form of a model
+
+The parsed structure is `providers.<name>.models.<model_id>`, a table. TOML
+spells that table in two ways, and Otto accepts both:
+
+```toml
+[providers.chatgpt]
+type = "chatgpt"
+models."gpt-5.6-luna" = { thinking = "high" }   # one line per model
+```
+
+```toml
+[providers.chatgpt.models."gpt-5.6-luna"]       # one table header per model
+thinking = "high"
+```
+
+The one-line form is the written form: `otto setup`, `otto config set`, the
+`/model` save, `POST /v1/config/changes` (`set_model`, `set_model_field`) and
+the legacy-profile diagnostic emit it, inside `[providers.<name>]`, and write
+that header with `type = "<name>"` when the file does not hold it, built-in
+providers included. An existing model is edited or removed where it is
+written: a `models."<id>"` line is replaced or deleted; a
+`[providers.<name>.models."<id>"]` table has its key set or is removed as a
+whole. `otto_core::config::edit` implements both in-place edits
+(`set_inline_table`, `set_value`, `remove_table`). The array form
+`models = [{ id = "..." }]` was rejected: it changes the schema and the
+addressing by model ID that `otto config set` and the HTTP changes use.
 
 ## Selection
 
@@ -187,15 +214,15 @@ has the same type, and otherwise on the built-in provider of that type.
 - Approval-gated configuration changes: `ProfileChange` becomes `ModelChange`
   with one variant per change kind above. The approval artifact still
   contains no API-key values.
-- `otto setup` writes `default_model`, the provider table only when the
-  built-in defaults do not fit, and one model table.
+- `otto setup` writes `default_model`, `[providers.<name>]` with `type` (and
+  `base_url`/`api_key_env` when given) and one `models."<id>" = {}` line.
 - `otto config set 'providers.chatgpt.models."gpt-5.6-luna".thinking' '"high"'`
   and `otto config explain` use the new paths.
 
 ## Project scope
 
 Projects may set `default_model`, and the fields `thinking`, `context_window`
-and `compaction_window` of `[providers.<name>.models."<id>"]` where `<name>` is
+and `compaction_window` of a model entry of `[providers.<name>]` where `<name>` is
 a built-in or host-defined provider. Projects may not set any provider-level
 field and may not define a provider. Selecting a model of a host-defined
 provider is the same authority a project has today through

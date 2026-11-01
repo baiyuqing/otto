@@ -329,6 +329,8 @@ pub struct FakeSandbox {
     pub reloaded: SandboxInfo,
     pub failure: Option<String>,
     pub calls: Arc<Mutex<usize>>,
+    /// Returned by `read_denylist`; `None` models a sandbox without one.
+    pub read_denylist: Option<crate::sandbox::read_denylist::ReadDenylist>,
 }
 
 impl FakeSandbox {
@@ -344,6 +346,23 @@ impl FakeSandbox {
             reloaded,
             failure: failure.map(str::to_string),
             calls: Arc::clone(&calls),
+            read_denylist: None,
+        });
+        (control, calls)
+    }
+
+    /// Like [`FakeSandbox::new`] with a read denylist that grants are checked against.
+    pub fn with_read_denylist(
+        info: SandboxInfo,
+        read_denylist: crate::sandbox::read_denylist::ReadDenylist,
+    ) -> (Arc<Self>, Arc<Mutex<usize>>) {
+        let calls = Arc::new(Mutex::new(0));
+        let control = Arc::new(Self {
+            reloaded: info.clone(),
+            info,
+            failure: None,
+            calls: Arc::clone(&calls),
+            read_denylist: Some(read_denylist),
         });
         (control, calls)
     }
@@ -361,6 +380,10 @@ impl crate::app::SandboxControl for FakeSandbox {
             Some(message) => Err(message.clone()),
             None => Ok(self.reloaded.clone()),
         }
+    }
+
+    fn read_denylist(&self) -> Option<crate::sandbox::read_denylist::ReadDenylist> {
+        self.read_denylist.clone()
     }
 }
 

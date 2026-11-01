@@ -61,8 +61,13 @@ test('otto-core change selects full tests and wasm check, not --lib', () => {
 });
 
 test('top-level integration test files map to --test', () => {
-  const { steps } = plan(['crates/otto/tests/b.rs', 'crates/otto/tests/a.rs']);
+  const { steps } = plan(['crates/otto/tests/b.rs', 'crates/otto-cli/tests/a.rs']);
   assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --test a --test b']);
+});
+
+test('modules of the frontend crates map to --lib filters by module name', () => {
+  const { steps } = plan(['crates/otto-server/src/turn_routes.rs', 'crates/otto-acp/src/stdio/x.rs', 'crates/otto-cli/src/run/attach.rs']);
+  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- run:: stdio:: turn_routes::']);
 });
 
 test('module and integration test steps run in that order', () => {
@@ -74,9 +79,15 @@ test('test support directories and crate entry files select full tests', () => {
   for (const p of [
     'crates/otto/tests/binary_harness/mod.rs',
     'crates/otto/tests/fixtures/x.json',
+    'crates/otto-cli/tests/acp_attach/commands.rs',
+    'crates/otto/src/fixtures.rs',
+    'crates/otto/src/fixtures/scripted_provider.rs',
     'crates/otto/src/lib.rs',
     'crates/otto/build.rs',
     'crates/otto/Cargo.toml',
+    'crates/otto-server/src/lib.rs',
+    'crates/otto-acp/Cargo.toml',
+    'crates/otto-cli/src/main.rs',
     'testdata/x.json',
     'crates/other/src/a.rs',
   ]) {
@@ -117,16 +128,26 @@ test('license check runs for manifests and lock files only', () => {
 });
 
 test('mixed change keeps the documented order', () => {
-  const { steps } = plan(['scripts/a.mjs', 'chat-connector/a.go', 'crates/otto/src/cli/a.rs']);
-  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- cli::', 'make connect-check', 'make scripts-test']);
+  const { steps } = plan(['scripts/a.mjs', 'chat-connector/a.go', 'crates/otto-cli/src/a.rs']);
+  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- a::', 'make connect-check', 'make scripts-test']);
 });
 
-test('every crates/otto/tests/*.rs file maps to --test <name>', () => {
-  const dir = new URL('../crates/otto/tests/', import.meta.url);
-  const names = readdirSync(fileURLToPath(dir)).filter((f) => f.endsWith('.rs'));
-  assert.ok(names.length > 0);
-  for (const f of names) {
-    const { steps } = plan([`crates/otto/tests/${f}`]);
-    assert.ok(steps.includes(`cargo test --workspace --test ${f.slice(0, -3)}`), f);
+test('every tests/*.rs file of the lib crates maps to --test <name>', () => {
+  const crates = new URL('../crates/', import.meta.url);
+  let seen = 0;
+  for (const crate of ['otto', 'otto-server', 'otto-acp', 'otto-cli']) {
+    const dir = join(fileURLToPath(crates), crate, 'tests');
+    let names;
+    try {
+      names = readdirSync(dir).filter((f) => f.endsWith('.rs'));
+    } catch {
+      continue;
+    }
+    for (const f of names) {
+      seen += 1;
+      const { steps } = plan([`crates/${crate}/tests/${f}`]);
+      assert.ok(steps.includes(`cargo test --workspace --test ${f.slice(0, -3)}`), `${crate}/${f}`);
+    }
   }
+  assert.ok(seen > 0);
 });

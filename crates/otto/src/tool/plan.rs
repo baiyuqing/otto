@@ -25,16 +25,13 @@ struct Args {
 }
 
 /// Replaces the session plan with the steps it is given.
-pub(crate) struct UpdatePlan {
+pub struct UpdatePlan {
     session: Arc<dyn Session + Send + Sync>,
     redactor: Redactor,
 }
 
 impl UpdatePlan {
-    pub(crate) fn new(
-        session: Arc<dyn Session + Send + Sync>,
-        redaction_values: &[String],
-    ) -> Self {
+    pub fn new(session: Arc<dyn Session + Send + Sync>, redaction_values: &[String]) -> Self {
         Self {
             session,
             redactor: Redactor::new(redaction_values),

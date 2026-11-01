@@ -79,7 +79,7 @@ async fn spinner_timer_skips_stale_ticks_after_a_slow_operation() {
 async fn timer_redraws_for_main_turn_and_live_children_but_not_an_idle_screen() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = crate::fixtures::controller(workspace.path(), sessions.path()).await;
     let mut app = App::new(&crate::tui::app::Backend::Local(&controller));
     assert!(!needs_animation(&app));
     app.start_turn();

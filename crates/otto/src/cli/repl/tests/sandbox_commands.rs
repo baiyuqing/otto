@@ -26,9 +26,9 @@ async fn reloading_controller(
     sessions: &Path,
     failure: Option<&str>,
 ) -> (Controller, Arc<Mutex<usize>>) {
-    let (control, calls) = fixture_tests::FakeSandbox::new(
-        fixture_tests::seatbelt_info(SandboxNetwork::Allowed),
-        fixture_tests::seatbelt_info(SandboxNetwork::Denied),
+    let (control, calls) = fixtures::FakeSandbox::new(
+        fixtures::seatbelt_info(SandboxNetwork::Allowed),
+        fixtures::seatbelt_info(SandboxNetwork::Denied),
         failure,
     );
     let controller = controller(workspace, sessions)

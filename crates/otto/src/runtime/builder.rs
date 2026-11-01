@@ -183,31 +183,31 @@ pub enum ProviderClient {
     Unavailable,
     /// Test seam. `Runner` is a concrete struct, so the seam sits one layer
     /// down.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Scripted(Arc<dyn Provider + Send + Sync>),
 }
 
 /// One composed agent, plus the two fixed strings a frontend may show.
 /// The request sizer a [`Runner::scripted`] runner uses: the bytes of text, so
 /// compaction can size its summary request without a real provider client.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct ScriptedSizer;
 
 /// Test providers keyed by home directory: a runner built by a [`Builder`]
 /// whose `home` is listed uses that provider, so a test can drive the full
 /// composition without a network and without affecting tests that run
 /// concurrently under other homes.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static TEST_PROVIDERS: std::sync::Mutex<Vec<(String, Arc<dyn Provider + Send + Sync>)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Builder homes whose scripted provider also backs a sub-agent runner.
 /// Without an entry here a scripted runner has no sub-agent executor.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static TEST_SCRIPTED_SUBAGENT_HOMES: std::sync::Mutex<Vec<String>> =
     std::sync::Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl RequestSizer for ScriptedSizer {
     fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {
         Ok(request.system_prompt.len()
@@ -390,8 +390,8 @@ impl ParentToolSlot {
 
     /// Whether a factory is installed. Test-only: production installs once and
     /// relies on the first-install-wins rule above.
-    #[cfg(test)]
-    pub(crate) fn installed(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn installed(&self) -> bool {
         self.0
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -451,11 +451,11 @@ impl std::ops::Deref for Builder {
 
 impl Builder {
     /// Assembles the workspace-scoped half of the composition root over an
-    /// already-built [`Shared`]. `cli::run` calls this once per process, for
+    /// already-built [`Shared`]. `otto_cli::run` calls this once per process, for
     /// the TUI, REPL, and serve alike.
     ///
     /// ponytail: `workspace` and `mcp` are passed in already resolved rather
-    /// than resolved here, because `cli::run` resolves them at specific
+    /// than resolved here, because `otto_cli::run` resolves them at specific
     /// points in its startup sequence to keep today's error-reporting order
     /// (the workspace lease happens before the archive/resume paths that
     /// never use it; mcp resolution happens before the usage and
@@ -494,12 +494,12 @@ impl Builder {
     /// Mutable access to this `Builder`'s `Shared`, valid only while it is
     /// still uniquely owned. Startup uses this to fill in the memory
     /// service, its user scope, and the recall limits once they are resolved
-    /// (`cli::run`), before any second workspace clones the `Arc`; test
+    /// (`otto_cli::run`), before any second workspace clones the `Arc`; test
     /// fixtures use it the same way, to tweak a field on a freshly built
     /// `Shared` before use. Once a workspace load clones `shared`, this
     /// panics rather than letting one `Builder` silently rewrite state every
     /// other loaded workspace already reads.
-    pub(crate) fn shared_mut(&mut self) -> &mut Shared {
+    pub fn shared_mut(&mut self) -> &mut Shared {
         Arc::get_mut(&mut self.shared).expect("shared: not uniquely owned")
     }
 
@@ -534,7 +534,7 @@ pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<Stri
 }
 
 /// 16 random bytes from `/dev/urandom`, hex encoded.
-pub(crate) fn random_id() -> std::io::Result<String> {
+pub fn random_id() -> std::io::Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;

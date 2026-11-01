@@ -1,9 +1,9 @@
 use super::*;
-use crate::subagent::Definition;
-use crate::subagent::doubles_tests::{
+use crate::fixtures::subagent_doubles::{
     FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, match_any, raw, stub,
     test_config, wait_status,
 };
+use crate::subagent::Definition;
 use crate::subagent::runner::{Config, StartRequest};
 use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::Usage;
@@ -39,7 +39,7 @@ async fn wait_final(tasks: &Tasks, id: &str) -> Task {
 
 /// A hook that blocks every provider call until `release` fires, or the
 /// child is cancelled.
-fn block_until(release: CancellationToken) -> crate::subagent::doubles_tests::Hook {
+fn block_until(release: CancellationToken) -> crate::fixtures::subagent_doubles::Hook {
     Arc::new(move |cancel, _request| {
         let release = release.clone();
         Box::pin(async move {

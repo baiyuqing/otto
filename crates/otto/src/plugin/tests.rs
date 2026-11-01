@@ -1,5 +1,6 @@
 use super::*;
-use crate::cli::fixture_tests;
+use crate::fixtures;
+use crate::fixtures::plugin_package::Fixture;
 use otto_core::{
     config::{File, McpTransport, PluginBindings},
     tool::ToolResult,
@@ -7,61 +8,6 @@ use otto_core::{
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
-
-struct Fixture {
-    home: tempfile::TempDir,
-}
-impl Fixture {
-    fn new() -> Self {
-        Self {
-            home: tempfile::tempdir().unwrap(),
-        }
-    }
-    fn service(&self) -> Service {
-        Service::new(self.home.path())
-    }
-    fn package(&self, name: &str) -> PathBuf {
-        let path = self.home.path().join(format!("source-{name}"));
-        fs::create_dir_all(path.join("skills/review")).unwrap();
-        fs::write(
-            path.join("plugin.json"),
-            json!({"$schema":package::PLUGIN_SCHEMA,"name":name,"version":"1.0.0"}).to_string(),
-        )
-        .unwrap();
-        fs::write(
-            path.join("skills/review/SKILL.md"),
-            "---\nname: review\ndescription: Review changes\n---\nReview carefully.\n",
-        )
-        .unwrap();
-        path
-    }
-    fn mcp(&self, path: &Path, servers: serde_json::Value) {
-        fs::write(
-            path.join("mcp.json"),
-            json!({"$schema":package::MCP_SCHEMA,"mcpServers":servers}).to_string(),
-        )
-        .unwrap();
-    }
-    fn env(&self) -> HashMap<String, String> {
-        HashMap::from([
-            (
-                "HOME".into(),
-                self.home.path().to_string_lossy().into_owned(),
-            ),
-            ("PATH".into(), "/usr/bin:/bin".into()),
-        ])
-    }
-    fn install(&self, path: &Path) -> Installed {
-        self.service()
-            .install(path.to_str().unwrap(), None)
-            .unwrap()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = thaw(self.home.path());
-    }
-}
 
 #[test]
 fn installation_is_a_snapshot_and_runs_no_package_scripts() {
@@ -358,34 +304,6 @@ fn git_install_pins_commit_and_rejects_floating_revisions() {
             .exists()
     );
 }
-#[test]
-fn cli_management_requires_no_provider_and_reports_configuration() {
-    let f = Fixture::new();
-    let path = f.package("example");
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let run = |args: Vec<String>, out: &mut Vec<u8>, err: &mut Vec<u8>| {
-        crate::cli::plugin::run(&args, out, err, &f.env())
-    };
-    assert_eq!(
-        run(
-            vec!["install".into(), path.to_string_lossy().into_owned()],
-            &mut out,
-            &mut err
-        ),
-        0
-    );
-    out.clear();
-    assert_eq!(
-        run(vec!["inspect".into(), "example".into()], &mut out, &mut err),
-        0
-    );
-    let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(report["plugin"]["name"], "example");
-    assert_eq!(report["content_authorized"], false);
-    assert!(err.is_empty());
-}
-
 fn result_text(result: &ToolResult) -> String {
     result.content.clone()
 }
@@ -410,7 +328,7 @@ while IFS= read -r line; do
 done
 "#).unwrap();
     f.install(&path);
-    let mut builder = fixture_tests::builder(f.home.path(), &f.home.path().join("sessions"));
+    let mut builder = fixtures::builder(f.home.path(), &f.home.path().join("sessions"));
     builder.shared_mut().environment.extend(f.env());
     builder.mcp.enabled = true;
     builder.mcp.connect_timeout_secs = 2;
@@ -464,35 +382,6 @@ done
     }
     servers.close().await;
 }
-#[tokio::test]
-async fn plugin_oauth_logout_accepts_logical_identity_without_network() {
-    let f = Fixture::new();
-    let path = f.package("example");
-    f.mcp(
-        &path,
-        json!({"remote":{"type":"streamable-http","url":"https://example.test/mcp"}}),
-    );
-    f.install(&path);
-    fs::create_dir_all(f.home.path().join(".config/otto")).unwrap();
-    fs::write(
-        f.home.path().join(".config/otto/config.toml"),
-        "[plugins.bindings.'example:remote']\nauth='oauth'\n",
-    )
-    .unwrap();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let code = crate::cli::mcp::run(
-        &["logout".into(), "example:remote".into()],
-        &mut out,
-        &mut err,
-        &f.env(),
-        &CancellationToken::new(),
-    )
-    .await;
-    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-    assert!(String::from_utf8_lossy(&out).contains(&runtime_name("example:remote")));
-}
-
 #[test]
 fn plugin_bindings_participate_in_environment_capture_and_redaction() {
     let mut file = File::default();
@@ -507,43 +396,18 @@ fn plugin_bindings_participate_in_environment_capture_and_redaction() {
         },
     );
     let lookup = HashMap::from([("PLUGIN_CREDENTIAL".into(), "fixture-only-value".into())]);
-    let environment = crate::cli::run::config_environment_for(&file, &lookup);
+    let environment = crate::runtime::startup::config_environment_for(&file, &lookup);
     assert_eq!(
         environment.get("PLUGIN_CREDENTIAL"),
         lookup.get("PLUGIN_CREDENTIAL")
     );
     let root = tempfile::tempdir().unwrap();
-    let mut builder = fixture_tests::builder(root.path(), &root.path().join("sessions"));
+    let mut builder = fixtures::builder(root.path(), &root.path().join("sessions"));
     builder.shared_mut().config = file;
     builder.shared_mut().environment = environment;
     let secrets = builder.secret_values(None);
     assert!(secrets.contains(&"PLUGIN_CREDENTIAL".into()));
     assert!(secrets.contains(&"fixture-only-value".into()));
-}
-
-#[tokio::test]
-async fn plugin_dispatch_runs_before_provider_configuration() {
-    let f = Fixture::new();
-    let path = f.package("example");
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let code = crate::cli::run::run(
-        &[
-            "plugin".into(),
-            "install".into(),
-            path.to_string_lossy().into_owned(),
-        ],
-        Box::new(std::io::Cursor::new(Vec::<u8>::new())),
-        &mut out,
-        &mut err,
-        vec![format!("HOME={}", f.home.path().display()).into_bytes()],
-        false,
-        &CancellationToken::new(),
-        &crate::cli::terminate::Terminate::new(),
-    )
-    .await;
-    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-    assert_eq!(f.service().list().unwrap().len(), 1);
 }
 
 #[test]

@@ -326,25 +326,3 @@ fn memory_component_validation_requires_a_runnable_command() {
     assert!(validate_components("m", &memory(vec!["run".into()], "301s")).is_err());
     assert!(validate_components("m", &memory(vec!["run".into()], "5s")).is_ok());
 }
-
-#[test]
-fn trust_disclosure_lists_the_memory_command_of_a_memory_only_package() {
-    let f = MemoryFixture::new();
-    f.install(
-        "mem",
-        json!({"version":1,"memory":{"command":["/opt/mem/serve"]}}),
-        false,
-    );
-    let env = HashMap::from([(
-        "HOME".to_string(),
-        f.home.path().to_string_lossy().into_owned(),
-    )]);
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let args = vec!["trust".to_string(), "mem".to_string()];
-    assert_eq!(crate::cli::plugin::run(&args, &mut out, &mut err, &env), 0);
-    let out = String::from_utf8(out).unwrap();
-    assert!(
-        out.contains("Otto hooks/tools/memory:") && out.contains("/opt/mem/serve"),
-        "{out}"
-    );
-}

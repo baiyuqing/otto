@@ -16,7 +16,7 @@ RUN --mount=type=secret,id=proxy_ca \
       export SSL_CERT_FILE=/run/secrets/proxy_ca CARGO_HTTP_CAINFO=/run/secrets/proxy_ca; \
     fi; \
     cargo fetch --locked \
-    && cargo build --offline --locked --release -p otto \
+    && cargo build --offline --locked --release -p otto-cli \
     && install -D target/release/otto /out/otto
 
 FROM debian:bookworm-slim AS runtime

@@ -124,19 +124,19 @@ impl Controller {
         )
     }
 
-    pub(crate) fn routed_notices_since(&self, after: u64) -> (Vec<Notice>, u64) {
+    pub fn routed_notices_since(&self, after: u64) -> (Vec<Notice>, u64) {
         self.notices.since(after)
     }
 
     /// Queues a notice as background operations would, for frontend tests.
-    #[cfg(test)]
-    pub(crate) fn push_notice(&self, line: &str) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn push_notice(&self, line: &str) {
         self.notices.push(line.to_owned());
     }
 
     /// Queues a wake reply as a finished wake turn would, for server tests.
-    #[cfg(test)]
-    pub(crate) fn push_wake_reply(&self, text: &str) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn push_wake_reply(&self, text: &str) {
         self.wake_replies.push(text.to_owned());
     }
 

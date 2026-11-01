@@ -502,8 +502,8 @@ impl Advisor {
 mod tests;
 
 /// Candidates for the review-surface tests of other modules.
-#[cfg(test)]
-pub(crate) mod testing {
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
     use super::*;
 
     /// The advice line [`candidate`] stores when `advised`, for a candidate

@@ -10,7 +10,7 @@ impl Provider for ProviderClient {
             Self::Claude { client, .. } => client.capabilities(),
             Self::ChatGpt { client, .. } => client.capabilities(),
             Self::Unavailable => otto_core::provider::ProviderCapabilities::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Scripted(provider) => provider.capabilities(),
         }
     }
@@ -95,7 +95,7 @@ impl Provider for ProviderClient {
                     0,
                     otto_core::model::EffectCertainty::NotStarted,
                 ),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 Self::Scripted(provider) => {
                     provider
                         .complete_observed(request, emit, control, observer)
@@ -212,7 +212,7 @@ impl Builder {
     /// The provider client and the secret redactor the normal agents use for `runtime`. The
     /// development evaluation (`otto eval view-tree`) calls its provider only through an
     /// `Agent` built with this redactor.
-    pub(crate) fn eval_provider_access(
+    pub fn eval_provider_access(
         &self,
         runtime: &Runtime,
     ) -> Result<(ProviderClient, Redactor), BuildError> {

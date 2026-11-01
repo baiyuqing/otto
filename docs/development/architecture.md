@@ -8,11 +8,28 @@
   remain WASM-safe and I/O-free: no filesystem, network, process, environment,
   stdio or wall-clock access. Provider-specific wire types stay in
   `openaicompat` and `openairesponses`, behind the neutral provider contract.
-- `otto` owns native I/O, tools, sandboxing, storage, authentication and
-  frontends. `app` owns shared use cases; frontends adapt presentation and
-  transport rather than reimplementing domain behavior.
+- `otto` is a library. It owns native I/O, tools, sandboxing, storage,
+  authentication, the `embed` API and the terminal UI. `app` owns shared use
+  cases; frontends adapt presentation and transport rather than
+  reimplementing domain behavior.
+- `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio and attach
+  frontends) and `otto-cli` (the `otto` binary and composition root) are
+  separate packages. Dependencies are one-way:
+  `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <- `otto-cli`. A crate
+  never imports one to its right. A one-line change in a frontend crate
+  rebuilds and retests only that crate and those to its right, not the `otto`
+  library test binary.
+- The `otto` public API is what the frontend crates need. Widening an item
+  from `pub(crate)` to `pub` is how a frontend crate reaches it; new frontend
+  code goes into the frontend crates, not into `otto`. `cli::{login, repl,
+  repl_commands}` stay in `otto` because `tui` uses them.
+- Test-only items that a dependent crate's tests need are public and gated
+  `#[cfg(any(test, feature = "test-support"))]`, not `#[cfg(test)]`. Dependent
+  crates enable `otto/test-support` in `[dev-dependencies]` and take
+  scaffolding from `otto::fixtures`.
 - `runtime/startup.rs` is the shared composition root for CLI, serve and embed.
-  Inject domain ports there. CLI-only flag/frontend steps stay in `cli::run`.
+  Inject domain ports there. CLI-only flag/frontend steps stay in
+  `otto_cli::run`.
 - `chat-connector/` is an independent Go ACP client; it links no Otto runtime
   code. The browser UI lives in [otto-plus](https://github.com/baiyuqing/otto-plus).
 
@@ -78,7 +95,7 @@ The legacy-schema importer (`otto storage migrate`) is separate from route trans
 
 Extension binaries register `RepositoryFactory` implementations with
 `runtime::storage::BackendRegistry` before route validation, through
-`cli::run::run_with_backends`. Ordinary startup retains local defaults.
+`otto_cli::run::run_with_backends`. Ordinary startup retains local defaults.
 Factories bind immutable non-secret options, then validate every namespace
 against `RepositoryRequirements`. Version-one profiles mean the whole domain
 port contract, not just a SQL dialect.

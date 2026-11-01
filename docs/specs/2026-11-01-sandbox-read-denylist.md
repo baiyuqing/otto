@@ -254,8 +254,10 @@ From `crates/otto/src/sandbox/seatbelt/profile/`:
   the host `PATH`.
 - `exact_broad_anchor`, `safe_automatic_directory_root`.
 - `collapse_read_roots`, `roots_within_limits`, `MAX_DYNAMIC_ROOTS`,
-  `MAX_DYNAMIC_PATH_BYTES`, `metadata_ancestors`, and the
-  `OTTO-DYNAMIC-METADATA` section of `render_read_rules`.
+  `metadata_ancestors`, and the `OTTO-DYNAMIC-METADATA` section of
+  `render_read_rules`. `MAX_DYNAMIC_PATH_BYTES` stays: the path text of the
+  deny and allow forms together is bounded at 32 KiB, and a longer
+  configuration is `Rejected`.
 
 `paths.rs` keeps `resolve_path`, `canonical_filesystem_path`,
 `valid_path_text`, `clean`, `join`, `path_within`, `paths_overlap`,

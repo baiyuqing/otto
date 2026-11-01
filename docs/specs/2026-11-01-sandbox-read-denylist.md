@@ -262,6 +262,16 @@ From `crates/otto/src/sandbox/seatbelt/profile/`:
 `sort_paths`. `roots.rs` is renamed to `deny_roots.rs` and holds the
 built-in list, the deny set construction and the exception filter.
 
+From `crates/otto/src/runtime/startup/sandbox.rs`: `resolve_sandbox_settings`
+no longer pushes existing skill roots, agent roots and plugin snapshot
+package paths into `read_paths`. Under the denylist the global read allow
+covers them, and the pushed entries would be reported as inert. A catalog
+root that a configured `deny_read_paths` entry contains needs an explicit
+`read_paths` exception. The tests
+`sandbox_settings_pick_up_existing_skill_and_agent_roots` and
+`a_symlinked_skill_root_is_not_promoted_to_a_sandbox_read_path` are removed
+with the promotion.
+
 ## Compatibility
 
 - Existing configurations load unchanged. `read_paths` entries that are

@@ -28,6 +28,16 @@ fn has_header_is_true_only_for_tables_written_as_headers() {
 }
 
 #[test]
+fn has_header_below_is_true_only_for_longer_header_paths() {
+    let text = "[p.models.\"a\"]\nx = 1\n[q]\nm.n = 1\n";
+    assert!(has_header_below(text, &["p", "models"]));
+    assert!(has_header_below(text, &["p"]));
+    assert!(!has_header_below(text, &["p", "models", "a"]));
+    assert!(!has_header_below(text, &["q"]));
+    assert!(!has_header_below(text, &["r"]));
+}
+
+#[test]
 fn set_inline_table_inserts_after_the_last_statement_of_an_existing_block() {
     let text =
         "[providers.chatgpt]\ntype = \"chatgpt\"\nmodels.\"a\" = {}\n\n# next\n[other]\nx = 1\n";

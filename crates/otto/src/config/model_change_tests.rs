@@ -392,3 +392,36 @@ fn provider_field_edits_apply_type_rules_and_work_without_a_provider_header() {
         "{rejected}"
     );
 }
+
+#[test]
+fn every_change_is_refused_when_the_file_holds_a_legacy_profile_key() {
+    for legacy in [
+        "default_profile = \"work\"\n",
+        "[profiles.work]\nprovider = \"claude\"\nmodel = \"m\"\n",
+        "[approval]\nreviewer_profile = \"work\"\n",
+    ] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = write_config(directory.path(), legacy);
+        let change = ModelChange::SetDefaultModel {
+            model: "claude/m".into(),
+        };
+        let error = preview(&path, &change).expect_err("legacy file must be refused");
+        assert!(
+            matches!(error, ModelChangeError::LegacyProfiles(_)),
+            "{legacy}: {error}"
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read"), legacy);
+    }
+}
+
+#[test]
+fn a_bad_thinking_value_is_rejected_at_preview_time() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = write_config(directory.path(), CONFIG);
+    let change = ModelChange::SetModel {
+        model: "local/big".into(),
+        thinking: Some("extreme".into()),
+    };
+    let error = preview(&path, &change).expect_err("invalid thinking");
+    assert!(error.to_string().contains("invalid thinking"), "{error}");
+}

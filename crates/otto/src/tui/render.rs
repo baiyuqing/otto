@@ -317,13 +317,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 /// compaction. Only the tail is lost on a narrow terminal.
 fn footer_text(app: &App) -> String {
     let model = escape_single_line_text(&app.info.model);
-    let profile_model = if model.is_empty() {
+    let model_label = if model.is_empty() {
         "unknown".to_string()
     } else {
         model
     };
     let mut text = format!(
-        "{profile_model} | {} | tokens {}/{}",
+        "{model_label} | {} | tokens {}/{}",
         if app.info.approval_settings.policy == otto_core::approval::ApprovalPolicy::Never {
             "NEVER"
         } else {

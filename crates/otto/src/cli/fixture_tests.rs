@@ -1,4 +1,4 @@
-//! Shared scaffolding for the `cli` unit tests: a two-profile configuration
+//! Shared scaffolding for the `cli` unit tests: a two-provider configuration
 //! that resolves offline, and a [`Controller`] built on temporary
 //! directories. Used by `controller.rs` and `repl.rs`, which both need a
 //! working composition root but never reach the provider.
@@ -8,9 +8,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use otto_core::config::File;
 use otto_core::config::memory::MemoryRuntime;
+use otto_core::config::providers::{ModelEntry, ProviderEntry};
 use otto_core::config::resolve::{Overrides, Runtime};
-use otto_core::config::{File, Profile};
 use otto_core::model::{Block, BlockType, Message, Role};
 
 use super::controller::Controller;
@@ -18,30 +19,28 @@ use crate::runtime::builder::{Builder, Shared, resolve_initial_runtime};
 use crate::runtime::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 pub fn config() -> File {
-    let mut profiles = HashMap::new();
-    profiles.insert(
-        "alpha".to_string(),
-        Profile {
-            provider: "openai-compatible".to_string(),
-            model: "gpt-alpha".to_string(),
-            base_url: "https://gw.example.com/v1".to_string(),
-            api_key_env: "ALPHA_KEY".to_string(),
-            ..Profile::default()
-        },
-    );
-    profiles.insert(
-        "beta".to_string(),
-        Profile {
-            provider: "openai-compatible".to_string(),
-            model: "gpt-beta".to_string(),
-            base_url: "https://gw.example.com/v1".to_string(),
-            api_key_env: "BETA_KEY".to_string(),
-            ..Profile::default()
-        },
-    );
+    let mut providers = std::collections::BTreeMap::new();
+    for (name, model, key_env) in [
+        ("alpha", "gpt-alpha", "ALPHA_KEY"),
+        ("beta", "gpt-beta", "BETA_KEY"),
+    ] {
+        providers.insert(
+            name.to_string(),
+            ProviderEntry {
+                type_: "openai-compatible".to_string(),
+                base_url: "https://gw.example.com/v1".to_string(),
+                api_key_env: key_env.to_string(),
+                models: std::collections::BTreeMap::from([(
+                    model.to_string(),
+                    ModelEntry::default(),
+                )]),
+                ..ProviderEntry::default()
+            },
+        );
+    }
     File {
-        default_profile: "alpha".to_string(),
-        profiles,
+        default_model: "alpha/gpt-alpha".to_string(),
+        providers,
         ..File::default()
     }
 }

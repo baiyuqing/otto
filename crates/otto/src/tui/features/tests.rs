@@ -405,7 +405,7 @@ fn rename_without_a_name_still_opens_the_form() {
 
 #[test]
 fn thinking_apply_and_save_use_the_same_selected_effort() {
-    let mut choice = Choice::new(ChoiceKind::Thinking { profile: None }, "medium");
+    let mut choice = Choice::new(ChoiceKind::Thinking { model: None }, "medium");
     assert!(matches!(
         choice.receive(Reply::Operation {
             message: "Thinking: medium".into(),
@@ -416,7 +416,7 @@ fn thinking_apply_and_save_use_the_same_selected_effort() {
         Transition::CloseFlow
     ));
 
-    let mut choice = Choice::new(ChoiceKind::Thinking { profile: None }, "medium");
+    let mut choice = Choice::new(ChoiceKind::Thinking { model: None }, "medium");
 
     let apply = choice.activate(Activation::Action {
         id: "apply".into(),

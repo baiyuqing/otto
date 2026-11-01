@@ -279,12 +279,16 @@ async fn create_in_a_named_workspace_uses_that_workspaces_builder() {
     )
     .await
     .expect("load workspace B");
-    Arc::make_mut(&mut builder.shared)
-        .config
-        .profiles
-        .get_mut("alpha")
-        .unwrap()
-        .model = "workspace-b-model".into();
+    {
+        let config = &mut Arc::make_mut(&mut builder.shared).config;
+        config
+            .providers
+            .get_mut("alpha")
+            .unwrap()
+            .models
+            .insert("workspace-b-model".into(), Default::default());
+        config.default_model = "alpha/workspace-b-model".into();
+    }
     assert!(
         builder.grant_control.is_some(),
         "loaded workspace wires persistent read grants"

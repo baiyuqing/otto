@@ -51,7 +51,7 @@ fn unknown_mutation_outcome_keeps_submission_locked() {
 fn model_selection_closes_the_nested_picker_and_keeps_its_receipt_by_the_composer() {
     let (mut app, remote) = app();
     app.attached = false;
-    app.info.profile = "current".into();
+    app.info.model_selector = "chatgpt/current".into();
     app.dispatch_line(
         "/model",
         &Backend::Attach(&remote),
@@ -61,10 +61,11 @@ fn model_selection_closes_the_nested_picker_and_keeps_its_receipt_by_the_compose
     app.apply_completion(Completion {
         mutation: false,
         ticket: profiles_ticket,
-        result: Ok(Reply::Profiles(vec![crate::app::ProfileSummary {
-            name: "terra".into(),
+        result: Ok(Reply::Models(vec![crate::app::ModelSummary {
+            selector: "chatgpt/gpt-terra".into(),
             provider: "chatgpt".into(),
-            model: "gpt-terra".into(),
+            provider_type: "chatgpt".into(),
+            model_id: "gpt-terra".into(),
             thinking: "high".into(),
         }])),
     });
@@ -82,18 +83,19 @@ fn model_selection_closes_the_nested_picker_and_keeps_its_receipt_by_the_compose
     );
     assert!(matches!(
         app.requests.last().map(|(_, request)| request),
-        Some(Request::Command(backend::Command::SwitchProfileThinking {
-            profile,
+        Some(Request::Command(backend::Command::SwitchModelThinking {
+            model,
             thinking,
             save: false,
-        })) if profile == "terra" && thinking == "high"
+        })) if model == "chatgpt/gpt-terra" && thinking == "high"
     ));
     let switch_ticket = app.requests.last().unwrap().0.clone();
     let mut info = app.info.clone();
-    info.profile = "terra".into();
+    info.model_selector = "chatgpt/gpt-terra".into();
     info.model = "gpt-terra".into();
     info.thinking = "high".into();
-    let message = "Switched to profile terra (provider chatgpt, model gpt-terra). Set as default profile.\nThinking: high";
+    let message =
+        "Switched to model chatgpt/gpt-terra (type chatgpt). Set as default model.\nThinking: high";
     app.apply_completion(Completion {
         mutation: true,
         ticket: switch_ticket,
@@ -112,7 +114,7 @@ fn model_selection_closes_the_nested_picker_and_keeps_its_receipt_by_the_compose
     assert_eq!(
         app.composer_notices,
         [
-            "Switched to profile terra (provider chatgpt, model gpt-terra). Set as default profile.",
+            "Switched to model chatgpt/gpt-terra (type chatgpt). Set as default model.",
             "Thinking: high",
         ]
     );

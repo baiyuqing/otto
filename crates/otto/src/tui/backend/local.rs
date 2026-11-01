@@ -64,11 +64,11 @@ pub(super) async fn local(
                             .collect(),
                     )
                 }),
-                Request::Profiles => Ok(Reply::Profiles(
-                    c.profile_summaries()
+                Request::Models => Ok(Reply::Models(
+                    c.model_summaries()
                         .into_iter()
                         .map(|mut row| {
-                            row.thinking = c.profile_effective_thinking(&row.name);
+                            row.thinking = c.model_effective_thinking(&row.selector);
                             row
                         })
                         .collect(),

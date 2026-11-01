@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::attach::Remote;
-use crate::app::{Controller, Info, ProfileSummary};
+use crate::app::{Controller, Info, ModelSummary};
 use crate::memory::{
     Candidate, CandidateListRequest, CandidateRef, CandidateState, ReviewDecision, ReviewRequest,
 };
@@ -44,7 +44,7 @@ pub(crate) enum Request {
     /// The current session's fork points, newest first, as session choices
     /// whose value is the prompt's entry id.
     ForkPoints,
-    Profiles,
+    Models,
     Context,
     SandboxPath(String),
     Agents(ListQuery),
@@ -67,9 +67,9 @@ pub(crate) enum Command {
     /// Fork the current session before the prompt with this entry id and
     /// switch to the fork.
     Fork(String),
-    SwitchProfile(String),
-    SwitchProfileThinking {
-        profile: String,
+    SwitchModel(String),
+    SwitchModelThinking {
+        model: String,
         thinking: String,
         save: bool,
     },
@@ -118,7 +118,7 @@ pub(crate) struct SessionChoice {
 #[derive(Debug)]
 pub(crate) enum Reply {
     Sessions(Vec<SessionChoice>),
-    Profiles(Vec<ProfileSummary>),
+    Models(Vec<ModelSummary>),
     Context(ContextReport),
     SandboxPath(String),
     Agents(ListResult),

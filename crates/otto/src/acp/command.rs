@@ -1,5 +1,5 @@
 //! The slash commands `otto acp` runs itself: `/compact [focus]`,
-//! `/context`, `/model [profile]`, `/steer <guidance>`,
+//! `/context`, `/model [provider/model_id]`, `/steer <guidance>`,
 //! and `/queue <prompt>`.
 //!
 //! They are advertised with `available_commands_update` and arrive as the
@@ -20,7 +20,7 @@ pub(super) enum Command<'a> {
     Context,
     Permissions { args: &'a str },
     Compact { focus: &'a str },
-    Model { profile: &'a str },
+    Model { selector: &'a str },
     Steer { guidance: &'a str },
     Queue { prompt: &'a str },
 }
@@ -43,7 +43,7 @@ pub(super) fn parse(text: &str) -> Option<Command<'_>> {
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
         return Some(Command::Model {
-            profile: rest.trim(),
+            selector: rest.trim(),
         });
     }
     if let Some(rest) = text.strip_prefix("/steer")
@@ -73,10 +73,10 @@ pub(super) fn available_commands() -> SessionUpdate {
     SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
         AvailableCommand::new(
             "model",
-            "Show the session's profile and model, or switch the session to another configured profile",
+            "Show the session's model, or switch the session to another model by provider/model_id",
         )
         .input(AvailableCommandInput::Unstructured(
-            UnstructuredCommandInput::new("optional profile"),
+            UnstructuredCommandInput::new("optional provider/model_id"),
         )),
         AvailableCommand::new(
             "context",
@@ -99,54 +99,50 @@ pub(super) fn available_commands() -> SessionUpdate {
         .input(AvailableCommandInput::Unstructured(
             UnstructuredCommandInput::new("prompt"),
         )),
-        AvailableCommand::new("permissions", "Show the approval mode, or set manual|auto|yolo, policy on_request|never or reviewer user|auto_review"),
+        AvailableCommand::new(
+            "permissions",
+            "Show the approval mode, or set manual|auto|yolo, policy on_request|never or reviewer user|auto_review",
+        ),
     ]))
 }
 
 pub(super) const CONTEXT_UNAVAILABLE: &str = "The context report is not available in this session.";
 
-/// The `/model` report: the session's effective selection plus every profile a
-/// switch may name. The profile list is what makes the command usable from a
-/// chat client, which cannot read the configuration file.
+/// The `/model` report: the session's effective selector, API type and
+/// thinking effort, plus every configured selector a switch may name. The list
+/// is what makes the command usable from a chat client, which cannot read the
+/// configuration file.
 pub(super) fn model_text(
-    profile: &str,
-    provider: &str,
-    model: &str,
+    selector: &str,
+    provider_type: &str,
     thinking: &str,
     available: &[String],
-) -> String {
-    let mut lines = vec![
-        format!("Profile: {profile}"),
-        format!("Provider: {provider}"),
-        format!("Model: {model}"),
-    ];
-    if !thinking.is_empty() {
-        lines.push(format!("Thinking: {thinking}"));
-    }
-    if available.is_empty() {
-        lines.push("No profiles are configured; add one on the host to switch.".to_string());
-    } else {
-        lines.push(format!("Configured profiles: {}", available.join(", ")));
-        lines.push("Switch with /model <profile>.".to_string());
-    }
-    lines.join("\n")
-}
-
-/// The `/model <profile>` confirmation. It never claims the profile was saved:
-/// a session switch leaves the configuration file and every other session
-/// unchanged.
-pub(super) fn model_switched_text(
-    profile: &str,
-    provider: &str,
-    model: &str,
-    thinking: &str,
 ) -> String {
     let thinking = if thinking.is_empty() {
         String::new()
     } else {
         format!(", thinking {thinking}")
     };
-    format!("Switched to profile {profile} (provider {provider}, model {model}{thinking}).")
+    let mut lines = vec![format!("Model {selector} (type {provider_type}{thinking})")];
+    if available.is_empty() {
+        lines.push("No models are configured; add one on the host to switch.".to_string());
+    } else {
+        lines.push(format!("Configured models: {}", available.join(", ")));
+        lines.push("Switch with /model <provider>/<model_id>.".to_string());
+    }
+    lines.join("\n")
+}
+
+/// The error for `/model <id>` with no provider: the hint names the selector form.
+pub(super) fn bare_model_hint(model: &str) -> String {
+    format!("model `{model}` has no provider; use /model <provider>/<model_id>")
+}
+
+/// The `/model <selector>` confirmation. It never claims the model was saved:
+/// a session switch leaves the configuration file and every other session
+/// unchanged.
+pub(super) fn model_switched_text(selector: &str, provider_type: &str) -> String {
+    format!("Switched to model {selector} (type {provider_type}).")
 }
 
 fn section_name(kind: SectionKind, items: usize) -> String {
@@ -242,14 +238,18 @@ mod tests {
             })
         );
         assert_eq!(parse("/queue"), Some(Command::Queue { prompt: "" }));
-        assert_eq!(parse("/model"), Some(Command::Model { profile: "" }));
+        assert_eq!(parse("/model"), Some(Command::Model { selector: "" }));
         assert_eq!(
-            parse("/model  terra "),
-            Some(Command::Model { profile: "terra" })
+            parse("/model  chatgpt/terra "),
+            Some(Command::Model {
+                selector: "chatgpt/terra"
+            })
         );
         assert_eq!(
-            parse("/model\tterra"),
-            Some(Command::Model { profile: "terra" })
+            parse("/model\tchatgpt/terra"),
+            Some(Command::Model {
+                selector: "chatgpt/terra"
+            })
         );
         for text in [
             "/compactx",
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(value["sessionUpdate"], "available_commands_update");
         let commands = value["availableCommands"].as_array().expect("array");
         assert_eq!(commands[0]["name"], "model");
-        assert_eq!(commands[0]["input"]["hint"], "optional profile");
+        assert_eq!(commands[0]["input"]["hint"], "optional provider/model_id");
         assert_eq!(commands[1]["name"], "context");
         assert!(commands[1].get("input").is_none());
         assert_eq!(commands[2]["name"], "compact");
@@ -313,31 +313,31 @@ mod tests {
     }
 
     #[test]
-    fn model_text_reports_the_selection_and_every_profile() {
+    fn model_text_reports_the_selection_and_every_configured_model() {
         let text = model_text(
-            "terra",
+            "chatgpt/gpt-5.6-terra",
             "chatgpt",
-            "gpt-5.6-terra",
             "medium",
-            &["chatgpt".to_string(), "terra".to_string()],
+            &[
+                "chatgpt/gpt-5.6-luna".to_string(),
+                "chatgpt/gpt-5.6-terra".to_string(),
+            ],
         );
         assert_eq!(
             text,
-            "Profile: terra\nProvider: chatgpt\nModel: gpt-5.6-terra\nThinking: medium\n\
-             Configured profiles: chatgpt, terra\nSwitch with /model <profile>."
+            "Model chatgpt/gpt-5.6-terra (type chatgpt, thinking medium)\n\
+             Configured models: chatgpt/gpt-5.6-luna, chatgpt/gpt-5.6-terra\n\
+             Switch with /model <provider>/<model_id>."
         );
-        let bare = model_text("terra", "chatgpt", "gpt-5.6-terra", "", &[]);
-        assert!(bare.starts_with("Profile: terra\nProvider: chatgpt\nModel: gpt-5.6-terra\n"));
-        assert!(bare.ends_with("add one on the host to switch."));
-        assert!(!bare.contains("Thinking:"));
-
+        let bare = model_text("chatgpt/gpt-5.6-terra", "chatgpt", "", &[]);
         assert_eq!(
-            model_switched_text("terra", "chatgpt", "gpt-5.6-terra", "medium"),
-            "Switched to profile terra (provider chatgpt, model gpt-5.6-terra, thinking medium)."
+            bare,
+            "Model chatgpt/gpt-5.6-terra (type chatgpt)\n\
+             No models are configured; add one on the host to switch."
         );
         assert_eq!(
-            model_switched_text("terra", "chatgpt", "gpt-5.6-terra", ""),
-            "Switched to profile terra (provider chatgpt, model gpt-5.6-terra)."
+            model_switched_text("chatgpt/gpt-5.6-terra", "chatgpt"),
+            "Switched to model chatgpt/gpt-5.6-terra (type chatgpt)."
         );
     }
 

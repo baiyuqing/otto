@@ -132,15 +132,19 @@ fn a_relay_lists_and_switches_profiles_on_serve() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         agent_text(&frames),
-        "Profile: test\nProvider: openai-compatible\nModel: gpt-test\n\
-         Configured profiles: other, test\nSwitch with /model <profile>."
+        "Model test/gpt-test (type openai-compatible)\n\
+         Configured models: other/gpt-other, test/gpt-test\n\
+         Switch with /model <provider>/<model_id>."
     );
 
-    let (frames, response) = relay.call("session/prompt", prompt(&session_id, "/model other"));
+    let (frames, response) = relay.call(
+        "session/prompt",
+        prompt(&session_id, "/model other/gpt-other"),
+    );
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         agent_text(&frames),
-        "Switched to profile other (provider openai-compatible, model gpt-other)."
+        "Switched to model other/gpt-other (type openai-compatible)."
     );
     assert_eq!(
         requests.lock().unwrap().len(),
@@ -152,11 +156,11 @@ fn a_relay_lists_and_switches_profiles_on_serve() {
     let (frames, response) = relay.call("session/prompt", prompt(&session_id, "/model"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert!(
-        agent_text(&frames).starts_with("Profile: other\n"),
+        agent_text(&frames).starts_with("Model other/gpt-other "),
         "{frames:?}"
     );
 
-    // An unknown profile is an error on the relay, not a model request.
+    // A bare model id without a provider is an error on the relay, not a model request.
     let (_, response) = relay.call("session/prompt", prompt(&session_id, "/model nope"));
     assert!(response["error"].is_object(), "{response}");
     assert!(

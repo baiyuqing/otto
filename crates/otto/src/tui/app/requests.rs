@@ -30,8 +30,8 @@ impl App {
         let composer_feedback = matches!(
             &request,
             Request::Command(
-                backend::Command::SwitchProfile(_)
-                    | backend::Command::SwitchProfileThinking { .. }
+                backend::Command::SwitchModel(_)
+                    | backend::Command::SwitchModelThinking { .. }
                     | backend::Command::SetThinking { .. }
             )
         );
@@ -56,8 +56,8 @@ impl App {
                     | backend::Command::Resume(_)
                     | backend::Command::Fork(_)
                     | backend::Command::Archive(_)
-                    | backend::Command::SwitchProfile(_)
-                    | backend::Command::SwitchProfileThinking { .. }
+                    | backend::Command::SwitchModel(_)
+                    | backend::Command::SwitchModelThinking { .. }
             )
         ) {
             self.session_changes.insert((surface, g));

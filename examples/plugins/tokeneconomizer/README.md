@@ -35,12 +35,15 @@ so a TokenEconomizer checkout can be installed directly, without `bridge.py`:
 
 ```sh
 otto plugin install /path/to/TokenEconomizer/plugin
-otto plugin inspect <name>
-otto plugin trust <name>
+otto plugin inspect tokeneconomizer
+otto plugin trust tokeneconomizer
 ```
 
 The path is the plugin directory that contains `.claude-plugin/plugin.json`.
-`<name>` is the plugin name printed by `otto plugin install`. The package's
+The package name is the `name` field of that manifest, `tokeneconomizer`, the
+same name as the bridge package above. `otto plugin install` refuses a name
+that is already installed, so remove one package before installing the other.
+The package's
 `te-hook` hooks for `SessionStart`, `UserPromptSubmit`, `PostToolUse`,
 `PostToolUseFailure`, `Stop` and `SessionEnd` then run natively: micro-skill
 injection at session start, the loop guard on prompts and tool results, and the

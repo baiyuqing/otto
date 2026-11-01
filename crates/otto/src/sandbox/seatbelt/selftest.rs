@@ -40,7 +40,7 @@ const MODE: u32 = 0o600;
 /// Which promise of the profile one fixture exercises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
-    /// A file under the private `HOME` the child must be able to read.
+    /// A file under the private `TMPDIR` the child must be able to read.
     AllowedRead,
     /// A file in the workspace the child must be able to write.
     AllowedWorkspaceWrite,
@@ -153,7 +153,6 @@ impl Fixtures {
     /// content of both unreadable ones; the writable fixtures start empty
     /// because the probe truncates them.
     pub(super) fn prepare(
-        home: &str,
         workspace: &str,
         temp: &str,
         profiles: &str,
@@ -161,7 +160,7 @@ impl Fixtures {
         denied: &str,
     ) -> Result<Self, Error> {
         let definitions: [(Kind, &str, &str); 5] = [
-            (Kind::AllowedRead, home, allowed_read),
+            (Kind::AllowedRead, temp, allowed_read),
             (Kind::AllowedWorkspaceWrite, workspace, ""),
             (Kind::AllowedPrivateWrite, temp, ""),
             (Kind::DeniedRead, profiles, denied),

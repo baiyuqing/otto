@@ -93,17 +93,26 @@ pub(crate) async fn advertised_read_confinement(case: &dyn Contract) {
     result.expect("allowed read Execute");
     assert_eq!(status.code, 0, "allowed read status");
 
+    let local = fixture.with_environment("SANDBOX_CONFORMANCE_READ_PATH", &fixture.visible_file);
+    let (status, result, output) = run(&executor, shell_request(case, &local, SCRIPT)).await;
+    result.expect("undenied read Execute");
+    assert_eq!(
+        (status.code, output.as_str()),
+        (0, "visible-data"),
+        "undenied read status"
+    );
+
     let local = fixture.with_environment("SANDBOX_CONFORMANCE_READ_PATH", &fixture.outside_file);
     let (status, result, _) = run(&executor, shell_request(case, &local, SCRIPT)).await;
-    result.expect("outside read Execute");
-    assert_ne!(status.code, 0, "outside read was permitted");
+    result.expect("denied read Execute");
+    assert_ne!(status.code, 0, "denied read was permitted");
 
-    let link = fixture.workspace.join("outside read symlink");
+    let link = fixture.workspace.join("denied read symlink");
     std::os::unix::fs::symlink(&fixture.outside_file, &link).expect("symlink");
     let local = fixture.with_environment("SANDBOX_CONFORMANCE_READ_PATH", &link);
     let (status, result, _) = run(&executor, shell_request(case, &local, SCRIPT)).await;
     result.expect("symlink read Execute");
-    assert_ne!(status.code, 0, "symlink read was permitted");
+    assert_ne!(status.code, 0, "symlink to a denied file was readable");
     executor.close().expect("close");
 }
 

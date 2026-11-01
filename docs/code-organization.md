@@ -154,8 +154,11 @@ The other modules group native responsibilities:
   `fault-injection` feature; `faults/http.rs` is the scripted loopback HTTP
   server; see [Fault injection](development/testing.md#fault-injection)).
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
-  `urlprivacy.rs`, and `log.rs` (the process logger: one instance built at the
-  composition root and passed to its consumers). `log/diagnostics.rs` owns the
+  `urlprivacy.rs`, `tls_provider.rs` (installs `ring` as the process-wide
+  rustls crypto provider; every reqwest client is built through its
+  `http_client_builder()` or `http_client()`, and `server/tls.rs` takes its
+  provider from `install()`), and `log.rs` (the process logger: one instance
+  built at the composition root and passed to its consumers). `log/diagnostics.rs` owns the
   private rotating execution files; `otto-core/src/diagnostics.rs` supplies the
   content-free observation boundary used by provider and agent operations. Event names and fields are in
   [diagnostics guide](manual/servers-and-connectors.md#logs-metrics-and-request-correlation).

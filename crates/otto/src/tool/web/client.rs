@@ -64,7 +64,7 @@ impl Client {
     fn http(&self) -> Result<&reqwest::Client, String> {
         self.http
             .get_or_init(|| {
-                reqwest::Client::builder()
+                crate::tls_provider::http_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .no_proxy()
                     .dns_resolver(Arc::new(self.resolver.clone()))

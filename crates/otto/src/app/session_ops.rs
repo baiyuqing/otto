@@ -50,16 +50,16 @@ impl Controller {
     }
 
     /// Discards the resume result the line frontend does not use.
-    pub async fn switch_profile(&self, profile: &str) -> Result<(), String> {
-        self.switch_profile_result(profile).await.map(|_| ())
+    pub async fn switch_model(&self, selector: &str) -> Result<(), String> {
+        self.switch_model_result(selector).await.map(|_| ())
     }
 
-    pub async fn switch_profile_result(&self, profile: &str) -> Result<ResumeResult, String> {
+    pub async fn switch_model_result(&self, selector: &str) -> Result<ResumeResult, String> {
         let admission = self.begin_replacement()?;
         if !self.dynamic_content {
-            return Err(PROFILE_SWITCH_UNAVAILABLE.to_string());
+            return Err(MODEL_SWITCH_UNAVAILABLE.to_string());
         }
-        let runtime = self.builder.resolve_profile(profile)?;
+        let runtime = self.builder.resolve_model(selector)?;
         if !self.builder.boundary_allows_dynamic(Some(&runtime)) {
             return Err(SESSION_OPERATION_UNAVAILABLE.to_string());
         }

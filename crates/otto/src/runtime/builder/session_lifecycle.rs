@@ -17,29 +17,32 @@ impl Builder {
 
     /// Resolves a replacement runtime from the provenance a session carries.
     pub fn resolve_session(&self, metadata: &RuntimeMetadata) -> Result<Runtime, BuildError> {
+        // The stored `profile` field holds a selector for sessions written
+        // since provider/model configuration; older sessions hold a profile
+        // name, and otto-core resolves those from the recorded type and model.
         let overrides = Overrides {
-            profile: metadata.profile.clone(),
-            provider: metadata.provider.clone(),
-            model: metadata.model.clone(),
+            model: String::new(),
+            provider: String::new(),
+            legacy_profile: String::new(),
             ..self.overrides.clone()
         };
         otto_core::config::resolve::resolve(
             &self.config,
             &resume_environment(&self.environment),
-            &SessionDefaults::default(),
+            &session_defaults(metadata),
             &overrides,
         )
         .map_err(|error| self.redact_error(&error.to_string(), None))
     }
 
-    /// The named profile is an explicit override, so its own provider, model
-    /// and base URL win.
-    pub fn resolve_profile(&self, profile: &str) -> Result<Runtime, BuildError> {
+    /// The selector is an explicit override, so its provider, model and
+    /// endpoint win over command-line overrides.
+    pub fn resolve_model(&self, selector: &str) -> Result<Runtime, BuildError> {
         let overrides = Overrides {
-            profile: profile.to_string(),
+            model: selector.to_string(),
             provider: String::new(),
+            legacy_profile: String::new(),
             base_url: String::new(),
-            model: String::new(),
             ..self.overrides.clone()
         };
         otto_core::config::resolve::resolve(
@@ -62,15 +65,16 @@ impl Builder {
             return Ok(());
         }
         let header = session.header();
-        if header.profile == runtime.profile
-            && header.provider == runtime.provider
+        let selector = runtime.model_selector.to_string();
+        if header.profile == selector
+            && header.provider == runtime.provider_type
             && header.model == runtime.model
         {
             return Ok(());
         }
         session.update_runtime(&RuntimeMetadata {
-            profile: runtime.profile.clone(),
-            provider: runtime.provider.clone(),
+            profile: selector,
+            provider: runtime.provider_type.clone(),
             model: runtime.model.clone(),
         })
     }
@@ -91,8 +95,8 @@ impl Builder {
             version: CURRENT_VERSION,
             id,
             workspace: self.workspace_path.clone(),
-            provider: runtime.provider.clone(),
-            profile: runtime.profile.clone(),
+            provider: runtime.provider_type.clone(),
+            profile: runtime.model_selector.to_string(),
             model: runtime.model.clone(),
             created_at: Utc::now(),
         };
@@ -152,5 +156,20 @@ impl Builder {
         reference: &str,
     ) -> Result<Vec<otto_core::session::ForkPoint>, String> {
         self.storage.sessions()?.fork_points(reference)
+    }
+}
+
+/// The stored session provenance as resolution defaults: the `profile` field
+/// counts as a selector only when it parses as one.
+pub(crate) fn session_defaults(metadata: &RuntimeMetadata) -> SessionDefaults {
+    let model_selector = if otto_core::config::ModelSelector::parse(&metadata.profile).is_ok() {
+        metadata.profile.clone()
+    } else {
+        String::new()
+    };
+    SessionDefaults {
+        provider: metadata.provider.clone(),
+        model: metadata.model.clone(),
+        model_selector,
     }
 }

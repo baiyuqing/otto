@@ -183,7 +183,7 @@ async fn a_chatgpt_runtime_registers_catalog_discovery_without_manual_models() {
         ..crate::auth::Credentials::default()
     };
     let mut runtime = runtime();
-    runtime.provider = otto_core::config::PROVIDER_CHATGPT.to_string();
+    runtime.provider_type = otto_core::config::PROVIDER_CHATGPT.to_string();
     let session = SharedSession::memory(Header::default());
     let runner = builder
         .build_runner(&session, &runtime)

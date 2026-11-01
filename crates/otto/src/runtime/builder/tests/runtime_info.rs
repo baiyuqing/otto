@@ -1,4 +1,5 @@
 use super::*;
+use otto_core::config::{ModelEntry, ProviderEntry};
 
 #[test]
 fn planned_sandbox_info_downgrades_when_the_executor_is_missing() {
@@ -30,7 +31,8 @@ fn effective_sandbox_info_reports_environment_rejected_when_the_boundary_is_clos
 
     let info = builder.runtime_info(&runtime());
     assert_eq!(info.provider, "");
-    assert_eq!(info.profile, "");
+    assert_eq!(info.provider_type, "");
+    assert_eq!(info.model_selector, "");
     assert_eq!(info.model, "");
     assert_eq!(info.context_window, 0);
 }
@@ -82,12 +84,18 @@ async fn the_system_prompt_carries_the_workspace_context_and_hides_the_api_key()
 async fn disabled_child_models_report_safe_warning_and_parent_context() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut shared = shared(dir.path());
-    Arc::get_mut(&mut shared).unwrap().config.profiles.insert(
+    Arc::get_mut(&mut shared).unwrap().config.providers.insert(
         "default".into(),
-        otto_core::config::Profile {
-            provider: "openai-compatible".into(),
+        otto_core::config::ProviderEntry {
+            type_: "openai-compatible".into(),
             base_url: "https://configured.invalid/v1".into(),
-            subagent_models: vec!["private-candidate".into()],
+            models: std::collections::BTreeMap::from([(
+                "gpt-test".to_string(),
+                otto_core::config::ModelEntry {
+                    legacy_subagent_models: vec!["private-candidate".into()],
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         },
     );
@@ -152,8 +160,9 @@ fn runtime_info_reports_the_resolved_runtime_when_the_boundary_is_open() {
     let mut runtime = runtime();
     runtime.compaction.context_window = 128_000;
     let info = builder.runtime_info(&runtime);
-    assert_eq!(info.provider, "openai-compatible");
-    assert_eq!(info.profile, "default");
+    assert_eq!(info.provider, "default");
+    assert_eq!(info.provider_type, "openai-compatible");
+    assert_eq!(info.model_selector, "default/gpt-test");
     assert_eq!(info.model, "gpt-test");
     assert_eq!(info.context_window, 128_000);
     assert_eq!(info.sandbox.mode, SandboxMode::Unavailable);
@@ -162,17 +171,20 @@ fn runtime_info_reports_the_resolved_runtime_when_the_boundary_is_open() {
 #[test]
 fn resolve_initial_runtime_ignores_session_selection() {
     let mut file = File {
-        default_profile: "work".to_string(),
+        default_model: "work/profile-model".to_string(),
         ..File::default()
     };
-    file.profiles.insert(
+    file.providers.insert(
         "work".to_string(),
-        Profile {
-            provider: "openai-compatible".to_string(),
+        ProviderEntry {
+            type_: "openai-compatible".to_string(),
             base_url: "https://gw.example.com/v1".to_string(),
-            model: "profile-model".to_string(),
             api_key_env: "WORK_KEY".to_string(),
-            ..Profile::default()
+            models: std::collections::BTreeMap::from([
+                ("profile-model".to_string(), ModelEntry::default()),
+                ("session-model".to_string(), ModelEntry::default()),
+            ]),
+            ..ProviderEntry::default()
         },
     );
     let environment = HashMap::from([("WORK_KEY".to_string(), "sk-1".to_string())]);
@@ -190,19 +202,19 @@ fn resolve_initial_runtime_ignores_session_selection() {
         resolve_initial_runtime(&file, &environment, Some(&metadata), &Overrides::default())
             .expect("resumed runtime");
     assert_eq!(resumed.model, "profile-model");
-    assert_eq!(resumed.provider, fresh.provider);
+    assert_eq!(resumed.provider_name, fresh.provider_name);
     assert_eq!(resumed.thinking, fresh.thinking);
-    assert_eq!(resumed.profile, "work");
+    assert_eq!(resumed.model_selector.to_string(), "work/profile-model");
 
     let overrides = Overrides {
-        profile: "work".to_string(),
+        model: "work/profile-model".to_string(),
         ..Overrides::default()
     };
     let overridden = resolve_initial_runtime(&file, &environment, Some(&metadata), &overrides)
         .expect("overridden runtime");
     assert_eq!(overridden.model, "profile-model");
     let overrides = Overrides {
-        model: "session-model".to_string(),
+        model: "work/session-model".to_string(),
         thinking: "high".to_string(),
         ..overrides
     };
@@ -212,7 +224,7 @@ fn resolve_initial_runtime_ignores_session_selection() {
     assert_eq!(overridden.thinking, "high");
     let environment = HashMap::from([
         ("WORK_KEY".to_string(), "sk-1".to_string()),
-        ("OTTO_MODEL".to_string(), "session-model".to_string()),
+        ("OTTO_MODEL".to_string(), "work/session-model".to_string()),
     ]);
     let from_environment =
         resolve_initial_runtime(&file, &environment, Some(&metadata), &Overrides::default())

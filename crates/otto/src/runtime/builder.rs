@@ -99,8 +99,13 @@ pub type BuildError = String;
 /// Everything a frontend shows about the resolved runtime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeInfo {
+    /// The provider name from the selector.
     pub provider: String,
-    pub profile: String,
+    /// The API type of the provider.
+    pub provider_type: String,
+    /// The `<provider>/<model_id>` selector.
+    pub model_selector: String,
+    /// The provider model ID.
     pub model: String,
     pub thinking: String,
     pub context_window: i64,

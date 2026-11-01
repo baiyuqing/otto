@@ -695,7 +695,7 @@ async fn await_control<T>(
 /// There is deliberately no overall request timeout: a streaming completion may
 /// run for minutes and is bounded by the caller's cancellation token.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+    crate::tls_provider::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_keepalive(KEEPALIVE)
         .read_timeout(READ_TIMEOUT)

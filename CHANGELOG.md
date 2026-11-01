@@ -90,6 +90,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changes
 
+- TLS uses rustls with the `ring` crypto provider instead of `aws-lc-rs`, for
+  provider and OAuth requests, `web_fetch`, HTTP MCP servers and the
+  `otto serve --listen` TLS listener. TLS 1.3 key exchange is X25519 or P-256;
+  the hybrid post-quantum exchange that `aws-lc-rs` offered is no longer
+  negotiated. Cipher suites, certificate verification (platform verifier) and
+  certificate formats are unchanged.
 - Bash overflow logs, research scratch files and sub-agent reports are written
   under `.otto/tool-output/<session-id>/` and `.otto/reports/<session-id>/`
   instead of directly under `.otto/tool-output/` and `.otto/reports/`.
@@ -151,6 +157,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Development
 
+- Clean dev builds are shorter. Measured with `cargo build --timings` on macOS
+  arm64 (Rust 1.99.1, 10 cores, 2026-11-01): a clean `cargo build` went from
+  65.0 s to 58.1 s because the `ring` crypto provider replaces `aws-lc-rs`,
+  whose build script compiled C for 16.7 s on the critical path (ring's takes
+  2.8 s). Every reqwest client is created through
+  `otto::tls_provider::http_client_builder()` or `http_client()`, which
+  install the provider; a `reqwest::Client::builder()` call elsewhere panics
+  at `build()` with "No rustls crypto provider is configured".
 - `make install` now includes a repository-aware `rust-best-practices` skill,
   adapted from BeautifulRust with source attribution. It applies idiomatic Rust
   guidance while keeping Otto's scoped `AGENTS.md`, architecture, exact

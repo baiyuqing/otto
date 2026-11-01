@@ -43,12 +43,14 @@ base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 nix = { version = "=0.31.3", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }
 tempfile = "=3.27.0"
 # Native-only HTTP transport for the provider client. rustls only, no
-# native-tls: `rustls` uses the aws-lc-rs provider and rustls-platform-verifier,
-# which checks certificates with the macOS trust evaluation (Security.framework)
-# and with the system root store on Linux. `stream` gives the chunked body
-# reader the SSE assembler needs; `query` and `form` give
+# native-tls: `rustls-no-provider` keeps rustls-platform-verifier, which checks
+# certificates with the macOS trust evaluation (Security.framework) and with
+# the system root store on Linux, and leaves the crypto provider to the rustls
+# features the workspace enables: `ring`, through tokio-rustls below. The
+# `rustls` feature would add aws-lc-rs as a second provider. `stream` gives
+# the chunked body reader the SSE assembler needs; `query` and `form` give
 # `RequestBuilder::query` (client API) and `::form` (OAuth token request).
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream", "query", "form"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "query", "form"] }
 # `TryStreamExt::try_next` over the reqwest byte stream.
 futures-util = { version = "=0.3.34", default-features = false }
 # otto-core only parses TOML (config loading is resolution-only there); the
@@ -67,9 +69,14 @@ axum = "=0.8.9"
 # contract tests need no listening socket.
 tower = { version = "=0.5.3", features = ["util"] }
 # Native-only server-side TLS for `otto serve --listen` on a non-loopback
-# address. The same rustls and aws-lc-rs provider reqwest pins; `rustls` and
-# its `pki_types` are reached through this crate's re-export.
-tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs"] }
+# address. `ring` is the one rustls crypto provider in the workspace, for this
+# listener and for reqwest's client (`crate::tls_provider` installs it as the
+# process default). Its build script compiled its C and assembly in 2.8 s where
+# aws-lc-sys took 16.7 s; the clean dev build went from 65.0 s to 58.1 s
+# (`cargo build --timings`, 2026-11-01, macOS arm64, 10 cores). ring has no
+# post-quantum key exchange, so TLS 1.3 negotiates X25519 or P-256. `rustls`
+# and its `pki_types` are reached through this crate's re-export.
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 # Embedded SQLite, compiled from the bundled C source.
 rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }

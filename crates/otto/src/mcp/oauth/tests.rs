@@ -51,7 +51,10 @@ fn browser(
             let callback =
                 reqwest::Url::parse_with_params(&redirect, &[("code", code), ("state", &state)])
                     .unwrap();
-            let _ = reqwest::get(callback).await;
+            let _ = crate::tls_provider::http_client()
+                .get(callback)
+                .send()
+                .await;
         });
         Ok(())
     })

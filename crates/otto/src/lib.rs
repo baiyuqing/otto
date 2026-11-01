@@ -40,6 +40,7 @@ pub mod session;
 pub mod skill;
 pub mod storage;
 pub mod subagent;
+pub mod tls_provider;
 pub mod tool;
 pub mod tui;
 pub mod typesafe;

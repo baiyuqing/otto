@@ -253,7 +253,10 @@ mod tests {
                     &[("code", code), ("state", &state)],
                 )
                 .unwrap();
-                let _ = reqwest::get(callback).await;
+                let _ = crate::tls_provider::http_client()
+                    .get(callback)
+                    .send()
+                    .await;
             });
             Ok(())
         })
@@ -384,7 +387,10 @@ mod tests {
                     .unwrap();
                 let callback = format!("{redirect}?{query}&state={state}");
                 tokio::spawn(async move {
-                    let _ = reqwest::get(&callback).await;
+                    let _ = crate::tls_provider::http_client()
+                        .get(&callback)
+                        .send()
+                        .await;
                 });
                 Ok(())
             });
@@ -421,9 +427,16 @@ mod tests {
                 .unwrap();
             tokio::spawn(async move {
                 let base = redirect.trim_end_matches("/auth/callback").to_owned();
-                let noise = reqwest::get(format!("{base}/favicon.ico")).await.unwrap();
+                let noise = crate::tls_provider::http_client()
+                    .get(format!("{base}/favicon.ico"))
+                    .send()
+                    .await
+                    .unwrap();
                 assert_eq!(noise.status(), 404);
-                let _ = reqwest::get(format!("{redirect}?code=c&state={state}")).await;
+                let _ = crate::tls_provider::http_client()
+                    .get(format!("{redirect}?code=c&state={state}"))
+                    .send()
+                    .await;
             });
             Ok(())
         });

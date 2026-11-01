@@ -301,10 +301,11 @@ api_version = "2026-10-21"
 models."MODEL_ID" = { thinking = "high" }
 
 [sandbox]
-driver = "auto"
-network = "allow"
-read_paths = []
-allow_env = []
+driver = "auto"                # "auto" selects Seatbelt on macOS
+network = "allow"              # "allow" or "deny" IP networking
+deny_read_paths = []           # added to the built-in read denylist
+read_paths = []                # exceptions: readable although the denylist covers them
+allow_env = []                 # exact environment variable names restored in the sandbox
 
 [agent]
 shell_timeout = "120s"

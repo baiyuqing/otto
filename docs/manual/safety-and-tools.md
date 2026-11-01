@@ -747,24 +747,30 @@ uses a separate `[sandbox]` table; unsupported layouts are rejected without edit
 Changes apply to future processes using that config file, not just the selected
 workspace.
 
-The GitHub CLI recipe exposes its configuration directory read-only and allows
-`GH_CONFIG_DIR`. This can expose saved GitHub credentials to shell commands. The
-wizard uses an existing absolute `GH_CONFIG_DIR`, or defaults to `~/.config/gh`,
-and prints a launch command setting that variable because Otto replaces `HOME`.
-Run `gh auth login` outside Otto first if the configuration directory is missing.
+The GitHub CLI recipe adds its configuration directory to `read_paths`, which is
+an exception to the built-in read denylist entry `~/.config/gh`. The wizard uses
+an existing absolute `GH_CONFIG_DIR`, or defaults to `~/.config/gh`. The recipe
+does not add `GH_CONFIG_DIR` to `allow_env` and prints no launch command,
+because `gh` finds `~/.config/gh` through the real `HOME`. The exception can
+expose saved GitHub credentials to shell commands. Run `gh auth login` outside
+Otto first if the configuration directory is missing.
 
 Choose `check` to test sandbox startup and, when selected, GitHub CLI availability
-and directory access using the displayed launch environment. The check does not
-contact GitHub or verify authentication or network connectivity. Choose `save`
-to write the reviewed configuration, then restart Otto with the printed command.
+(`gh --version`) and whether the configuration directory is readable. The check
+does not contact GitHub or verify authentication or network connectivity.
+Choose `save` to write the reviewed configuration.
 
 ### `bash` sandbox policy
 
 On macOS, the default is `--sandbox auto`, which means Seatbelt. The sandboxed
-command gets whole-workspace write access plus Otto-managed private `home`,
-`tmp`, and `cache` directories beneath your user cache. `HOME` points to the
-private `home`, so `~` in a command does not name your home directory; the
-`bash` tool description tells the model to use absolute paths for your files.
+command can write the whole workspace, the admitted linked worktrees and the
+Otto-managed private `tmp` and `cache` directories beneath your user cache. It
+can read every path on the host except the paths on the
+[read denylist](#a-sandboxed-command-reads-every-path-except-the-read-denylist).
+`HOME` is your real home directory, so `~` in a command names your home
+directory. The private per-session `home` directory does not exist. A write
+under `~` outside the writable set fails with a write denial, and `TMPDIR` is
+the writable scratch location.
 Otto keeps generated sandbox profile files in a separate private `profiles` directory
 that the sandboxed child cannot read. Otto does not treat the workspace as protected: source,
 `.git`, tests, and generated files remain writable.
@@ -779,21 +785,11 @@ listing alone is not sufficient, because it is derived from
 `.git/worktrees/<id>/gitdir` files that a sandboxed command can write.
 Records marked `bare` or `prunable`, `.git` entries that are symbolic links,
 and paths that fail to canonicalize are not admitted. Bash can read and write
-admitted worktrees without a separate `read_paths` approval; their `.git`
+admitted worktrees without a `read_paths` entry; their `.git`
 metadata and Otto workspace identity stay read-only. This does not admit a
 similarly named directory, a different repository, or change the file tools'
 selected-workspace boundary. Otto rediscovers this set at startup and
 `/sandbox reload`.
-
-Host home content is not automatically readable. Git config, shell dotfiles,
-and host caches are not implicitly mounted into the command view. Add only the
-narrow absolute or `~/...` `read_paths` you need. Broad `read_paths` are high
-risk because command code can read them and, with `network = "allow"`, exfiltrate
-them. Otto rejects `read_paths` that would include Otto's private sandbox state.
-If you need tool-specific config, prefer narrow `read_paths` plus exact config
-environment variables over exposing a large home or cache subtree.
-An unavailable configured `read_paths` entry is skipped until it exists again;
-remove obsolete entries from the configuration to keep the policy clear.
 
 `network = "allow"` is the default and permits ordinary IP networking and local
 IP binds. `network = "deny"` blocks IP networking and local binds. Phase 1 has
@@ -821,7 +817,7 @@ command transforms or encodes a secret, Otto may not be able to redact it.
 
 If you explicitly select `--sandbox off`, Otto prints a persistent local warning
 and `bash` runs unsandboxed as your current user. In that mode,
-`network = "deny"`, private-home/cache replacement, and `read_paths` no longer
+`network = "deny"`, cache replacement, `deny_read_paths` and `read_paths` no longer
 constrain the shell.
 
 Under Seatbelt, the model may set `sandbox_permissions` to
@@ -845,6 +841,78 @@ classes still waits for that approval and then runs unconfined. Exclusions
 apply to child agents and `otto --prompt` runs as well, and only to simple
 commands; see [`[sandbox]`](getting-started.md#configuration) for the entry
 syntax and the rule.
+
+### A sandboxed command reads every path except the read denylist
+
+Seatbelt allows reads of all paths and then denies the paths below. Every path
+that is not on this list is readable, including files in your home directory
+that are not named here. A denylist protects listed locations only: a
+credential stored at an unlisted path is readable and, with
+`network = "allow"`, can be sent off the host.
+
+The built-in entries are relative to your home directory. Each entry denies the
+path and everything below it, whether or not the path exists:
+
+- Credentials of tools and services: `.ssh`, `.gnupg`, `.aws`, `.azure`,
+  `.config/gcloud`, `.kube`, `.docker`, `.netrc`, `.git-credentials`, `.npmrc`,
+  `.pypirc`, `.cargo/credentials.toml`, `.cargo/credentials`,
+  `.gem/credentials`, `.m2/settings.xml`, `.terraform.d/credentials.tfrc.json`,
+  `.config/gh`.
+- Credentials of coding agents, Otto's own included: `.otto/auth`,
+  `.claude/.credentials.json`, `.codex/auth.json`.
+- Shell history: `.zsh_history`, `.bash_history`, `.zsh_sessions`.
+- Personal data kept by macOS and browsers: `Library/Keychains`,
+  `Library/Cookies`, `Library/Safari`,
+  `Library/Application Support/Google/Chrome`,
+  `Library/Application Support/Firefox`, `Library/Messages`, `Library/Mail`.
+- Every private sandbox state root `~/Library/Caches/otto-sandbox-*`, except the
+  `tmp` and `cache` directories of the running session.
+
+Three configuration and runtime inputs change the effective list:
+
+- `[sandbox] deny_read_paths` adds entries. Each entry is an absolute path or
+  starts with `~/`, like `read_paths`, and need not exist. It takes effect on
+  `/sandbox reload`. An entry that equals or contains the workspace or a linked
+  worktree is rejected and the sandbox does not start. An entry below the
+  workspace is accepted: reads of that subtree are denied and writes stay
+  allowed.
+- A built-in entry that equals or contains the workspace or a linked worktree
+  is skipped, because the sandbox cannot work without reading it. `/sandbox`
+  prints `Sandbox deny_read_paths <path>: contains a writable root; not applied`
+  for each skipped entry.
+- `[sandbox] read_paths` lists exceptions inside the denylist. An entry is
+  active only when its resolved path equals or lies below a denied path. An
+  entry that is not below any denied path, or that is an ancestor of a denied
+  path, is inert: it changes nothing, and `/sandbox` prints
+  `Sandbox read_paths <path>: not below any denied path; remove it from read_paths`.
+  For example, `~/.otto` does not lift the denial of `~/.otto/auth`. Otto
+  rejects `read_paths` that overlap Otto's private sandbox state. An
+  unavailable configured `read_paths` entry is skipped until it exists again;
+  remove obsolete entries from the configuration to keep the policy clear.
+  Existing configurations load unchanged.
+
+Add only the narrow exceptions you need. An exception for a credential
+location lets command code read it and, with `network = "allow"`, send it off
+the host.
+
+The `bash` tool's `sandbox_read_path` argument and `/sandbox allow <path>`
+accept only a path that the denylist covers. For any other path the tool
+returns `path is already readable; run the command without sandbox_read_path`
+and the REPL reports `path is already readable; no read_paths entry is needed`.
+
+Writes are unchanged. Limitations of this policy:
+
+- Commands that match `excluded_commands` run unconfined and read every path,
+  including `deny_read_paths` entries.
+- `HOME` is the real home directory, but the cache variables
+  `XDG_CACHE_HOME`, `GOCACHE`, `GOMODCACHE`, `NPM_CONFIG_CACHE`, `PIP_CACHE_DIR`,
+  `UV_CACHE_DIR` and `CARGO_HOME` point into the private `cache` directory.
+  The cargo, go, npm, pip and uv caches therefore download dependencies again in
+  every session, and cargo does not read `~/.cargo/config.toml` (registry
+  mirrors, build settings) or `~/.cargo/credentials.toml`. `RUSTUP_HOME` is not
+  set, so the rustup proxy finds `~/.rustup` through `HOME`.
+- `ZDOTDIR` points to the private `tmp` directory, so `zsh -c` does not source
+  `~/.zshenv`, `~/.zprofile` or `~/.zshrc`. `BASH_ENV` and `ENV` stay withheld.
 
 ### Classified commands wait for approval inside the sandbox
 
@@ -936,8 +1004,7 @@ when it clones a submodule into `.git/modules`, and hook installers such as
 
 Commands that are not affected: `git commit`, `checkout`, `branch` without
 tracking, `fetch`, `pull`, `merge`, `rebase`, `stash`, `worktree add`,
-`clone` into a subdirectory, and `git config --global` (which writes the
-private HOME).
+`clone` into a subdirectory.
 
 To run one of the failing commands, the model sets `sandbox_permissions` to
 `require_escalated`, and you enter `/approve <id>`.
@@ -952,6 +1019,9 @@ example `file-read-data /Users/me/.ssh/config` or
 prompt instructs the model to answer a denied read outside the workspace by
 requesting a persistent read grant with Bash's `sandbox_read_path` argument, and a denied write to `.git` metadata or
 outside the workspace by requesting `require_escalated`.
+
+When a listed denial has a `file-read` operation, the section ends with the line
+`hint: a denied read is on the sandbox read denylist; request a persistent exception with sandbox_read_path, or an elevated run with sandbox_permissions`.
 
 Limits:
 

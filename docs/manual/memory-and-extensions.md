@@ -484,7 +484,8 @@ connection. Remote servers use `streamable-http`, HTTPS except loopback;
 legacy HTTP+SSE is unsupported.
 
 Enable/disable applies at next runner build (normally new session/restart).
-New snapshots need restart or `/sandbox reload` for Bash read access on macOS.
+Bash can read plugin snapshots on macOS because `~/.otto/plugins` is not on the
+[sandbox read denylist](safety-and-tools.md#a-sandboxed-command-reads-every-path-except-the-read-denylist).
 Revoke/remove immediately blocks subsequent MCP/command use and closes servers;
 it does not undo effects. Removal retains snapshots and
 `~/.otto/plugins/data/<name>/`; no automatic garbage collection exists. Replace

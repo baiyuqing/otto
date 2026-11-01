@@ -153,7 +153,7 @@ pub struct Client {
 impl Client {
     #[cfg(unix)]
     pub fn new(socket: &Path) -> Result<Self, Error> {
-        let http = reqwest::Client::builder()
+        let http = crate::tls_provider::http_client_builder()
             .unix_socket(socket)
             .no_proxy()
             .build()
@@ -164,7 +164,7 @@ impl Client {
     /// Dispatch against the same serve router without a socket or extra process.
     pub(crate) fn in_process(router: axum::Router) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::tls_provider::http_client(),
             router: Some(router),
         }
     }

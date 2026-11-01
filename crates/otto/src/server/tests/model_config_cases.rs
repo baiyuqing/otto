@@ -298,3 +298,19 @@ async fn removing_the_default_provider_or_model_is_409_model_in_use() {
         assert_eq!(reply.json()["error"]["code"], "model_in_use", "{body}");
     }
 }
+
+#[tokio::test]
+async fn a_file_with_legacy_profile_keys_rejects_every_change_with_409_legacy_profiles_config() {
+    let harness = Harness::with(HarnessOptions {
+        config_text: Some(
+            "default_profile = \"work\"\n[profiles.work]\nprovider = \"openai-compatible\"\n\
+             base_url = \"https://w.example/v1\"\nmodel = \"m\"\n"
+                .into(),
+        ),
+        ..Default::default()
+    });
+    let reply = post_change(&harness, r#"{"kind":"set_default_model","model":"work/m"}"#).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "legacy_profiles_config");
+    assert!(reply.body.contains("default_profile"), "{}", reply.body);
+}

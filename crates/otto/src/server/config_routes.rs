@@ -410,6 +410,9 @@ pub(super) async fn preview(
         Err(ModelChangeError::InUse(message)) => {
             return error_response(StatusCode::CONFLICT, "model_in_use", &message);
         }
+        Err(ModelChangeError::LegacyProfiles(message)) => {
+            return error_response(StatusCode::CONFLICT, "legacy_profiles_config", &message);
+        }
         Err(error) => {
             return error_response(
                 StatusCode::BAD_REQUEST,

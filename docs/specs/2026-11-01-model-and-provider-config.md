@@ -118,10 +118,11 @@ providers included, followed by one `models."<id>" = { ... }` line per model.
 has no such header; they write no `type`, because the same writer serves
 project-scope files, where a provider-level field is rejected. A provider
 whose models are all written as `[providers.<name>.models."<id>"]` tables
-receives a new model as such a table, so one provider never holds both forms
-(a dotted `models."<id>"` key after such headers is accepted by Otto's parser
-but is not guaranteed by other TOML parsers, such as the chat connector's).
-An existing model is edited or removed where it is written: a
+receives a new model as such a table, so all models of one provider keep one
+spelling and one place in the file. Both the mixed form and either pure form
+parse identically in the Rust `toml` crate 1.1.8 and in BurntSushi/toml
+v1.6.0, the chat connector's parser (checked 2026-11-01); the rule is about
+readability, not parser support. An existing model is edited or removed where it is written: a
 `models."<id>"` line is replaced or deleted; a
 `[providers.<name>.models."<id>"]` table has its key set or is removed as a
 whole. `otto_core::config::edit` implements both in-place edits

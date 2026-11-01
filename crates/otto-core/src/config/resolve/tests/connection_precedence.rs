@@ -1,174 +1,249 @@
-//! Resolve tests: profile, environment and CLI precedence, provider validation and API keys.
+//! Resolve tests: model selection precedence, provider validation and API keys.
 
 use super::*;
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn precedence_prefers_explicit_profile_env_model_and_profile_base_url() {
-    let file = file_with_profiles(
-        "configured",
-        &[
-            (
-                "configured",
-                profile(
-                    "openai-compatible",
-                    "config-model",
-                    "https://config.example/v1",
-                    "CONFIG_KEY",
-                ),
-            ),
-            (
-                "explicit",
-                profile(
-                    "openai-compatible",
-                    "profile-model",
-                    "https://profile.example/v1",
-                    "PROFILE_KEY",
-                ),
-            ),
-        ],
-    );
-    let runtime = resolve(
-        &file,
-        &env_map(&[("OTTO_MODEL", "env-model"), ("PROFILE_KEY", "secret")]),
-        &SessionDefaults {
-            provider: "openai-compatible".into(),
-            model: "session-model".into(),
-        },
-        &Overrides {
-            profile: "explicit".into(),
-            ..Default::default()
-        },
-    )
-    .expect("resolve");
-    assert_eq!(runtime.model, "env-model");
-    assert_eq!(runtime.profile, "explicit");
-    assert_eq!(runtime.base_url, "https://profile.example/v1");
+const TWO_PROVIDERS: &str = r#"
+default_model = "alpha/shared"
+[providers.alpha]
+type = "openai-compatible"
+base_url = "https://alpha.example/v1"
+api_key_env = "ALPHA_KEY"
+[providers.alpha.models."shared"]
+thinking = "low"
+[providers.alpha.models."alpha-only"]
+[providers.beta]
+type = "openai-compatible"
+base_url = "https://beta.example/v1"
+api_key_env = "BETA_KEY"
+[providers.beta.models."shared"]
+[providers.beta.models."vendor/with-slash"]
+"#;
+
+fn two_providers() -> File {
+    crate::config::parse(TWO_PROVIDERS).expect("parse")
+}
+
+fn keys() -> HashMap<String, String> {
+    env_map(&[("ALPHA_KEY", "a-secret"), ("BETA_KEY", "b-secret")])
+}
+
+fn resolve_with(
+    env: &HashMap<String, String>,
+    session: SessionDefaults,
+    overrides: Overrides,
+) -> Result<Runtime, ConfigError> {
+    resolve(&two_providers(), env, &session, &overrides)
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn explicit_profile_overrides_resumed_provider_and_model() {
-    let file = file_with_profiles(
-        "",
-        &[(
-            "explicit",
-            profile(
-                "openai-compatible",
-                "profile-model",
-                "https://example.com/v1",
-                "PROFILE_KEY",
-            ),
-        )],
-    );
-    let runtime = resolve(
-        &file,
-        &env_map(&[("PROFILE_KEY", "secret")]),
-        &SessionDefaults {
-            provider: "codex".into(),
-            model: "old-model".into(),
-        },
-        &Overrides {
-            profile: "explicit".into(),
-            ..Default::default()
-        },
-    )
-    .expect("resolve");
-    assert_eq!(runtime.provider, "openai-compatible");
-    assert_eq!(runtime.model, "profile-model");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn cli_overrides_win_over_environment() {
-    let file = file_with_profiles(
-        "",
-        &[(
-            "local",
-            profile(
-                "openai-compatible",
-                "profile-model",
-                "https://example.com/v1",
-                "PROFILE_KEY",
-            ),
-        )],
-    );
-    let runtime = resolve(
-        &file,
-        &env_map(&[
-            ("OTTO_PROVIDER", "openai-compatible"),
-            ("OTTO_MODEL", "env-model"),
-            ("PROFILE_KEY", "secret"),
-        ]),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "local".into(),
-            model: "cli-model".into(),
-            ..Default::default()
-        },
-    )
-    .expect("resolve");
-    assert_eq!(runtime.model, "cli-model");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn copies_thinking_override() {
-    let file = file_with_profiles(
-        "",
-        &[(
-            "local",
-            profile(
-                "openai-compatible",
-                "profile-model",
-                "https://example.com/v1",
-                "PROFILE_KEY",
-            ),
-        )],
-    );
-    let runtime = resolve(
-        &file,
-        &env_map(&[("PROFILE_KEY", "secret")]),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "local".into(),
-            thinking: "max".into(),
-            ..Default::default()
-        },
-    )
-    .expect("resolve");
-    assert_eq!(runtime.thinking, "max");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn profile_thinking_is_used_and_cli_override_wins() {
-    let mut local = profile(
-        "openai-compatible",
-        "profile-model",
-        "https://example.com/v1",
-        "PROFILE_KEY",
-    );
-    local.thinking = "low".into();
-    let file = file_with_profiles("", &[("local", local)]);
-    let runtime = resolve(
-        &file,
-        &env_map(&[("PROFILE_KEY", "secret")]),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "local".into(),
-            ..Default::default()
-        },
-    )
-    .expect("resolve");
+fn default_model_selects_provider_connection_and_model_thinking() {
+    let runtime =
+        resolve_with(&keys(), SessionDefaults::default(), Overrides::default()).expect("resolve");
+    assert_eq!(runtime.model_selector.to_string(), "alpha/shared");
+    assert_eq!(runtime.provider_name, "alpha");
+    assert_eq!(runtime.provider_type, "openai-compatible");
+    assert_eq!(runtime.model, "shared");
+    assert_eq!(runtime.base_url, "https://alpha.example/v1");
+    assert_eq!(runtime.api_key, "a-secret");
     assert_eq!(runtime.thinking, "low");
+}
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn same_model_id_under_two_providers_resolves_two_connections() {
+    let runtime = resolve_with(
+        &keys(),
+        SessionDefaults::default(),
+        Overrides {
+            model: "beta/shared".into(),
+            ..Default::default()
+        },
+    )
+    .expect("resolve");
+    assert_eq!(runtime.base_url, "https://beta.example/v1");
+    assert_eq!(runtime.api_key, "b-secret");
+    assert_eq!(runtime.thinking, "");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn model_id_may_contain_slashes() {
+    let runtime = resolve_with(
+        &keys(),
+        SessionDefaults::default(),
+        Overrides {
+            model: "beta/vendor/with-slash".into(),
+            ..Default::default()
+        },
+    )
+    .expect("resolve");
+    assert_eq!(runtime.provider_name, "beta");
+    assert_eq!(runtime.model, "vendor/with-slash");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn precedence_is_cli_then_environment_then_session_then_profile_env_then_default_model() {
+    let file = two_providers();
+    let session = SessionDefaults {
+        provider: "openai-compatible".into(),
+        model: "session-model".into(),
+        model_selector: "beta/alpha-session".into(),
+    };
+    let env = env_map(&[
+        ("OTTO_MODEL", "beta/env-model"),
+        ("ALPHA_KEY", "a"),
+        ("BETA_KEY", "b"),
+    ]);
+    let cli = Overrides {
+        model: "alpha/cli-model".into(),
+        ..Default::default()
+    };
+    let runtime = resolve(&file, &env, &session, &cli).expect("cli");
+    assert_eq!(runtime.model_selector.to_string(), "alpha/cli-model");
+    let runtime = resolve(&file, &env, &session, &Overrides::default()).expect("env");
+    assert_eq!(runtime.model_selector.to_string(), "beta/env-model");
+    let env = env_map(&[("ALPHA_KEY", "a"), ("BETA_KEY", "b")]);
+    let runtime = resolve(&file, &env, &session, &Overrides::default()).expect("session");
+    assert_eq!(runtime.model_selector.to_string(), "beta/alpha-session");
     let runtime = resolve(
         &file,
-        &env_map(&[("PROFILE_KEY", "secret")]),
+        &env,
+        &SessionDefaults::default(),
+        &Overrides::default(),
+    )
+    .expect("default");
+    assert_eq!(runtime.model_selector.to_string(), "alpha/shared");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn deprecated_provider_and_model_pairs_form_a_selector() {
+    let runtime = resolve_with(
+        &keys(),
+        SessionDefaults::default(),
+        Overrides {
+            provider: "beta".into(),
+            model: "shared".into(),
+            ..Default::default()
+        },
+    )
+    .expect("flags");
+    assert_eq!(runtime.model_selector.to_string(), "beta/shared");
+    let env = env_map(&[
+        ("OTTO_PROVIDER", "beta"),
+        ("OTTO_MODEL", "shared"),
+        ("BETA_KEY", "b"),
+    ]);
+    let runtime =
+        resolve_with(&env, SessionDefaults::default(), Overrides::default()).expect("env");
+    assert_eq!(runtime.model_selector.to_string(), "beta/shared");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn bare_model_id_and_lone_provider_are_errors_with_a_hint() {
+    let bare = resolve_with(
+        &keys(),
+        SessionDefaults::default(),
+        Overrides {
+            model: "shared".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(bare.contains("--model <provider>/shared"), "{bare}");
+    let lone = resolve_with(
+        &keys(),
+        SessionDefaults::default(),
+        Overrides {
+            provider: "beta".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(lone.contains("--provider requires --model"), "{lone}");
+    let env = env_map(&[("OTTO_PROVIDER", "beta")]);
+    let lone_env = resolve_with(&env, SessionDefaults::default(), Overrides::default())
+        .unwrap_err()
+        .to_string();
+    assert!(lone_env.contains("OTTO_PROVIDER"), "{lone_env}");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn unknown_provider_is_an_error() {
+    let error = resolve_with(
+        &keys(),
+        SessionDefaults::default(),
+        Overrides {
+            model: "gamma/x".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("unknown provider \"gamma\""), "{error}");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn missing_model_is_an_error() {
+    let error = resolve(
+        &File::default(),
+        &HashMap::new(),
+        &SessionDefaults::default(),
+        &Overrides::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("missing model"), "{error}");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn old_session_uses_default_model_provider_of_the_same_type_else_builtin() {
+    let session = |provider: &str| SessionDefaults {
+        provider: provider.into(),
+        model: "old-model".into(),
+        ..Default::default()
+    };
+    let runtime = resolve_with(&keys(), session("openai-compatible"), Overrides::default())
+        .expect("same type");
+    assert_eq!(runtime.model_selector.to_string(), "alpha/old-model");
+    let runtime = resolve_with(&keys(), session("chatgpt"), Overrides::default()).expect("builtin");
+    assert_eq!(runtime.model_selector.to_string(), "chatgpt/old-model");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn model_without_a_table_uses_builtin_provider_defaults() {
+    let runtime = resolve(
+        &File::default(),
+        &HashMap::new(),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
+            model: "chatgpt/gpt-5-codex".into(),
+            ..Default::default()
+        },
+    )
+    .expect("resolve");
+    assert_eq!(runtime.provider_type, "chatgpt");
+    assert_eq!(runtime.model, "gpt-5-codex");
+    assert_eq!(runtime.base_url, "");
+    assert_eq!(runtime.api_key, "");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn cli_thinking_wins_over_model_thinking() {
+    let runtime = resolve_with(
+        &keys(),
+        SessionDefaults::default(),
+        Overrides {
             thinking: "max".into(),
             ..Default::default()
         },
@@ -179,7 +254,7 @@ fn profile_thinking_is_used_and_cli_override_wins() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn environment_profile_wins_before_default_profile() {
+fn legacy_profile_flag_and_environment_select_converted_models() {
     let file = file_with_profiles(
         "configured",
         &[
@@ -203,221 +278,74 @@ fn environment_profile_wins_before_default_profile() {
             ),
         ],
     );
+    let env = env_map(&[
+        ("OTTO_PROFILE", "current"),
+        ("CURRENT_KEY", "secret"),
+        ("CONFIG_KEY", "c"),
+    ]);
     let runtime = resolve(
         &file,
-        &env_map(&[("OTTO_PROFILE", "current"), ("CURRENT_KEY", "secret")]),
+        &env,
         &SessionDefaults::default(),
         &Overrides::default(),
     )
-    .expect("resolve");
-    assert_eq!(runtime.profile, "current");
+    .expect("env");
     assert_eq!(runtime.model, "current-model");
-    assert_eq!(runtime.api_key, "secret");
     assert_eq!(runtime.base_url, "https://current.example/v1");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn explicit_profile_overrides_environment_profile() {
-    let file = file_with_profiles(
-        "configured",
-        &[
-            (
-                "env",
-                profile(
-                    "openai-compatible",
-                    "env-model",
-                    "https://env.example/v1",
-                    "ENV_KEY",
-                ),
-            ),
-            (
-                "explicit",
-                profile(
-                    "openai-compatible",
-                    "explicit-model",
-                    "https://explicit.example/v1",
-                    "EXPLICIT_KEY",
-                ),
-            ),
-        ],
-    );
     let runtime = resolve(
         &file,
-        &env_map(&[("OTTO_PROFILE", "env"), ("EXPLICIT_KEY", "secret")]),
+        &env,
         &SessionDefaults::default(),
         &Overrides {
-            profile: "explicit".into(),
+            legacy_profile: "configured".into(),
             ..Default::default()
         },
     )
-    .expect("resolve");
-    assert_eq!(runtime.profile, "explicit");
-    assert_eq!(runtime.model, "explicit-model");
-    assert_eq!(runtime.api_key, "secret");
-    assert_eq!(runtime.base_url, "https://explicit.example/v1");
+    .expect("flag");
+    assert_eq!(runtime.model, "config-model");
+    let error = resolve(
+        &file,
+        &env,
+        &SessionDefaults::default(),
+        &Overrides {
+            legacy_profile: "missing".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("profile \"missing\" not found"), "{error}");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn rejects_unknown_profile() {
-    let err = resolve(
-        &File::default(),
+fn missing_named_api_key_environment_variable_is_an_error() {
+    let error = resolve_with(
         &HashMap::new(),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "missing".into(),
-            ..Default::default()
-        },
+        SessionDefaults::default(),
+        Overrides::default(),
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("missing"), "{err}");
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("api key"), "{error}");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn rejects_missing_model() {
-    let file = file_with_profiles(
-        "",
-        &[(
-            "local",
-            profile(
-                "openai-compatible",
-                "",
-                "https://example.com/v1",
-                "PROFILE_KEY",
-            ),
-        )],
-    );
-    let err = resolve(
-        &file,
-        &env_map(&[("PROFILE_KEY", "secret")]),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "local".into(),
-            ..Default::default()
-        },
+fn otto_api_key_is_the_fallback_when_no_key_variable_is_named() {
+    let file = crate::config::parse(
+        r#"default_model = "local/m"
+[providers.local]
+type = "openai-compatible"
+base_url = "https://example.com/v1"
+"#,
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("model"), "{err}");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn rejects_unsupported_provider() {
-    let file = file_with_profiles(
-        "",
-        &[(
-            "local",
-            profile(
-                "codex",
-                "test-model",
-                "https://example.com/v1",
-                "PROFILE_KEY",
-            ),
-        )],
-    );
-    let err = resolve(
-        &file,
-        &env_map(&[("PROFILE_KEY", "secret")]),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "local".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("provider"), "{err}");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn chatgpt_provider_needs_no_base_url_or_key() {
-    let file = file_with_profiles("", &[("sub", profile("chatgpt", "gpt-5-codex", "", ""))]);
-    let runtime = resolve(
-        &file,
-        &HashMap::new(),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "sub".into(),
-            ..Default::default()
-        },
-    )
-    .expect("resolve");
-    assert_eq!(runtime.provider, "chatgpt");
-    assert_eq!(runtime.model, "gpt-5-codex");
-    assert_eq!(runtime.base_url, "");
-    assert_eq!(runtime.api_key, "");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn chatgpt_still_requires_model() {
-    let file = file_with_profiles("", &[("sub", profile("chatgpt", "", "", ""))]);
-    let err = resolve(
-        &file,
-        &HashMap::new(),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "sub".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("model"), "{err}");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn rejects_missing_named_api_key_environment_variable() {
-    let file = file_with_profiles(
-        "",
-        &[(
-            "local",
-            profile(
-                "openai-compatible",
-                "test-model",
-                "https://example.com/v1",
-                "PROFILE_KEY",
-            ),
-        )],
-    );
-    let err = resolve(
-        &file,
-        &HashMap::new(),
-        &SessionDefaults::default(),
-        &Overrides {
-            profile: "local".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("api key"), "{err}");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn uses_otto_api_key_fallback() {
-    let file = file_with_profiles(
-        "",
-        &[(
-            "local",
-            profile(
-                "openai-compatible",
-                "test-model",
-                "https://example.com/v1",
-                "",
-            ),
-        )],
-    );
+    .expect("parse");
     let runtime = resolve(
         &file,
         &env_map(&[("OTTO_API_KEY", "fallback-secret")]),
         &SessionDefaults::default(),
-        &Overrides {
-            profile: "local".into(),
-            ..Default::default()
-        },
+        &Overrides::default(),
     )
     .expect("resolve");
     assert_eq!(runtime.api_key, "fallback-secret");

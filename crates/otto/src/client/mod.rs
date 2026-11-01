@@ -298,7 +298,7 @@ struct SessionWire {
     #[serde(default)]
     provider: String,
     #[serde(default)]
-    profile: String,
+    provider_type: String,
     #[serde(default)]
     model: String,
     #[serde(default)]
@@ -370,8 +370,9 @@ impl SessionWire {
             session_id: self.id,
             session_name: self.name,
             workspace: self.workspace,
+            model_selector: format!("{}/{}", self.provider, self.model),
             provider: self.provider,
-            profile: self.profile,
+            provider_type: self.provider_type,
             model: self.model,
             thinking: self.thinking,
             usage_present: self.usage != Usage::default(),

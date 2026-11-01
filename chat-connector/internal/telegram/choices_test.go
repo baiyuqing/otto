@@ -20,15 +20,15 @@ func TestChoiceButtonsDeliverTheirCommand(t *testing.T) {
 	b := New(testToken, nil)
 	b.APIBase = api.srv.URL
 	choices := []bridge.Choice{
-		{Label: "deepseek", Command: "/model deepseek"},
-		{Label: "terra", Command: "/model terra"},
-		{Label: "chatgpt-5.5", Command: "/model chatgpt-5.5"},
+		{Label: "deepseek/deepseek-v4-flash", Command: "/model deepseek/deepseek-v4-flash"},
+		{Label: "chatgpt/gpt-5.6-terra", Command: "/model chatgpt/gpt-5.6-terra"},
+		{Label: "chatgpt/gpt-5.5", Command: "/model chatgpt/gpt-5.5"},
 	}
-	if err := b.SendChoices(context.Background(), "123", "9", "Profiles:\n• terra", choices); err != nil {
+	if err := b.SendChoices(context.Background(), "123", "9", "Configured models:\n• chatgpt/gpt-5.6-terra", choices); err != nil {
 		t.Fatal(err)
 	}
 	call := api.byMethod("sendMessage")[0].body
-	if call["chat_id"] != float64(123) || call["text"] != "Profiles:\n• terra" {
+	if call["chat_id"] != float64(123) || call["text"] != "Configured models:\n• chatgpt/gpt-5.6-terra" {
 		t.Fatalf("sendMessage = %+v", call)
 	}
 	reply := call["reply_parameters"].(map[string]any)
@@ -51,20 +51,21 @@ func TestChoiceButtonsDeliverTheirCommand(t *testing.T) {
 	}
 }
 
-func TestChoiceCallbacksAcceptOnlyProfileSwitches(t *testing.T) {
+func TestChoiceCallbacksAcceptOnlyModelSwitches(t *testing.T) {
 	for _, data := range []string{
 		"cmd:rm -rf /",
 		"cmd:/model a b",
-		"cmd:/model a/b",
+		"cmd:/model terra",
+		"cmd:/model a/b c",
 		"cmd:/model ",
 		"cmd:/stop",
-		"cmd:/model " + strings.Repeat("x", 65),
+		"cmd:/model " + "a/" + strings.Repeat("x", 127),
 	} {
 		if _, ok := normalizeCallback(callbackFor(data)); ok {
 			t.Errorf("%q was accepted as a choice callback", data)
 		}
 	}
-	if _, ok := normalizeCallback(&callbackQuery{Data: "cmd:/model terra"}); ok {
+	if _, ok := normalizeCallback(&callbackQuery{Data: "cmd:/model chatgpt/gpt-5.6-terra"}); ok {
 		t.Error("a callback without a sender and message was accepted")
 	}
 }
@@ -77,12 +78,12 @@ func TestSendChoicesRefusesWhatTelegramCannotCarry(t *testing.T) {
 	if err := b.SendChoices(ctx, "123", "", "text", nil); err == nil {
 		t.Error("an empty choice list must be an error so the caller can fall back to text")
 	}
-	long := bridge.Choice{Label: "x", Command: "/model " + strings.Repeat("x", 64)}
+	long := bridge.Choice{Label: "x", Command: "/model a/" + strings.Repeat("x", 64)}
 	if err := b.SendChoices(ctx, "123", "", "text", []bridge.Choice{long}); err == nil {
 		t.Error("a choice whose callback exceeds 64 bytes must be an error")
 	}
 	tooLong := strings.Repeat("x", maxUnits+1)
-	if err := b.SendChoices(ctx, "123", "", tooLong, []bridge.Choice{{Label: "a", Command: "/model a"}}); err == nil {
+	if err := b.SendChoices(ctx, "123", "", tooLong, []bridge.Choice{{Label: "a", Command: "/model p/a"}}); err == nil {
 		t.Error("text longer than one message must be an error")
 	}
 	if n := len(api.byMethod("sendMessage")); n != 0 {
@@ -94,7 +95,7 @@ func TestSendChoicesReportsSendFailures(t *testing.T) {
 	api := newAPI(t, func(string, map[string]any) resp { return errR(400, "bad request", 0) })
 	b := New(testToken, nil)
 	b.APIBase = api.srv.URL
-	if err := b.SendChoices(context.Background(), "123", "", "text", []bridge.Choice{{Label: "a", Command: "/model a"}}); err == nil {
+	if err := b.SendChoices(context.Background(), "123", "", "text", []bridge.Choice{{Label: "a", Command: "/model p/a"}}); err == nil {
 		t.Fatal("a rejected sendMessage must be an error")
 	}
 }

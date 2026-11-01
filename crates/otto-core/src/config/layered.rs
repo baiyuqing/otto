@@ -1,6 +1,8 @@
 //! Presence-preserving configuration merge and source authority, without I/O.
 
 use super::{ConfigError, File};
+
+mod provider_merge;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use toml::{Table, Value};
@@ -60,8 +62,18 @@ impl Merged {
         })?;
         let mut table: Table = toml::from_str(text)
             .map_err(|_| ConfigError::new(format!("invalid TOML in {source}")))?;
+        super::legacy_profiles::reject_mixed_source(&table, source)?;
         if layer.project() {
+            let kept_providers = provider_merge::filter_project_providers(
+                &mut table,
+                &self.values,
+                source,
+                &mut self.diagnostics,
+            );
             filter(&mut table, &[], source, trusted, &mut self.diagnostics);
+            if let Some(providers) = kept_providers {
+                table.insert("providers".into(), Value::Table(providers));
+            }
             // Never mix a lower-layer secret binding with a new project execution identity.
             if let Some(servers) = table
                 .get_mut("mcp")
@@ -128,6 +140,12 @@ impl Merged {
                 }
             }
         }
+        provider_merge::drop_connection_on_type_change(
+            &mut self.values,
+            &mut self.origins,
+            &mut self.overridden,
+            &table,
+        );
         // A transport switch replaces its incompatible fields rather than making
         // an invalid hybrid server. Credential-bearing project switches were removed above.
         if let Some(incoming) = table
@@ -209,10 +227,12 @@ impl Merged {
     }
 
     pub fn file(&self) -> Result<File, ConfigError> {
-        let file: File = Value::Table(self.values.clone())
+        let mut file: File = Value::Table(self.values.clone())
             .try_into()
             .map_err(|_| ConfigError::new("invalid merged configuration"))?;
         file.approval.validate()?;
+        file.validate_providers()?;
+        super::convert_legacy_profiles(&mut file)?;
         Ok(file)
     }
 
@@ -332,7 +352,7 @@ fn filter(
 fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str> {
     let keys: Vec<&str> = p.iter().map(String::as_str).collect();
     let allowed = match keys.as_slice() {
-        ["default_profile"] => true,
+        ["default_profile"] | ["default_model"] => true,
         ["ui", "mode"] => true,
         ["agent", ..] => true,
         ["profiles", _, field] => matches!(
@@ -448,6 +468,7 @@ impl ManagedPolicy {
                 "managed MCP commands must be absolute administrator-controlled paths",
             ));
         }
+        self.reject_legacy_force_keys()?;
         // Value's display is an inline table; validate by deserializing directly.
         let _: File = Value::Table(self.force.clone())
             .try_into()
@@ -487,54 +508,7 @@ impl ManagedPolicy {
     }
 
     pub fn runtime(&self, runtime: &super::resolve::Runtime) -> Result<(), ConfigError> {
-        if self
-            .force
-            .get("default_profile")
-            .and_then(Value::as_str)
-            .is_some_and(|p| p != runtime.profile)
-        {
-            return Err(ConfigError::new("profile is forced by managed policy"));
-        }
-        if let Some(forced) = self
-            .force
-            .get("profiles")
-            .and_then(Value::as_table)
-            .and_then(|p| p.get(&runtime.profile))
-            .and_then(Value::as_table)
-        {
-            for (key, actual) in [
-                ("provider", &runtime.provider),
-                ("base_url", &runtime.base_url),
-                ("model", &runtime.model),
-                ("thinking", &runtime.thinking),
-                ("api_key_env", &runtime.api_key_env),
-                ("api_version", &runtime.api_version),
-                ("workspace_id_env", &runtime.workspace_id_env),
-            ] {
-                if forced.get(key).and_then(Value::as_str).is_some_and(|v| {
-                    let v = if runtime.provider == super::PROVIDER_CLAUDE && v.is_empty() {
-                        match key {
-                            "base_url" => "https://api.anthropic.com",
-                            "api_key_env" => "ANTHROPIC_API_KEY",
-                            "api_version" => super::DEFAULT_CLAUDE_API_VERSION,
-                            _ => v,
-                        }
-                    } else {
-                        v
-                    };
-                    if key == "base_url" {
-                        super::resolve::normalize_base_url(v)
-                            .is_ok_and(|normalized| normalized != *actual)
-                    } else {
-                        v != actual
-                    }
-                }) {
-                    return Err(ConfigError::new(format!(
-                        "profile field is forced by managed policy: {key}"
-                    )));
-                }
-            }
-        }
+        self.model_runtime(runtime)?;
         if let Some(agent) = self.force.get("agent").and_then(Value::as_table) {
             if agent
                 .get("max_output_bytes")
@@ -556,7 +530,7 @@ impl ManagedPolicy {
             }
         }
         if let Some(hosts) = &self.allowed_provider_hosts {
-            let host = if runtime.provider == super::PROVIDER_CHATGPT {
+            let host = if runtime.provider_type == super::PROVIDER_CHATGPT {
                 "chatgpt.com".to_string()
             } else {
                 url::Url::parse(&runtime.base_url)
@@ -571,7 +545,7 @@ impl ManagedPolicy {
             }
         }
         if let Some(names) = &self.allowed_credential_variables {
-            if runtime.provider == super::PROVIDER_CLAUDE
+            if runtime.provider_type == super::PROVIDER_CLAUDE
                 && !runtime.workspace_id_env.is_empty()
                 && !names.contains(&runtime.workspace_id_env)
             {
@@ -584,7 +558,8 @@ impl ManagedPolicy {
             } else {
                 &runtime.api_key_env
             };
-            if runtime.provider != super::PROVIDER_CHATGPT && !names.iter().any(|n| n == name) {
+            if runtime.provider_type != super::PROVIDER_CHATGPT && !names.iter().any(|n| n == name)
+            {
                 return Err(ConfigError::new(
                     "provider credential binding is prohibited by managed policy",
                 ));
@@ -740,5 +715,7 @@ impl ManagedPolicy {
     }
 }
 
+#[cfg(test)]
+mod provider_merge_tests;
 #[cfg(test)]
 mod tests;

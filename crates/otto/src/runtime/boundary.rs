@@ -114,21 +114,21 @@ pub fn boundary_secret_values(
     if !collect.add("OTTO_API_KEY") || !collect.add(environment_value(inputs, "OTTO_API_KEY")) {
         return (collect.values(), false);
     }
-    for name in sorted_profile_names(inputs.config) {
-        let profile = &inputs.config.profiles[&name];
-        if !profile.workspace_id_env.is_empty()
-            && (!collect.add(&profile.workspace_id_env)
-                || !collect.add(environment_value(inputs, &profile.workspace_id_env)))
+    for name in sorted_provider_names(inputs.config) {
+        let provider = &inputs.config.providers[&name];
+        if !provider.workspace_id_env.is_empty()
+            && (!collect.add(&provider.workspace_id_env)
+                || !collect.add(environment_value(inputs, &provider.workspace_id_env)))
         {
             return (collect.values(), false);
         }
-        if !profile.api_key_env.is_empty()
-            && (!collect.add(&profile.api_key_env)
-                || !collect.add(environment_value(inputs, &profile.api_key_env)))
+        if !provider.api_key_env.is_empty()
+            && (!collect.add(&provider.api_key_env)
+                || !collect.add(environment_value(inputs, &provider.api_key_env)))
         {
             return (collect.values(), false);
         }
-        collect.add_url(&profile.base_url);
+        collect.add_url(&provider.base_url);
         if !collect.open {
             return (collect.values(), false);
         }
@@ -207,9 +207,11 @@ pub fn fields_unchanged(
     if let Some(runtime) = runtime {
         let endpoint_host = endpoint_host_for(&runtime.base_url);
         let context_window = runtime.compaction.context_window.to_string();
+        let selector_text = runtime.model_selector.to_string();
         let fields = [
-            runtime.provider.as_str(),
-            runtime.profile.as_str(),
+            runtime.provider_name.as_str(),
+            runtime.provider_type.as_str(),
+            selector_text.as_str(),
             runtime.model.as_str(),
             runtime.thinking.as_str(),
             endpoint_host.as_str(),
@@ -252,8 +254,8 @@ fn environment_value<'a>(inputs: &'a BoundaryInputs<'_>, name: &str) -> &'a str 
         .unwrap_or_default()
 }
 
-fn sorted_profile_names(config: &File) -> Vec<String> {
-    let mut names: Vec<String> = config.profiles.keys().cloned().collect();
+fn sorted_provider_names(config: &File) -> Vec<String> {
+    let mut names: Vec<String> = config.providers.keys().cloned().collect();
     names.sort();
     names
 }
@@ -386,17 +388,17 @@ fn collect_raw_url_secret_values(raw: &str, collect: &mut Collect) -> bool {
 mod tests {
     use super::*;
     use otto_core::agent::redactor::REDACTION_MARKER;
-    use otto_core::config::Profile;
+    use otto_core::config::ProviderEntry;
 
     fn config_with(profiles: &[(&str, &str, &str)]) -> File {
         let mut file = File::default();
         for (name, api_key_env, base_url) in profiles {
-            file.profiles.insert(
+            file.providers.insert(
                 (*name).to_string(),
-                Profile {
+                ProviderEntry {
                     api_key_env: (*api_key_env).to_string(),
                     base_url: (*base_url).to_string(),
-                    ..Profile::default()
+                    ..ProviderEntry::default()
                 },
             );
         }
@@ -461,10 +463,10 @@ mod tests {
     #[test]
     fn claude_workspace_environment_binding_and_value_are_secrets() {
         let mut config = File::default();
-        config.profiles.insert(
+        config.providers.insert(
             "claude".into(),
-            otto_core::config::Profile {
-                provider: "claude".into(),
+            otto_core::config::ProviderEntry {
+                type_: "claude".into(),
                 workspace_id_env: "CLAUDE_WORKSPACE".into(),
                 ..Default::default()
             },

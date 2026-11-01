@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 pub struct ApprovalConfig {
     pub policy: Option<ApprovalPolicy>,
     pub reviewer: Option<ApprovalReviewer>,
+    /// Selector `<provider>/<model_id>` of the reviewer model.
+    pub reviewer_model: Option<String>,
+    /// Deprecated input; mapped to `reviewer_model` by profile conversion.
     pub reviewer_profile: Option<String>,
     #[serde(default)]
     pub rules: Vec<ApprovalRule>,
@@ -23,6 +26,10 @@ impl ApprovalConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(selector) = &self.reviewer_model {
+            super::ModelSelector::parse(selector)
+                .map_err(|error| ConfigError::new(format!("approval.reviewer_model: {error}")))?;
+        }
         if self
             .reviewer_profile
             .as_ref()

@@ -97,12 +97,12 @@ async fn start_child(controller: &Controller, prompt: &str) -> String {
         .id
 }
 
-/// A profile switch builds a new runner on the same session. A child blocked
+/// A model switch builds a new runner on the same session. A child blocked
 /// inside its provider call stays `Running`, the registry is the same `Arc`,
 /// and once the call returns the child's completion notification reaches the
 /// new runner's mailbox and the inbox sidecar.
 #[tokio::test]
-async fn profile_switch_keeps_running_child_and_delivers_its_completion() {
+async fn model_switch_keeps_running_child_and_delivers_its_completion() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let mut fixture = blocking_children(workspace.path(), sessions.path(), None).await;
@@ -120,7 +120,7 @@ async fn profile_switch_keeps_running_child_and_delivers_its_completion() {
         .expect("child reaches its provider call");
 
     controller
-        .switch_profile_result("beta")
+        .switch_model_result("beta/gpt-beta")
         .await
         .expect("switch");
 
@@ -167,7 +167,7 @@ async fn children_of_the_replaced_and_the_new_runner_share_the_parallel_cap() {
         .expect("first child reaches its provider call");
 
     controller
-        .switch_profile_result("beta")
+        .switch_model_result("beta/gpt-beta")
         .await
         .expect("switch");
     let second = start_child(controller, "second").await;

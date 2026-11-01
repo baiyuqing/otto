@@ -6,7 +6,7 @@ impl<'a> Repl<'a> {
     pub(super) async fn model(&mut self, args: &str) -> Result<(), Error> {
         let unavailable = || Error::Command {
             command: "/model".to_string(),
-            message: PROFILE_SWITCH_UNAVAILABLE.to_string(),
+            message: MODEL_SWITCH_UNAVAILABLE.to_string(),
         };
         if !self.controller.dynamic_content() {
             return Err(unavailable());
@@ -15,39 +15,36 @@ impl<'a> Repl<'a> {
             command: "/model".to_string(),
             message,
         })?;
-        if parsed.profile.is_empty() {
+        if parsed.model.is_empty() {
             let info = self.controller.info();
             let _ = writeln!(
                 self.stdout,
-                "Current: profile {} (provider {}, model {}, thinking {})",
-                info.profile,
-                info.provider,
-                info.model,
+                "Model {} (type {}, thinking {})",
+                info.model_selector,
+                info.provider_type,
                 display_thinking(&info.thinking)
             );
-            let profiles = self.controller.profile_summaries();
-            if profiles.is_empty() {
-                let _ = writeln!(self.stdout, "No profiles configured.");
+            let models = self.controller.model_summaries();
+            if models.is_empty() {
+                let _ = writeln!(self.stdout, "No models configured.");
             } else {
-                let list = profiles
+                let list = models
                     .iter()
-                    .map(|profile| {
+                    .map(|model| {
                         format!(
-                            "{} ({}/{}, thinking {})",
-                            profile.name,
-                            profile.provider,
-                            profile.model,
-                            display_thinking(&profile.thinking)
+                            "{} (thinking {})",
+                            model.selector,
+                            display_thinking(&model.thinking)
                         )
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                let _ = writeln!(self.stdout, "Profiles: {list}");
+                let _ = writeln!(self.stdout, "Configured models: {list}");
             }
             return Ok(());
         }
         self.controller
-            .switch_profile(&parsed.profile)
+            .switch_model(&parsed.model)
             .await
             .map_err(|message| Error::Command {
                 command: "/model".to_string(),
@@ -62,10 +59,10 @@ impl<'a> Repl<'a> {
                     message,
                 })?;
         }
-        let saved = self.controller.set_default_profile(&parsed.profile);
+        let saved = self.controller.set_default_model(&parsed.model);
         if parsed.save && !parsed.thinking.is_empty() {
             self.controller
-                .save_profile_thinking(&parsed.thinking)
+                .save_model_thinking(&parsed.thinking)
                 .map_err(|message| Error::Command {
                     command: "/model".to_string(),
                     message,
@@ -76,27 +73,25 @@ impl<'a> Repl<'a> {
             Ok(()) => {
                 let _ = writeln!(
                     self.stdout,
-                    "Switched to profile {} (provider {}, model {}, thinking {}). Set as default profile.",
-                    info.profile,
-                    info.provider,
-                    info.model,
+                    "Switched to model {} (type {}, thinking {}). Set as default model.",
+                    info.model_selector,
+                    info.provider_type,
                     display_thinking(&info.thinking)
                 );
             }
             Err(message) => {
                 let _ = writeln!(
                     self.stdout,
-                    "Switched to profile {} (provider {}, model {}, thinking {}), but the default profile was not saved: {}",
-                    info.profile,
-                    info.provider,
-                    info.model,
+                    "Switched to model {} (type {}, thinking {}), but the default model was not saved: {}",
+                    info.model_selector,
+                    info.provider_type,
                     display_thinking(&info.thinking),
                     message
                 );
             }
         }
         if parsed.save && !parsed.thinking.is_empty() {
-            let _ = writeln!(self.stdout, "Saved thinking to profile.");
+            let _ = writeln!(self.stdout, "Saved thinking to model.");
         }
         if !info.session_id.is_empty() {
             let _ = writeln!(self.stdout, "Session: {}", info.session_id);
@@ -127,7 +122,7 @@ impl<'a> Repl<'a> {
             })?;
         if parsed.save {
             self.controller
-                .save_profile_thinking(&parsed.thinking)
+                .save_model_thinking(&parsed.thinking)
                 .map_err(|message| Error::Command {
                     command: "/thinking".to_string(),
                     message,
@@ -140,7 +135,7 @@ impl<'a> Repl<'a> {
             display_thinking(&info.thinking)
         );
         if parsed.save {
-            let _ = writeln!(self.stdout, "Saved thinking to profile.");
+            let _ = writeln!(self.stdout, "Saved thinking to model.");
         }
         Ok(())
     }
@@ -233,7 +228,7 @@ struct ParsedThinkingArgs {
 
 #[derive(Default)]
 struct ParsedModelArgs {
-    profile: String,
+    model: String,
     thinking: String,
     save: bool,
 }
@@ -264,8 +259,12 @@ fn parse_model_args(args: &str) -> Result<ParsedModelArgs, String> {
                 };
                 parsed.thinking = level.to_string();
             }
-            value if parsed.profile.is_empty() => parsed.profile = value.to_string(),
-            _ => return Err("usage: /model [profile] [--thinking LEVEL] [--save]".to_string()),
+            value if parsed.model.is_empty() => parsed.model = value.to_string(),
+            _ => {
+                return Err(
+                    "usage: /model [provider/model_id] [--thinking LEVEL] [--save]".to_string(),
+                );
+            }
         }
     }
     Ok(parsed)

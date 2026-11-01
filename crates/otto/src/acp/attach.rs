@@ -254,7 +254,8 @@ impl Relay {
         cancel: &CancellationToken,
     ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
         use super::command::{
-            Command, compaction_text, context_text, model_switched_text, model_text,
+            Command, bare_model_hint, compaction_text, context_text, model_switched_text,
+            model_text,
         };
         let command = match command {
             Command::Steer { guidance } => {
@@ -292,28 +293,32 @@ impl Relay {
                     .compact(session_id, focus)
                     .await
                     .map(|done| done.map(|done| compaction_text(&done))),
-                Command::Model { profile } => {
-                    if profile.is_empty() {
-                        let available = self.client.profiles().await?;
+                Command::Model { selector } => {
+                    if selector.is_empty() {
+                        let available = self.client.models().await?;
                         return self.client.session(session_id).await.map(|info| {
                             Some(model_text(
-                                &info.profile,
-                                &info.provider,
-                                &info.model,
+                                &info.model_selector,
+                                &info.provider_type,
                                 &info.thinking,
                                 &available,
                             ))
                         });
                     }
+                    if !selector.contains('/') {
+                        return Err(ClientError::Http {
+                            status: 400,
+                            code: "invalid_model".to_string(),
+                            message: bare_model_hint(selector),
+                        });
+                    }
                     self.client
-                        .switch_profile(session_id, profile)
+                        .switch_model(session_id, selector)
                         .await
                         .map(|info| {
                             Some(model_switched_text(
-                                &info.profile,
-                                &info.provider,
-                                &info.model,
-                                &info.thinking,
+                                &info.model_selector,
+                                &info.provider_type,
                             ))
                         })
                 }

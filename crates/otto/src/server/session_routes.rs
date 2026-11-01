@@ -35,7 +35,7 @@ pub(super) struct SessionWire {
     name: String,
     workspace: String,
     provider: String,
-    profile: String,
+    provider_type: String,
     model: String,
     thinking: String,
     context_window: i64,
@@ -99,7 +99,7 @@ impl Server {
             name: info.session_name,
             workspace: info.workspace,
             provider: info.provider,
-            profile: info.profile,
+            provider_type: info.provider_type,
             model: info.model,
             thinking: info.thinking,
             context_window: info.context_window,
@@ -339,17 +339,17 @@ pub(super) async fn get_session(
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct ProfileBody {
-    /// The configured profile this session should run on.
+pub(super) struct ModelBody {
+    /// The `<provider>/<model_id>` selector this session should run on.
     #[serde(default)]
-    profile: String,
+    model: String,
 }
 
-/// `POST /v1/sessions/{id}/profile`. Rebuilds this session's runner on another
-/// configured profile and answers with the session wire. It never writes the
+/// `POST /v1/sessions/{id}/model`. Rebuilds this session's runner on another
+/// model selector and answers with the session wire. It never writes the
 /// configuration file, so other sessions and the next `otto serve` start keep
-/// the profile they had.
-pub(super) async fn set_session_profile(
+/// the model they had.
+pub(super) async fn set_session_model(
     State(server): State<Arc<Server>>,
     Path(id): Path<String>,
     body: Bytes,
@@ -357,18 +357,21 @@ pub(super) async fn set_session_profile(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    let parsed: ProfileBody = match serde_json::from_slice(&body) {
+    let parsed: ModelBody = match serde_json::from_slice(&body) {
         Ok(parsed) => parsed,
         Err(_) => return bad_request("invalid JSON body"),
     };
-    if parsed.profile.is_empty() {
-        return bad_request("profile must not be empty");
+    if parsed.model.is_empty() {
+        return bad_request("model must not be empty");
     }
-    match session.ctrl.switch_profile_result(&parsed.profile).await {
+    if let Err(error) = otto_core::config::ModelSelector::parse(&parsed.model) {
+        return bad_request(&format!("model must be <provider>/<model_id>: {error}"));
+    }
+    match session.ctrl.switch_model_result(&parsed.model).await {
         Ok(_) => {
             server.logger().info(
-                "profile_switched",
-                &[("session_id", id), ("profile", parsed.profile)],
+                "model_switched",
+                &[("session_id", id), ("model", parsed.model)],
             );
             json_response(StatusCode::OK, &server.session_wire(&session))
         }
@@ -376,14 +379,14 @@ pub(super) async fn set_session_profile(
             turn_active("a turn is already active for this session")
         }
         // A session without dynamic content, or under a policy that forbids a
-        // dynamic profile, cannot switch; retrying the same request cannot help.
+        // dynamic model, cannot switch; retrying the same request cannot help.
         Err(message)
-            if message == app::PROFILE_SWITCH_UNAVAILABLE
+            if message == app::MODEL_SWITCH_UNAVAILABLE
                 || message == app::SESSION_OPERATION_UNAVAILABLE =>
         {
-            error_response(StatusCode::CONFLICT, "profile_switch_unavailable", &message)
+            error_response(StatusCode::CONFLICT, "model_switch_unavailable", &message)
         }
-        // Unknown profile or invalid profile content; the builder redacts it.
+        // Unknown provider or invalid model content; the builder redacts it.
         Err(message) => bad_request(&message),
     }
 }

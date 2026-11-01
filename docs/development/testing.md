@@ -52,12 +52,13 @@ reuses built nodes, probes and answers.
 `build` and `all` take `--session`; `probes` and `run` take `--out` and read the
 session recorded in `build.json`. `--dry-run` needs no credentials.
 
-The compressor model defaults to the profile's first `subagent_models` entry,
-else the profile model. The number of compressor calls grows with the number of
-session messages; run `--dry-run` first. Use `--view-low`/`--view-high` (KB) to
-force compression on short sessions. `cost.json` is computed from message byte
-sizes with the multipliers given by flags; it is not a measured bill.
-`report.md` prints pass or fail for the spec's acceptance criteria.
+The compressor model defaults to the first `subagent_models` entry of a
+converted legacy profile, else the selected model. The number of compressor
+calls grows with the number of session messages; run `--dry-run` first. Use
+`--view-low`/`--view-high` (KB) to force compression on short sessions.
+`cost.json` is computed from message byte sizes with the multipliers given by
+flags; it is not a measured bill. `report.md` prints pass or fail for the spec's
+acceptance criteria.
 
 ## Fault injection
 

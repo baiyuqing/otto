@@ -52,8 +52,10 @@ async fn creating_a_session_answers_201_and_counts_one_open_session() {
 
     let body = reply.json();
     assert!(!body["id"].as_str().expect("id").is_empty());
-    assert_eq!(body["provider"], "openai-compatible");
+    assert_eq!(body["provider"], "alpha");
+    assert_eq!(body["provider_type"], "openai-compatible");
     assert_eq!(body["model"], "test-model");
+    assert!(body.get("profile").is_none(), "{body}");
     assert_eq!(body["context_window"], 128_000);
     assert!(body["sandbox"]["summary"].as_str().is_some());
 

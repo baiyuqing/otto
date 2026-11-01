@@ -297,7 +297,7 @@ impl Runner {
         let options = Options {
             diagnostics: self.agent.diagnostics().cloned(),
             model: runtime.model.clone(),
-            provider_name: runtime.provider.clone(),
+            provider_name: runtime.provider_type.clone(),
             thinking: runtime.thinking.clone(),
             system_prompt,
             now: Box::new(Utc::now),

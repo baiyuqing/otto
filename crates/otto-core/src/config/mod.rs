@@ -19,12 +19,15 @@ pub mod duration;
 pub mod edit;
 pub mod failover;
 pub mod layered;
+pub mod legacy_profiles;
 pub mod mcp;
 pub mod memory;
 pub mod model_limits;
+pub mod model_selector;
 mod paths;
 pub mod plugins;
 pub mod projects;
+pub mod providers;
 pub mod resolve;
 pub mod sandbox;
 pub mod sandbox_setup;
@@ -33,18 +36,21 @@ pub mod skills;
 pub mod storage;
 pub mod ui;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
 pub use approval::ApprovalConfig;
 pub use failover::{Failover, FailoverRuntime, resolve_failover};
+pub use legacy_profiles::{LegacyProfile, convert_legacy_profiles};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemoryTurso, resolve_memory};
 pub use model_limits::ModelLimits;
+pub use model_selector::ModelSelector;
 pub use plugins::{PluginBindings, Plugins};
 pub use projects::{Project, TrustLevel};
+pub use providers::{ModelEntry, ProviderConnection, ProviderEntry};
 pub use resolve::{
     CompactionRuntime, DeadlineRuntime, Overrides, ResilienceRuntime, Runtime, SessionDefaults,
     resolve,
@@ -93,7 +99,11 @@ pub struct File {
     pub user_source: Option<String>,
     #[serde(skip)]
     pub diagnostics: Vec<layered::Diagnostic>,
-    #[serde(default)]
+    /// The default model selector, `<provider>/<model_id>`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_model: String,
+    /// Deprecated input; cleared by [`convert_legacy_profiles`] once it names a profile.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_profile: String,
     #[serde(default)]
     pub ui: ui::Ui,
@@ -123,8 +133,14 @@ pub struct File {
     pub failover: Failover,
     #[serde(default, skip_serializing_if = "Web::is_default")]
     pub web: Web,
-    #[serde(default)]
-    pub profiles: HashMap<String, Profile>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderEntry>,
+    /// Deprecated input; emptied by [`convert_legacy_profiles`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, LegacyProfile>,
+    /// Selector of the model each deprecated profile was converted to.
+    #[serde(skip)]
+    pub legacy_profile_selectors: BTreeMap<String, ModelSelector>,
     #[serde(default)]
     pub projects: HashMap<String, projects::Project>,
 }
@@ -218,37 +234,17 @@ pub struct CompactionConfig {
     pub keep_recent_tokens: Option<i64>,
 }
 
-/// One `[profiles.<name>]` table.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Profile {
-    #[serde(default)]
-    pub provider: String,
-    #[serde(default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub model: String,
-    /// Sub-agent model IDs, ordered from cheapest to strongest by the user.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub subagent_models: Vec<String>,
-    #[serde(default)]
-    pub thinking: String,
-    #[serde(default)]
-    pub api_key_env: String,
-    #[serde(default)]
-    pub api_version: String,
-    #[serde(default)]
-    pub workspace_id_env: String,
-    pub context_window: Option<i64>,
-    pub compaction_window: Option<i64>,
-}
-
 /// Parses `text` as a `config.toml` document, rejecting unknown fields at every
 /// table.
 pub fn parse(text: &str) -> Result<File, ConfigError> {
     match toml::from_str::<File>(text) {
-        Ok(file) => {
+        Ok(mut file) => {
+            let table: toml::Table =
+                toml::from_str(text).map_err(|err| ConfigError::new(err.to_string()))?;
+            legacy_profiles::reject_mixed_source(&table, "configuration")?;
             file.approval.validate()?;
+            file.validate_providers()?;
+            convert_legacy_profiles(&mut file)?;
             Ok(file)
         }
         Err(err) => {
@@ -290,19 +286,25 @@ pub(crate) fn removed_table_error(text: &str, err: &toml::de::Error) -> Option<&
     ))
 }
 
-/// Sets the top-level `default_profile` of `content` to `profile`, changing
-/// only that value; see [`edit::set_value`] for the layout and errors.
-pub fn set_default_profile(content: &str, profile: &str) -> Result<String, ConfigError> {
-    edit::set_value(content, &[], "default_profile", Some(&go_quote(profile)))
+/// Sets the top-level `default_model` of `content` to the selector `model`,
+/// changing only that value; see [`edit::set_value`] for the layout and errors.
+pub fn set_default_model(content: &str, model: &str) -> Result<String, ConfigError> {
+    let selector = ModelSelector::parse(model)?;
+    edit::set_value(
+        content,
+        &[],
+        "default_model",
+        Some(&go_quote(&selector.to_string())),
+    )
 }
 
 /// Renders `value` as a double-quoted string literal for the identifier-like
-/// profile names Otto accepts.
+/// names and selectors Otto accepts.
 ///
 /// ponytail: escapes backslash, double quote, and ASCII control characters
 /// (`\n`, `\t`, `\r`, `\xNN`) but passes non-ASCII text through unescaped
 /// rather than reproducing `strconv.Quote`'s full Unicode-printability table.
-/// Upgrade if a profile name with exotic Unicode ever needs it.
+/// Upgrade if a name with exotic Unicode ever needs it.
 fn go_quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -320,6 +322,12 @@ fn go_quote(value: &str) -> String {
     out.push('"');
     out
 }
+
+#[cfg(test)]
+mod legacy_profiles_tests;
+
+#[cfg(test)]
+mod sample_config_tests;
 
 #[cfg(test)]
 mod tests {
@@ -371,38 +379,32 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn parses_a_minimal_profile() {
+    fn parses_a_provider_with_a_model() {
         let file = parse(
-            r#"default_profile = "local"
-[profiles.local]
-provider = "openai-compatible"
-model = "test-model"
-subagent_models = ["cheap-model", "test-model"]
-thinking = "high"
+            r#"default_model = "local/test-model"
+[providers.local]
+type = "openai-compatible"
 base_url = "http://localhost:8080/v1"
 api_key_env = "TEST_KEY"
+[providers.local.models."test-model"]
+thinking = "high"
 "#,
         )
         .expect("parse");
-        assert_eq!(file.default_profile, "local");
-        let profile = &file.profiles["local"];
-        assert_eq!(profile.provider, "openai-compatible");
-        assert_eq!(profile.model, "test-model");
-        assert_eq!(profile.subagent_models, ["cheap-model", "test-model"]);
-        assert_eq!(profile.thinking, "high");
+        assert_eq!(file.default_model, "local/test-model");
+        let provider = &file.providers["local"];
+        assert_eq!(provider.type_, "openai-compatible");
+        assert_eq!(provider.base_url, "http://localhost:8080/v1");
+        assert_eq!(provider.models["test-model"].thinking, "high");
+        assert!(file.profiles.is_empty());
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn rejects_unknown_top_level_fields() {
         let err = parse(
-            r#"default_profile = "local"
+            r#"default_model = "chatgpt/x"
 unknown = true
-[profiles.local]
-provider = "openai-compatible"
-model = "test-model"
-base_url = "http://localhost:8080/v1"
-api_key_env = "TEST_KEY"
 "#,
         )
         .unwrap_err();
@@ -453,7 +455,10 @@ auto = false
 reserve_tokens = 0
 keep_recent_tokens = -1
 
-[profiles.local]
+[providers.local]
+type = "openai-compatible"
+base_url = "http://localhost/v1"
+[providers.local.models."m"]
 context_window = 0
 compaction_window = -2
 "#,
@@ -462,9 +467,9 @@ compaction_window = -2
         assert_eq!(file.agent.compaction.auto, Some(false));
         assert_eq!(file.agent.compaction.reserve_tokens, Some(0));
         assert_eq!(file.agent.compaction.keep_recent_tokens, Some(-1));
-        let profile = &file.profiles["local"];
-        assert_eq!(profile.context_window, Some(0));
-        assert_eq!(profile.compaction_window, Some(-2));
+        let model = &file.providers["local"].models["m"];
+        assert_eq!(model.context_window, Some(0));
+        assert_eq!(model.compaction_window, Some(-2));
 
         let empty = parse("").expect("parse");
         assert_eq!(empty.agent.compaction.auto, None);
@@ -544,9 +549,8 @@ allow_env = ["PROJECT_TOKEN"]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn rejects_raw_secret_field() {
         let err = parse(
-            r#"[profiles.bad]
-provider = "openai-compatible"
-model = "test-model"
+            r#"[providers.bad]
+type = "openai-compatible"
 base_url = "https://example.com/v1"
 api_key = "secret"
 "#,
@@ -557,32 +561,27 @@ api_key = "secret"
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn set_default_profile_updates_existing_line() {
-        let content = r#"default_profile = "old"
-[profiles.old]
-provider = "openai-compatible"
-model = "old-model"
-base_url = "https://old.example/v1"
-api_key_env = "OLD_KEY"
-[profiles.new]
-provider = "chatgpt"
-model = "gpt-5-codex"
+    fn set_default_model_updates_existing_line() {
+        let content = r#"default_model = "chatgpt/old"
+[providers.chatgpt.models."old"]
+[providers.chatgpt.models."new"]
 "#;
-        let updated = set_default_profile(content, "new").expect("set");
-        assert!(updated.contains("default_profile = \"new\""));
-        assert!(!updated.contains("default_profile = \"old\""));
+        let updated = set_default_model(content, "chatgpt/new").expect("set");
+        assert!(updated.contains("default_model = \"chatgpt/new\""));
+        assert!(!updated.contains("chatgpt/old\""));
         let file = parse(&updated).expect("parse");
-        assert_eq!(file.default_profile, "new");
-        assert_eq!(file.profiles["old"].model, "old-model");
-        assert_eq!(file.profiles["new"].provider, "chatgpt");
+        assert_eq!(file.default_model, "chatgpt/new");
+        assert_eq!(file.providers["chatgpt"].models.len(), 2);
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn set_default_profile_inserts_missing_line() {
-        let content = "[profiles.new]\nprovider = \"chatgpt\"\nmodel = \"gpt-5-codex\"\n";
-        let updated = set_default_profile(content, "new").expect("set");
-        assert!(updated.starts_with("default_profile = \"new\"\n"));
+    fn set_default_model_inserts_missing_line_and_rejects_a_bare_id() {
+        let content = "[providers.chatgpt.models.\"new\"]\n";
+        let updated = set_default_model(content, "chatgpt/new").expect("set");
+        assert!(updated.starts_with("default_model = \"chatgpt/new\"\n"));
+        let error = set_default_model(content, "new").unwrap_err().to_string();
+        assert!(error.contains("<provider>/<model_id>"), "{error}");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

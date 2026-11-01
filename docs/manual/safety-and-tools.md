@@ -33,7 +33,7 @@ and a reviewer (`user`, `auto_review` or `bypass`). The familiar modes are prese
 AUTO reviews shell escalations, sandboxed shell commands that change external
 state ([classified commands](#classified-commands-wait-for-approval-inside-the-sandbox)),
 external MCP calls, memory/skill writes, ordinary
-profile changes, schedules and cross-workspace delivery. Task-related low or
+model configuration changes, schedules and cross-workspace delivery. Task-related low or
 medium risk operations can proceed; ordinary persistent writes need evidence
 covering their contents and scope. High risk needs exact user authorization and
 bounded targets. Critical or explicitly forbidden operations are denied. An
@@ -53,8 +53,9 @@ than `2>&1` and output to `/dev/null`; anything else requires review. A `deny` o
 `ask` command-prefix rule applies when any command starts with the prefix,
 so `["git", "push"]` also matches `git push origin "$BRANCH"`.
 
-User or managed configuration can set defaults in `[approval]` and select an
-existing configured profile with `reviewer_profile`. Without an override, the
+User or managed configuration can set defaults in `[approval]` and select a
+configured model with `reviewer_model` (a `<provider>/<model_id>` selector;
+see [provider and model configuration](getting-started.md#providers-and-models)). Without an override, the
 reviewer uses the root session's provider/model. Rules select exactly one of
 `source`, `tool` or `command_prefix`; their decision is `allow`, `ask` or `deny`.
 Project configuration, skills, model messages and tool output cannot install
@@ -154,7 +155,7 @@ restore.
 
 
 Otto uses one approval service for tool permissions, memory review, workflow
-gates, generated skills and profile changes. Pending requests survive in
+gates, generated skills and model configuration changes. Pending requests survive in
 `~/.otto/approvals.db`. A decision and the outcome of applying it are separate:
 approving an operation does not mean it has succeeded.
 
@@ -187,8 +188,8 @@ Memory/workflow reviews remain independent of the foreground turn.
 
 Generated skills still pass the rule scan and configured model review, then
 wait for human approval: YOLO decides the review, and the rule scan, the
-configured model review and the artifact checks still run. Saving a profile
-change still requires a restart.
+configured model review and the artifact checks still run. Saving a model
+configuration change still requires a restart.
 Read-path requests explicitly disclose persistence; commands remain sandboxed.
 
 ## Provider egress secret and PII guard
@@ -526,7 +527,7 @@ active provider connection's model catalog, with metadata only where actually
 available. Claude supplies its catalog through `GET {base_url}/v1/models`; an
 OpenAI-compatible endpoint uses `GET {base_url}/models`; ChatGPT discovery uses
 the signed-in connection. Otto performs discovery with the existing provider
-authentication: the profile's API-key environment variable (and optional Claude
+authentication: the provider's API-key environment variable (and optional Claude
 workspace binding) or credentials from `otto login`. Credentials stay in the
 runtime, not in tool arguments or `bash`. Child agents do not get this tool.
 
@@ -537,7 +538,7 @@ must distinguish known metadata from its own suitability judgment and must not
 invent IDs or prices. Discovery is on demand, not a full catalog attached to
 every request: the parent calls once before ordinary delegation and reuses the
 result within the current connection, refreshing when that connection changes.
-Explicit user choices, named-agent defaults and the optional deprecated profile
+Explicit user choices, named-agent defaults and the optional deprecated `subagent_models`
 override do not require catalog selection.
 
 ChatGPT catalog requests use a separately maintained Codex catalog compatibility
@@ -547,12 +548,12 @@ them without a request. The cache is scoped to the endpoint, signed-in account
 and compatibility version; a change to any of these requires a fresh request.
 An empty result or request error is not saved. A ChatGPT model request rejected
 with HTTP 400 or 404 invalidates the cache for the next discovery; it does not
-automatically rerun that request or a child task. Configured profile models are
+automatically rerun that request or a child task. Configured model tables are
 defaults, not a catalog allowlist.
 
 If discovery fails, returns an empty catalog, or does not establish suitability,
 the parent uses the session model fallback without blind discovery retries. To
-recover discovery, check the selected profile and endpoint, export its configured
+recover discovery, check the selected provider and endpoint, export its configured
 API-key variable or renew ChatGPT authentication with `otto login`, then start a
 new connection. A provider can reject a catalog ID; inspect partial work and
 possible side effects before deciding whether retrying the child is safe.
@@ -574,9 +575,9 @@ model, putting its short reason in the task description. Explicit user choices
 and named-agent defaults take precedence; unavailable/uncertain discovery falls
 back to the session model, not an invented ID. No manual list is required.
 Without an explicit call model, precedence is named-agent default, optional
-deprecated profile `subagent_models` first entry, then session model. Changing
-the provider connection disables that profile list; select the intended profile
-or remove conflicting overrides and restart. Check rejected model IDs and
+deprecated `subagent_models` first entry (legacy profiles only), then session
+model. Changing the provider connection disables that list; select the intended
+model or remove conflicting overrides and restart. Check rejected model IDs and
 partial work before retrying: failed child work is not automatically repeated.
 
 `agent_status.model_source` is `explicit`, `definition`, `configured_first`,
@@ -764,7 +765,7 @@ command gets whole-workspace write access plus Otto-managed private `home`,
 `tmp`, and `cache` directories beneath your user cache. `HOME` points to the
 private `home`, so `~` in a command does not name your home directory; the
 `bash` tool description tells the model to use absolute paths for your files.
-Otto keeps generated profile files in a separate private `profiles` directory
+Otto keeps generated sandbox profile files in a separate private `profiles` directory
 that the sandboxed child cannot read. Otto does not treat the workspace as protected: source,
 `.git`, tests, and generated files remain writable.
 

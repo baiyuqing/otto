@@ -54,14 +54,22 @@ type choicesCall struct {
 
 func newFakePlatform() *fakePlatform { return &fakePlatform{started: make(chan struct{})} }
 
+// handlerTransport serves requests by calling the handler in-process, so a
+// management test needs no listening port.
+type handlerTransport struct{ handler http.Handler }
+
+func (t handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	t.handler.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
 // managementServer supplies an HTTP client to the bridge. Production creates
-// the same API client from the attach command's Unix socket; this test helper
-// uses httptest because the sandbox does not allow listener binds on Unix paths.
+// the same API client from the attach command's Unix socket; tests call the
+// handler in-process because the sandbox does not allow listener binds.
 func managementServer(t *testing.T, handler http.HandlerFunc) *manage.Client {
 	t.Helper()
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	return manage.NewWithBaseURL(server.Client(), server.URL)
+	return manage.NewWithBaseURL(&http.Client{Transport: handlerTransport{handler}}, "http://otto")
 }
 
 func (p *fakePlatform) Name() string {

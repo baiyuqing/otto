@@ -9,7 +9,7 @@ import (
 	"github.com/baiyuqing/otto/chat-connector/internal/agent/fake"
 )
 
-// staticModels is a ProfileSource with a fixed answer.
+// staticModels is a ModelSource with a fixed answer.
 type staticModels struct {
 	snapshot ModelSnapshot
 	err      error

@@ -372,8 +372,15 @@ Shared commands:
   printing the new state. It is rejected while a turn is in flight, and a
   failed reload keeps the previous sandbox in place. `allow_env` and `driver`
   changes, and a sandbox that was unavailable at startup, still need a restart.
+- `/sandbox` also lists each `read_paths` entry that is not below any denied
+  path (`Sandbox read_paths <path>: not below any denied path; remove it from
+  read_paths`) and each built-in denylist entry that contains a writable root
+  (`Sandbox deny_read_paths <path>: contains a writable root; not applied`).
+  See [the read denylist](safety-and-tools.md#a-sandboxed-command-reads-every-path-except-the-read-denylist).
 - `/sandbox allow <path>` adds one path to `read_paths` and reloads, so a
-  command that the sandbox denied can read it. The path is resolved to an
+  command that the sandbox denied can read it. The path must be covered by the
+  read denylist; otherwise the command reports `path is already readable; no
+  read_paths entry is needed` and changes nothing. The path is resolved to an
   absolute, symlink-free path first and must exist; it is written to
   `[sandbox].read_paths` in the config file, so it also applies to later
   sessions. In the TUI the resolved path is loaded before a confirmation screen
@@ -419,7 +426,7 @@ Shared commands:
   - the first word is not a bare program name looked up on `PATH`: it contains
     a quote, a backslash, `=`, `/` or `~`. A path such as `./build.sh` or
     `/abs/dir/tool` can name a file in the workspace or in the sandbox's
-    private home and temporary directories, which the model can rewrite;
+    private temporary directories, which the model can rewrite;
   - the program runs another command given as an argument: shells and command
     runners such as `sh`, `bash`, `env`, `sudo`, `xargs`, `python3`, and
     `git`, which runs programs named by aliases (`alias.<name> = !...`) and by

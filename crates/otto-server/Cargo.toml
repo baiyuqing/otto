@@ -28,6 +28,8 @@ tokio-rustls.workspace = true
 base64.workspace = true
 # `otto::faults` and `otto::fixtures` for the route and listener tests.
 otto = { workspace = true, features = ["fault-injection", "test-support"] }
+# `tokio::time::pause` drives the approval timeout test without real waits.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 tower.workspace = true
 # Self-signed certificates for the TLS listener tests; a key must not live in

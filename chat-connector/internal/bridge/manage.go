@@ -54,9 +54,13 @@ func manageError(err error) string {
 	if api, ok := err.(*manage.APIError); ok {
 		switch api.Code {
 		case "models_unsupported":
-			return "This ChatGPT profile cannot list models; choose an account-available model ID explicitly."
-		case "profile_not_found":
-			return "Profile not found. Send /config profiles."
+			return "The chatgpt provider cannot list models; use a model ID your account can use."
+		case "provider_not_found":
+			return "Provider not found. Send /config models."
+		case "model_in_use":
+			return "That model is the default model or the approval reviewer model. Select another model first."
+		case "legacy_profiles_config":
+			return "The host configuration still uses [profiles]. Convert it on the host to [providers] and default_model."
 		case "change_not_found":
 			return "That configuration confirmation is unknown or was already used. Submit the change again."
 		case "change_expired":
@@ -68,14 +72,33 @@ func manageError(err error) string {
 	return "Management request failed: " + err.Error()
 }
 
+// validProviderName reports whether name is a provider name: ASCII letters,
+// digits, '_' and '-'.
+func validProviderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !isSelectorWord(r) {
+			return false
+		}
+	}
+	return true
+}
+
+const (
+	configUsage     = "Usage: /config [models|show <provider>|use|add|set|remove <provider>/<model_id>|confirm|cancel]"
+	badSelectorText = "Expected a model selector <provider>/<model_id>."
+)
+
 func (c *chat) models(m Message, name string) {
 	go func() {
 		client, ok := c.manager(m)
 		if !ok {
 			return
 		}
-		if name == "" {
-			c.notify(m.MessageID, "Usage: /models <profile>. Send /config profiles to choose a profile.")
+		if !validProviderName(name) {
+			c.notify(m.MessageID, "Usage: /models <provider>. Send /config models to see the configured models.")
 			return
 		}
 		ctx, cancel := c.manageContext()
@@ -86,11 +109,55 @@ func (c *chat) models(m Message, name string) {
 			return
 		}
 		if len(ids) == 0 {
-			c.notify(m.MessageID, "No models were returned for profile "+name+".")
+			c.notify(m.MessageID, "No models were returned for provider "+name+".")
 			return
 		}
-		c.notify(m.MessageID, "Models for "+name+":\n"+strings.Join(ids, "\n"))
+		lines := make([]string, 0, len(ids))
+		for _, id := range ids {
+			lines = append(lines, name+"/"+id)
+		}
+		c.notify(m.MessageID, "Models of "+name+":\n"+strings.Join(lines, "\n"))
 	}()
+}
+
+// renderConfiguredModels lists every model selector, marking the default.
+func renderConfiguredModels(all manage.Providers) string {
+	var lines []string
+	for _, provider := range all.Providers {
+		for _, model := range provider.Models {
+			mark := ""
+			if model.Default || model.Selector == all.DefaultModel {
+				mark = " (default)"
+			}
+			lines = append(lines, "• "+model.Selector+mark)
+		}
+	}
+	if len(lines) == 0 {
+		lines = []string{"No models are configured."}
+	}
+	return "Configured models:\n" + strings.Join(lines, "\n") +
+		"\nUse /config show <provider>, /models <provider>, /config use <provider>/<model_id>, or /config add <provider>/<model_id>."
+}
+
+func renderProvider(p manage.Provider) string {
+	lines := []string{p.Name, "type: " + p.Type}
+	if p.BaseURL != "" {
+		lines = append(lines, "base_url: "+p.BaseURL)
+	}
+	if p.APIKeyEnv != "" {
+		lines = append(lines, "api_key_env: "+p.APIKeyEnv)
+	}
+	if len(p.Models) == 0 {
+		lines = append(lines, "models: none")
+	}
+	for _, model := range p.Models {
+		line := "• " + model.Selector
+		if model.Thinking != "" {
+			line += " (thinking " + model.Thinking + ")"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (c *chat) config(m Message, args []string) {
@@ -102,79 +169,58 @@ func (c *chat) config(m Message, args []string) {
 		ctx, cancel := c.manageContext()
 		defer cancel()
 		if len(args) == 0 {
-			profiles, err := client.Profiles(ctx)
-			if err != nil {
-				c.notify(m.MessageID, manageError(err))
-				return
-			}
-			var lines []string
-			for _, p := range profiles {
-				mark := ""
-				if p.Default {
-					mark = " (default)"
-				}
-				lines = append(lines, fmt.Sprintf("%s: %s / %s%s", p.Name, p.Provider, p.Model, mark))
-			}
-			c.notify(m.MessageID, "Profiles:\n"+strings.Join(lines, "\n")+"\nUse /config profiles, /config show <profile>, /models <profile>, or /config set <profile> model <id>.")
-			return
+			args = []string{"models"}
 		}
 		switch args[0] {
-		case "profiles":
-			profiles, err := client.Profiles(ctx)
+		case "models":
+			all, err := client.Providers(ctx)
 			if err != nil {
 				c.notify(m.MessageID, manageError(err))
 				return
 			}
-			var lines []string
-			for _, p := range profiles {
-				mark := ""
-				if p.Default {
-					mark = " (default)"
-				}
-				lines = append(lines, fmt.Sprintf("%s: %s / %s%s", p.Name, p.Provider, p.Model, mark))
-			}
-			c.notify(m.MessageID, strings.Join(lines, "\n"))
+			c.notify(m.MessageID, renderConfiguredModels(all))
 		case "show":
-			if len(args) != 2 {
-				c.notify(m.MessageID, "Usage: /config show <profile>")
+			if len(args) != 2 || !validProviderName(args[1]) {
+				c.notify(m.MessageID, "Usage: /config show <provider>")
 				return
 			}
-			p, err := client.Profile(ctx, args[1])
+			p, err := client.Provider(ctx, args[1])
 			if err != nil {
 				c.notify(m.MessageID, manageError(err))
 				return
 			}
-			c.notify(m.MessageID, fmt.Sprintf("%s\nprovider: %s\nmodel: %s\nthinking: %s\nbase_url: %s\napi_key_env: %s", p.Name, p.Provider, p.Model, p.Thinking, p.BaseURL, p.APIKeyEnv))
+			c.notify(m.MessageID, renderProvider(p))
 		case "confirm":
 			c.confirmChange(m, client, args)
 		case "cancel":
 			c.cancelChange(m, client, args)
-		case "use":
+		case "use", "remove":
 			if len(args) != 2 {
-				c.notify(m.MessageID, "Usage: /config use <profile>")
+				c.notify(m.MessageID, "Usage: /config "+args[0]+" <provider>/<model_id>")
 				return
 			}
-			c.previewChange(m, client, map[string]any{"kind": "set_default_profile", "profile": args[1]})
-		case "remove":
-			if len(args) != 2 {
-				c.notify(m.MessageID, "Usage: /config remove <profile>")
+			if !ValidModelSelector(args[1]) {
+				c.notify(m.MessageID, badSelectorText)
 				return
 			}
-			c.previewChange(m, client, map[string]any{"kind": "remove_profile", "profile": args[1]})
+			kind := "set_default_model"
+			if args[0] == "remove" {
+				kind = "remove_model"
+			}
+			c.previewChange(m, client, map[string]any{"kind": kind, "model": args[1]})
 		case "add":
-			if len(args) < 6 || len(args)%2 != 0 || args[2] != "--provider" || args[4] != "--model" {
-				c.notify(m.MessageID, "Usage: /config add <profile> --provider chatgpt --model <model> [--thinking <level>]")
+			if len(args) < 2 || len(args)%2 != 0 {
+				c.notify(m.MessageID, "Usage: /config add <provider>/<model_id> [--thinking <level>]")
 				return
 			}
-			// An openai-compatible profile needs a base URL, which chat cannot set.
-			if args[3] == "openai-compatible" {
-				c.notify(m.MessageID, hostOnlyMessage)
+			if !ValidModelSelector(args[1]) {
+				c.notify(m.MessageID, badSelectorText)
 				return
 			}
-			change := map[string]any{"kind": "create_profile", "profile": args[1], "provider": args[3], "model": args[5]}
-			for i := 6; i+1 < len(args); i += 2 {
+			change := map[string]any{"kind": "set_model", "model": args[1]}
+			for i := 2; i+1 < len(args); i += 2 {
 				switch args[i] {
-				case "--base-url", "--api-key-env":
+				case "--base-url", "--api-key-env", "--provider":
 					c.notify(m.MessageID, hostOnlyMessage)
 					return
 				case "--thinking":
@@ -186,23 +232,27 @@ func (c *chat) config(m Message, args []string) {
 			}
 			c.previewChange(m, client, change)
 		case "set":
-			if len(args) < 4 {
-				c.notify(m.MessageID, "Usage: /config set <profile> <model|thinking> <value>")
+			if len(args) != 4 {
+				c.notify(m.MessageID, "Usage: /config set <provider>/<model_id> thinking <level>")
+				return
+			}
+			if !ValidModelSelector(args[1]) {
+				c.notify(m.MessageID, badSelectorText)
 				return
 			}
 			field := strings.ReplaceAll(args[2], "-", "_")
 			switch field {
-			case "model", "thinking":
+			case "thinking":
 			case "base_url", "api_key_env":
 				c.notify(m.MessageID, hostOnlyMessage)
 				return
 			default:
-				c.notify(m.MessageID, "Only model and thinking can be changed.")
+				c.notify(m.MessageID, "Only thinking can be changed.")
 				return
 			}
-			c.previewChange(m, client, map[string]any{"kind": "set_profile_field", "profile": args[1], "field": field, "value": strings.Join(args[3:], " ")})
+			c.previewChange(m, client, map[string]any{"kind": "set_model_field", "model": args[1], "field": field, "value": args[3]})
 		default:
-			c.notify(m.MessageID, "Usage: /config [profiles|show|use|set|remove|confirm|cancel]")
+			c.notify(m.MessageID, configUsage)
 		}
 	}()
 }
@@ -229,7 +279,7 @@ func (c *chat) previewChange(m Message, client *manage.Client, change any) {
 	c.manageMu.Lock()
 	c.change = &pendingChange{id: preview.ID, senderID: m.SenderID, expires: time.Now().Add(time.Duration(preview.ExpiresInSeconds) * time.Second)}
 	c.manageMu.Unlock()
-	slog.Info("management_previewed", "request_id", requestID, "platform", m.Platform, "chat_id", m.ChatID, "command", "config", "operation", preview.Operation, "profile", preview.Profile)
+	slog.Info("management_previewed", "request_id", requestID, "platform", m.Platform, "chat_id", m.ChatID, "command", "config", "operation", preview.Operation, "target", preview.Target)
 	c.notify(m.MessageID, fmt.Sprintf("Preview: %s. Confirm with /config confirm %s within %d seconds.", preview.Diff, preview.ID, preview.ExpiresInSeconds))
 }
 func (c *chat) confirmChange(m Message, client *manage.Client, args []string) {

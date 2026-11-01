@@ -290,8 +290,8 @@ type Command struct {
 // deliver and cmdManage, and with the commands `otto acp` advertises;
 // TestMenuCommandsAreHandled checks it.
 var Commands = []Command{
-	{"config", "Show or change provider profiles", false},
-	{"models", "List a provider profile's model IDs", false},
+	{"config", "Show or change configured models", false},
+	{"models", "List the model IDs of a provider", false},
 	{"model", "Choose the conversation's model: /model, or /model <provider>/<model_id>", true},
 	{"context", "Show what the next request sends, with token counts", true},
 	{"compact", "Compact the session context: /compact [focus]", true},

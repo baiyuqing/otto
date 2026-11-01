@@ -42,18 +42,39 @@ type APIError struct{ Code, Message string }
 
 func (e *APIError) Error() string { return e.Code + ": " + e.Message }
 
-type Profile struct {
-	Name      string `json:"name"`
-	Default   bool   `json:"default"`
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Thinking  string `json:"thinking"`
-	BaseURL   string `json:"base_url"`
-	APIKeyEnv string `json:"api_key_env"`
+// ModelEntry is one model table of a provider.
+type ModelEntry struct {
+	ModelID  string `json:"model_id"`
+	Selector string `json:"selector"`
+	Default  bool   `json:"default"`
+	Thinking string `json:"thinking"`
 }
+
+// Provider is one provider with its model tables. Only the connection fields
+// that name no secret are decoded.
+type Provider struct {
+	Name      string       `json:"name"`
+	Type      string       `json:"type"`
+	Builtin   bool         `json:"builtin"`
+	BaseURL   string       `json:"base_url"`
+	APIKeyEnv string       `json:"api_key_env"`
+	Models    []ModelEntry `json:"models"`
+}
+
+// Providers is the reply of GET /v1/config/providers.
+type Providers struct {
+	DefaultModel string     `json:"default_model"`
+	Providers    []Provider `json:"providers"`
+}
+
+// Preview is the reply of POST /v1/config/changes.
 type Preview struct {
-	ID, Operation, Profile, Field, Diff string
-	ExpiresInSeconds                    uint64 `json:"expires_in_seconds"`
+	ID               string `json:"id"`
+	Operation        string `json:"operation"`
+	Target           string `json:"target"`
+	Field            string `json:"field"`
+	Diff             string `json:"diff"`
+	ExpiresInSeconds uint64 `json:"expires_in_seconds"`
 }
 
 // FromCommand recognizes the existing attach command and its optional socket.
@@ -81,27 +102,27 @@ func FromCommand(command []string, home string) (*Client, error) {
 	return &Client{http: &http.Client{Transport: transport, Timeout: 30 * time.Second}, base: "http://otto"}, nil
 }
 
-func (c *Client) Profiles(ctx context.Context) ([]Profile, error) {
-	var out struct {
-		Profiles []Profile `json:"profiles"`
-	}
-	if err := c.get(ctx, "/v1/config/profiles", &out); err != nil {
-		return nil, err
-	}
-	return out.Profiles, nil
-}
-func (c *Client) Profile(ctx context.Context, name string) (Profile, error) {
-	var out Profile
-	if err := c.get(ctx, "/v1/config/profiles/"+url.PathEscape(name), &out); err != nil {
-		return Profile{}, err
+func (c *Client) Providers(ctx context.Context) (Providers, error) {
+	var out Providers
+	if err := c.get(ctx, "/v1/config/providers", &out); err != nil {
+		return Providers{}, err
 	}
 	return out, nil
 }
-func (c *Client) Models(ctx context.Context, profile string) ([]string, error) {
+func (c *Client) Provider(ctx context.Context, name string) (Provider, error) {
+	var out Provider
+	if err := c.get(ctx, "/v1/config/providers/"+url.PathEscape(name), &out); err != nil {
+		return Provider{}, err
+	}
+	return out, nil
+}
+
+// Models lists the model IDs the provider's API reports.
+func (c *Client) Models(ctx context.Context, provider string) ([]string, error) {
 	var out struct {
 		Models []string `json:"models"`
 	}
-	if err := c.get(ctx, "/v1/config/models?profile="+url.QueryEscape(profile), &out); err != nil {
+	if err := c.get(ctx, "/v1/config/models?provider="+url.QueryEscape(provider), &out); err != nil {
 		return nil, err
 	}
 	return out.Models, nil

@@ -203,8 +203,26 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Prints one line per read exception that changes nothing and per
+    /// built-in denylist entry that is not applied.
+    pub(super) fn print_sandbox_read_notes(&mut self, info: &crate::runtime::info::SandboxInfo) {
+        for path in &info.inert_read_paths {
+            let _ = writeln!(
+                self.stdout,
+                "Sandbox read_paths {path}: not below any denied path; remove it from read_paths"
+            );
+        }
+        for path in &info.skipped_deny_paths {
+            let _ = writeln!(
+                self.stdout,
+                "Sandbox deny_read_paths {path}: contains a writable root; not applied"
+            );
+        }
+    }
+
     fn print_sandbox(&mut self, info: crate::runtime::info::SandboxInfo) {
         let _ = writeln!(self.stdout, "Sandbox: {}", info.summary());
+        self.print_sandbox_read_notes(&info);
         let reason = info.reason_code();
         if !reason.is_empty() {
             let _ = writeln!(self.stdout, "Sandbox reason: {reason}");

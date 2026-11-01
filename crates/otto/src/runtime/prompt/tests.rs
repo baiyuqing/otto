@@ -16,6 +16,7 @@ fn seatbelt(network: SandboxNetwork) -> SandboxInfo {
         network,
         bash_available: true,
         reason: SandboxReason::None,
+        ..Default::default()
     }
 }
 
@@ -25,6 +26,7 @@ fn off() -> SandboxInfo {
         network: SandboxNetwork::Unconfined,
         bash_available: true,
         reason: SandboxReason::None,
+        ..Default::default()
     }
 }
 
@@ -144,6 +146,7 @@ fn sandbox_policies_and_registered_tool_order() {
                 network: SandboxNetwork::Denied,
                 bash_available: false,
                 reason: SandboxReason::SelfTestFailed,
+                ..Default::default()
             },
             "<available_tools>read, edit</available_tools>",
             "<sandbox_policy mode=\"unavailable\">\nBash is unavailable.",
@@ -157,7 +160,7 @@ fn sandbox_policies_and_registered_tool_order() {
         ),
     ];
     for (info, want_tools, want_policy, forbidden) in cases {
-        let prompt = system_prompt_for(&definitions, *info, "", "", "");
+        let prompt = system_prompt_for(&definitions, info.clone(), "", "", "");
         assert!(prompt.contains(want_tools), "{prompt}");
         assert!(prompt.contains(want_policy), "{prompt}");
         let sandbox_policy = prompt
@@ -270,6 +273,25 @@ fn seatbelt_policies_explain_excluded_commands() {
 }
 
 #[test]
+fn seatbelt_policies_describe_the_read_denylist_and_not_a_private_home() {
+    for network in [SandboxNetwork::Allowed, SandboxNetwork::Denied] {
+        let prompt = system_prompt_for(&definitions(&["bash"]), seatbelt(network), "", "", "");
+        assert!(
+            prompt.contains("read every path except the read denylist")
+                && prompt.contains("HOME is the real home directory")
+                && prompt.contains("TMPDIR and tool caches are private to the session")
+                && prompt.contains("writes stay limited to the workspace"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("private sandbox directory"), "{prompt}");
+        assert!(
+            !prompt.contains("real home directory or keychain"),
+            "{prompt}"
+        );
+    }
+}
+
+#[test]
 fn seatbelt_policies_state_the_read_only_git_metadata() {
     for network in [SandboxNetwork::Allowed, SandboxNetwork::Denied] {
         let prompt = system_prompt_for(&definitions(&["bash"]), seatbelt(network), "", "", "");
@@ -278,7 +300,7 @@ fn seatbelt_policies_state_the_read_only_git_metadata() {
                 && prompt.contains("`git config` without `--global`")
                 && prompt.contains("`require_escalated`")
                 && prompt.contains("`sandbox_denied:` list")
-                && prompt.contains("denied read outside the workspace"),
+                && prompt.contains("denied read on the read denylist"),
             "{prompt}"
         );
     }
@@ -336,12 +358,14 @@ fn an_inconsistent_sandbox_state_fails_closed() {
             network: SandboxNetwork::Denied,
             bash_available: false,
             reason: SandboxReason::RuntimeFailure,
+            ..Default::default()
         },
         SandboxInfo {
             mode: SandboxMode::Seatbelt,
             network: SandboxNetwork::Unconfined,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         },
     ] {
         let prompt = system_prompt_for(&definitions, info, "", "", "");

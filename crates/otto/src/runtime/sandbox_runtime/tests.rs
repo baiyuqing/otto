@@ -8,6 +8,7 @@ fn options(workspace: &Path, driver: DriverMode) -> OpenOptions {
             driver,
             network: Some(NetworkMode::Allow),
             read_paths: Vec::new(),
+            deny_read_paths: Vec::new(),
             allow_env: Vec::new(),
         },
         workspace: workspace.to_string_lossy().into_owned(),
@@ -25,6 +26,7 @@ fn resolved_configuration_becomes_native_settings() {
         driver: Some("off".to_string()),
         network: Some("deny".to_string()),
         read_paths: vec!["/b".to_string(), "/a".to_string()],
+        deny_read_paths: Vec::new(),
         allow_env: vec!["ZED".to_string(), "ABLE".to_string()],
         excluded_commands: Vec::new(),
     };
@@ -74,7 +76,7 @@ async fn the_off_driver_opens_an_unconfined_runtime() {
     assert!(runtime.environment.is_some());
     assert!(runtime.redactions_complete);
     assert_eq!(
-        sandbox_runtime_warning(runtime.info).as_deref(),
+        sandbox_runtime_warning(&runtime.info).as_deref(),
         Some("warning: sandbox is off; bash runs unsandboxed as your user\n")
     );
     runtime.close().expect("close");
@@ -142,9 +144,11 @@ fn an_incomplete_redaction_set_disables_bash() {
             network: SandboxNetwork::Denied,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         },
         redaction_values: vec!["secret".to_string()],
         redactions_complete: false,
+        read_denylist: None,
         closer: Closer::Nothing,
         #[cfg(target_os = "macos")]
         seatbelt: None,
@@ -167,9 +171,11 @@ fn a_runtime_claiming_bash_without_an_executor_is_failed_closed() {
             network: SandboxNetwork::Denied,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         },
         redaction_values: Vec::new(),
         redactions_complete: true,
+        read_denylist: None,
         closer: Closer::Nothing,
         #[cfg(target_os = "macos")]
         seatbelt: None,
@@ -183,7 +189,7 @@ fn a_runtime_claiming_bash_without_an_executor_is_failed_closed() {
 fn the_unavailable_warning_names_the_reason_but_nothing_else() {
     let info = SandboxInfo::unavailable(SandboxReason::SeatbeltMissing);
     assert_eq!(
-        sandbox_runtime_warning(info).as_deref(),
+        sandbox_runtime_warning(&info).as_deref(),
         Some(
             "warning: bash is unavailable because the configured sandbox could not be established (reason: seatbelt-missing); file tools remain available\n"
         )
@@ -193,8 +199,9 @@ fn the_unavailable_warning_names_the_reason_but_nothing_else() {
         network: SandboxNetwork::Denied,
         bash_available: true,
         reason: SandboxReason::None,
+        ..Default::default()
     };
-    assert_eq!(sandbox_runtime_warning(confined), None);
+    assert_eq!(sandbox_runtime_warning(&confined), None);
 }
 
 #[test]

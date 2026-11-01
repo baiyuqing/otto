@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Refusal for a read grant on a path the read denylist does not cover.
+const PATH_ALREADY_READABLE: &str = "path is already readable; no read_paths entry is needed";
+
 impl Controller {
     pub async fn reload_sandbox(&self) -> Result<SandboxInfo, String> {
         let control = {
@@ -53,6 +56,12 @@ impl Controller {
             };
             control
         };
+        if let SandboxChange::AllowReadPath(read_path) = &change
+            && let Some(denylist) = control.read_denylist()
+            && std::fs::canonicalize(read_path).is_ok_and(|canonical| !denylist.covers(&canonical))
+        {
+            return Err(PATH_ALREADY_READABLE.to_string());
+        }
         let path = self.builder.config_path.clone();
         let amendment = sandbox_config::amend_sandbox_config(&path, &change)?;
         match control.reload().await {

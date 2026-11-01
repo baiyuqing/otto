@@ -1,8 +1,10 @@
 //! Generation of the Seatbelt profile for one session.
 //!
 //! [`generate`] renders the four dynamic sections of [`super::TEMPLATE`] from a
-//! session's workspace, private state directories, shell and reviewed read
-//! roots.
+//! session's workspace, private state directories, shell and read policy. The
+//! template allows every read; the read section denies the read denylist
+//! ([`crate::sandbox::read_denylist`]) and re-allows the session's own private
+//! directories and the configured `read_paths` exceptions.
 //!
 //! Ownership: every function here is pure with respect to the caller's data;
 //! the only side effects are the filesystem reads used to canonicalize paths.
@@ -17,21 +19,18 @@
 //! Paths are handled as `String` rather than `Path`: [`valid_path_text`]
 //! already requires valid UTF-8, and the rules are rendered as text.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::sandbox::{NetworkMode, PrivateDirectories};
 
+mod deny_roots;
 mod paths;
-mod roots;
 mod rules;
+use deny_roots::*;
 pub(crate) use paths::*;
-use roots::*;
 use rules::*;
 
-/// At most this many dynamic read roots may reach the profile.
-pub(crate) const MAX_DYNAMIC_ROOTS: usize = 128;
-/// The dynamic read roots may contribute at most this many bytes of path text.
+/// The dynamic read rules may contribute at most this many bytes of path text.
 pub(crate) const MAX_DYNAMIC_PATH_BYTES: usize = 32 * 1024;
 
 pub(crate) const READ_MARKER: &str = "@@OTTO_PROFILE_READ_RULES@@";
@@ -41,45 +40,6 @@ pub(crate) const SHELL_MARKER: &str = "@@OTTO_PROFILE_SHELL_RULE@@";
 /// Replaced at every template deny with `(with message "<tag>")`.
 pub(crate) const DENY_MESSAGE_MARKER: &str = "@@OTTO_DENY_MESSAGE@@";
 
-/// Directories that are read-only for every session when they exist.
-pub(crate) const REVIEWED_AUTOMATIC_PATHS: &[&str] = &[
-    "/bin",
-    "/sbin",
-    "/usr/bin",
-    "/usr/sbin",
-    "/usr/lib",
-    "/usr/libexec",
-    "/usr/share",
-    "/usr/include",
-    "/System",
-    "/Library/Apple",
-    "/Library/Developer",
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/opt/homebrew/lib",
-    "/opt/homebrew/share",
-    "/opt/homebrew/include",
-    "/opt/homebrew/Cellar",
-    "/opt/homebrew/opt",
-    "/usr/local/bin",
-    "/usr/local/sbin",
-    "/usr/local/lib",
-    "/usr/local/share",
-    "/usr/local/include",
-    "/usr/local/Cellar",
-    "/usr/local/opt",
-    "/usr/local/Homebrew",
-];
-
-/// Individual runtime files that are read-only for every session.
-pub(crate) const REVIEWED_RUNTIME_FILES: &[&str] = &[
-    "/private/etc/hosts",
-    "/private/etc/protocols",
-    "/private/etc/resolv.conf",
-    "/private/etc/services",
-    "/private/etc/ssl/cert.pem",
-];
-
 /// The single rejection value. It carries no detail on purpose: the text is
 /// reachable by the model through the bash tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -88,7 +48,7 @@ pub(crate) struct Rejected;
 
 /// Why a path could not be resolved.
 ///
-/// `NotFound` is the only recoverable case: an automatic root that does not
+/// `NotFound` is the only recoverable case: a configured path that does not
 /// exist on this host is skipped rather than rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResolveError {
@@ -117,13 +77,6 @@ pub(crate) struct ResolvedPath {
     pub(crate) executable: bool,
 }
 
-/// One entry of the reviewed fixed list, with the kind it must have.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AutomaticPath {
-    pub(crate) path: String,
-    pub(crate) kind: PathKind,
-}
-
 /// What the caller asks the profile to permit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Options {
@@ -132,18 +85,31 @@ pub(crate) struct Options {
     pub(crate) workspaces: Vec<String>,
     pub(crate) directories: PrivateDirectories,
     pub(crate) shell: String,
+    /// The user's home directory; the built-in denylist entries and `~/`
+    /// prefixes are relative to it.
     pub(crate) home: String,
-    /// The host environment, only read for its single `PATH` entry.
-    pub(crate) host_entries: Vec<String>,
+    /// `[sandbox] read_paths`: exceptions inside the read denylist.
     pub(crate) read_paths: Vec<String>,
+    /// `[sandbox] deny_read_paths`: additions to the built-in read denylist.
+    pub(crate) deny_read_paths: Vec<String>,
     pub(crate) network: Option<NetworkMode>,
 }
 
 /// The filesystem facts generation depends on.
 pub(crate) struct Dependencies<'a> {
     pub(crate) resolve: &'a dyn Fn(&str) -> Result<ResolvedPath, ResolveError>,
-    pub(crate) fixed_paths: Vec<AutomaticPath>,
-    pub(crate) developer_root: &'a dyn Fn() -> Result<Option<String>, Rejected>,
+}
+
+/// The generated profile text and what the read policy left out of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedProfile {
+    pub(crate) text: String,
+    /// `read_paths` entries omitted because they lie below no denied path, as
+    /// configured.
+    pub(crate) inert_read_paths: Vec<String>,
+    /// Built-in denylist entries omitted because they contain a writable root,
+    /// as `~/...` text.
+    pub(crate) skipped_deny_paths: Vec<String>,
 }
 
 /// The required options once each has been canonicalized and cross-checked.
@@ -158,27 +124,11 @@ struct ResolvedOptions {
 }
 
 /// Renders the profile for `options` against the real filesystem.
-pub(crate) fn generate(options: &Options) -> Result<String, Rejected> {
-    let mut fixed_paths =
-        Vec::with_capacity(REVIEWED_AUTOMATIC_PATHS.len() + REVIEWED_RUNTIME_FILES.len());
-    for path in REVIEWED_AUTOMATIC_PATHS {
-        fixed_paths.push(AutomaticPath {
-            path: (*path).to_string(),
-            kind: PathKind::Directory,
-        });
-    }
-    for path in REVIEWED_RUNTIME_FILES {
-        fixed_paths.push(AutomaticPath {
-            path: (*path).to_string(),
-            kind: PathKind::Regular,
-        });
-    }
+pub(crate) fn generate(options: &Options) -> Result<GeneratedProfile, Rejected> {
     generate_with(
         options,
         &Dependencies {
             resolve: &resolve_path,
-            fixed_paths,
-            developer_root: &discover_developer_root,
         },
     )
 }
@@ -187,24 +137,15 @@ pub(crate) fn generate(options: &Options) -> Result<String, Rejected> {
 pub(crate) fn generate_with(
     options: &Options,
     dependencies: &Dependencies<'_>,
-) -> Result<String, Rejected> {
+) -> Result<GeneratedProfile, Rejected> {
     let resolved = resolve_required_options(options, dependencies.resolve)?;
-    let roots = discover_read_roots(options, &resolved, dependencies)?;
     let mut writable = resolved.workspaces.clone();
     writable.extend([
-        directory_text(&resolved.directories.home)?,
         directory_text(&resolved.directories.temp)?,
         directory_text(&resolved.directories.cache)?,
     ]);
-    let roots = collapse_read_roots(roots, &writable);
-    if !roots_within_limits(&roots) {
-        return Err(Rejected);
-    }
-
     sort_paths(&mut writable);
-    let metadata = metadata_ancestors(&writable, &roots, &resolved.shell);
 
-    let read_rules = render_read_rules(&metadata, &writable, &roots)?;
     let tag = options
         .directories
         .root
@@ -212,6 +153,8 @@ pub(crate) fn generate_with(
         .and_then(|name| name.to_str())
         .ok_or(Rejected)?;
     let deny_message = format!("(with message {})", string_literal(tag)?);
+    let read_policy = resolve_read_policy(options, &resolved, &writable, dependencies.resolve)?;
+    let read_rules = render_read_rules(&read_policy, &resolved.directories, &deny_message)?;
     let write_rules = render_write_rules(&writable, &resolved.workspaces, &deny_message)?;
     let network_rules = render_network_rules(resolved.network);
     let shell_rule = render_shell_rule(&resolved.shell)?;
@@ -227,7 +170,7 @@ pub(crate) fn generate_with(
     }
     // One left-to-right pass over the template, so generated text is never
     // rescanned for markers.
-    Ok(replace_markers(
+    let text = replace_markers(
         template,
         &[
             (READ_MARKER, read_rules.as_str()),
@@ -236,7 +179,12 @@ pub(crate) fn generate_with(
             (SHELL_MARKER, shell_rule.as_str()),
             (DENY_MESSAGE_MARKER, deny_message.as_str()),
         ],
-    ))
+    );
+    Ok(GeneratedProfile {
+        text,
+        inert_read_paths: read_policy.inert_read_paths,
+        skipped_deny_paths: read_policy.skipped_deny_paths,
+    })
 }
 
 /// Replacement scans left to right: the earliest match in the remaining input

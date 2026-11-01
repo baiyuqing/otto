@@ -141,7 +141,7 @@ async fn read_approval_reload_failure_rolls_back_and_does_not_grant() {
     let (mut controller, approvals, _) =
         controller_with_approvals(workspace.path(), sessions.path()).await;
     let info = seatbelt_info(SandboxNetwork::Allowed);
-    controller.sandbox = Some(FakeSandbox::new(info, info, Some("reload failed")).0);
+    controller.sandbox = Some(FakeSandbox::new(info.clone(), info, Some("reload failed")).0);
     let original = "# preserve this config\n";
     std::fs::write(controller.config_path(), original).unwrap();
     let session = controller.info().session_id;

@@ -10,24 +10,18 @@ type ResolveFn = dyn Fn(&str) -> Result<ResolvedPath, ResolveError>;
 
 struct Deps {
     resolve: Box<ResolveFn>,
-    fixed_paths: Vec<AutomaticPath>,
-    developer_root: Box<dyn Fn() -> Result<Option<String>, Rejected>>,
 }
 
 impl Deps {
     fn new() -> Self {
         Self {
             resolve: Box::new(resolve_path),
-            fixed_paths: Vec::new(),
-            developer_root: Box::new(|| Ok(None)),
         }
     }
 
     fn view(&self) -> Dependencies<'_> {
         Dependencies {
             resolve: self.resolve.as_ref(),
-            fixed_paths: self.fixed_paths.clone(),
-            developer_root: self.developer_root.as_ref(),
         }
     }
 
@@ -54,10 +48,6 @@ impl Deps {
             );
         }
         self.override_resolve(move |path| resolved.get(path).cloned().map(Ok));
-    }
-
-    fn developer_root_is(&mut self, root: String) {
-        self.developer_root = Box::new(move || Ok(Some(root.clone())));
     }
 }
 
@@ -87,17 +77,21 @@ impl Fixture {
     }
 
     fn render(&self) -> String {
+        self.generated().text
+    }
+
+    fn generated(&self) -> GeneratedProfile {
         generate_with(&self.options, &self.deps.view()).expect("generate profile")
     }
 
-    fn generate(&self) -> Result<String, Rejected> {
+    fn generate(&self) -> Result<GeneratedProfile, Rejected> {
         generate_with(&self.options, &self.deps.view())
     }
 
     fn assert_rejected(&self, what: &str) {
         match self.generate() {
             Err(Rejected) => {}
-            Ok(profile) => panic!("{what} generated {} bytes", profile.len()),
+            Ok(profile) => panic!("{what} generated {} bytes", profile.text.len()),
         }
     }
 
@@ -120,8 +114,8 @@ fn new_fixture() -> Fixture {
         directories: private_state.directories.clone(),
         shell,
         home,
-        host_entries: vec!["PATH=".to_string()],
         read_paths: Vec::new(),
+        deny_read_paths: Vec::new(),
         network: Some(NetworkMode::Deny),
     };
     Fixture {
@@ -188,8 +182,7 @@ fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-mod automatic_paths;
 mod deny_rules;
 mod dynamic_literals;
-mod reviewed_roots;
+mod read_policy;
 mod system_rules;

@@ -109,7 +109,6 @@ fn creates_an_owner_only_canonical_tree_outside_the_workspace() {
 
     for path in [
         root.clone(),
-        text(&state.directories.home),
         text(&state.directories.temp),
         text(&state.directories.cache),
         state.profiles.clone(),
@@ -117,10 +116,6 @@ fn creates_an_owner_only_canonical_tree_outside_the_workspace() {
         assert_canonical(&path);
         assert_entry(&path, true, 0o700);
     }
-    assert_eq!(
-        state.directories.home,
-        Path::new(&profile::join(&root, "home"))
-    );
     assert_eq!(
         state.directories.temp,
         Path::new(&profile::join(&root, "tmp"))
@@ -215,7 +210,7 @@ fn fails_closed_when_creation_strips_owner_bits() {
             "child directory",
             Box::new(|| {
                 Arc::new(|event: &Event| {
-                    if event.kind == EventKind::DirectoryCreated && event.name == "home" {
+                    if event.kind == EventKind::DirectoryCreated && event.name == "tmp" {
                         chmod(&event.path, 0o600);
                     }
                 })
@@ -366,9 +361,9 @@ fn close_is_idempotent_and_never_follows_symlinks() {
     std::fs::write(&marker, b"keep").expect("write marker");
 
     let state = create(&workspace, &cache).expect("create state");
-    let home = text(&state.directories.home);
-    std::fs::remove_dir(&home).expect("remove home");
-    symlink(&outside, &home);
+    let temp = text(&state.directories.temp);
+    std::fs::remove_dir(&temp).expect("remove temp");
+    symlink(&outside, &temp);
     symlink(
         &outside,
         &profile::join(&text(&state.directories.cache), "outside-link"),
@@ -403,7 +398,7 @@ fn construction_does_not_follow_a_root_replacement_after_validation() {
 
     let created = create_with_operations(&workspace, &cache, &operations);
     assert!(created.is_err(), "a replaced root was accepted");
-    for relative in ["home", "tmp", "cache", "profiles", "profiles/profile.sb"] {
+    for relative in ["tmp", "cache", "profiles", "profiles/profile.sb"] {
         let path = profile::join(&outside, relative);
         assert!(
             std::fs::symlink_metadata(&path).is_err(),
@@ -479,11 +474,11 @@ fn partial_cleanup_does_not_traverse_an_unknown_or_substituted_directory() {
         (
             "substituted directory",
             Box::new(|base, root| {
-                let home = profile::join(root, "home");
-                std::fs::rename(&home, profile::join(base, "created-home")).expect("rename home");
-                std::fs::create_dir_all(profile::join(&home, "nested")).expect("create substitute");
-                std::fs::write(profile::join(&home, "nested/keep"), b"keep").expect("write marker");
-                "home/nested/keep".to_string()
+                let temp = profile::join(root, "tmp");
+                std::fs::rename(&temp, profile::join(base, "created-tmp")).expect("rename temp");
+                std::fs::create_dir_all(profile::join(&temp, "nested")).expect("create substitute");
+                std::fs::write(profile::join(&temp, "nested/keep"), b"keep").expect("write marker");
+                "tmp/nested/keep".to_string()
             }),
         ),
     ];

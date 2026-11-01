@@ -220,9 +220,9 @@ async fn the_bash_tool_is_added_only_when_the_sandbox_is_usable() {
 }
 
 #[tokio::test]
-async fn bash_advertises_the_private_home_only_under_seatbelt() {
+async fn bash_advertises_the_read_denylist_and_no_private_home() {
     let dir = tempfile::tempdir().expect("temp dir");
-    for (mode, expected) in [(SandboxMode::Seatbelt, true), (SandboxMode::Off, false)] {
+    for mode in [SandboxMode::Seatbelt, SandboxMode::Off] {
         let mut builder = builder(dir.path());
         with_bash(&mut builder, dir.path());
         builder.sandbox_info.mode = mode;
@@ -249,9 +249,14 @@ async fn bash_advertises_the_private_home_only_under_seatbelt() {
             .find(|definition| definition.name == "bash")
             .expect("child bash");
         for definition in [&advertised, &built, &children] {
-            assert_eq!(
-                definition.description.contains("private sandbox directory"),
-                expected,
+            assert!(
+                definition.description.contains(
+                    "Sandboxed commands read every path except the sandbox read denylist"
+                ),
+                "{mode:?}"
+            );
+            assert!(
+                !definition.description.contains("private sandbox directory"),
                 "{mode:?}"
             );
         }

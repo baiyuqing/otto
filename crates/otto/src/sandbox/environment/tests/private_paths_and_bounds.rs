@@ -18,6 +18,8 @@ fn private_paths_are_rewritten_and_caches_created() {
             "NPM_CONFIG_CACHE=/host/npm",
             "PIP_CACHE_DIR=/host/pip",
             "UV_CACHE_DIR=/host/uv",
+            "CARGO_HOME=/host/cargo",
+            "ZDOTDIR=/host/zdotdir",
             "home=preserved-lowercase",
             "HOME_SUFFIX=preserved-suffix",
         ]),
@@ -28,7 +30,10 @@ fn private_paths_are_rewritten_and_caches_created() {
 
     let cache = |name: &str| display_path(&directories.cache.join(name));
     let want = BTreeMap::from([
-        ("HOME", display_path(&directories.home)),
+        // The host `HOME` reaches the child; no private home directory exists.
+        ("HOME", "/host/home".to_owned()),
+        ("ZDOTDIR", display_path(&directories.temp)),
+        ("CARGO_HOME", cache("cargo")),
         ("TMPDIR", display_path(&directories.temp)),
         ("TMP", display_path(&directories.temp)),
         ("TEMP", display_path(&directories.temp)),
@@ -47,6 +52,14 @@ fn private_paths_are_rewritten_and_caches_created() {
         .map(|(name, value)| (name, value.to_owned()))
         .collect();
     assert_eq!(got, want);
+    assert!(
+        !got.contains_key("RUSTUP_HOME"),
+        "RUSTUP_HOME must stay unset"
+    );
+    assert!(
+        !directories.root.join("home").exists(),
+        "no private home directory is created"
+    );
 
     for name in DERIVED_CACHE_NAMES {
         let info = fs::symlink_metadata(directories.cache.join(name)).unwrap();
@@ -57,7 +70,6 @@ fn private_paths_are_rewritten_and_caches_created() {
         snapshot.redaction_values(),
         &[
             &display_path(&directories.root),
-            &display_path(&directories.home),
             &display_path(&directories.temp),
             &display_path(&directories.cache),
         ],
@@ -216,7 +228,6 @@ fn the_sensitive_byte_bound_is_enforced_before_private_paths() {
 fn private_path_redactions_stay_inside_the_sensitive_byte_bound() {
     let directories = PrivateDirectories {
         root: PathBuf::from("r".repeat(1 << 20)),
-        home: PathBuf::from("/known/private/home"),
         temp: PathBuf::from("/known/private/temp"),
         cache: PathBuf::from("/known/private/cache"),
     };

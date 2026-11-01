@@ -335,9 +335,6 @@ impl Builder {
                 output_logs,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
-            if self.sandbox_info.mode == SandboxMode::Seatbelt {
-                tool = tool.with_private_home();
-            }
             if let Some(approvals) = &self.bash_approvals {
                 tool = tool.with_approvals(session_id.to_owned(), approvals.clone());
             }
@@ -372,8 +369,13 @@ impl Builder {
         let model = runtime.model.clone();
         let tail = prompt_tail.to_string();
         Arc::new(move |definitions: &[ToolDefinition]| {
-            super::super::prompt::system_prompt_for(definitions, sandbox, &provider, &host, &model)
-                + &tail
+            super::super::prompt::system_prompt_for(
+                definitions,
+                sandbox.clone(),
+                &provider,
+                &host,
+                &model,
+            ) + &tail
         })
     }
 }

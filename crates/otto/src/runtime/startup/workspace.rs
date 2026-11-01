@@ -66,12 +66,7 @@ pub async fn load_workspace(
     );
 
     let driver_override = shared.sandbox_driver_override.clone();
-    let sandbox_settings = resolve_sandbox_settings(
-        &shared.config,
-        &shared.environment,
-        &workspace_path,
-        driver_override.as_deref(),
-    )?;
+    let sandbox_settings = resolve_sandbox_settings(&shared.config, driver_override.as_deref())?;
     let resolved =
         resolve_initial_runtime(&shared.config, &shared.environment, None, &shared.overrides)
             .map_err(|error| error.to_string())?;

@@ -7,6 +7,47 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Sandbox
+
+- A sandboxed `bash` command reads every host path except a denylist, instead of
+  only an allowlist of system directories, `PATH` directories and `read_paths`.
+  The built-in denylist covers credential, shell-history and personal-data
+  locations under the home directory and the private sandbox state roots
+  `~/Library/Caches/otto-sandbox-*`. Paths not on the list are readable, so a
+  credential at an unlisted path can be read and, with `network = "allow"`, sent
+  off the host. Writes are unchanged. See
+  [the read denylist](docs/manual/safety-and-tools.md#a-sandboxed-command-reads-every-path-except-the-read-denylist).
+- `[sandbox] deny_read_paths` adds absolute or `~/...` paths to the denylist and
+  takes effect on `/sandbox reload`. An entry that equals or contains a writable
+  root is rejected and the sandbox does not start.
+- `[sandbox] read_paths` now lists exceptions inside the denylist. An entry that
+  is not at or below a denied path is inert. `/sandbox` prints `Sandbox
+  read_paths <path>: not below any denied path; remove it from read_paths` for
+  it, and `Sandbox deny_read_paths <path>: contains a writable root; not
+  applied` for a built-in entry that contains a writable root. Existing
+  configurations load unchanged; review `read_paths` entries that `/sandbox`
+  reports.
+- The sandboxed command's `HOME` is your real home directory and the private
+  per-session `home` directory is removed. `ZDOTDIR` points to the private
+  `tmp` directory, so `zsh -c` does not source `~/.zshenv`, `~/.zprofile` or
+  `~/.zshrc`. `CARGO_HOME` points to a private per-session cache directory and
+  `RUSTUP_HOME` is not set. The cargo, go, npm, pip and uv caches download again
+  in every session, and cargo does not read `~/.cargo/config.toml`. A write
+  under `~` outside the writable set fails; use `TMPDIR` for scratch files.
+- `sandbox_read_path` and `/sandbox allow` accept only a path the denylist
+  covers; for another path the `bash` tool returns `path is already readable;
+  run the command without sandbox_read_path` and `/sandbox allow` reports `path
+  is already readable; no read_paths entry is needed`. A `sandbox_denied:`
+  section with a `file-read` denial ends with a hint to request an exception
+  with `sandbox_read_path` or an elevated run with `sandbox_permissions`. The
+  `bash` and `sandbox_read_path` descriptions describe the denylist.
+- The HTTP `Sandbox` object returned by `POST /v1/sandbox/reload` gains the optional
+  string arrays `inert_read_paths` and `skipped_deny_paths`, present only when
+  non-empty.
+- `otto sandbox setup`: the GitHub CLI recipe adds the `gh` configuration
+  directory to `read_paths` as an exception to the denylist. It no longer adds
+  `GH_CONFIG_DIR` to `allow_env` and no longer prints a launch command.
+
 ### Configuration
 
 - LLM access is configured as providers and models instead of

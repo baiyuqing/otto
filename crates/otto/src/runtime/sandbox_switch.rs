@@ -7,7 +7,6 @@
 //! Seatbelt runtime that stays Seatbelt is reconfigured in place; any other
 //! reload opens a replacement runtime.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +22,7 @@ use crate::runtime::sandbox_runtime::{
     CloseError, OpenOptions, ReconfigureError, SandboxRuntime, normalize_sandbox_runtime,
     open_sandbox_runtime, settings_from_config,
 };
+use crate::sandbox::read_denylist::ReadDenylist;
 
 const RELOAD_UNAVAILABLE: &str = "sandbox reload requires a usable sandbox; restart otto";
 const RELOAD_ENVIRONMENT: &str =
@@ -46,23 +46,36 @@ pub struct SandboxSwitch {
     /// `None` once closed.
     current: RwLock<Option<SandboxRuntime>>,
     info: Mutex<SandboxInfo>,
+    /// Mirror of the current runtime's read denylist, read like `info`.
+    read_denylist: Mutex<Option<ReadDenylist>>,
 }
 
 impl SandboxSwitch {
     pub fn new(runtime: SandboxRuntime) -> Arc<Self> {
-        let info = runtime.info;
+        let info = runtime.info.clone();
+        let read_denylist = runtime.read_denylist.clone();
         Arc::new(Self {
             current: RwLock::new(Some(runtime)),
             info: Mutex::new(info),
+            read_denylist: Mutex::new(read_denylist),
         })
     }
 
     /// The sandbox state now in effect.
     pub fn info(&self) -> SandboxInfo {
-        *self
-            .info
+        self.info
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// The read denylist the current Seatbelt runtime enforces; `None` for
+    /// every other runtime.
+    pub fn read_denylist(&self) -> Option<ReadDenylist> {
+        self.read_denylist
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     /// Applies `options` to the current Seatbelt runtime in place, holding the
@@ -83,11 +96,15 @@ impl SandboxSwitch {
         let result = runtime.reconfigure(options, cancel).await?;
         Some(match result {
             Ok(()) => {
-                let info = runtime.info;
+                let info = runtime.info.clone();
                 *self
                     .info
                     .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) = info;
+                    .unwrap_or_else(|poison| poison.into_inner()) = info.clone();
+                *self
+                    .read_denylist
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = runtime.read_denylist.clone();
                 Ok(info)
             }
             Err(ReconfigureError::EnvironmentChanged) => Err(RELOAD_ENVIRONMENT.to_string()),
@@ -121,12 +138,17 @@ impl SandboxSwitch {
             let _ = next.close();
             return Err(message);
         }
-        let info = next.info;
+        let info = next.info.clone();
+        let read_denylist = next.read_denylist.clone();
         let previous = guard.replace(next).expect("a usable current runtime");
         *self
             .info
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = info;
+            .unwrap_or_else(|poison| poison.into_inner()) = info.clone();
+        *self
+            .read_denylist
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = read_denylist;
         drop(guard);
         previous.close().map_err(|error| error.to_string())?;
         Ok(info)
@@ -188,7 +210,6 @@ pub struct SandboxReloader {
     pub(crate) config_path: PathBuf,
     pub(crate) explicit_config: bool,
     pub(crate) driver_override: Option<String>,
-    pub(crate) environment: HashMap<String, String>,
     pub(crate) api_key_env: String,
     pub(crate) reopen: OpenOptions,
     pub(crate) cancel: CancellationToken,
@@ -201,12 +222,14 @@ impl SandboxControl for SandboxReloader {
         self.control.info()
     }
 
+    fn read_denylist(&self) -> Option<ReadDenylist> {
+        self.control.read_denylist()
+    }
+
     async fn reload(&self) -> Result<SandboxInfo, String> {
         let file = self.load_config()?;
         let settings = crate::runtime::startup::resolve_sandbox_settings(
             &file,
-            &self.environment,
-            &self.reopen.workspace,
             self.driver_override.as_deref(),
         )?;
         let options = OpenOptions {
@@ -265,6 +288,7 @@ mod tests {
                 driver: DriverMode::Off,
                 network: Some(NetworkMode::Allow),
                 read_paths: Vec::new(),
+                deny_read_paths: Vec::new(),
                 allow_env: allow_env.iter().map(|name| name.to_string()).collect(),
             },
             workspace: path.clone(),
@@ -418,10 +442,6 @@ mod tests {
             config_path: path,
             explicit_config: true,
             driver_override: Some("off".to_string()),
-            environment: HashMap::from([(
-                "HOME".to_string(),
-                home.path().to_string_lossy().into_owned(),
-            )]),
             api_key_env: "OTTO_API_KEY".to_string(),
             reopen: options(home, &[]),
             cancel: CancellationToken::new(),
@@ -565,6 +585,7 @@ mod tests {
                 driver: DriverMode::Seatbelt,
                 network: Some(NetworkMode::Deny),
                 read_paths: Vec::new(),
+                deny_read_paths: Vec::new(),
                 allow_env: Vec::new(),
             },
             workspace: canonical(&workspace),
@@ -572,6 +593,7 @@ mod tests {
             home: canonical(&home),
             host_entries: vec![
                 b"PATH=/usr/bin:/bin".to_vec(),
+                format!("HOME={}", canonical(&home)).into_bytes(),
                 b"GH_TOKEN=token-value".to_vec(),
             ],
             provider_names: vec!["OTTO_API_KEY".to_string()],
@@ -636,12 +658,17 @@ mod tests {
                 runtime.redaction_values.clone(),
             )
         };
-        let private_home = environment
+        let child_home = environment
             .iter()
             .find_map(|entry| entry.strip_prefix("HOME="))
-            .map(std::path::PathBuf::from)
             .expect("HOME entry");
-        assert!(private_home.is_dir());
+        assert_eq!(child_home, fixture.options.home, "HOME is the host home");
+        let private_temp = environment
+            .iter()
+            .find_map(|entry| entry.strip_prefix("TMPDIR="))
+            .map(std::path::PathBuf::from)
+            .expect("TMPDIR entry");
+        assert!(private_temp.is_dir());
         let list = excluded(Arc::clone(&control), &[]);
         let path = fixture.home.path().join("config.toml");
         let reload_with = |config: &str| {
@@ -651,10 +678,6 @@ mod tests {
                 config_path: path.clone(),
                 explicit_config: true,
                 driver_override: Some("seatbelt".to_string()),
-                environment: HashMap::from([(
-                    "HOME".to_string(),
-                    fixture.home.path().to_string_lossy().into_owned(),
-                )]),
                 api_key_env: "OTTO_API_KEY".to_string(),
                 reopen: fixture.options.clone(),
                 cancel: CancellationToken::new(),
@@ -681,7 +704,7 @@ mod tests {
             &control,
             &fixture.workspace,
             &environment,
-            r#"printf reloaded > "$HOME/probe" && cat "$HOME/probe""#,
+            r#"printf reloaded > "$TMPDIR/probe" && cat "$TMPDIR/probe""#,
         )
         .await;
         assert_eq!(output, "reloaded");
@@ -700,7 +723,7 @@ mod tests {
 
         control.close().await.expect("close");
         assert!(
-            !private_home.exists(),
+            !private_temp.exists(),
             "closing the switch removes the private tree"
         );
     }

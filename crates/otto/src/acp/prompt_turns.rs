@@ -203,32 +203,32 @@ impl Connection {
                         self.say(session_id, &text);
                         end_turn()
                     }
-                    command::Command::Model { profile } => {
-                        if profile.is_empty() {
+                    command::Command::Model { selector } => {
+                        if selector.is_empty() {
                             let info = session.controller.info();
-                            let available = session.controller.profiles();
+                            let available = session.controller.models();
                             self.say(
                                 session_id,
                                 &command::model_text(
-                                    &info.profile,
-                                    &info.provider,
-                                    &info.model,
+                                    &info.model_selector,
+                                    &info.provider_type,
                                     &info.thinking,
                                     &available,
                                 ),
                             );
                             return end_turn();
                         }
-                        match session.controller.switch_profile_result(profile).await {
+                        if !selector.contains('/') {
+                            return Err(invalid_params(command::bare_model_hint(selector)));
+                        }
+                        match session.controller.switch_model_result(selector).await {
                             Ok(switched) => {
                                 let info = session.controller.info();
                                 self.say(
                                     session_id,
                                     &command::model_switched_text(
-                                        &info.profile,
-                                        &info.provider,
-                                        &info.model,
-                                        &info.thinking,
+                                        &info.model_selector,
+                                        &info.provider_type,
                                     ),
                                 );
                                 for warning in switched.warnings {

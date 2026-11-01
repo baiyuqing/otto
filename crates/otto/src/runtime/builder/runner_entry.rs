@@ -77,7 +77,7 @@ impl Builder {
     /// configured and `[sandbox].network` is not `deny`. The hosted search
     /// runs at OpenAI, outside Otto's host approvals.
     pub(crate) fn hosted_search(&self, runtime: Option<&Runtime>) -> bool {
-        runtime.is_some_and(|runtime| runtime.provider == otto_core::config::PROVIDER_CHATGPT)
+        runtime.is_some_and(|runtime| runtime.provider_type == otto_core::config::PROVIDER_CHATGPT)
             && !self.web_network_denied()
             && crate::tool::web::search_is_keyless(&|name| self.environment.get(name).cloned())
     }
@@ -178,7 +178,7 @@ impl Builder {
         }
         Ok(if !self.boundary_allows_dynamic(Some(runtime)) {
             ProviderClient::Unavailable
-        } else if runtime.provider == otto_core::config::PROVIDER_CLAUDE {
+        } else if runtime.provider_type == otto_core::config::PROVIDER_CLAUDE {
             ProviderClient::Claude {
                 client: Arc::new(crate::provider::claude::Client::new(
                     &runtime.base_url,
@@ -189,7 +189,7 @@ impl Builder {
                 timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
             }
-        } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
+        } else if runtime.provider_type == otto_core::config::PROVIDER_CHATGPT {
             ProviderClient::ChatGpt {
                 client: Arc::new(
                     chatgpt_client(

@@ -9,11 +9,11 @@ use super::*;
 pub struct Info {
     pub workspace: String,
     pub provider: String,
-    pub profile: String,
+    pub provider_type: String,
     pub model: String,
     pub thinking: String,
     pub sandbox: String,
-    pub profiles: Vec<String>,
+    pub models: Vec<String>,
 }
 
 /// What a [`Server`] needs from its composition root.

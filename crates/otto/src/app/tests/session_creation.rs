@@ -237,15 +237,16 @@ async fn a_saved_prompt_that_already_started_is_not_restored() {
 }
 
 #[tokio::test]
-async fn info_reports_the_current_session_and_the_resolved_profile() {
+async fn info_reports_the_current_session_and_the_resolved_model() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
 
     let info = controller.info();
-    assert_eq!(info.profile, "alpha");
+    assert_eq!(info.model_selector, "alpha/gpt-alpha");
+    assert_eq!(info.provider, "alpha");
+    assert_eq!(info.provider_type, "openai-compatible");
     assert_eq!(info.model, "gpt-alpha");
-    assert_eq!(info.provider, "openai-compatible");
     assert_eq!(info.session_id.len(), 32);
     // The file is lazy, so nothing exists until the first message.
     assert_eq!(info.session_path, "");

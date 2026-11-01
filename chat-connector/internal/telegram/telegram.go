@@ -531,9 +531,9 @@ func normalizeCallback(q *callbackQuery) (bridge.Message, bool) {
 			Time:        time.Now(),
 		}, true
 	}
-	// A choice button stands for one command. Only the connector's own profile
+	// A choice button stands for one command. Only the connector's own model
 	// switcher may travel this way, so a button can never inject arbitrary text.
-	if name, ok := strings.CutPrefix(q.Data, choicePrefix+"/model "); ok && bridge.ValidProfileArg(name) && q.From != nil && q.Message != nil {
+	if name, ok := strings.CutPrefix(q.Data, choicePrefix+"/model "); ok && bridge.ValidModelSelector(name) && q.From != nil && q.Message != nil {
 		return bridge.Message{
 			Platform:  "telegram",
 			ChatID:    strconv.FormatInt(q.Message.Chat.ID, 10),

@@ -6,8 +6,8 @@ pub(crate) enum ChoiceKind {
     Resume,
     Fork,
     Archive,
-    Profiles,
-    Thinking { profile: Option<String> },
+    Models,
+    Thinking { model: Option<String> },
     Network,
     Allow(String),
 }
@@ -16,7 +16,7 @@ pub(crate) struct Choice {
     rows: Vec<Row>,
     loaded: bool,
     current: Option<String>,
-    profiles: std::collections::BTreeMap<String, String>,
+    model_thinking: std::collections::BTreeMap<String, String>,
 }
 
 impl Choice {
@@ -58,7 +58,7 @@ impl Choice {
             rows,
             loaded,
             current: Some(if current.is_empty() { "unset" } else { current }.into()),
-            profiles: Default::default(),
+            model_thinking: Default::default(),
         }
     }
 }
@@ -69,7 +69,7 @@ impl Presenter for Choice {
             ChoiceKind::Resume => "resume",
             ChoiceKind::Fork => "fork",
             ChoiceKind::Archive => "archive",
-            ChoiceKind::Profiles => "model",
+            ChoiceKind::Models => "model",
             ChoiceKind::Thinking { .. } => "thinking",
             ChoiceKind::Network | ChoiceKind::Allow(_) => "sandbox",
         }
@@ -77,7 +77,7 @@ impl Presenter for Choice {
     }
     fn flow_key(&self) -> String {
         match &self.kind {
-            ChoiceKind::Profiles | ChoiceKind::Thinking { .. } => "model".into(),
+            ChoiceKind::Models | ChoiceKind::Thinking { .. } => "model".into(),
             _ => self.key(),
         }
     }
@@ -87,7 +87,7 @@ impl Presenter for Choice {
             ChoiceKind::Resume => "Resume session",
             ChoiceKind::Fork => "Fork session before a prompt",
             ChoiceKind::Archive => "Archive session",
-            ChoiceKind::Profiles => "Switch profile",
+            ChoiceKind::Models => "Switch model",
             ChoiceKind::Thinking { .. } => "Reasoning effort",
             ChoiceKind::Network => "Sandbox network",
             ChoiceKind::Allow(_) => "Sandbox read permission",
@@ -172,25 +172,23 @@ impl Presenter for Choice {
             ChoiceKind::Resume => Command::Resume(selected.unwrap_or_default()),
             ChoiceKind::Fork => Command::Fork(selected.unwrap_or_default()),
             ChoiceKind::Archive => Command::Archive(selected.unwrap_or_default()),
-            ChoiceKind::Profiles => {
+            ChoiceKind::Models => {
                 let current = selected
                     .as_ref()
-                    .and_then(|id| self.profiles.get(id))
+                    .and_then(|id| self.model_thinking.get(id))
                     .cloned()
                     .unwrap_or_default();
                 return Transition::Push(Box::new(Self::new(
-                    ChoiceKind::Thinking { profile: selected },
+                    ChoiceKind::Thinking { model: selected },
                     &current,
                 )));
             }
-            ChoiceKind::Thinking {
-                profile: Some(profile),
-            } => Command::SwitchProfileThinking {
-                profile: profile.clone(),
+            ChoiceKind::Thinking { model: Some(model) } => Command::SwitchModelThinking {
+                model: model.clone(),
                 thinking: selected.unwrap_or_default(),
                 save,
             },
-            ChoiceKind::Thinking { profile: None } => Command::SetThinking {
+            ChoiceKind::Thinking { model: None } => Command::SetThinking {
                 thinking: selected.unwrap_or_default(),
                 save,
             },
@@ -212,16 +210,16 @@ impl Presenter for Choice {
                     .collect();
                 self.loaded = true;
             }
-            Reply::Profiles(profiles) => {
-                self.profiles = profiles
+            Reply::Models(models) => {
+                self.model_thinking = models
                     .iter()
-                    .map(|p| (p.name.clone(), p.thinking.clone()))
+                    .map(|m| (m.selector.clone(), m.thinking.clone()))
                     .collect();
-                self.rows = profiles
+                self.rows = models
                     .into_iter()
-                    .map(|p| Row {
-                        id: p.name.clone(),
-                        cells: vec![p.name, format!("{}/{}", p.provider, p.model), p.thinking],
+                    .map(|m| Row {
+                        id: m.selector.clone(),
+                        cells: vec![m.selector, m.provider_type, m.thinking],
                         detail: String::new(),
                     })
                     .collect();
@@ -240,7 +238,7 @@ impl Presenter for Choice {
         match self.kind {
             ChoiceKind::Resume | ChoiceKind::Archive => Some(Request::Sessions),
             ChoiceKind::Fork => Some(Request::ForkPoints),
-            ChoiceKind::Profiles => Some(Request::Profiles),
+            ChoiceKind::Models => Some(Request::Models),
             ChoiceKind::Allow(ref path) => Some(Request::SandboxPath(path.clone())),
             _ => None,
         }

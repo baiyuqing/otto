@@ -165,8 +165,8 @@ pub(crate) fn initial_runtime(
         &builder.overrides,
     ) {
         Ok(runtime) => Ok(runtime),
-        Err(error) if error.to_string() == "missing provider" => Err(
-            "no provider configured; run `otto setup` to create one, or pass --provider and --model"
+        Err(error) if error.to_string().starts_with("missing model:") => Err(
+            "no model configured; run `otto setup` to create one, or pass --model <provider>/<model_id>"
                 .to_string(),
         ),
         Err(error) => Err(builder.redact_error(&error.to_string(), None)),

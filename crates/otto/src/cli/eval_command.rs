@@ -110,7 +110,7 @@ pub async fn run(
     let env = Arc::new(EvalEnvironment {
         provider,
         redactor,
-        provider_name: runtime.provider.clone(),
+        provider_name: runtime.provider_type.clone(),
         profile_model: runtime.model.clone(),
         compressor_model: runtime
             .subagent_models

@@ -151,7 +151,7 @@ operation facts separate from transient presentation.
 Approval presentation is not authority: use the shared decision service and
 exact request/version checks described in [contracts](contracts.md#unified-approval-contract).
 Authentication captures startup credentials; changing those requires restart.
-Profile switches refresh backend state even when saving the default fails.
+Model switches refresh backend state even when saving the default fails.
 Frontends never persist credentials themselves.
 
 ## Embedding API

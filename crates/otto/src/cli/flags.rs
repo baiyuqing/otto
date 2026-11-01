@@ -28,9 +28,12 @@ use otto_core::config::duration::parse_go_duration;
 pub struct CliOptions {
     pub config_path: String,
     pub cwd: String,
+    /// Deprecated `--profile NAME`.
     pub profile: String,
+    /// Deprecated `--provider NAME`, paired with a bare `--model ID`.
     pub provider: String,
     pub base_url: String,
+    /// `--model <provider>/<model_id>`.
     pub model: String,
     pub thinking: String,
     pub prompt: String,
@@ -61,6 +64,24 @@ pub struct CliOptions {
     /// `otto acp --attach` relays ACP to it, plain `otto --attach` runs the
     /// TUI against it.
     pub attach: bool,
+}
+
+impl CliOptions {
+    /// One stderr line for each deprecated model flag that was written.
+    pub fn deprecation_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if !self.profile.is_empty() {
+            warnings.push(
+                "otto: --profile is deprecated; use --model <provider>/<model_id>\n".to_string(),
+            );
+        }
+        if !self.provider.is_empty() && !self.model.is_empty() {
+            warnings.push(
+                "otto: --provider is deprecated; use --model <provider>/<model_id>\n".to_string(),
+            );
+        }
+        warnings
+    }
 }
 
 /// Why a command line was refused. Both cases exit with status 2.
@@ -316,10 +337,10 @@ Options:
   --version, -V          print version and exit
   --config PATH          user configuration source
   --cwd PATH             workspace directory
-  --profile NAME         configuration profile
-  --provider NAME        provider override
+  --model PROVIDER/ID    model selector, for example claude/<model_id>
   --base-url URL         provider base URL override
-  --model NAME           model override
+  --profile NAME         deprecated: legacy profile name; use --model
+  --provider NAME        deprecated: pairs with a bare --model ID; use --model PROVIDER/ID
   --thinking LEVEL       model thinking effort: low, medium, high, xhigh, or max
   --prompt PROMPT        run PROMPT (or @FILE) without interaction and exit
   --ui MODE              frontend mode: auto, tui, or repl

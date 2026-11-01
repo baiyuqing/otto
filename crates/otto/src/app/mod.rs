@@ -82,8 +82,8 @@ pub(crate) mod turn_queue;
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 mod inspection;
+mod model_selection;
 pub(crate) mod notices;
-mod profile;
 mod prompt;
 mod replacement;
 mod reporting;
@@ -123,7 +123,7 @@ pub use tasks::{Task, TaskStatus, TaskView};
 pub use wake::WakeOperation;
 
 pub const PERSISTENCE_DISABLED: &str = "session persistence is disabled";
-pub const PROFILE_SWITCH_UNAVAILABLE: &str = "profile switching is not available";
+pub const MODEL_SWITCH_UNAVAILABLE: &str = "model switching is not available";
 pub const SANDBOX_RELOAD_UNAVAILABLE: &str = "sandbox reload is not available";
 pub const SESSION_OPERATION_UNAVAILABLE: &str = "session operation is unavailable";
 /// The server answers it with 409 `turn_active`.
@@ -147,12 +147,14 @@ pub enum ActiveInputAdmission {
     ApprovalPending,
 }
 
-/// One configured profile row a frontend can display.
+/// One configured model row a frontend can display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProfileSummary {
-    pub name: String,
+pub struct ModelSummary {
+    /// `<provider>/<model_id>`.
+    pub selector: String,
     pub provider: String,
-    pub model: String,
+    pub provider_type: String,
+    pub model_id: String,
     pub thinking: String,
 }
 
@@ -163,8 +165,11 @@ pub struct Info {
     pub session_name: String,
     pub session_path: String,
     pub workspace: String,
+    /// The provider name from the selector.
     pub provider: String,
-    pub profile: String,
+    pub provider_type: String,
+    /// `<provider>/<model_id>`.
+    pub model_selector: String,
     pub model: String,
     pub thinking: String,
     pub usage: Usage,
@@ -607,8 +612,8 @@ impl State {
 
 fn metadata_of(info: &RuntimeInfo) -> RuntimeMetadata {
     RuntimeMetadata {
-        profile: info.profile.clone(),
-        provider: info.provider.clone(),
+        profile: info.model_selector.clone(),
+        provider: info.provider_type.clone(),
         model: info.model.clone(),
     }
 }

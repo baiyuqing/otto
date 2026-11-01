@@ -3,7 +3,7 @@
 //! `/sandbox exclude` and the bash read-path approval.
 //!
 //! The interactive `otto sandbox setup` command, which writes the same table
-//! from the terminal, stays in [`crate::cli::sandbox_setup`] and shares
+//! from the terminal, stays in `otto_cli::sandbox_setup` and shares
 //! [`quote`] from here.
 
 use std::path::{Path, PathBuf};
@@ -170,7 +170,7 @@ pub fn revert_sandbox_config(path: &Path, amendment: &Amendment) -> Result<(), S
 }
 
 /// `value` as a double-quoted TOML basic string.
-pub(crate) fn quote(value: &str) -> String {
+pub fn quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for ch in value.chars() {

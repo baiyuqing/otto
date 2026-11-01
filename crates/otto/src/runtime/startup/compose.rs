@@ -2,21 +2,21 @@
 
 use super::*;
 
-pub(crate) struct ComposeOptions {
-    pub(crate) memory_extension: Option<super::super::wiring::MemoryExtension>,
-    pub(crate) sandbox_driver_override: Option<String>,
-    pub(crate) no_session: bool,
+pub struct ComposeOptions {
+    pub memory_extension: Option<super::super::wiring::MemoryExtension>,
+    pub sandbox_driver_override: Option<String>,
+    pub no_session: bool,
     /// `otto --prompt`: every turn is unattended.
-    pub(crate) headless: bool,
-    pub(crate) overrides: Overrides,
-    pub(crate) explicit_config: bool,
-    pub(crate) logger: Arc<crate::log::Logger>,
-    pub(crate) disabled: Disabled,
+    pub headless: bool,
+    pub overrides: Overrides,
+    pub explicit_config: bool,
+    pub logger: Arc<crate::log::Logger>,
+    pub disabled: Disabled,
 }
 
-pub(crate) struct Composed {
-    pub(crate) builder: Builder,
-    pub(crate) sandbox_settings: SandboxSettings,
+pub struct Composed {
+    pub builder: Builder,
+    pub sandbox_settings: SandboxSettings,
 }
 
 /// Resolves the shell and the sandbox settings, opens MCP configuration, the
@@ -24,7 +24,7 @@ pub(crate) struct Composed {
 /// service, then builds `Shared` and the workspace `Builder`. Warnings go to
 /// `stderr` as each store fails to open; errors are already redacted.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compose(
+pub fn compose(
     options: ComposeOptions,
     loaded: &Loaded,
     configured: &Configured,
@@ -154,7 +154,7 @@ pub(crate) fn compose(
 
 /// The process runtime from CLI, environment and configuration, independent of
 /// the conversation history being resumed.
-pub(crate) fn initial_runtime(
+pub fn initial_runtime(
     builder: &Builder,
     metadata: Option<&RuntimeMetadata>,
 ) -> Result<Runtime, String> {

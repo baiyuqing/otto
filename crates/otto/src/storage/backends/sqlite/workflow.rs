@@ -195,8 +195,8 @@ impl SqliteWorkflowStore {
             .map_err(|_| unavailable())?;
         Self::initialize(connection)
     }
-    #[cfg(test)]
-    pub(crate) fn open_in_memory() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_in_memory() -> Self {
         Self::initialize(Connection::open_in_memory().expect("in-memory database")).expect("schema")
     }
     fn initialize(connection: Connection) -> Result<Self, String> {

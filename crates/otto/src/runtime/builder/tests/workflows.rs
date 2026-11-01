@@ -38,7 +38,7 @@ async fn workflow_tools_and_durable_mailbox_exist_with_conversational_agents_dis
 
 #[tokio::test]
 async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation() {
-    use crate::subagent::doubles_tests::{
+    use crate::fixtures::subagent_doubles::{
         FakeProvider, assistant_text, assistant_tool_call, match_any,
     };
     use crate::workflow::{RunStatus, WorkflowStore};
@@ -387,7 +387,7 @@ async fn parent_tool_factory_is_fresh_per_parent_runner_and_absent_from_children
 
 #[tokio::test]
 async fn a_parent_agent_tool_round_finishes_before_the_child_and_wakes_later() {
-    use crate::subagent::doubles_tests::{
+    use crate::fixtures::subagent_doubles::{
         FakeProvider, assistant_text, assistant_tool_call, match_any, test_config, wait_status,
     };
     use crate::subagent::runner::Runner as ChildRunner;

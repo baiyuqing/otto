@@ -89,8 +89,8 @@ async fn dropping_the_session_and_runner_releases_the_transcript() {
 /// a later runner with a real provider can start sub-agents.
 #[tokio::test]
 async fn a_first_runner_without_a_subagent_executor_still_creates_the_task_registry() {
+    use crate::fixtures::subagent_doubles::FakeProvider;
     use crate::runtime::builder::TEST_PROVIDERS;
-    use crate::subagent::doubles_tests::FakeProvider;
     struct ProviderGuard(String);
     impl Drop for ProviderGuard {
         fn drop(&mut self) {

@@ -1,6 +1,6 @@
 //! Registry of process ids started by this process, killed together when a
 //! lease's watchdog fences this process or when the panic hook
-//! (`cli::panic_cleanup`) runs under `panic = "abort"`.
+//! (`otto_cli::panic_cleanup`) runs under `panic = "abort"`.
 //!
 //! Ownership: one process-wide [`Children`], reached via [`Children::global`].
 //! Concurrency: a `Mutex<State>` guards the registered set; `register` and

@@ -2,7 +2,7 @@
 //! capture, layered configuration, the redaction boundary, storage, the
 //! workspace, the sandbox and the memory service.
 //!
-//! `cli::run` calls the phase functions in order and keeps its own steps
+//! `otto_cli::run` calls the phase functions in order and keeps its own steps
 //! between them (flag-specific checks, session resume, frontend selection).
 //! [`start`] runs the same phases straight through, as `otto acp` does. Every
 //! warning goes to the `stderr` writer at the moment its step emits it, and
@@ -43,13 +43,13 @@ const MAX_LOOKUP_ENVIRONMENT_NAME_BYTES: usize = 4 << 10;
 const MAX_LOOKUP_ENVIRONMENT_ENTRY_BYTES: usize = 1 << 20;
 const MAX_LOOKUP_ENVIRONMENT_ENTRIES: usize = 1 << 18;
 const MAX_LOOKUP_ENVIRONMENT_BYTES: usize = 8 << 20;
-pub(crate) const MAX_CAPTURED_ENVIRONMENT_ENTRIES: usize = 1 << 19;
-pub(crate) const MAX_CAPTURED_ENVIRONMENT_BYTES: usize = 16 << 20;
+pub const MAX_CAPTURED_ENVIRONMENT_ENTRIES: usize = 1 << 19;
+pub const MAX_CAPTURED_ENVIRONMENT_BYTES: usize = 16 << 20;
 
 const ENVIRONMENT_SNAPSHOT_TOO_LARGE: &str = "process environment snapshot is too large";
 
 /// The process environment, parsed into names and values.
-pub(crate) type EnvironmentLookup = HashMap<String, String>;
+pub type EnvironmentLookup = HashMap<String, String>;
 
 /// Builds the automatic skill contract checker when skills and the check are
 /// enabled and `TYPESAFE_API_KEY` is non-empty. The check defaults to enabled;
@@ -57,7 +57,7 @@ pub(crate) type EnvironmentLookup = HashMap<String, String>;
 /// A database open failure prints one warning here, before any UI starts, and
 /// leaves the checker off for the process; `TYPESAFE_API_KEY` never appears in
 /// that warning.
-pub(crate) fn skill_checker(
+pub fn skill_checker(
     storage: &crate::runtime::storage::Storage,
     config: &File,
     environment: &HashMap<String, String>,
@@ -99,12 +99,12 @@ pub(crate) fn skill_checker(
 }
 
 /// The boundary that exists before a profile is resolved.
-pub(crate) struct StartupBoundary {
-    pub(crate) sandbox_secrets: Vec<String>,
-    pub(crate) complete: bool,
-    pub(crate) config: File,
-    pub(crate) environment: HashMap<String, String>,
-    pub(crate) base_url: String,
+pub struct StartupBoundary {
+    pub sandbox_secrets: Vec<String>,
+    pub complete: bool,
+    pub config: File,
+    pub environment: HashMap<String, String>,
+    pub base_url: String,
 }
 
 impl StartupBoundary {
@@ -118,25 +118,22 @@ impl StartupBoundary {
         }
     }
 
-    pub(crate) fn redactor(&self) -> otto_core::agent::redactor::Redactor {
+    pub fn redactor(&self) -> otto_core::agent::redactor::Redactor {
         boundary::secret_redactor(&self.inputs(), None)
     }
 
-    pub(crate) fn allows_dynamic(&self) -> bool {
+    pub fn allows_dynamic(&self) -> bool {
         self.redactor().allows_dynamic_content()
     }
 
-    pub(crate) fn redact(&self, message: &str) -> String {
+    pub fn redact(&self, message: &str) -> String {
         redact_with(&self.redactor(), message)
     }
 }
 
 /// A closed boundary renders nothing at all, deliberately: an incomplete
 /// redaction set must not let a diagnostic escape.
-pub(crate) fn redact_with(
-    redactor: &otto_core::agent::redactor::Redactor,
-    message: &str,
-) -> String {
+pub fn redact_with(redactor: &otto_core::agent::redactor::Redactor, message: &str) -> String {
     if !redactor.allows_dynamic_content() {
         return String::new();
     }
@@ -161,11 +158,11 @@ mod memory_start;
 mod sandbox;
 mod workspace;
 
-pub(crate) use compose::*;
-pub(crate) use environment::*;
-pub(crate) use memory_start::*;
-pub(crate) use sandbox::*;
-pub(crate) use workspace::*;
+pub use compose::*;
+pub use environment::*;
+pub use memory_start::*;
+pub use sandbox::*;
+pub use workspace::*;
 
 #[cfg(test)]
 mod tests;

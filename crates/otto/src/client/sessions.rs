@@ -1,4 +1,4 @@
-//! Session, turn, profile, fork and rename calls.
+//! Session, turn, model, fork and rename calls.
 
 use super::*;
 
@@ -170,45 +170,51 @@ impl Client {
         Ok(wire.into_info())
     }
 
-    /// `POST /v1/sessions/{id}/profile`: run the session on another configured
-    /// profile and return the session's new info. The configuration file and
-    /// every other session are unchanged.
-    pub async fn switch_profile(
+    /// `POST /v1/sessions/{id}/model`: run the session on another configured
+    /// model selector and return the session's new info. The configuration
+    /// file and every other session are unchanged.
+    pub async fn switch_model(
         &self,
         session_id: &str,
-        profile: &str,
+        model: &str,
     ) -> Result<crate::app::Info, Error> {
         let response = self
             .send(self.post(
-                &format!("{BASE}/v1/sessions/{session_id}/profile"),
-                &json!({ "profile": profile }),
+                &format!("{BASE}/v1/sessions/{session_id}/model"),
+                &json!({ "model": model }),
             ))
             .await?;
         let wire: SessionWire = decode(response).await?;
         Ok(wire.into_info())
     }
 
-    /// `GET /v1/config/profiles`: the configured profile names, sorted.
-    pub async fn profiles(&self) -> Result<Vec<String>, Error> {
+    /// `GET /v1/config/providers`: the configured model selectors, sorted.
+    pub async fn models(&self) -> Result<Vec<String>, Error> {
         #[derive(Deserialize)]
-        struct Row {
-            name: String,
+        struct Model {
+            selector: String,
+        }
+        #[derive(Deserialize)]
+        struct Provider {
+            #[serde(default)]
+            models: Vec<Model>,
         }
         #[derive(Deserialize)]
         struct Reply {
-            profiles: Vec<Row>,
+            providers: Vec<Provider>,
         }
         let response = self
-            .send(self.http.get(format!("{BASE}/v1/config/profiles")))
+            .send(self.http.get(format!("{BASE}/v1/config/providers")))
             .await?;
-        let mut names: Vec<String> = decode::<Reply>(response)
+        let mut selectors: Vec<String> = decode::<Reply>(response)
             .await?
-            .profiles
+            .providers
             .into_iter()
-            .map(|row| row.name)
+            .flat_map(|provider| provider.models)
+            .map(|model| model.selector)
             .collect();
-        names.sort();
-        Ok(names)
+        selectors.sort();
+        Ok(selectors)
     }
 
     /// `GET /v1/sessions/{id}/fork-points`, oldest first, as (entry id,

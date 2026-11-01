@@ -186,8 +186,7 @@ pub async fn run(
             }
         };
     let info = builder.runtime_info(&runtime);
-    let mut profiles: Vec<String> = builder.config.profiles.keys().cloned().collect();
-    profiles.sort();
+    let models = crate::config::configured_model_selectors(&builder.config);
     let workspace_path = builder.workspace_path.clone();
     let host = Arc::new(WorkspaceHost {
         builder: Arc::clone(&builder),
@@ -227,11 +226,11 @@ pub async fn run(
         info: Info {
             workspace: builder.workspace_path.clone(),
             provider: info.provider.clone(),
-            profile: info.profile.clone(),
+            provider_type: info.provider_type.clone(),
             model: info.model.clone(),
             thinking: info.thinking.clone(),
             sandbox: info.sandbox.summary().to_string(),
-            profiles,
+            models,
         },
         factory: Arc::clone(&factory),
         config_path: builder.shared.config_path.clone(),

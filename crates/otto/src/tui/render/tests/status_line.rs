@@ -28,9 +28,9 @@ async fn a_long_model_id_keeps_the_token_and_cache_totals_visible() {
 }
 
 #[tokio::test]
-async fn footer_omits_the_profile_and_uses_compact_status_labels() {
+async fn footer_omits_the_provider_and_uses_compact_status_labels() {
     let (_workspace, _sessions, mut app) = app_fixture().await;
-    app.info.profile = "terra".to_string();
+    app.info.model_selector = "chatgpt/gpt-5.6-terra".to_string();
     app.info.model = "gpt-5.6-terra".to_string();
     app.info.thinking.clear();
     app.info.sandbox = fixture_tests::seatbelt_info(crate::runtime::info::SandboxNetwork::Allowed);

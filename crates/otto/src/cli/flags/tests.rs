@@ -421,3 +421,26 @@ fn go_integer_and_boolean_syntax_is_accepted() {
     assert_eq!(parse_go_bool("yes"), Err(()));
     assert!(!options(&["--no-session=false"]).no_session);
 }
+
+#[test]
+fn deprecated_model_flags_each_produce_one_warning() {
+    assert!(
+        options(&["--model", "alpha/m"])
+            .deprecation_warnings()
+            .is_empty()
+    );
+    assert!(
+        options(&["--provider", "claude"])
+            .deprecation_warnings()
+            .is_empty()
+    );
+    let paired = options(&["--provider", "claude", "--model", "m"]).deprecation_warnings();
+    assert_eq!(paired.len(), 1);
+    assert!(paired[0].contains("--provider is deprecated"), "{paired:?}");
+    let profile = options(&["--profile", "work"]).deprecation_warnings();
+    assert_eq!(profile.len(), 1);
+    assert!(
+        profile[0].contains("--profile is deprecated"),
+        "{profile:?}"
+    );
+}

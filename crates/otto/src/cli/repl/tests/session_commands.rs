@@ -134,7 +134,7 @@ async fn help_and_session_describe_the_ported_commands_and_the_session() {
         "/session  show session details",
         "/rename <name> rename current session",
         "/archive  archive current session and start a new one",
-        "/model [profile]",
+        "/model [provider/model_id]",
         "/compact [focus] compact context",
         "/sandbox [reload]",
         "/approve <id>",
@@ -148,14 +148,14 @@ async fn help_and_session_describe_the_ported_commands_and_the_session() {
         );
     }
     assert!(
-            stdout.contains(&format!(
-                "ID: {}\nPath: {}\nProvider: openai-compatible\nModel: gpt-alpha\nThinking: default\nSandbox: {}\n",
-                info.session_id,
-                info.session_path,
-                info.sandbox.summary()
-            )),
-            "{stdout}"
-        );
+        stdout.contains(&format!(
+            "ID: {}\nPath: {}\nProvider: alpha\nModel: gpt-alpha\nThinking: default\nSandbox: {}\n",
+            info.session_id,
+            info.session_path,
+            info.sandbox.summary()
+        )),
+        "{stdout}"
+    );
 }
 
 #[tokio::test]
@@ -245,43 +245,50 @@ async fn archiving_a_session_without_a_file_is_a_command_error() {
 }
 
 #[tokio::test]
-async fn model_lists_profiles_and_switches_to_one() {
+async fn model_lists_configured_models_and_switches_to_one() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
     std::fs::write(
         controller.config_path(),
-        "default_profile = \"alpha\"\n\n[profiles.alpha]\n\n[profiles.beta]\n",
+        concat!(
+            "default_model = \"alpha/gpt-alpha\"\n\n[providers.alpha]\ntype = \"openai-compatible\"\n",
+            "base_url = \"https://a.example/v1\"\n\n[providers.beta]\ntype = \"openai-compatible\"\n",
+            "base_url = \"https://b.example/v1\"\n"
+        ),
     )
     .expect("write config");
 
-    let (stdout, stderr, result) = session("/model\n/model beta\n/exit\n", &controller).await;
+    let (stdout, stderr, result) =
+        session("/model\n/model beta/gpt-beta\n/exit\n", &controller).await;
 
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(stderr, "");
     assert!(
-            stdout
-                .contains("Current: profile alpha (provider openai-compatible, model gpt-alpha, thinking default)\n"),
-            "{stdout}"
-        );
-    assert!(stdout.contains("Profiles: alpha (openai-compatible/gpt-alpha, thinking default), beta (openai-compatible/gpt-beta, thinking default)\n"), "{stdout}");
+        stdout.contains("Model alpha/gpt-alpha (type openai-compatible, thinking default)\n"),
+        "{stdout}"
+    );
     assert!(
-            stdout.contains(
-                "Switched to profile beta (provider openai-compatible, model gpt-beta, thinking default). Set as default profile.\n"
-            ),
-            "{stdout}"
-        );
+        stdout.contains("Configured models: alpha/gpt-alpha (thinking default), beta/gpt-beta (thinking default)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Switched to model beta/gpt-beta (type openai-compatible, thinking default). Set as default model.\n"
+        ),
+        "{stdout}"
+    );
     assert_eq!(controller.info().model, "gpt-beta");
 }
 
 #[tokio::test]
-async fn an_unknown_profile_is_a_command_error() {
+async fn an_unknown_model_selector_is_a_command_error() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
 
     let (_, _, result) = session("/model missing\n", &controller).await;
 
-    let error = result.expect_err("unknown profile");
+    let error = result.expect_err("unknown selector");
     assert!(is_command_error(&error, "/model"), "{error:?}");
 }

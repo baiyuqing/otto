@@ -662,7 +662,7 @@ fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
 /// enforced here. reqwest exposes no cap on the size of a response header
 /// block.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+    crate::tls_provider::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_keepalive(KEEPALIVE)
         .read_timeout(READ_TIMEOUT)

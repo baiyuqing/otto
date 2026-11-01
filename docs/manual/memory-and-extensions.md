@@ -454,6 +454,10 @@ packages means no added capability. A portable package contains `plugin.json`,
 the [TokenEconomizer bridge](../../examples/plugins/tokeneconomizer/README.md)
 runs an external hook host from a package.
 
+`claude` packages' Claude Code hooks run natively (see
+[Claude Code hook format](#claude-code-hook-format)); `codex` packages' hooks
+are still unsupported.
+
 ```bash
 otto plugin install ./my-plugin
 otto plugin install https://github.com/example/my-plugin.git --rev <full-commit-id>
@@ -551,6 +555,104 @@ event's array. Standalone hooks run first, then packages sorted by name, each
 in declaration order. Native CLI/TUI/HTTP/ACP, children and compaction share
 this path. Matchers use exact tool names or one `*`; omission matches all.
 MCP matching uses selected remote names; router arguments stay `{tool, arguments}`.
+
+### Claude Code hook format
+
+A `claude` package (`.claude-plugin/plugin.json`) runs its Claude Code
+`command` hooks natively. `codex` packages, hooks in Claude settings files
+(`~/.claude/settings.json`, `.claude/settings*.json`) and the portable
+`extensions.com.anthropic.hooks` field are not read; they are follow-up work.
+Trust, sandbox, redaction and limits are those of Otto hooks:
+`otto plugin inspect <name>` lists the hooks under `claude_hooks`, and
+`otto plugin trust <name>` prints `Claude hooks: <json>` before authorizing.
+A `claude` package trusted before this support existed runs its hooks after
+the upgrade; there is no re-trust step.
+
+**What is read.** `hooks/hooks.json` (an object with a `hooks` key and an
+optional `description`) and the manifest `hooks` field, which is a path string
+inside the package, an inline object, or an array of both. Only
+`type: command` handlers run. Each handler accepts `matcher` (on its group),
+`timeout` in seconds, `shell` (`sh` or `bash`), `args` and `async`. Handlers
+with another `type`, an `if` condition or another shell are skipped with a
+diagnostic. `once`, `onFailure` and `statusMessage` are ignored. `async: true`
+runs synchronously with a diagnostic.
+
+**Events and matchers.** One Otto event produces at most one Claude event.
+
+| Claude event | Otto event | Matcher value |
+| --- | --- | --- |
+| `SessionStart` | session start; `source` is `startup` or `resume` | `source` |
+| `SubagentStart` | session start of an Otto subagent session | `agent_type` (`otto-subagent`) |
+| `UserPromptSubmit` | before prompt | not used |
+| `PreToolUse` | before tool | tool name |
+| `PostToolUse` | after tool, no error | tool name |
+| `PostToolUseFailure` | after tool, error | tool name |
+| `Stop` | turn end, status `success` | not used |
+| `SubagentStop` | turn end of an Otto subagent session | `agent_type` |
+| `PreCompact` | before compaction; `trigger` is `manual` or `auto` | `trigger` |
+| `PostCompact` | after compaction | `trigger` |
+| `SessionEnd` | session end; `reason` is always `other` | `reason` |
+
+A matcher of `*` or empty matches everything, `A|B` is a list of exact names,
+and any other text is a regular expression. A configuration that names
+`Notification`, `PermissionRequest`, `PermissionDenied`, `FileChanged`,
+`CwdChanged`, `InstructionsLoaded`, `ConfigChange`, `WorktreeCreate`,
+`WorktreeRemove`, `TeammateIdle`, `TaskCompleted`, `TaskCreated`,
+`Elicitation` or `ElicitationResult` gets the diagnostic
+`hook event <Event> never fires in Otto`.
+
+**Payload.** The stdin JSON holds `session_id`, `transcript_path`, `cwd`,
+`hook_event_name` and `prompt_id`, plus the event fields; subagent sessions add
+`agent_id` and `agent_type`. `transcript_path` is Otto's session JSONL file,
+not the Claude transcript format. `permission_mode`, `effort` and
+`scratchpad_dir` are not sent. Tool names and inputs are translated, and
+`updatedInput` is translated back:
+
+| Otto tool | Claude `tool_name` | Input changes |
+| --- | --- | --- |
+| `bash` | `Bash` | none |
+| `read`, `write` | `Read`, `Write` | `path` becomes absolute `file_path` |
+| `edit` | `Edit` | `file_path`; `old_text`, `new_text` become `old_string`, `new_string` |
+| `grep` | `Grep` | absolute `path`; `ignore_case` becomes `-i` |
+| `find` | `Glob` | absolute `path` |
+| `mcp_call_tool` | the MCP tool's own name | `tool_input` is the call arguments |
+
+**Responses.** The exit code and the JSON on exit 0 are handled per event.
+
+| Result | Effect |
+| --- | --- |
+| Exit 2 on `PreToolUse`, `UserPromptSubmit`, `PreCompact` | blocks; stderr is the reason |
+| Exit 2 on `PostToolUse`, `PostToolUseFailure` | stderr is appended to the tool result |
+| Exit 2 on `SessionStart`, `SubagentStart`, `Stop`, `SubagentStop` | stderr is shown as a notice |
+| Other nonzero exit | notice `hook exited <code>: <stderr>`; does not block |
+| `continue: false` | blocks on `PreToolUse`, `UserPromptSubmit`, `PreCompact` with `stopReason` as the reason; a notice elsewhere |
+| `systemMessage` | notice |
+| `permissionDecision` `allow` or `deny` | applied; `ask` and `defer` are denied with a notice |
+| `updatedInput`, `updatedToolOutput` | rewrite the tool input or output |
+| `additionalContext` | context on `UserPromptSubmit`, `SessionStart`; appended to the tool result on `PostToolUse`, `PostToolUseFailure`; dropped on `PreToolUse` |
+| `decision: block` | deny on `UserPromptSubmit`, `PreCompact`; appended to the tool result on `PostToolUse`; a notice on `Stop`, `SubagentStop`, because Otto does not continue a turn |
+
+Plain-text stdout is context on `UserPromptSubmit` and `SessionStart` only. A
+timeout or a signal fails like an Otto hook: the action fails on
+`SessionStart`, `UserPromptSubmit`, `PreToolUse` and `PreCompact`. Claude Code
+treats a timeout as non-blocking; Otto does not.
+
+**Execution.** The command runs as `/bin/sh -c <command>` (`/bin/bash` when
+`shell` is `bash`); with `args`, the command and arguments are executed
+directly. `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}` and
+`${CLAUDE_PROJECT_DIR}` are substituted. The environment adds
+`CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA`, `CLAUDE_PROJECT_DIR` and
+`CLAUDE_CODE_SESSION_ATTENDED` (`0` for `otto --prompt`, else `1`) next to
+`PLUGIN_ROOT` and `PLUGIN_DATA`. The default timeout is 60 seconds, 30 for
+`UserPromptSubmit` and 10 for `SessionEnd`; larger values are clamped to 300.
+The sandbox, redaction, 1 MiB input and 64 KiB output limits are those of
+Otto hooks. Hooks run sequentially, after the package's `dev.otto` hooks.
+
+**Diagnostics.** Skipped handlers are reported by `otto plugin install` and
+`otto plugin inspect`: unsupported hook type, condition or shell, invalid
+timeout or matcher, and events that never fire. The diagnostics
+`unsupported component hooks` and `unsupported hooks at hooks/hooks.json` no
+longer appear for `claude` packages; `codex` packages still get them.
 
 ### Hook protocol v1
 

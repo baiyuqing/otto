@@ -137,7 +137,11 @@ The other modules group native responsibilities:
 - **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
   package validation and Skills/MCP adaptation with content-bound trust.
   `plugin/hooks.rs` adapts authorized `dev.otto` hooks/tools through the native
-  sandbox; `otto-core/src/agent/hooks.rs` is the neutral lifecycle port.
+  sandbox; `plugin/claude_hooks/` reads the Claude Code hook format
+  (manifest, matcher, payload, response and tool-name translation) and
+  `plugin/hooks/claude_binding.rs` runs those hooks through the shared
+  sandboxed process runner; `otto-core/src/agent/hooks.rs` is the neutral
+  lifecycle port.
   `cli/plugin.rs` exposes management commands; shared runner construction loads
   packages for every native frontend.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.

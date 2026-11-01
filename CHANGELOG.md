@@ -159,9 +159,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 - Clean dev builds are shorter. Measured with `cargo build --timings` on macOS
   arm64 (Rust 1.99.1, 10 cores, 2026-11-01): a clean `cargo build` went from
-  65.0 s to 58.1 s because the `ring` crypto provider replaces `aws-lc-rs`,
-  whose build script compiled C for 16.7 s on the critical path (ring's takes
-  2.8 s). Every reqwest client is created through
+  65.0 s to 52.2 s, and a rebuild after a one-line edit in `crates/otto` from
+  8.8 s to 6.1 s. Two changes: the `ring` crypto provider replaces
+  `aws-lc-rs`, whose build script compiled C for 16.7 s on the critical path
+  (ring's takes 2.8 s), and the dev profile sets `debug = "line-tables-only"`.
+  Backtraces and panic messages keep file and line; a debugger no longer shows
+  local variables or types in dev and test builds. A developer who needs them
+  sets `[profile.dev] debug = 2` in `~/.cargo/config.toml`, which overrides
+  the manifest. Every reqwest client is created through
   `otto::tls_provider::http_client_builder()` or `http_client()`, which
   install the provider; a `reqwest::Client::builder()` call elsewhere panics
   at `build()` with "No rustls crypto provider is configured".

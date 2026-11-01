@@ -375,7 +375,7 @@ pub(crate) fn create_initial_config(
 
 /// Renders and validates the complete non-secret configuration `otto setup`
 /// proposes before a user confirms its creation: `default_model`, and a
-/// built-in provider table only when the built-in defaults do not fit.
+/// provider table that names the model as an inline entry.
 pub(crate) fn initial_config_content(
     provider: &str,
     model_id: &str,
@@ -388,34 +388,25 @@ pub(crate) fn initial_config_content(
     ) {
         return Err("unsupported provider; no changes made".to_string());
     }
-    let mut provider_table = toml::Table::new();
+    let quote = |value: &str| toml::Value::String(value.to_string()).to_string();
     let claude_default_url = otto_core::config::providers::CLAUDE_DEFAULT_BASE_URL;
     let claude_default_key = otto_core::config::providers::CLAUDE_DEFAULT_API_KEY_ENV;
+    let mut content = format!(
+        "default_model = {}\n\n[providers.{provider}]\ntype = {}\n",
+        quote(&format!("{provider}/{model_id}")),
+        quote(provider)
+    );
     if provider == PROVIDER_OPENAI_COMPATIBLE
         || (provider == PROVIDER_CLAUDE && base_url != claude_default_url)
     {
-        provider_table.insert("base_url".into(), toml::Value::String(base_url.to_string()));
+        content.push_str(&format!("base_url = {}\n", quote(base_url)));
     }
     if provider == PROVIDER_OPENAI_COMPATIBLE
         || (provider == PROVIDER_CLAUDE && api_key_env != claude_default_key)
     {
-        provider_table.insert(
-            "api_key_env".into(),
-            toml::Value::String(api_key_env.to_string()),
-        );
+        content.push_str(&format!("api_key_env = {}\n", quote(api_key_env)));
     }
-    let mut model_table = toml::Table::new();
-    model_table.insert(model_id.to_string(), toml::Value::Table(toml::Table::new()));
-    provider_table.insert("models".into(), toml::Value::Table(model_table));
-    let mut providers = toml::Table::new();
-    providers.insert(provider.to_string(), toml::Value::Table(provider_table));
-    let mut root = toml::Table::new();
-    root.insert(
-        "default_model".to_string(),
-        toml::Value::String(format!("{provider}/{model_id}")),
-    );
-    root.insert("providers".to_string(), toml::Value::Table(providers));
-    let content = toml::to_string(&root).map_err(|_| "cannot create configuration".to_string())?;
+    content.push_str(&format!("models.{} = {{}}\n", quote(model_id)));
     let parsed = otto_core::config::parse(&content)
         .map_err(|error| format!("invalid setup values: {error}"))?;
     let mut environment = HashMap::new();

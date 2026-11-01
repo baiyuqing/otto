@@ -31,7 +31,7 @@ use otto_core::safetext::SecretCollector;
 
 /// The per-cache subdirectories a confined child is pointed at. Created at mode
 /// 0700 inside `PrivateDirectories::cache`.
-const DERIVED_CACHE_NAMES: [&str; 6] = ["go-build", "go-mod", "npm", "pip", "uv", "xdg"];
+const DERIVED_CACHE_NAMES: [&str; 7] = ["cargo", "go-build", "go-mod", "npm", "pip", "uv", "xdg"];
 
 /// What [`resolve_environment`] is given.
 ///
@@ -109,9 +109,9 @@ impl From<RejectedEnvironment> for Error {
 /// A name is *ordinary* (passed through), *automatic* (withheld unless
 /// explicitly allowed, value always redacted), or *non-restorable* (withheld
 /// unconditionally, value always redacted). When `private_directories` is set,
-/// the per-session `HOME`, `TMPDIR`, zsh's `TMPPREFIX` and cache variables
-/// replace whatever the host had, and the derived cache directories are
-/// created at mode 0700.
+/// the per-session `TMPDIR`, `ZDOTDIR`, zsh's `TMPPREFIX` and cache variables
+/// replace whatever the host had, `HOME` keeps the host value, and the derived
+/// cache directories are created at mode 0700.
 ///
 /// Returns [`RejectedEnvironment`] when any input is unsafe. That path never
 /// creates directories: the bounds are enforced first.
@@ -183,12 +183,7 @@ pub fn resolve_environment(
 
     let directories = options.private_directories.clone();
     if let Some(directories) = &directories {
-        for private_path in [
-            &directories.root,
-            &directories.home,
-            &directories.temp,
-            &directories.cache,
-        ] {
+        for private_path in [&directories.root, &directories.temp, &directories.cache] {
             if !add_private_environment_redaction(&mut collector, private_path) {
                 unsafe_input = true;
                 redactions_complete = false;
@@ -220,7 +215,11 @@ pub fn resolve_environment(
             ])))
         };
         for (name, value) in [
-            ("HOME", display_path(&directories.home)),
+            // `HOME` is not replaced: the host value reaches the child. zsh
+            // reads its startup files from `ZDOTDIR`, so pointing it at the
+            // private `tmp` directory keeps `~/.zshenv`, `~/.zprofile` and
+            // `~/.zshrc` from being sourced.
+            ("ZDOTDIR", display_path(&directories.temp)),
             ("TMPDIR", display_path(&directories.temp)),
             ("TMP", display_path(&directories.temp)),
             ("TEMP", display_path(&directories.temp)),
@@ -234,6 +233,9 @@ pub fn resolve_environment(
             ("NPM_CONFIG_CACHE", cache("npm")),
             ("PIP_CACHE_DIR", cache("pip")),
             ("UV_CACHE_DIR", cache("uv")),
+            // Cargo would otherwise read `~/.cargo/config.toml` and
+            // `~/.cargo/credentials.toml` through the real `HOME`.
+            ("CARGO_HOME", cache("cargo")),
         ] {
             resolved.insert(name.to_owned(), value);
         }
@@ -434,15 +436,10 @@ fn is_proxy_environment_name(name: &str) -> bool {
     upper == "PROXY" || upper.ends_with("_PROXY")
 }
 
-/// Verifies the four base directories and creates the derived cache
+/// Verifies the three base directories and creates the derived cache
 /// directories, all owner-only and none reached through a symlink.
 fn prepare_private_environment(directories: &PrivateDirectories) -> Result<(), Error> {
-    for path in [
-        &directories.root,
-        &directories.home,
-        &directories.temp,
-        &directories.cache,
-    ] {
+    for path in [&directories.root, &directories.temp, &directories.cache] {
         if !valid_private_directory_path(path) || verify_private_directory(path).is_err() {
             return Err(Error::EnvironmentUnsafe);
         }

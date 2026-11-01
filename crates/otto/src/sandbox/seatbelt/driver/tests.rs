@@ -32,12 +32,14 @@ async fn workspace_containing_the_cache_base_is_policy_unsupported() {
 
 /// Real `sandbox-exec` fixtures for [`SeatbeltDriver::reconfigure`]: the
 /// workspace, the host home and the cache base are separate 0700 canonical
-/// directories, and `outside` holds a file the default profile denies.
+/// directories, `outside` holds a file the profile denies through
+/// `deny_read_paths`, and `host-home/visible` holds a file it does not deny.
 #[cfg(target_os = "macos")]
 struct Reconfigure {
     _root: tempfile::TempDir,
     workspace: std::path::PathBuf,
     outside: std::path::PathBuf,
+    visible: std::path::PathBuf,
     driver: SeatbeltDriver,
 }
 
@@ -91,15 +93,18 @@ async fn fixture_with(git: bool) -> Option<Reconfigure> {
     }
     let outside = directory("outside");
     std::fs::write(outside.join("note"), "outside-contents").expect("outside file");
+    let host_home = directory("host-home");
+    let visible = host_home.join("visible");
+    std::fs::write(&visible, "visible-contents").expect("visible file");
     let driver = SeatbeltDriver::open(
         Options {
             workspace: workspace.to_str().expect("workspace").to_string(),
             workspaces: vec![workspace.to_str().expect("workspace").to_string()],
             shell: "/bin/sh".to_string(),
-            home: directory("host-home").to_str().expect("home").to_string(),
+            home: host_home.to_str().expect("home").to_string(),
             cache_base: directory("user-cache").to_str().expect("cache").to_string(),
-            host_entries: vec!["PATH=/usr/bin:/bin".to_string()],
             read_paths: Vec::new(),
+            deny_read_paths: vec![outside.to_str().expect("outside").to_string()],
             network: Some(NetworkMode::Deny),
         },
         &CancellationToken::new(),
@@ -110,6 +115,7 @@ async fn fixture_with(git: bool) -> Option<Reconfigure> {
         _root: root,
         workspace,
         outside,
+        visible,
         driver,
     })
 }
@@ -118,6 +124,16 @@ async fn fixture_with(git: bool) -> Option<Reconfigure> {
 /// stdout.
 #[cfg(target_os = "macos")]
 async fn run_script(fixture: &Reconfigure, script: &str) -> (bool, String) {
+    run_script_with_env(fixture, script, Vec::new()).await
+}
+
+/// [`run_script`] with `extra_env` entries appended to the request.
+#[cfg(target_os = "macos")]
+async fn run_script_with_env(
+    fixture: &Reconfigure,
+    script: &str,
+    extra_env: Vec<String>,
+) -> (bool, String) {
     use crate::sandbox::{Driver as _, Request, Streams};
 
     let directories = fixture.driver.private_directories();
@@ -129,10 +145,13 @@ async fn run_script(fixture: &Reconfigure, script: &str) -> (bool, String) {
                 stdin: None,
                 argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
                 dir: fixture.workspace.clone(),
-                env: vec![
+                env: [
                     "PATH=/usr/bin:/bin".to_string(),
-                    format!("HOME={}", directories.home.display()),
-                ],
+                    format!("TMPDIR={}", directories.temp.display()),
+                ]
+                .into_iter()
+                .chain(extra_env)
+                .collect(),
                 ..Default::default()
             },
             Streams {
@@ -159,13 +178,23 @@ async fn reconfigure_applies_new_read_paths_and_network_in_the_same_private_tree
     };
     let cat = format!("cat '{}'", fixture.outside.join("note").display());
     let (readable, _) = run_script(&fixture, &cat).await;
-    assert!(!readable, "the profile must deny a file outside its roots");
+    assert!(
+        !readable,
+        "the profile must deny a file under a deny_read_paths entry"
+    );
+    let (readable, output) =
+        run_script(&fixture, &format!("cat '{}'", fixture.visible.display())).await;
+    assert!(
+        readable && output == "visible-contents",
+        "a file outside the denylist must be readable"
+    );
     assert!(fixture.driver.capabilities().network_deny);
     let private = fixture.driver.private_directories();
 
     fixture
         .driver
         .reconfigure(
+            vec![fixture.outside.to_str().expect("outside").to_string()],
             vec![fixture.outside.to_str().expect("outside").to_string()],
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
@@ -182,10 +211,13 @@ async fn reconfigure_applies_new_read_paths_and_network_in_the_same_private_tree
     assert_eq!(output, "outside-contents");
     let (written, output) = run_script(
         &fixture,
-        r#"printf kept > "$HOME/probe" && cat "$HOME/probe""#,
+        r#"printf kept > "$TMPDIR/probe" && cat "$TMPDIR/probe""#,
     )
     .await;
-    assert!(written, "the private HOME must stay writable");
+    assert!(
+        written,
+        "the private temporary directory must stay writable"
+    );
     assert_eq!(output, "kept");
 }
 
@@ -201,6 +233,7 @@ async fn reconfigure_with_unchanged_settings_leaves_the_profile_file_alone() {
         .driver
         .reconfigure(
             read_paths.clone(),
+            read_paths.clone(),
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
             &cancel,
@@ -212,6 +245,7 @@ async fn reconfigure_with_unchanged_settings_leaves_the_profile_file_alone() {
     fixture
         .driver
         .reconfigure(
+            read_paths.clone(),
             read_paths,
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
@@ -240,6 +274,7 @@ async fn a_missing_read_path_reconfigure_keeps_the_driver_running() {
         .driver
         .reconfigure(
             vec!["/otto-reconfigure-missing-directory".to_string()],
+            vec![fixture.outside.to_str().expect("outside").to_string()],
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
             &CancellationToken::new(),
@@ -269,6 +304,7 @@ async fn reconfigure_on_a_closed_driver_is_refused() {
     let error = fixture
         .driver
         .reconfigure(
+            Vec::new(),
             Vec::new(),
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Deny,
@@ -344,7 +380,6 @@ async fn run_status(
 ) -> crate::sandbox::ExitStatus {
     use crate::sandbox::{Driver as _, Request, Streams};
 
-    let directories = fixture.driver.private_directories();
     let (status, result) = fixture
         .driver
         .execute(
@@ -352,10 +387,7 @@ async fn run_status(
                 stdin: None,
                 argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
                 dir: fixture.workspace.clone(),
-                env: vec![
-                    "PATH=/usr/bin:/bin".to_string(),
-                    format!("HOME={}", directories.home.display()),
-                ],
+                env: vec!["PATH=/usr/bin:/bin".to_string()],
                 report_denials,
             },
             Streams {
@@ -403,4 +435,62 @@ async fn a_failed_command_reports_the_denied_read_only_when_asked() {
     let status = run_status(&fixture, &cat, false).await;
     assert_ne!(status.code, 0);
     assert!(status.denials.is_empty(), "{:?}", status.denials);
+}
+
+/// zsh reads `.zshenv` from `ZDOTDIR` when it is set, so the startup files in
+/// the home directory are not sourced.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn zsh_reads_its_startup_files_from_zdotdir_not_from_home() {
+    let Some(fixture) = reconfigure_fixture().await else {
+        return;
+    };
+    if !std::path::Path::new("/bin/zsh").exists() {
+        return;
+    }
+    let home = fixture.visible.parent().expect("host home").to_path_buf();
+    std::fs::write(home.join(".zshenv"), "echo home-zshenv\n").expect("home .zshenv");
+    let temp = fixture.driver.private_directories().temp;
+    std::fs::write(temp.join(".zshenv"), "echo private-zshenv\n").expect(".zshenv in ZDOTDIR");
+    let (ok, output) = run_script_with_env(
+        &fixture,
+        "/bin/zsh -c 'echo done'",
+        vec![
+            format!("HOME={}", home.display()),
+            format!("ZDOTDIR={}", temp.display()),
+        ],
+    )
+    .await;
+    assert!(ok, "zsh failed under the profile: {output:?}");
+    assert_eq!(output, "private-zshenv\ndone\n");
+}
+
+/// The regex rule denies every `otto-sandbox-*` directory in the cache base;
+/// the session's own `tmp` and `cache` directories stay readable.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn another_sessions_private_root_is_unreadable_and_the_own_one_is_readable() {
+    let Some(fixture) = reconfigure_fixture().await else {
+        return;
+    };
+    let base = fixture
+        .visible
+        .parent()
+        .and_then(|home| home.parent())
+        .expect("base");
+    let other = base.join("user-cache/otto-sandbox-other-session");
+    std::fs::create_dir_all(&other).expect("other private root");
+    std::fs::write(other.join("note"), "placeholder-not-a-secret").expect("other file");
+    let (readable, _) =
+        run_script(&fixture, &format!("cat '{}'", other.join("note").display())).await;
+    assert!(!readable, "another private root was readable");
+    let (readable, output) = run_script(
+        &fixture,
+        r#"printf own > "$TMPDIR/own" && cat "$TMPDIR/own""#,
+    )
+    .await;
+    assert!(
+        readable && output == "own",
+        "the own tmp directory is not readable"
+    );
 }

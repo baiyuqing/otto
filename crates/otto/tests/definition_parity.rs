@@ -68,7 +68,7 @@ fn every_tool_schema_matches_the_recorded_schema() {
         find_definition(),
         grep_definition(),
         skill_definition(),
-        bash_definition(false),
+        bash_definition(),
         memory_search_definition(),
         remember_definition(),
         forget_definition(),

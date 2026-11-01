@@ -206,7 +206,6 @@ pub struct BashTool {
     dynamic_content: bool,
     approvals: Option<(String, Arc<BashApprovals>)>,
     excluded: Option<Arc<ExcludedCommands>>,
-    private_home: bool,
 }
 
 /// How the shell is invoked.
@@ -329,7 +328,6 @@ impl BashTool {
             dynamic_content,
             approvals: None,
             excluded: None,
-            private_home: false,
         })
     }
 
@@ -355,12 +353,6 @@ impl BashTool {
     /// Runs commands matching the excluded list outside the sandbox.
     pub fn with_excluded_commands(mut self, excluded: Arc<ExcludedCommands>) -> Self {
         self.excluded = Some(excluded);
-        self
-    }
-
-    /// Tells the model that `HOME` is a private sandbox directory.
-    pub fn with_private_home(mut self) -> Self {
-        self.private_home = true;
         self
     }
 
@@ -406,24 +398,19 @@ const OUTPUT_NOTE: &str = "Return exit status and stdout/stderr previews of at m
     failures; use read with offset/limit for excerpts instead of printing \
     complete logs.";
 
-/// Appended when the child's `HOME` is a private sandbox directory.
-const PRIVATE_HOME_NOTE: &str = "HOME and ~ are a private sandbox directory, not the user's home directory; use absolute paths for the user's files.";
+/// The read capability of a sandboxed command.
+const SANDBOX_READ_NOTE: &str = "Sandboxed commands read every path except the sandbox read denylist (credential and personal-data locations).";
 
-fn describe(base: &str, private_home: bool) -> String {
+fn describe(base: &str) -> String {
     let base = base.trim_end_matches('.');
-    let mut description = format!("{base}. {OUTPUT_NOTE}");
-    if private_home {
-        description.push(' ');
-        description.push_str(PRIVATE_HOME_NOTE);
-    }
-    description
+    format!("{base}. {OUTPUT_NOTE} {SANDBOX_READ_NOTE}")
 }
 
 /// The schema advertised for `bash`.
-pub fn bash_definition(private_home: bool) -> ToolDefinition {
+pub fn bash_definition() -> ToolDefinition {
     definition(
         "bash",
-        &describe("Execute a shell command from the workspace", private_home),
+        &describe("Execute a shell command from the workspace"),
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -440,7 +427,7 @@ pub fn bash_definition(private_home: bool) -> ToolDefinition {
     )
 }
 
-pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
+pub fn bash_definition_with_approvals() -> ToolDefinition {
     definition(
         "bash",
         &describe(
@@ -460,7 +447,6 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
                 security grants require a person in AUTO. The command runs only after \
                 authority is recorded; MANUAL asks, NEVER rejects additional authority, \
                 and YOLO bypasses review while retaining hard checks.",
-            private_home,
         ),
         json!({
             "type": "object",
@@ -479,7 +465,7 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
                 },
                 "sandbox_read_path": {
                     "type": "string",
-                    "description": "Request user approval to permanently add one absolute existing path to sandbox read_paths before running this command inside the sandbox"
+                    "description": "Request user approval to permanently allow reading one absolute existing path that the sandbox read denylist covers, before running this command inside the sandbox"
                 },
                 "justification": {
                     "type": "string",

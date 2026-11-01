@@ -134,6 +134,7 @@ fn with_bash(builder: &mut Builder, root: &Path) {
         network: SandboxNetwork::Unconfined,
         bash_available: true,
         reason: SandboxReason::None,
+        ..Default::default()
     };
 }
 

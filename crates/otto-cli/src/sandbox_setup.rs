@@ -184,13 +184,6 @@ pub async fn run(
         if !proposed.read_paths.contains(&gh_dir) {
             proposed.read_paths.push(gh_dir.clone());
         }
-        if !proposed
-            .allow_env
-            .iter()
-            .any(|name| name == "GH_CONFIG_DIR")
-        {
-            proposed.allow_env.push("GH_CONFIG_DIR".to_string());
-        }
         let _ = writeln!(
             stdout,
             "GitHub CLI access may expose saved GitHub credentials to shell commands. Network access allows those commands to send data externally."
@@ -207,18 +200,6 @@ pub async fn run(
         quote_list(&proposed.read_paths),
         quote_list(&proposed.allow_env)
     );
-    let launch = |stdout: &mut (dyn Write + Send)| {
-        if github {
-            let _ = writeln!(
-                stdout,
-                "Start Otto with: GH_CONFIG_DIR={} otto --config {} --cwd {}",
-                shell_quote(&gh_dir),
-                shell_quote(&path.to_string_lossy()),
-                shell_quote(&workspace)
-            );
-        }
-    };
-    launch(stdout);
 
     loop {
         let _ = write!(stdout, "[check / save / cancel] (cancel): ");
@@ -241,8 +222,19 @@ pub async fn run(
                 let Ok(resolved) = resolve_sandbox(&proposed, None) else {
                     continue;
                 };
+                // The probe reads the directory through this variable; the saved
+                // configuration does not pass it to commands.
+                let mut settings = settings_from_config(&resolved);
+                if github
+                    && !settings
+                        .allow_env
+                        .iter()
+                        .any(|name| name == "GH_CONFIG_DIR")
+                {
+                    settings.allow_env.push("GH_CONFIG_DIR".to_string());
+                }
                 let options = OpenOptions {
-                    settings: settings_from_config(&resolved),
+                    settings,
                     workspace: workspace.clone(),
                     shell: "/bin/bash".to_string(),
                     home: home.clone(),
@@ -264,7 +256,6 @@ pub async fn run(
                     return fail(stderr, &format!("cannot save configuration: {message}"));
                 }
                 let _ = writeln!(stdout, "Saved. Restart Otto to apply these permissions.");
-                launch(stdout);
                 return 0;
             }
             _ => {
@@ -399,10 +390,6 @@ async fn report_check(
     let _ = writeln!(stdout, "{message}");
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
 /// Quoted values, space separated inside brackets.
 fn quote_list(values: &[String]) -> String {
     let quoted: Vec<String> = values.iter().map(|value| quote(value)).collect();
@@ -470,8 +457,13 @@ mod tests {
                 ],
                 "{name}"
             );
+            assert!(
+                file.sandbox.allow_env.is_empty(),
+                "{name}: {:?}",
+                file.sandbox.allow_env
+            );
             let out = String::from_utf8_lossy(&stdout).into_owned();
-            assert!(out.contains("GH_CONFIG_DIR="), "{name}: {out}");
+            assert!(!out.contains("Start Otto with"), "{name}: {out}");
             assert!(config_text.contains(PRESERVED), "{name}: {config_text}");
         }
     }
@@ -541,6 +533,7 @@ mod tests {
                 driver: DriverMode::Off,
                 network: Some(NetworkMode::Allow),
                 read_paths: Vec::new(),
+                deny_read_paths: Vec::new(),
                 allow_env: vec!["GH_CONFIG_DIR".to_string()],
             },
             workspace: workspace.clone(),
@@ -675,6 +668,5 @@ mod tests {
             quote_list(&["/a".to_string(), "/b".to_string()]),
             "[\"/a\" \"/b\"]"
         );
-        assert_eq!(shell_quote("it's"), "'it'\"'\"'s'");
     }
 }

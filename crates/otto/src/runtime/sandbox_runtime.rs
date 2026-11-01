@@ -19,12 +19,10 @@ use std::sync::Arc;
 use otto_core::config::sandbox::{
     SandboxDriverMode, SandboxNetworkMode, SandboxSettings as CoreSettings,
 };
-use otto_core::safetext::SecretCollector;
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::PrivateDirectories;
 use crate::sandbox::direct::DirectDriver;
-use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resolve_environment};
+use crate::sandbox::read_denylist::ReadDenylist;
 #[cfg(target_os = "macos")]
 use crate::sandbox::seatbelt::{Options as SeatbeltOptions, SeatbeltDriver};
 use crate::sandbox::{
@@ -32,6 +30,9 @@ use crate::sandbox::{
 };
 
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
+
+mod child_environment;
+use child_environment::{resolve_child, resolve_host};
 
 /// A sandbox that could not be shut down cleanly. The specific cause is
 /// deliberately not carried, because it can name host paths the model must
@@ -80,6 +81,9 @@ pub struct SandboxRuntime {
     /// When false the caller must suppress child output entirely: a value the
     /// redactor does not know about would otherwise reach the model verbatim.
     pub redactions_complete: bool,
+    /// The read denylist the Seatbelt profile enforces. `None` for every
+    /// other driver and for an unusable runtime.
+    pub read_denylist: Option<ReadDenylist>,
     closer: Closer,
     /// The Seatbelt driver behind `executor`, kept so a reload can rewrite its
     /// profile in place. `None` for every other driver and for an unusable
@@ -166,12 +170,14 @@ impl SandboxRuntime {
 
         let previous = (
             driver.read_paths(),
+            driver.deny_read_paths(),
             driver.workspaces(),
             driver.network().unwrap_or(NetworkMode::Deny),
         );
         if let Err(error) = driver
             .reconfigure(
                 options.settings.read_paths.clone(),
+                options.settings.deny_read_paths.clone(),
                 options.managed_worktrees.clone(),
                 network,
                 cancel,
@@ -201,13 +207,22 @@ impl SandboxRuntime {
                             previous.0,
                             previous.1,
                             previous.2,
+                            previous.3,
                             &CancellationToken::new(),
                         )
                         .await;
                     return Err(Failed(reason));
                 }
             };
-        self.info = seatbelt_sandbox_info(network);
+        self.info = seatbelt_sandbox_info(
+            network,
+            driver.inert_read_paths(),
+            driver.skipped_deny_paths(),
+        );
+        self.read_denylist = Some(ReadDenylist::new(
+            &options.home,
+            options.settings.deny_read_paths.clone(),
+        ));
         self.closer = Closer::Executor(Arc::clone(&executor));
         // The replaced executor is dropped without `close`: closing it would
         // close the driver both executors share and delete the private tree.
@@ -243,6 +258,7 @@ pub fn settings_from_config(resolved: &CoreSettings) -> Settings {
             SandboxNetworkMode::Allow => NetworkMode::Allow,
         }),
         read_paths: resolved.read_paths.clone(),
+        deny_read_paths: resolved.deny_read_paths.clone(),
         allow_env: resolved.allow_env.clone(),
     }
 }
@@ -362,11 +378,8 @@ async fn open_seatbelt(
                 .join("Caches")
                 .to_string_lossy()
                 .into_owned(),
-            // The driver reads this only for its single PATH entry, which is
-            // useless if it is not text; a non-UTF-8 entry is dropped here
-            // rather than lossily rewritten into a path the child would use.
-            host_entries: utf8_entries(&options.host_entries),
             read_paths: options.settings.read_paths.clone(),
+            deny_read_paths: options.settings.deny_read_paths.clone(),
             workspaces: options.managed_worktrees.clone(),
             network: Some(network),
         },
@@ -419,7 +432,11 @@ async fn open_seatbelt(
         Arc::clone(&driver) as Arc<dyn Driver>,
         policy,
         &workspace,
-        seatbelt_sandbox_info(network),
+        seatbelt_sandbox_info(
+            network,
+            driver.inert_read_paths(),
+            driver.skipped_deny_paths(),
+        ),
         child.entries,
         child.redactions,
         child.complete,
@@ -427,6 +444,10 @@ async fn open_seatbelt(
     );
     if runtime.executor.is_some() {
         runtime.seatbelt = Some(driver);
+        runtime.read_denylist = Some(ReadDenylist::new(
+            &options.home,
+            options.settings.deny_read_paths.clone(),
+        ));
     }
     runtime
 }
@@ -482,6 +503,8 @@ async fn open_direct(
         network: SandboxNetwork::Unconfined,
         bash_available: true,
         reason: SandboxReason::None,
+        inert_read_paths: Vec::new(),
+        skipped_deny_paths: Vec::new(),
     };
     finish(
         Arc::new(DirectDriver::new()) as Arc<dyn Driver>,
@@ -530,6 +553,7 @@ fn finish(
         info,
         redaction_values: redactions,
         redactions_complete: complete,
+        read_denylist: None,
         closer: Closer::Executor(executor),
         #[cfg(target_os = "macos")]
         seatbelt: None,
@@ -556,9 +580,12 @@ pub fn normalize_sandbox_runtime(mut runtime: SandboxRuntime) -> SandboxRuntime 
         network: SandboxNetwork::default(),
         bash_available: false,
         reason,
+        inert_read_paths: Vec::new(),
+        skipped_deny_paths: Vec::new(),
     };
     runtime.executor = None;
     runtime.environment = None;
+    runtime.read_denylist = None;
     #[cfg(target_os = "macos")]
     {
         runtime.seatbelt = None;
@@ -568,7 +595,7 @@ pub fn normalize_sandbox_runtime(mut runtime: SandboxRuntime) -> SandboxRuntime 
 
 /// The warning printed once at startup when the sandbox is not what the user
 /// would assume. A confined runtime prints nothing.
-pub fn sandbox_runtime_warning(info: SandboxInfo) -> Option<String> {
+pub fn sandbox_runtime_warning(info: &SandboxInfo) -> Option<String> {
     match info.mode {
         SandboxMode::Unavailable => Some(format!(
             "warning: bash is unavailable because the configured sandbox could not be established (reason: {}); file tools remain available\n",
@@ -600,9 +627,12 @@ fn unavailable(reason: SandboxReason, redactions: Vec<String>, complete: bool) -
             network: SandboxNetwork::default(),
             bash_available: false,
             reason: safe_sandbox_reason(reason),
+            inert_read_paths: Vec::new(),
+            skipped_deny_paths: Vec::new(),
         },
         redaction_values: redactions,
         redactions_complete: complete,
+        read_denylist: None,
         closer: Closer::Nothing,
         #[cfg(target_os = "macos")]
         seatbelt: None,
@@ -622,95 +652,12 @@ fn after_cleanup(
     runtime
 }
 
-/// The host environment classified before any driver opens.
-struct HostEnvironment {
-    /// False when the host cannot be classified safely or yields no entries.
-    usable: bool,
-    redactions: Vec<String>,
-    complete: bool,
-}
-
-fn resolve_host(options: &OpenOptions) -> HostEnvironment {
-    let resolved = resolve_environment(&EnvironmentOptions {
-        host_entries: options.host_entries.clone(),
-        provider_names: options.provider_names.clone(),
-        allow_names: options.settings.allow_env.clone(),
-        private_directories: None,
-    });
-    let (snapshot, ok) = match &resolved {
-        Ok(snapshot) => (snapshot, true),
-        Err(rejected) => (rejected.snapshot(), false),
-    };
-    HostEnvironment {
-        usable: ok && snapshot.entries().is_some(),
-        redactions: snapshot.redaction_values().to_vec(),
-        complete: snapshot.redactions_complete(),
-    }
-}
-
-/// The child environment and the merged redaction set for one open.
-struct ChildEnvironment {
-    /// False when resolution was rejected or produced no entries.
-    usable: bool,
-    entries: Option<Vec<String>>,
-    redactions: Vec<String>,
-    complete: bool,
-}
-
-/// Resolves the child environment, with `private_directories` when a driver
-/// owns a private tree, and merges its redactions with the host's. The open
-/// path and [`SandboxRuntime::reconfigure`] both call this, so they cannot
-/// compute different environments for the same options.
-fn resolve_child(
-    options: &OpenOptions,
-    private_directories: Option<PrivateDirectories>,
-    host_redactions: &[String],
-    host_complete: bool,
-) -> ChildEnvironment {
-    let resolved = resolve_environment(&EnvironmentOptions {
-        host_entries: options.host_entries.clone(),
-        provider_names: options.provider_names.clone(),
-        allow_names: options.settings.allow_env.clone(),
-        private_directories,
-    });
-    let (snapshot, ok) = match &resolved {
-        Ok(snapshot) => (snapshot, true),
-        Err(rejected) => (rejected.snapshot(), false),
-    };
-    let (redactions, complete) = merged_redactions(host_redactions, snapshot, host_complete);
-    let entries = snapshot.entries().map(<[String]>::to_vec);
-    ChildEnvironment {
-        usable: ok && entries.is_some(),
-        entries,
-        redactions,
-        complete,
-    }
-}
-
-/// Merges the host redaction set with the child's, keeping the union bounded.
-/// The result is complete only if both inputs were complete and the merge
-/// itself did not hit the collector's ceiling.
-fn merged_redactions(
-    host: &[String],
-    snapshot: &EnvironmentSnapshot,
-    host_complete: bool,
-) -> (Vec<String>, bool) {
-    let mut collector = SecretCollector::new();
-    let mut merge_complete = true;
-    'outer: for group in [host, snapshot.redaction_values()] {
-        for value in group {
-            if !collector.add_form(value) {
-                merge_complete = false;
-                break 'outer;
-            }
-        }
-    }
-    let complete = host_complete && snapshot.redactions_complete() && merge_complete;
-    (collector.values(), complete)
-}
-
 #[cfg(target_os = "macos")]
-fn seatbelt_sandbox_info(network: NetworkMode) -> SandboxInfo {
+fn seatbelt_sandbox_info(
+    network: NetworkMode,
+    inert_read_paths: Vec<String>,
+    skipped_deny_paths: Vec<String>,
+) -> SandboxInfo {
     SandboxInfo {
         mode: SandboxMode::Seatbelt,
         network: match network {
@@ -719,6 +666,8 @@ fn seatbelt_sandbox_info(network: NetworkMode) -> SandboxInfo {
         },
         bash_available: true,
         reason: SandboxReason::None,
+        inert_read_paths,
+        skipped_deny_paths,
     }
 }
 
@@ -751,14 +700,6 @@ fn safe_sandbox_reason(reason: SandboxReason) -> SandboxReason {
         SandboxReason::None => SandboxReason::RuntimeFailure,
         reason => reason,
     }
-}
-
-#[cfg(target_os = "macos")]
-fn utf8_entries(entries: &[Vec<u8>]) -> Vec<String> {
-    entries
-        .iter()
-        .filter_map(|entry| String::from_utf8(entry.clone()).ok())
-        .collect()
 }
 
 /// Resolves `path` to an existing directory with every symlink followed.

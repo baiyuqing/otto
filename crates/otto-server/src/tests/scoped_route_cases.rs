@@ -59,6 +59,7 @@ async fn sandbox_reload_response_is_unchanged_for_a_single_workspace() {
             network: SandboxNetwork::Allowed,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         })),
         ..Default::default()
     });
@@ -72,6 +73,40 @@ async fn sandbox_reload_response_is_unchanged_for_a_single_workspace() {
         body.get("workspaces").is_none(),
         "single-workspace reload gained a workspaces field: {body}"
     );
+    assert!(body.get("inert_read_paths").is_none(), "{body}");
+    assert!(body.get("skipped_deny_paths").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn sandbox_reload_reports_inert_and_skipped_paths_only_when_present() {
+    let harness = Harness::with(HarnessOptions {
+        sandbox_reload: Some(Ok(SandboxInfo {
+            mode: SandboxMode::Seatbelt,
+            network: SandboxNetwork::Allowed,
+            bash_available: true,
+            reason: SandboxReason::None,
+            inert_read_paths: vec!["~/.otto".to_string()],
+            skipped_deny_paths: vec!["~/.config/gh".to_string()],
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let body = reply.json();
+    assert_eq!(body["inert_read_paths"], serde_json::json!(["~/.otto"]));
+    assert_eq!(
+        body["skipped_deny_paths"],
+        serde_json::json!(["~/.config/gh"])
+    );
+}
+
+#[test]
+fn openapi_describes_the_optional_sandbox_path_arrays() {
+    let document = String::from_utf8_lossy(crate::OPENAPI_YAML);
+    for name in ["inert_read_paths:", "skipped_deny_paths:"] {
+        assert!(document.contains(name), "openapi.yaml is missing {name}");
+    }
 }
 
 #[tokio::test]
@@ -103,6 +138,7 @@ async fn sandbox_reload_reloads_every_loaded_workspace() {
             network: SandboxNetwork::Allowed,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         })),
         sandbox_reload_others: vec![(
             "/other".to_string(),
@@ -111,6 +147,7 @@ async fn sandbox_reload_reloads_every_loaded_workspace() {
                 network: SandboxNetwork::Unconfined,
                 bash_available: true,
                 reason: SandboxReason::None,
+                ..Default::default()
             }),
         )],
         ..Default::default()

@@ -187,6 +187,10 @@ pub struct SandboxConfig {
     pub network: Option<String>,
     #[serde(default)]
     pub read_paths: Vec<String>,
+    /// Paths added to the built-in sandbox read denylist; relative to the
+    /// home directory when written as `~/...`.
+    #[serde(default)]
+    pub deny_read_paths: Vec<String>,
     #[serde(default)]
     pub allow_env: Vec<String>,
     /// Commands that run outside the sandbox; see

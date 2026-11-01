@@ -74,9 +74,10 @@ pub struct Options {
     pub shell: String,
     pub home: String,
     pub cache_base: String,
-    /// The host environment, read only for its single `PATH` entry.
-    pub host_entries: Vec<String>,
+    /// `[sandbox] read_paths`: exceptions inside the read denylist.
     pub read_paths: Vec<String>,
+    /// `[sandbox] deny_read_paths`: additions to the built-in read denylist.
+    pub deny_read_paths: Vec<String>,
     pub workspaces: Vec<String>,
     /// `None` is rejected; the mode must be explicit.
     pub network: Option<NetworkMode>,
@@ -98,6 +99,12 @@ struct Inner {
 struct Active {
     options: profile::Options,
     text: String,
+    /// `read_paths` entries the profile omitted because they lie below no
+    /// denied path, as written.
+    inert_read_paths: Vec<String>,
+    /// Built-in denylist entries the profile omitted because they contain a
+    /// writable root, as `~/...` text.
+    skipped_deny_paths: Vec<String>,
 }
 
 /// Runs commands under `/usr/bin/sandbox-exec`.
@@ -225,8 +232,9 @@ impl SeatbeltDriver {
             directories: private.directories.clone(),
             shell,
             home,
-            host_entries: options.host_entries.clone(),
+            host_entries: Vec::new(),
             read_paths: options.read_paths.clone(),
+            deny_read_paths: options.deny_read_paths.clone(),
             network: Some(network),
         };
         let generated = profile::generate(&profile_options);
@@ -258,6 +266,8 @@ impl SeatbeltDriver {
             profile: Mutex::new(Active {
                 options: profile_options,
                 text,
+                inert_read_paths: Vec::new(),
+                skipped_deny_paths: Vec::new(),
             }),
             state: private,
             profile_path,
@@ -283,6 +293,36 @@ impl SeatbeltDriver {
             .unwrap_or_else(|poison| poison.into_inner())
             .options
             .read_paths
+            .clone()
+    }
+
+    /// The configured denylist additions in the profile now in effect.
+    pub fn deny_read_paths(&self) -> Vec<String> {
+        self.profile
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .options
+            .deny_read_paths
+            .clone()
+    }
+
+    /// The `read_paths` entries the profile now in effect omitted because
+    /// they lie below no denied path, as written.
+    pub fn inert_read_paths(&self) -> Vec<String> {
+        self.profile
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .inert_read_paths
+            .clone()
+    }
+
+    /// The built-in denylist entries the profile now in effect omitted
+    /// because they contain a writable root, as `~/...` text.
+    pub fn skipped_deny_paths(&self) -> Vec<String> {
+        self.profile
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .skipped_deny_paths
             .clone()
     }
 
@@ -324,6 +364,7 @@ impl SeatbeltDriver {
     pub async fn reconfigure(
         &self,
         read_paths: Vec<String>,
+        deny_read_paths: Vec<String>,
         workspaces: Vec<String>,
         network: NetworkMode,
         cancel: &CancellationToken,
@@ -348,6 +389,7 @@ impl SeatbeltDriver {
         };
         let next_options = profile::Options {
             read_paths,
+            deny_read_paths,
             workspaces,
             network: Some(network),
             ..previous_options
@@ -379,6 +421,8 @@ impl SeatbeltDriver {
             .unwrap_or_else(|poison| poison.into_inner()) = Active {
             options: next_options,
             text: next_text,
+            inert_read_paths: Vec::new(),
+            skipped_deny_paths: Vec::new(),
         };
         Ok(())
     }

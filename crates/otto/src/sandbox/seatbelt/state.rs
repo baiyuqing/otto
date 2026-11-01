@@ -40,7 +40,7 @@ pub(super) use verification::*;
 
 /// Every private state root is named with this prefix so cleanup can recognise
 /// its own leaves and refuse to touch anything else in the cache base.
-pub(crate) const LEAF_PREFIX: &str = "otto-sandbox-";
+pub(crate) const LEAF_PREFIX: &str = crate::sandbox::read_denylist::PRIVATE_ROOT_LEAF_PREFIX;
 
 /// Random bytes in a leaf name, hex encoded into 32 characters.
 const LEAF_RANDOM_BYTES: usize = 16;

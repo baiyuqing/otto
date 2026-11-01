@@ -23,6 +23,7 @@ use crate::runtime::sandbox_runtime::{
     CloseError, OpenOptions, ReconfigureError, SandboxRuntime, normalize_sandbox_runtime,
     open_sandbox_runtime, settings_from_config,
 };
+use crate::sandbox::read_denylist::ReadDenylist;
 
 const RELOAD_UNAVAILABLE: &str = "sandbox reload requires a usable sandbox; restart otto";
 const RELOAD_ENVIRONMENT: &str =
@@ -46,23 +47,36 @@ pub struct SandboxSwitch {
     /// `None` once closed.
     current: RwLock<Option<SandboxRuntime>>,
     info: Mutex<SandboxInfo>,
+    /// Mirror of the current runtime's read denylist, read like `info`.
+    read_denylist: Mutex<Option<ReadDenylist>>,
 }
 
 impl SandboxSwitch {
     pub fn new(runtime: SandboxRuntime) -> Arc<Self> {
-        let info = runtime.info;
+        let info = runtime.info.clone();
+        let read_denylist = runtime.read_denylist.clone();
         Arc::new(Self {
             current: RwLock::new(Some(runtime)),
             info: Mutex::new(info),
+            read_denylist: Mutex::new(read_denylist),
         })
     }
 
     /// The sandbox state now in effect.
     pub fn info(&self) -> SandboxInfo {
-        *self
-            .info
+        self.info
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// The read denylist the current Seatbelt runtime enforces; `None` for
+    /// every other runtime.
+    pub fn read_denylist(&self) -> Option<ReadDenylist> {
+        self.read_denylist
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     /// Applies `options` to the current Seatbelt runtime in place, holding the
@@ -83,11 +97,15 @@ impl SandboxSwitch {
         let result = runtime.reconfigure(options, cancel).await?;
         Some(match result {
             Ok(()) => {
-                let info = runtime.info;
+                let info = runtime.info.clone();
                 *self
                     .info
                     .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) = info;
+                    .unwrap_or_else(|poison| poison.into_inner()) = info.clone();
+                *self
+                    .read_denylist
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = runtime.read_denylist.clone();
                 Ok(info)
             }
             Err(ReconfigureError::EnvironmentChanged) => Err(RELOAD_ENVIRONMENT.to_string()),
@@ -121,12 +139,17 @@ impl SandboxSwitch {
             let _ = next.close();
             return Err(message);
         }
-        let info = next.info;
+        let info = next.info.clone();
+        let read_denylist = next.read_denylist.clone();
         let previous = guard.replace(next).expect("a usable current runtime");
         *self
             .info
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = info;
+            .unwrap_or_else(|poison| poison.into_inner()) = info.clone();
+        *self
+            .read_denylist
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = read_denylist;
         drop(guard);
         previous.close().map_err(|error| error.to_string())?;
         Ok(info)
@@ -201,6 +224,10 @@ impl SandboxControl for SandboxReloader {
         self.control.info()
     }
 
+    fn read_denylist(&self) -> Option<ReadDenylist> {
+        self.control.read_denylist()
+    }
+
     async fn reload(&self) -> Result<SandboxInfo, String> {
         let file = self.load_config()?;
         let settings = crate::runtime::startup::resolve_sandbox_settings(
@@ -265,6 +292,7 @@ mod tests {
                 driver: DriverMode::Off,
                 network: Some(NetworkMode::Allow),
                 read_paths: Vec::new(),
+                deny_read_paths: Vec::new(),
                 allow_env: allow_env.iter().map(|name| name.to_string()).collect(),
             },
             workspace: path.clone(),
@@ -565,6 +593,7 @@ mod tests {
                 driver: DriverMode::Seatbelt,
                 network: Some(NetworkMode::Deny),
                 read_paths: Vec::new(),
+                deny_read_paths: Vec::new(),
                 allow_env: Vec::new(),
             },
             workspace: canonical(&workspace),

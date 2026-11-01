@@ -122,6 +122,7 @@ fn new_fixture() -> Fixture {
         home,
         host_entries: vec!["PATH=".to_string()],
         read_paths: Vec::new(),
+        deny_read_paths: Vec::new(),
         network: Some(NetworkMode::Deny),
     };
     Fixture {

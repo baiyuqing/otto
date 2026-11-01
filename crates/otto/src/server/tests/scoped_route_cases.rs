@@ -59,6 +59,7 @@ async fn sandbox_reload_response_is_unchanged_for_a_single_workspace() {
             network: SandboxNetwork::Allowed,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         })),
         ..Default::default()
     });
@@ -103,6 +104,7 @@ async fn sandbox_reload_reloads_every_loaded_workspace() {
             network: SandboxNetwork::Allowed,
             bash_available: true,
             reason: SandboxReason::None,
+            ..Default::default()
         })),
         sandbox_reload_others: vec![(
             "/other".to_string(),
@@ -111,6 +113,7 @@ async fn sandbox_reload_reloads_every_loaded_workspace() {
                 network: SandboxNetwork::Unconfined,
                 bash_available: true,
                 reason: SandboxReason::None,
+                ..Default::default()
             }),
         )],
         ..Default::default()

@@ -217,9 +217,10 @@ impl Builder {
                 network: SandboxNetwork::Unconfined,
                 bash_available: false,
                 reason: SandboxReason::RuntimeFailure,
+                ..Default::default()
             };
         }
-        self.sandbox_info
+        self.sandbox_info.clone()
     }
 
     /// A closed boundary disables bash and says only that the environment was
@@ -231,6 +232,7 @@ impl Builder {
                 network: SandboxNetwork::Unconfined,
                 bash_available: false,
                 reason: SandboxReason::EnvironmentRejected,
+                ..Default::default()
             };
         }
         self.planned_sandbox_info()

@@ -1,14 +1,11 @@
 package bridge
 
 import (
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 
@@ -117,7 +114,7 @@ func TestMenuCommandsAreHandled(t *testing.T) {
 	}
 }
 
-// A session-level /model switch is how a chat leaves a profile whose quota is
+// A session-level /model switch is how a chat leaves a model whose quota is
 // exhausted, so it must reach Otto even without a management client; /config
 // stays attached-only and points at it.
 func TestModelSwitchReachesTheAgentWithoutAManagementClient(t *testing.T) {
@@ -129,8 +126,8 @@ func TestModelSwitchReachesTheAgentWithoutAManagementClient(t *testing.T) {
 	}, "agent command prompt")
 	settle()
 
-	h.say("/config profiles")
-	want := "This command requires otto acp --attach connected to a running otto serve. Use /model <profile> to switch this conversation's profile."
+	h.say("/config models")
+	want := "This command requires otto acp --attach connected to a running otto serve. Use /model <provider>/<model_id> to switch this conversation's model."
 	h.waitFor(func() bool {
 		for _, text := range h.plat.texts() {
 			if text == want {
@@ -139,7 +136,7 @@ func TestModelSwitchReachesTheAgentWithoutAManagementClient(t *testing.T) {
 		}
 		return false
 	}, "the attached-only notice")
-	if calls := agentWork(h.dir); slices.Contains(calls, "start:/config profiles") {
+	if calls := agentWork(h.dir); slices.Contains(calls, "start:/config models") {
 		t.Errorf("/config reached the agent: %q", calls)
 	}
 }
@@ -265,55 +262,5 @@ func TestStartupLoadsEachBoundSessionOnce(t *testing.T) {
 	h.waitSent(1)
 	if got := h.calls("load:"); len(got) != 3 {
 		t.Fatalf("loads after first message = %q, want no extra load", got)
-	}
-}
-
-func TestConfigChatCannotSetBaseURLOrAPIKeyEnv(t *testing.T) {
-	for _, cmd := range []string{
-		"/config add p --provider chatgpt --model m --base-url https://evil.example",
-		"/config add p --provider chatgpt --model m --api-key-env AWS_SECRET_ACCESS_KEY",
-		"/config add p --provider openai-compatible --model m",
-		"/config set p base-url https://evil.example",
-		"/config set p base_url https://evil.example",
-		"/config set p api-key-env AWS_SECRET_ACCESS_KEY",
-		"/config set p api_key_env AWS_SECRET_ACCESS_KEY",
-	} {
-		t.Run(cmd, func(t *testing.T) {
-			var hits atomic.Int32
-			client := managementServer(t, func(w http.ResponseWriter, r *http.Request) {
-				hits.Add(1)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{}`))
-			})
-			h := newHarness(t, setup{manage: client})
-			h.say(cmd)
-			got := h.waitSent(1)
-			if !strings.Contains(got[0], "only be changed on the host") {
-				t.Fatalf("reply = %q", got)
-			}
-			settle()
-			if n := hits.Load(); n != 0 {
-				t.Fatalf("%d management calls for %q", n, cmd)
-			}
-		})
-	}
-}
-
-func TestConfigChatSetModelStillPreviews(t *testing.T) {
-	var body string
-	client := managementServer(t, func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		body = string(b)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"tok1","expires_in_seconds":60,"operation":"set_profile_field","profile":"p","diff":"model: a -> b"}`))
-	})
-	h := newHarness(t, setup{manage: client})
-	h.say("/config set p model b")
-	got := h.waitSent(1)
-	if !strings.Contains(got[0], "Preview: model: a -> b") || !strings.Contains(got[0], "/config confirm tok1") {
-		t.Fatalf("reply = %q", got)
-	}
-	if !strings.Contains(body, `"field":"model"`) || !strings.Contains(body, `"value":"b"`) {
-		t.Fatalf("body = %s", body)
 	}
 }

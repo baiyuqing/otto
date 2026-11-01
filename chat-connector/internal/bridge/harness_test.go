@@ -54,14 +54,22 @@ type choicesCall struct {
 
 func newFakePlatform() *fakePlatform { return &fakePlatform{started: make(chan struct{})} }
 
+// handlerTransport serves requests by calling the handler in-process, so a
+// management test needs no listening port.
+type handlerTransport struct{ handler http.Handler }
+
+func (t handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	t.handler.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
 // managementServer supplies an HTTP client to the bridge. Production creates
-// the same API client from the attach command's Unix socket; this test helper
-// uses httptest because the sandbox does not allow listener binds on Unix paths.
+// the same API client from the attach command's Unix socket; tests call the
+// handler in-process because the sandbox does not allow listener binds.
 func managementServer(t *testing.T, handler http.HandlerFunc) *manage.Client {
 	t.Helper()
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	return manage.NewWithBaseURL(server.Client(), server.URL)
+	return manage.NewWithBaseURL(&http.Client{Transport: handlerTransport{handler}}, "http://otto")
 }
 
 func (p *fakePlatform) Name() string {
@@ -94,7 +102,7 @@ func (p *fakePlatform) Typing(context.Context, string) error {
 }
 
 // SendChoices makes the fake a ChoicePlatform: the bridge then posts the
-// profile picker as buttons instead of falling back to plain text.
+// model picker as buttons instead of falling back to plain text.
 func (p *fakePlatform) SendChoices(_ context.Context, chat, replyTo, text string, choices []Choice) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -150,7 +158,7 @@ type setup struct {
 	mod      func(*Options)
 	manage   *manage.Client
 	agent    *agent.Options // replaces the fake agent's options
-	profiles ProfileSource  // nil leaves bare "/model" to Otto
+	models   ModelSource    // nil leaves bare "/model" to Otto
 }
 
 func newHarness(t *testing.T, s setup) *harness {
@@ -189,7 +197,7 @@ func newHarness(t *testing.T, s setup) *harness {
 		Access:         map[string]Access{h.plat.Name(): {Chats: s.chats, Senders: s.senders}},
 		Store:          s.store,
 		TypingInterval: time.Hour,
-		Profiles:       s.profiles,
+		Models:         s.models,
 	}
 	if s.textOnly {
 		opts.Platforms = []Platform{textPlatform{h.plat}}

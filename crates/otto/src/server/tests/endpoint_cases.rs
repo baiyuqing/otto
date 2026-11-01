@@ -77,12 +77,15 @@ async fn the_request_id_is_truncated_to_64_bytes_and_filtered_to_ascii() {
 async fn the_info_endpoint_echoes_the_configured_info() {
     let info = Info {
         workspace: "/ws".to_string(),
-        provider: "openai-compatible".to_string(),
-        profile: "alpha".to_string(),
+        provider: "alpha".to_string(),
+        provider_type: "openai-compatible".to_string(),
         model: "test-model".to_string(),
         thinking: "high".to_string(),
         sandbox: "off".to_string(),
-        profiles: vec!["alpha".to_string(), "beta".to_string()],
+        models: vec![
+            "alpha/test-model".to_string(),
+            "beta/test-model".to_string(),
+        ],
     };
     let harness = Harness::with(HarnessOptions {
         info: info.clone(),
@@ -395,142 +398,13 @@ async fn workflow_routes_report_the_disabled_error_for_a_workspace_with_no_contr
     assert_eq!(default_list.status, StatusCode::OK, "{}", default_list.body);
 }
 
-#[tokio::test]
-async fn switching_a_session_profile_rebuilds_it_and_writes_no_file() {
-    let harness = Harness::new();
-    let id = harness.create().await;
-    let reply = harness
-        .send(
-            "POST",
-            &format!("/v1/sessions/{id}/profile"),
-            Some(r#"{"profile":"beta"}"#),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_eq!(reply.json()["profile"], "beta");
-    assert_eq!(reply.json()["model"], "gpt-beta");
-
-    let reply = harness
-        .send(
-            "POST",
-            &format!("/v1/sessions/{id}/profile"),
-            Some(r#"{"profile":"nope"}"#),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
-    assert_eq!(reply.json()["error"]["code"], "bad_request");
-    assert!(reply.body.contains("nope"), "{}", reply.body);
-
-    let reply = harness
-        .send("POST", &format!("/v1/sessions/{id}/profile"), Some("{}"))
-        .await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
-
-    let reply = harness
-        .send(
-            "POST",
-            "/v1/sessions/missing/profile",
-            Some(r#"{"profile":"beta"}"#),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
-
-    // A session switch never writes the configuration file: the running
-    // serve keeps its startup profile catalog, and so does the next start.
-    assert!(
-        !harness.factory.builder.shared.config_path.exists(),
-        "the profile switch wrote a configuration file"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn switching_a_profile_while_a_turn_runs_is_409_turn_active() {
-    let (gate, options) = gated();
-    let harness = Harness::with(options);
-    let id = harness.create().await;
-    let (_stream, _turn_id) = start_stream(&harness, &id).await;
-    harness.provider.wait_started(1).await;
-
-    let reply = harness
-        .send(
-            "POST",
-            &format!("/v1/sessions/{id}/profile"),
-            Some(r#"{"profile":"beta"}"#),
-        )
-        .await;
-    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
-    assert_eq!(reply.json()["error"]["code"], "turn_active");
-    gate.cancel();
-}
-
-#[tokio::test]
-async fn config_profiles_are_readable_without_environment_values() {
-    let harness = Harness::with(HarnessOptions {
-            config_text: Some(
-                "default_profile = \"work\"\n\n[profiles.work]\nprovider = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\nmodel = \"small\"\napi_key_env = \"WORK_KEY\"\n".into(),
-            ),
-            ..Default::default()
-        });
-    let reply = harness.send("GET", "/v1/config/profiles", None).await;
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_eq!(reply.json()["profiles"][0]["name"], "work");
-    assert_eq!(reply.json()["profiles"][0]["default"], true);
-    assert_eq!(reply.json()["profiles"][0]["api_key_env"], "WORK_KEY");
-    assert!(!reply.body.contains("WORK_KEY_VALUE"));
-}
-
-#[tokio::test]
-async fn config_change_confirmation_is_one_time_and_requires_restart() {
-    let original = "# preserve\ndefault_profile = \"work\"\n\n[profiles.work]\nprovider = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\nmodel = \"old\"\napi_key_env = \"WORK_KEY\"\n";
-    let harness = Harness::with(HarnessOptions {
-        config_text: Some(original.into()),
-        ..Default::default()
-    });
-    let preview = harness
-        .raw(
-            "POST",
-            "/v1/config/changes",
-            Some(r#"{"kind":"set_profile_field","profile":"work","field":"model","value":"new"}"#),
-            &[("content-type", b"application/json")],
-        )
-        .await;
-    let body = String::from_utf8(
-        axum::body::to_bytes(preview.into_body(), usize::MAX)
-            .await
-            .expect("body")
-            .to_vec(),
-    )
-    .expect("utf8");
-    let value: Value = serde_json::from_str(&body).expect("preview json");
-    let id = value["id"].as_str().expect("id");
-    assert!(
-        !body.contains("new"),
-        "preview must redact field values: {body}"
-    );
-    let confirm = harness
-        .send("POST", &format!("/v1/config/changes/{id}"), None)
-        .await;
-    assert_eq!(confirm.status, StatusCode::OK, "{}", confirm.body);
-    assert_eq!(confirm.json()["status"], "saved_restart_required");
-    let changed =
-        std::fs::read_to_string(&harness.factory.builder.shared.config_path).expect("read config");
-    assert_eq!(
-        changed,
-        original.replace("model = \"old\"", "model = \"new\"")
-    );
-    let repeated = harness
-        .send("POST", &format!("/v1/config/changes/{id}"), None)
-        .await;
-    assert_eq!(repeated.status, StatusCode::NOT_FOUND, "{}", repeated.body);
-}
-
 /// Every API path the router serves.
 ///
 /// ponytail: axum exposes no route table, so this list is written out once
 /// and checked against both the router and `openapi.yaml`.
 pub(super) const ROUTES: &[&str] = &[
-    "/v1/config/profiles",
-    "/v1/config/profiles/{name}",
+    "/v1/config/providers",
+    "/v1/config/providers/{name}",
     "/v1/config/models",
     "/v1/config/changes",
     "/v1/config/changes/{id}",
@@ -540,7 +414,7 @@ pub(super) const ROUTES: &[&str] = &[
     "/v1/sessions/{id}/context",
     "/v1/sessions/{id}/trace",
     "/v1/sessions/{id}/trace/{span_id}",
-    "/v1/sessions/{id}/profile",
+    "/v1/sessions/{id}/model",
     "/v1/sessions/{id}/approvals/{approval_id}",
     "/v1/sessions/{id}/inputs",
     "/v1/sessions/{id}/tasks/steer",

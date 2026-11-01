@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::subagent::tasks::TaskError;
 
-use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE};
+use super::controller::{Controller, MODEL_SWITCH_UNAVAILABLE};
 use crate::runtime::sandbox_config::{SandboxChange, parse_exclude_entry};
 
 mod command;
@@ -52,7 +52,7 @@ const HELP: &str = concat!(
     "/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state\n",
     "\n",
     "During a task\n",
-    "/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n",
+    "/model [provider/model_id] [--thinking LEVEL] [--save] show current model, or switch models\n",
     "/thinking [LEVEL] [--save] show or set reasoning effort\n",
     "/compact [focus] compact context\n",
     "\n",

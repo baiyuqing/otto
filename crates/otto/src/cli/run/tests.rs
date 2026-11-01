@@ -184,9 +184,9 @@ fn skill_checker_honors_the_legacy_experimental_setting() {
 #[test]
 fn the_config_environment_always_holds_every_fixed_key() {
     let mut file = otto_core::config::File::default();
-    file.profiles.insert(
+    file.providers.insert(
         "alpha".to_string(),
-        otto_core::config::Profile {
+        otto_core::config::ProviderEntry {
             api_key_env: "ALPHA_KEY".to_string(),
             workspace_id_env: "CLAUDE_WORKSPACE".to_string(),
             ..Default::default()
@@ -247,17 +247,17 @@ fn the_config_environment_carries_the_web_search_keys() {
 #[test]
 fn provider_environment_names_are_sorted_and_deduplicated() {
     let mut file = otto_core::config::File::default();
-    file.profiles.insert(
+    file.providers.insert(
         "alpha".to_string(),
-        otto_core::config::Profile {
+        otto_core::config::ProviderEntry {
             api_key_env: "ZED_KEY".to_string(),
             workspace_id_env: "CLAUDE_WORKSPACE".to_string(),
             ..Default::default()
         },
     );
-    file.profiles.insert(
+    file.providers.insert(
         "beta".to_string(),
-        otto_core::config::Profile {
+        otto_core::config::ProviderEntry {
             api_key_env: "OTTO_API_KEY".to_string(),
             ..Default::default()
         },
@@ -445,7 +445,7 @@ async fn an_empty_implicit_configuration_points_to_setup() {
     assert_eq!(code, 1);
     assert_eq!(
         String::from_utf8_lossy(&stderr),
-        "otto: no provider configured; run `otto setup` to create one, or pass --provider and --model\n"
+        "otto: no model configured; run `otto setup` to create one, or pass --model <provider>/<model_id>\n"
     );
 }
 

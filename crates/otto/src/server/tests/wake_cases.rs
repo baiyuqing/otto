@@ -273,10 +273,10 @@ async fn closing_the_server_ends_the_wake_loop() {
         .expect("close");
 }
 
-/// The wake loop opened with the session keeps waking after a profile switch
+/// The wake loop opened with the session keeps waking after a model switch
 /// builds a new runner, because the inbox and registry belong to the session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pending_notification_starts_a_wake_turn_after_a_profile_switch() {
+async fn a_pending_notification_starts_a_wake_turn_after_a_model_switch() {
     let (harness, tasks) = wake_harness(Script {
         deltas: vec!["ok".to_string()],
         ..Script::default()
@@ -285,8 +285,8 @@ async fn a_pending_notification_starts_a_wake_turn_after_a_profile_switch() {
     let reply = harness
         .send(
             "POST",
-            &format!("/v1/sessions/{id}/profile"),
-            Some(r#"{"profile":"beta"}"#),
+            &format!("/v1/sessions/{id}/model"),
+            Some(r#"{"model":"beta/gpt-beta"}"#),
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
@@ -310,6 +310,6 @@ async fn a_pending_notification_starts_a_wake_turn_after_a_profile_switch() {
     .await;
     assert!(
         started.is_ok(),
-        "the notification did not start a wake turn after the profile switch"
+        "the notification did not start a wake turn after the model switch"
     );
 }

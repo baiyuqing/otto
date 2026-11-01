@@ -40,9 +40,9 @@ type Options struct {
 	Access    map[string]Access // by Platform.Name()
 	Store     *state.Store
 	Metrics   *metrics.Metrics // nil disables counting
-	// Profiles reads the local Otto configuration for the "/model" picker.
+	// Models reads the local Otto configuration for the "/model" picker.
 	// Nil leaves bare "/model" to Otto.
-	Profiles ProfileSource
+	Models ModelSource
 
 	QueueLimit        int           // default 10
 	PermissionTimeout time.Duration // default 10 min
@@ -290,9 +290,9 @@ type Command struct {
 // deliver and cmdManage, and with the commands `otto acp` advertises;
 // TestMenuCommandsAreHandled checks it.
 var Commands = []Command{
-	{"config", "Show or change provider profiles", false},
-	{"models", "List a provider profile's model IDs", false},
-	{"model", "Choose the conversation's profile: /model, or /model <profile>", true},
+	{"config", "Show or change configured models", false},
+	{"models", "List the model IDs of a provider", false},
+	{"model", "Choose the conversation's model: /model, or /model <provider>/<model_id>", true},
 	{"context", "Show what the next request sends, with token counts", true},
 	{"compact", "Compact the session context: /compact [focus]", true},
 	{"steer", "Guide the active task: /steer <guidance>", false},

@@ -1,4 +1,4 @@
-//! New, resume, profile, rename and archive tests.
+//! New, resume, model switch, rename and archive tests.
 
 use super::*;
 
@@ -27,7 +27,7 @@ async fn new_session_replaces_the_session_and_keeps_the_runtime() {
     let after = controller.info();
     assert_ne!(after.session_id, before.session_id);
     assert_eq!(after.model, "gpt-alpha");
-    assert_eq!(after.profile, "alpha");
+    assert_eq!(after.model_selector, "alpha/gpt-alpha");
 }
 
 #[tokio::test]
@@ -36,7 +36,10 @@ async fn new_session_keeps_runtime_changed_in_the_current_session() {
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
 
-    controller.switch_profile("beta").await.expect("switch");
+    controller
+        .switch_model("beta/gpt-beta")
+        .await
+        .expect("switch");
     controller.set_thinking("high").await.expect("thinking");
     let before = controller.info();
 
@@ -44,7 +47,7 @@ async fn new_session_keeps_runtime_changed_in_the_current_session() {
 
     let after = controller.info();
     assert_ne!(after.session_id, before.session_id);
-    assert_eq!(after.profile, "beta");
+    assert_eq!(after.model_selector, "beta/gpt-beta");
     assert_eq!(after.model, "gpt-beta");
     assert_eq!(after.thinking, "high");
 }
@@ -80,7 +83,7 @@ async fn resume_keeps_process_selection_and_appends_without_rewriting_history() 
         .unwrap();
     let first = controller.info();
     controller.new_session().await.unwrap();
-    controller.switch_profile("beta").await.unwrap();
+    controller.switch_model("beta/gpt-beta").await.unwrap();
     controller.set_thinking("high").await.unwrap();
     let selected = controller.info();
     let original = std::fs::read(&first.session_path).unwrap();
@@ -92,8 +95,9 @@ async fn resume_keeps_process_selection_and_appends_without_rewriting_history() 
 
     let resumed = controller.info();
     assert_eq!(resumed.session_id, first.session_id);
-    assert_eq!(resumed.profile, selected.profile);
+    assert_eq!(resumed.model_selector, selected.model_selector);
     assert_eq!(resumed.provider, selected.provider);
+    assert_eq!(resumed.provider_type, selected.provider_type);
     assert_eq!(resumed.model, selected.model);
     assert_eq!(resumed.thinking, selected.thinking);
     assert_eq!(controller.history().len(), 2);
@@ -122,13 +126,13 @@ async fn resume_keeps_process_selection_and_appends_without_rewriting_history() 
         .find(|record| record["message"]["role"] == "assistant")
         .expect("persisted assistant response");
     assert_eq!(assistant["message"]["model"], selected.model);
-    assert_eq!(assistant["message"]["provider"], selected.provider);
+    assert_eq!(assistant["message"]["provider"], selected.provider_type);
     let historical = records
         .iter()
         .find(|record| record["message"]["role"] == "assistant")
         .unwrap();
     assert_eq!(historical["message"]["model"], first.model);
-    assert_eq!(historical["message"]["provider"], first.provider);
+    assert_eq!(historical["message"]["provider"], first.provider_type);
     let requests = provider.requests();
     assert_eq!(requests[0].model, first.model);
     assert_eq!(requests[0].thinking, "low");
@@ -156,7 +160,10 @@ async fn opening_a_session_uses_config_instead_of_historical_selection() {
         .await
         .expect("append");
 
-    controller.switch_profile("beta").await.expect("switch");
+    controller
+        .switch_model("beta/gpt-beta")
+        .await
+        .expect("switch");
     controller.set_thinking("high").await.expect("thinking");
     let path = controller.info().session_path;
     assert!(!path.is_empty());
@@ -168,40 +175,47 @@ async fn opening_a_session_uses_config_instead_of_historical_selection() {
         .expect("open");
 
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(reopened.info().profile, "alpha");
+    assert_eq!(reopened.info().model_selector, "alpha/gpt-alpha");
     assert_eq!(reopened.info().model, "gpt-alpha");
     assert_eq!(reopened.info().thinking, "");
 }
 
 #[tokio::test]
-async fn switching_profile_switches_the_model() {
+async fn switching_model_switches_provider_and_model() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
-    assert_eq!(controller.profiles(), vec!["alpha", "beta"]);
+    assert_eq!(
+        controller.models(),
+        vec!["alpha/gpt-alpha", "beta/gpt-beta"]
+    );
 
     let before = controller.info();
 
-    controller.switch_profile("beta").await.expect("switch");
+    controller
+        .switch_model("beta/gpt-beta")
+        .await
+        .expect("switch");
 
     let info = controller.info();
     assert_eq!(info.session_id, before.session_id);
-    assert_eq!(info.profile, "beta");
+    assert_eq!(info.model_selector, "beta/gpt-beta");
+    assert_eq!(info.provider, "beta");
     assert_eq!(info.model, "gpt-beta");
 }
 
 #[tokio::test]
-async fn an_unknown_profile_leaves_the_session_in_place() {
+async fn an_unknown_provider_leaves_the_session_in_place() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
     let before = controller.info();
 
     let error = controller
-        .switch_profile("missing")
+        .switch_model("missing/gpt-x")
         .await
-        .expect_err("unknown profile");
-    assert!(error.contains("not found"), "{error}");
+        .expect_err("unknown provider");
+    assert!(error.contains("unknown provider"), "{error}");
     assert_eq!(controller.info().session_id, before.session_id);
 }
 
@@ -323,18 +337,27 @@ async fn a_session_with_no_file_cannot_be_archived() {
 }
 
 #[tokio::test]
-async fn the_default_profile_is_written_to_the_configuration_file() {
+async fn the_default_model_is_written_to_the_configuration_file() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
     std::fs::write(
         controller.config_path(),
-        "default_profile = \"alpha\"\n\n[profiles.alpha]\n\n[profiles.beta]\n",
+        concat!(
+            "default_model = \"alpha/gpt-alpha\"\n\n[providers.alpha]\ntype = \"openai-compatible\"\n",
+            "base_url = \"https://a.example/v1\"\n\n[providers.beta]\ntype = \"openai-compatible\"\n",
+            "base_url = \"https://b.example/v1\"\n"
+        ),
     )
     .expect("write config");
 
-    controller.set_default_profile("beta").expect("set default");
+    controller
+        .set_default_model("beta/gpt-beta")
+        .expect("set default");
 
     let content = std::fs::read_to_string(controller.config_path()).expect("read config");
-    assert!(content.contains("default_profile = \"beta\""), "{content}");
+    assert!(
+        content.contains("default_model = \"beta/gpt-beta\""),
+        "{content}"
+    );
 }

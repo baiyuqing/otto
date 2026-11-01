@@ -12,9 +12,17 @@ use std::time::Duration;
 use url::Url;
 
 use super::{
-    CompactionConfig, ConfigError, File, Profile, duration::parse_go_duration,
-    model_limits::resolve_model_limits,
+    CompactionConfig, ConfigError, File, ModelSelector, ProviderConnection,
+    duration::parse_go_duration, model_limits::resolve_model_limits,
 };
+
+use compaction::{resolve_compaction, validate_thinking};
+use deadlines::{resolve_progress, resolve_resilience};
+use model_selection::{known_provider, select_model};
+
+mod compaction;
+mod deadlines;
+mod model_selection;
 
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
@@ -33,22 +41,28 @@ const MAX_PROGRESS_LIMIT: u32 = 1000;
 const MINIMUM_COMPACTION_WINDOW: i64 = 4_096;
 const MINIMUM_COMPACTION_TARGET: i64 = 1_024;
 
-/// The provider and model an already-resumed session used. Applied only when
-/// no profile is explicitly selected (an explicit profile always wins).
+/// The model an already-resumed session used. Applied only when no model is
+/// explicitly selected (an explicit selection always wins).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionDefaults {
+    /// API type recorded by a session that stored no selector.
     pub provider: String,
+    /// Provider model ID recorded by the session.
     pub model: String,
+    /// The stored `profile` field when it holds a `<provider>/<model_id>` selector.
+    pub model_selector: String,
 }
 
-/// Explicit CLI overrides, applied after profile, environment, and session
-/// defaults. An empty string or zero `Duration`/`0` means "not set".
+/// Explicit CLI overrides. An empty string or zero `Duration`/`0` means "not set".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
-    pub profile: String,
-    pub provider: String,
-    pub base_url: String,
+    /// `--model`: a `<provider>/<model_id>` selector, or a bare model ID
+    /// when `provider` (deprecated `--provider`) pairs it.
     pub model: String,
+    pub provider: String,
+    /// Deprecated `--profile NAME`.
+    pub legacy_profile: String,
+    pub base_url: String,
     pub thinking: String,
     pub shell_timeout: Duration,
     pub max_output_bytes: i64,
@@ -116,9 +130,13 @@ impl Default for ProgressRuntime {
 /// The fully resolved configuration for one process run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Runtime {
-    pub profile: String,
-    pub provider: String,
+    pub model_selector: ModelSelector,
+    /// The provider name from the selector.
+    pub provider_name: String,
+    /// The API type of the provider: `claude`, `openai-compatible` or `chatgpt`.
+    pub provider_type: String,
     pub base_url: String,
+    /// The model ID the provider API receives.
     pub model: String,
     /// Models configured for child tasks on this exact provider connection.
     pub subagent_models: Vec<String>,
@@ -137,47 +155,18 @@ pub struct Runtime {
     pub progress: ProgressRuntime,
 }
 
-fn effective_api_key_env(profile: &Profile) -> &str {
-    if profile.provider == super::PROVIDER_CLAUDE && profile.api_key_env.is_empty() {
-        "ANTHROPIC_API_KEY"
-    } else {
-        &profile.api_key_env
-    }
-}
-fn effective_base_url(profile: &Profile) -> &str {
-    if profile.provider == super::PROVIDER_CLAUDE && profile.base_url.is_empty() {
-        "https://api.anthropic.com"
-    } else {
-        &profile.base_url
-    }
-}
-
 /// Explains connection-scoped child model fallback without exposing configured values.
 /// Call with the runtime resolved from `file`; an empty configured list is not a fallback.
 pub fn subagent_model_diagnostic(
     file: &File,
     runtime: &Runtime,
 ) -> Option<super::layered::Diagnostic> {
-    let profile = file.profiles.get(&runtime.profile)?;
-    if profile.subagent_models.is_empty() || !runtime.subagent_models.is_empty() {
+    let model_entry = file.model_entry(&runtime.model_selector)?;
+    if model_entry.legacy_subagent_models.is_empty() || !runtime.subagent_models.is_empty() {
         return None;
     }
-    let same_connection = runtime.provider == profile.provider
-        && (runtime.provider == super::PROVIDER_CHATGPT
-            || (runtime.api_key_env == effective_api_key_env(profile)
-                && runtime.workspace_id_env == profile.workspace_id_env
-                && (runtime.provider != super::PROVIDER_CLAUDE
-                    || runtime.api_version
-                        == if profile.api_version.is_empty() {
-                            super::DEFAULT_CLAUDE_API_VERSION
-                        } else {
-                            &profile.api_version
-                        })
-                && normalize_base_url(effective_base_url(profile))
-                    .ok()
-                    .as_deref()
-                    == Some(runtime.base_url.as_str())));
-    if same_connection {
+    let provider = file.provider_entry(&runtime.provider_name)?;
+    if same_connection(&provider.connection(&runtime.provider_name), runtime) {
         return None;
     }
     Some(super::layered::Diagnostic {
@@ -185,10 +174,22 @@ pub fn subagent_model_diagnostic(
         source: "runtime".into(),
         reason: "Configured subagent_models are disabled because the provider connection \
             changed. Child tasks inherit the active parent model. Select the \
-            original profile/connection or configure subagent_models for the active \
+            original model/connection or configure subagent_models for the active \
             connection; failed model requests are not automatically retried."
             .into(),
     })
+}
+
+/// Whether `runtime` uses the connection `configured` describes.
+fn same_connection(configured: &ProviderConnection, runtime: &Runtime) -> bool {
+    runtime.provider_type == configured.provider_type
+        && (runtime.provider_type == super::PROVIDER_CHATGPT
+            || (runtime.api_key_env == configured.api_key_env
+                && runtime.workspace_id_env == configured.workspace_id_env
+                && (runtime.provider_type != super::PROVIDER_CLAUDE
+                    || runtime.api_version == configured.api_version)
+                && normalize_base_url(&configured.base_url).ok().as_deref()
+                    == Some(runtime.base_url.as_str())))
 }
 
 fn env_value(env: &HashMap<String, String>, key: &str) -> String {
@@ -197,10 +198,11 @@ fn env_value(env: &HashMap<String, String>, key: &str) -> String {
 
 /// Resolves `file`, `env`, `session`, and `overrides` into a [`Runtime`].
 ///
-/// Precedence for provider/model: profile fields, then (only when no
-/// explicit profile) `session`, then the `OTTO_PROVIDER`/`OTTO_MODEL`
-/// environment variables, then `overrides`. `base_url` follows the same
-/// chain but has no session or environment step beyond the profile.
+/// Precedence for the model: `--model` (or deprecated `--profile`), then
+/// `OTTO_MODEL`, then the resumed `session`'s model, then deprecated
+/// `OTTO_PROFILE`, then `default_model`. The provider's connection fields come
+/// from its table; `overrides.base_url` and `overrides.thinking` replace the
+/// provider's endpoint and the model's thinking effort.
 pub fn resolve(
     file: &File,
     env: &HashMap<String, String>,
@@ -227,65 +229,26 @@ fn resolve_impl(
     overrides: &Overrides,
     credentials: bool,
 ) -> Result<Runtime, ConfigError> {
-    let explicit_profile = !overrides.profile.is_empty();
     file.approval.validate()?;
-    let mut selected_profile = overrides.profile.clone();
-    if selected_profile.is_empty() {
-        selected_profile = env_value(env, "OTTO_PROFILE");
-    }
-    if selected_profile.is_empty() {
-        selected_profile = file.default_profile.clone();
-    }
-    let runtime_profile = selected_profile.clone();
+    let selector = select_model(file, env, session, overrides)?;
+    known_provider(file, &selector)?;
+    let provider_entry = file
+        .provider_entry(&selector.provider)
+        .expect("known_provider checked the name");
+    let configured = provider_entry.connection(&selector.provider);
+    let model_entry = provider_entry
+        .models
+        .get(&selector.model_id)
+        .cloned()
+        .unwrap_or_default();
 
-    let mut provider = String::new();
-    let mut model = String::new();
-    let mut thinking = String::new();
-    let mut base_url = String::new();
-    let mut api_key_env = String::new();
-    let mut api_version = String::new();
-    let mut workspace_id_env = String::new();
-    let mut profile_config = Profile::default();
-
-    if !selected_profile.is_empty() {
-        let Some(profile) = file.profiles.get(&selected_profile) else {
-            return Err(ConfigError::new(format!(
-                "profile \"{selected_profile}\" not found"
-            )));
-        };
-        profile_config = profile.clone();
-        provider = profile.provider.clone();
-        model = profile.model.clone();
-        thinking = profile.thinking.clone();
-        base_url = profile.base_url.clone();
-        api_key_env = profile.api_key_env.clone();
-        api_version = profile.api_version.clone();
-        workspace_id_env = profile.workspace_id_env.clone();
-    }
-    if !explicit_profile {
-        if !session.provider.is_empty() {
-            provider = session.provider.clone();
-        }
-        if !session.model.is_empty() {
-            model = session.model.clone();
-        }
-    }
-
-    let env_provider = env_value(env, "OTTO_PROVIDER");
-    if !env_provider.is_empty() {
-        provider = env_provider;
-    }
-    let env_model = env_value(env, "OTTO_MODEL");
-    if !env_model.is_empty() {
-        model = env_model;
-    }
-
-    if !overrides.provider.is_empty() {
-        provider = overrides.provider.clone();
-    }
-    if !overrides.model.is_empty() {
-        model = overrides.model.clone();
-    }
+    let provider = configured.provider_type.clone();
+    let model = selector.model_id.clone();
+    let mut thinking = model_entry.thinking.clone();
+    let mut base_url = configured.base_url.clone();
+    let api_key_env = configured.api_key_env.clone();
+    let api_version = configured.api_version.clone();
+    let workspace_id_env = configured.workspace_id_env.clone();
     if !overrides.thinking.is_empty() {
         thinking = overrides.thinking.clone();
     }
@@ -293,19 +256,14 @@ fn resolve_impl(
         base_url = overrides.base_url.clone();
     }
 
-    if provider.is_empty() {
-        return Err(ConfigError::new("missing provider"));
-    }
     if !matches!(
         provider.as_str(),
         super::PROVIDER_OPENAI_COMPATIBLE | super::PROVIDER_CHATGPT | super::PROVIDER_CLAUDE
     ) {
         return Err(ConfigError::new(format!(
-            "unsupported provider \"{provider}\""
+            "unsupported provider type \"{provider}\" for provider \"{}\"",
+            selector.provider
         )));
-    }
-    if model.is_empty() {
-        return Err(ConfigError::new("missing model"));
     }
     validate_thinking(&thinking)?;
 
@@ -314,15 +272,6 @@ fn resolve_impl(
         super::PROVIDER_OPENAI_COMPATIBLE | super::PROVIDER_CLAUDE
     ) {
         if provider == super::PROVIDER_CLAUDE {
-            if base_url.is_empty() {
-                base_url = "https://api.anthropic.com".into();
-            }
-            if api_key_env.is_empty() {
-                api_key_env = "ANTHROPIC_API_KEY".into();
-            }
-            if api_version.is_empty() {
-                api_version = super::DEFAULT_CLAUDE_API_VERSION.into();
-            }
             let bytes = api_version.as_bytes();
             if bytes.len() != 10
                 || !bytes.iter().enumerate().all(|(index, byte)| {
@@ -348,27 +297,7 @@ fn resolve_impl(
         // from the credential file, not a configured base_url or API key.
         base_url = String::new();
     }
-    validate_subagent_models(&selected_profile, &profile_config.subagent_models)?;
-    let same_connection = provider == profile_config.provider
-        && (provider == super::PROVIDER_CHATGPT
-            || (api_key_env == effective_api_key_env(&profile_config)
-                && workspace_id_env == profile_config.workspace_id_env
-                && (provider != super::PROVIDER_CLAUDE
-                    || api_version
-                        == if profile_config.api_version.is_empty() {
-                            super::DEFAULT_CLAUDE_API_VERSION
-                        } else {
-                            &profile_config.api_version
-                        })
-                && normalize_base_url(effective_base_url(&profile_config))
-                    .ok()
-                    .as_deref()
-                    == Some(base_url.as_str())));
-    let subagent_models = if same_connection {
-        profile_config.subagent_models.clone()
-    } else {
-        Vec::new()
-    };
+    validate_subagent_models(&selector, &model_entry.legacy_subagent_models)?;
 
     let mut shell_timeout = DEFAULT_SHELL_TIMEOUT;
     if !file.agent.shell_timeout.is_empty() {
@@ -393,7 +322,7 @@ fn resolve_impl(
         max_output_bytes = overrides.max_output_bytes;
     }
 
-    let compaction = resolve_compaction(&file.agent.compaction, &profile_config, &model)?;
+    let compaction = resolve_compaction(&file.agent.compaction, &model_entry, &model)?;
     let resilience = resolve_resilience(&file.agent)?;
     let progress = resolve_progress(&file.agent)?;
 
@@ -438,12 +367,13 @@ fn resolve_impl(
         } else {
             String::new()
         };
-    let runtime = Runtime {
-        profile: runtime_profile,
-        provider,
+    let mut runtime = Runtime {
+        provider_name: selector.provider.clone(),
+        model_selector: selector,
+        provider_type: provider,
         base_url,
         model,
-        subagent_models,
+        subagent_models: Vec::new(),
         thinking,
         api_key,
         api_key_env,
@@ -456,16 +386,22 @@ fn resolve_impl(
         resilience,
         progress,
     };
+    if same_connection(&configured, &runtime) {
+        runtime.subagent_models = model_entry.legacy_subagent_models.clone();
+    }
     if let Some(policy) = &file.policy {
         policy.runtime(&runtime)?;
     }
     Ok(runtime)
 }
 
-fn validate_subagent_models(profile: &str, models: &[String]) -> Result<(), ConfigError> {
+fn validate_subagent_models(
+    selector: &ModelSelector,
+    models: &[String],
+) -> Result<(), ConfigError> {
     if models.len() > 16 {
         return Err(ConfigError::new(format!(
-            "profile \"{profile}\" subagent_models must contain at most 16 IDs"
+            "model \"{selector}\" subagent_models must contain at most 16 IDs"
         )));
     }
     let mut seen = HashSet::new();
@@ -476,191 +412,16 @@ fn validate_subagent_models(profile: &str, models: &[String]) -> Result<(), Conf
             || model.chars().any(char::is_control)
         {
             return Err(ConfigError::new(format!(
-                "profile \"{profile}\" subagent_models contains an invalid model ID"
+                "model \"{selector}\" subagent_models contains an invalid model ID"
             )));
         }
         if !seen.insert(model) {
             return Err(ConfigError::new(format!(
-                "profile \"{profile}\" subagent_models contains a duplicate model ID"
+                "model \"{selector}\" subagent_models contains a duplicate model ID"
             )));
         }
     }
     Ok(())
-}
-
-fn resolve_resilience(agent: &super::Agent) -> Result<ResilienceRuntime, ConfigError> {
-    let deadlines = DeadlineRuntime {
-        turn_timeout: optional_positive_duration("turn_timeout", &agent.turn_timeout)?,
-        unattended_turn_timeout: unattended_turn_timeout(&agent.unattended_turn_timeout)?,
-        provider_timeout: optional_positive_duration("provider_timeout", &agent.provider_timeout)?,
-        cancellation_grace: optional_positive_duration(
-            "cancellation_grace",
-            &agent.cancellation_grace,
-        )?
-        .unwrap_or(DEFAULT_CANCELLATION_GRACE),
-        subagent_timeout: optional_positive_duration("subagent_timeout", &agent.subagent_timeout)?,
-        workflow_step_timeout: optional_positive_duration(
-            "workflow_step_timeout",
-            &agent.workflow_step_timeout,
-        )?,
-    };
-
-    Ok(ResilienceRuntime { deadlines })
-}
-
-fn resolve_progress(agent: &super::Agent) -> Result<ProgressRuntime, ConfigError> {
-    Ok(ProgressRuntime {
-        repeated_calls: optional_progress_limit(
-            "no_progress_repeats",
-            agent.no_progress_repeats,
-            DEFAULT_PROGRESS_REPEATED_CALLS,
-        )?,
-        consecutive_failures: optional_progress_limit(
-            "no_progress_failures",
-            agent.no_progress_failures,
-            DEFAULT_PROGRESS_CONSECUTIVE_FAILURES,
-        )?,
-    })
-}
-
-/// An absent limit keeps the built-in default; an explicit zero disables the
-/// condition.
-fn optional_progress_limit(
-    field: &str,
-    configured: Option<i64>,
-    default: u32,
-) -> Result<u32, ConfigError> {
-    let Some(value) = configured else {
-        return Ok(default);
-    };
-    if !(0..=i64::from(MAX_PROGRESS_LIMIT)).contains(&value) {
-        return Err(ConfigError::new(format!(
-            "[agent].{field} must be between 0 and {MAX_PROGRESS_LIMIT}, got {value}"
-        )));
-    }
-    Ok(value as u32)
-}
-
-fn optional_positive_duration(
-    field: &str,
-    configured: &Option<String>,
-) -> Result<Option<Duration>, ConfigError> {
-    let Some(value) = configured else {
-        return Ok(None);
-    };
-    let nanos = parse_go_duration(value)
-        .map_err(|err| ConfigError::new(format!("invalid {field}: {err}")))?;
-    if nanos <= 0 {
-        return Err(ConfigError::new(format!(
-            "invalid {field}: must be greater than zero"
-        )));
-    }
-    Ok(Some(Duration::from_nanos(nanos as u64)))
-}
-
-/// Omitted gives the default; a zero duration disables the deadline.
-fn unattended_turn_timeout(configured: &Option<String>) -> Result<Option<Duration>, ConfigError> {
-    let Some(value) = configured else {
-        return Ok(Some(DEFAULT_UNATTENDED_TURN_TIMEOUT));
-    };
-    let nanos = parse_go_duration(value)
-        .map_err(|err| ConfigError::new(format!("invalid unattended_turn_timeout: {err}")))?;
-    if nanos < 0 {
-        return Err(ConfigError::new(
-            "invalid unattended_turn_timeout: must not be negative",
-        ));
-    }
-    Ok((nanos > 0).then(|| Duration::from_nanos(nanos as u64)))
-}
-
-fn validate_thinking(thinking: &str) -> Result<(), ConfigError> {
-    if matches!(thinking, "" | "low" | "medium" | "high" | "xhigh" | "max") {
-        return Ok(());
-    }
-    Err(ConfigError::new(
-        "invalid thinking: must be one of low, medium, high, xhigh, max",
-    ))
-}
-
-fn resolve_compaction(
-    config: &CompactionConfig,
-    profile: &Profile,
-    model: &str,
-) -> Result<CompactionRuntime, ConfigError> {
-    let auto = config.auto.unwrap_or(true);
-
-    let reserve = match config.reserve_tokens {
-        Some(value) if value <= 0 => {
-            return Err(ConfigError::new(
-                "invalid reserve_tokens: must be greater than zero",
-            ));
-        }
-        Some(value) => value,
-        None => DEFAULT_COMPACTION_RESERVE,
-    };
-
-    let keep = match config.keep_recent_tokens {
-        Some(value) if value <= 0 => {
-            return Err(ConfigError::new(
-                "invalid keep_recent_tokens: must be greater than zero",
-            ));
-        }
-        Some(value) => value,
-        None => DEFAULT_COMPACTION_KEEP,
-    };
-
-    if let Some(context_window) = profile.context_window
-        && context_window < MINIMUM_COMPACTION_WINDOW
-    {
-        return Err(ConfigError::new(format!(
-            "invalid context_window: must be at least {MINIMUM_COMPACTION_WINDOW}"
-        )));
-    }
-    if let Some(compaction_window) = profile.compaction_window {
-        let Some(context_window) = profile.context_window else {
-            return Err(ConfigError::new(
-                "invalid context_window: required with compaction_window",
-            ));
-        };
-        if compaction_window < MINIMUM_COMPACTION_WINDOW {
-            return Err(ConfigError::new(format!(
-                "invalid compaction_window: must be at least {MINIMUM_COMPACTION_WINDOW}"
-            )));
-        }
-        if compaction_window > context_window {
-            return Err(ConfigError::new(
-                "invalid compaction_window: must not exceed context_window",
-            ));
-        }
-    }
-
-    let limits = resolve_model_limits(model);
-    let mut runtime = CompactionRuntime {
-        auto,
-        context_window: limits.context_window,
-        hard_input_window: limits.hard_input_window,
-        working_window: limits.working_window,
-        max_output_tokens: limits.max_output_tokens,
-        reserve_tokens: reserve,
-        keep_recent_tokens: keep,
-    };
-    if let Some(context_window) = profile.context_window {
-        runtime.context_window = context_window;
-        runtime.hard_input_window = context_window;
-        runtime.working_window = context_window;
-    }
-    if let Some(compaction_window) = profile.compaction_window {
-        runtime.working_window = compaction_window;
-    }
-
-    if runtime.working_window > 0 {
-        let reserve_cap = MINIMUM_COMPACTION_TARGET.max(runtime.working_window / 4);
-        runtime.reserve_tokens = runtime.reserve_tokens.min(reserve_cap);
-        let keep_cap =
-            MINIMUM_COMPACTION_TARGET.max((runtime.working_window - runtime.reserve_tokens) / 2);
-        runtime.keep_recent_tokens = runtime.keep_recent_tokens.min(keep_cap);
-    }
-    Ok(runtime)
 }
 
 fn resolve_api_key(

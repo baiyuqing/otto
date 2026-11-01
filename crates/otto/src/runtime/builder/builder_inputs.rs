@@ -58,8 +58,8 @@ impl Builder {
                 crate::usage::Context {
                     workspace: header.workspace,
                     session_id: header.id,
-                    provider: runtime.provider.clone(),
-                    profile: runtime.profile.clone(),
+                    provider: runtime.provider_name.clone(),
+                    profile: runtime.model_selector.to_string(),
                     model: runtime.model.clone(),
                     task_id: String::new(),
                 },
@@ -119,7 +119,7 @@ impl Builder {
     pub(super) fn boundary_redactor(&self, runtime: Option<&Runtime>) -> Redactor {
         let definitions = self.boundary_tool_definitions(runtime);
         let (provider, model) = match runtime {
-            Some(runtime) => (runtime.provider.as_str(), runtime.model.as_str()),
+            Some(runtime) => (runtime.provider_type.as_str(), runtime.model.as_str()),
             None => ("", ""),
         };
         let endpoint_host = runtime
@@ -237,11 +237,12 @@ impl Builder {
     }
 
     /// A closed boundary reports no runtime identity, because provider,
-    /// profile, and model are all model-visible text.
+    /// selector, and model are all model-visible text.
     pub fn runtime_info(&self, runtime: &Runtime) -> RuntimeInfo {
         let mut info = RuntimeInfo {
-            provider: runtime.provider.clone(),
-            profile: runtime.profile.clone(),
+            provider: runtime.provider_name.clone(),
+            provider_type: runtime.provider_type.clone(),
+            model_selector: runtime.model_selector.to_string(),
             model: runtime.model.clone(),
             thinking: runtime.thinking.clone(),
             context_window: runtime.compaction.context_window,
@@ -249,7 +250,8 @@ impl Builder {
         };
         if !self.boundary_allows_dynamic(Some(runtime)) {
             info.provider = String::new();
-            info.profile = String::new();
+            info.provider_type = String::new();
+            info.model_selector = String::new();
             info.model = String::new();
             info.thinking = String::new();
             info.context_window = 0;

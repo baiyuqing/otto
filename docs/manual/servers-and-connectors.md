@@ -20,7 +20,7 @@ Different sessions have separate histories, turn queues and event streams.
 Clients loading the same session intentionally share its conversation and
 approval state. A resume request naming a workspace must match the session's
 workspace, including when the session is already open, or it returns `404`.
-New sessions use the selected workspace's resolved profile/model settings
+New sessions use the selected workspace's resolved provider and model settings
 and sandbox; a loaded workspace has its own sandbox reload and read grants.
 
 ```bash
@@ -28,8 +28,8 @@ otto serve [--socket PATH] [--listen HOST:PORT]
 ```
 
 `serve` accepts the same startup flags as the interactive frontends
-(`--config`, `--cwd`, `--profile`, `--provider`, `--base-url`, `--model`,
-`--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
+(`--config`, `--cwd`, `--model`, `--base-url`, the deprecated `--profile` and
+`--provider`, `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
 `--socket` and `--listen`. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
 `--archive`, and `--no-session`.
 
@@ -461,7 +461,12 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/trace` | Return the session's turns, provider requests, tool calls, compactions and sub-agent tasks as nested spans with start and end times, status, provider timing and token usage. The JSON holds no message or result text; tool labels carry an argument preview of at most 60 characters and sub-agent labels the first 40 characters of the task description. `404` for an unknown session; `409 trace_unavailable` when the redaction boundary is closed, the session has no file (`--no-session`), or the session file cannot be read. |
 | `GET /v1/sessions/{id}/trace/{span_id}` | Return the text of one span from the trace as titled sections: a turn's `input`; a provider request's `input`, `request` (token estimates) and `reply`; a tool's `arguments` and `result`; a compaction's `summary`; a sub-agent's `prompt` and `result`. Empty sections are omitted. The text is the session content as stored, which the agent redacts before writing it. `404` for an unknown session or span; `409 trace_unavailable` as above. |
-| `POST /v1/sessions/{id}/profile` | With `{"profile":"<name>"}`, rebuild the session on another configured profile and return the session; it makes no model request and never writes the configuration file, so other sessions and the next start keep their profile. `400` for a missing, empty or unknown profile; `409 turn_active` while a turn runs, or `409 profile_switch_unavailable` when the session withholds dynamic content or policy forbids a dynamic profile. |
+| `POST /v1/sessions/{id}/model` | With `{"model":"<provider>/<model_id>"}`, rebuild the session on that model and return the session; it makes no model request and never writes the configuration file, so other sessions and the next start keep their model. `400` for a missing, empty, malformed or unknown selector; `409 turn_active` while a turn runs, or `409 model_switch_unavailable` when the session withholds dynamic content or policy forbids a dynamic model. `/v1/sessions/{id}/profile` and `/v1/config/profiles*` are removed and return `404`. |
+| `GET /v1/config/providers` | Return `{"default_model","providers":[...]}`. Each provider has `name`, `type`, `builtin`, the optional `base_url`, `api_key_env`, `api_version` and `workspace_id_env`, and `models`, a list of `{model_id, selector, default, thinking?, context_window?, compaction_window?}`. Built-in providers are always listed. API keys appear only as environment variable names. |
+| `GET /v1/config/providers/{name}` | Return one provider in the same shape; `404 provider_not_found`. |
+| `GET /v1/config/models?provider=<name>` | Query the provider's model catalog: `{"provider","models":[ids]}`. `501 models_unsupported` for `chatgpt`, `400 invalid_provider` for an unsupported provider type, `400 api_key_unavailable` when the key variable is unset, `404 provider_not_found`, `502 models_failed` when the endpoint request fails. |
+| `POST /v1/config/changes` | Prepare an approval-gated change to the user configuration. Body `{"kind":...}` with `set_default_model{model}`, `set_provider{provider,type,base_url?,api_key_env?,api_version?,workspace_id_env?}`, `set_provider_field{provider,field,value}`, `remove_provider{provider}`, `set_model{model,thinking?}`, `set_model_field{model,field:"thinking",value}` or `remove_model{model}`. Returns `{"id","expires_in_seconds","operation","target","field"?,"diff"}`; the preview holds no API-key values. `400 invalid_provider`, `invalid_field` or `invalid_change`; `409 model_in_use` when `default_model` or `approval.reviewer_model` selects the target; `409 legacy_profiles_config` while the host file still holds `profiles`, `default_profile` or `approval.reviewer_profile` (convert it first, see [migration](getting-started.md#migrating-from-profiles)). A prepared change is confirmed with `POST /v1/config/changes/{id}` (`404` unknown or used id, `409` configuration changed since the preview, `410` expired; a restart is required afterwards) or cancelled with `DELETE /v1/config/changes/{id}` (`204`). |
+| `GET /v1/config/providers` | List providers with their model tables. API keys appear only as environment variable names, never as values. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
@@ -481,7 +486,7 @@ are served at the root. Request and error bodies are JSON.
 | `POST /v1/workflows/requests/{id}/approve` | Approve a durable workflow gate. Searches every loaded workspace for the request id. |
 | `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate: the run is canceled and its in-flight attempts stop. Searches every loaded workspace for the request id. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to every loaded workspace; `409` while any session in any loaded workspace has a turn in flight, or `409 sandbox_reload_failed` when any workspace's reload fails; `501` when the process has no reloadable sandbox. With one loaded workspace, returns the sandbox object now in effect, as before; with more than one, the startup workspace's sandbox fields stay at the top level and an added `workspaces` array carries each workspace's own `{"workspace", "sandbox", "error"}` (`sandbox` and `error` are mutually exclusive). |
-| `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
+| `GET /v1/info` | Process-level static info: workspace, `provider` (provider name), `provider_type`, `model` (model ID), sandbox summary, and `models`, the configured selectors (`<provider>/<model_id>`). |
 | `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |
 | `GET /v1/usage/daily?days=30&session_id=<id>` | Return zero-filled daily usage and range totals for 1 to 365 UTC days. `session_id` is optional. |
 | `GET /v1/openapi.yaml` | The OpenAPI 3.1 document for this API. |
@@ -541,7 +546,7 @@ and no later request re-opens it. Use `POST /v1/sessions` with
   "name": "dev",
   "workspace": "...",
   "provider": "...",
-  "profile": "...",
+  "provider_type": "...",
   "model": "...",
   "context_window": 0,
   "usage": {
@@ -644,7 +649,7 @@ Status codes:
 
 Each normal provider response, compaction summary, and sub-agent provider
 response appends a content-free row to `~/.otto/usage.db`. The row contains
-time, workspace/session/task identifiers, provider/profile/model, usage
+time, workspace/session/task identifiers, provider/model (the model column stores the selector), usage
 presence, and token counts; it never contains prompts, response text, tool
 arguments, or tool output. Collection, SQLite storage, and the HTTP/UI query
 path are separate boundaries.
@@ -762,11 +767,11 @@ an ACP client as a child process. stdout carries only JSON-RPC frames;
 warnings and diagnostics go to stderr.
 
 ```bash
-otto acp [--config PATH] [--cwd PATH] [--profile NAME] ...
+otto acp [--config PATH] [--cwd PATH] [--model PROVIDER/MODEL_ID] ...
 ```
 
-`acp` accepts `--config`, `--cwd`, `--profile`, `--provider`, `--base-url`,
-`--model`, `--thinking`, `--sandbox`, `--shell-timeout`, and
+`acp` accepts `--config`, `--cwd`, `--model`, `--base-url`, `--thinking`,
+the deprecated `--profile` and `--provider`, `--sandbox`, `--shell-timeout`, and
 `--max-output-bytes`. It rejects `--ui`, `--prompt`, `--resume`,
 `--continue`, `--no-session`, `--archive`, and the `serve`-only flags;
 `--socket` is accepted only with `--attach`.
@@ -829,7 +834,7 @@ After `session/new` and `session/load` has replied, Otto sends a
 `session/update` of type `available_commands_update` listing `compact`,
 `context`, `model`, `skill`, `steer`, `queue`, and `auto`.
 A `session/prompt` containing `/context`, `/compact [focus]`, `/model`, or
-`/model <profile>` is run by Otto itself and is not sent to the task model. Command names must match
+`/model <provider>/<model_id>` is run by Otto itself and is not sent to the task model. Command names must match
 whole words; `/compactx`, `/models` or a sentence that contains `/context` is a normal
 prompt. `otto acp --attach` does the same, running the command on
 `otto serve` through its existing HTTP APIs. Each command answers with one
@@ -862,15 +867,17 @@ JSON-only, separate from the running prompt's updates.
   summary, memory, messages). It never includes the text of any part. When
   the session withholds dynamic content, the reply is "The context report is
   not available in this session."
-- `/model` replies with the session's profile, provider, model and effort,
-  then `Configured profiles: <names>` and `Switch with /model <profile>.`
-- `/model <profile>` rebuilds this session's runner on another configured
-  profile and replies `Switched to profile <name> (provider <provider>, model
-  <model>).` It makes no model request and never writes the configuration
-  file, so other sessions and the next start keep their profile; an unknown
-  profile answers with an error instead of a model turn. This is the same
-  session-level switch as the TUI's `/model`, which additionally saves the
-  default profile.
+- `/model` replies `Model <selector> (type <type>[, thinking <effort>])`,
+  then `Configured models: <selectors>` and
+  `Switch with /model <provider>/<model_id>.`; with no configured models the
+  last two lines are `No models are configured; add one on the host to switch.`
+- `/model <provider>/<model_id>` rebuilds this session's runner on that model
+  and replies `Switched to model <selector> (type <type>).` A bare model ID
+  answers ``model `X` has no provider; use /model <provider>/<model_id>``. It makes no model
+  request and never writes the configuration file, so other sessions and the
+  next start keep their model; an unknown selector answers with an error
+  instead of a model turn. This is the same session-level switch as the TUI's
+  `/model`, which additionally saves `default_model`. See [provider and model configuration](getting-started.md#providers-and-models).
 
 During a prompt Otto sends assistant text as `agent_message_chunk`,
 reasoning as `agent_thought_chunk`, and each tool call as a `tool_call`
@@ -994,7 +1001,7 @@ and maps each chat to one Otto session. Provider selection and authentication
 always belong to that Otto runtime. For example, a Claude key must be present
 in the environment of `otto acp` or `otto serve`, never in `connect.toml` or the
 connector process when it connects to an existing server. Restart the Otto
-runtime after changing its profile or credentials; restarting only the
+runtime after changing its model configuration or credentials; restarting only the
 connector does not update a running server.
 Telegram and Feishu can be enabled in the same process.
 
@@ -1062,7 +1069,7 @@ listen = "127.0.0.1:9465"          # the default; "" turns the endpoint off
   `[telegram]` and `[feishu]` is required.
 - The agent process starts with `workspace` as its working directory, and
   every session uses it as `cwd`. Otto flags go into `command`, for example
-  `["otto", "acp", "--profile", "work"]`.
+  `["otto", "acp", "--model", "claude/MODEL_ID"]`.
 - The Telegram bot token is read from the environment variable that
   `token_env` names, and the Feishu app secret from the one that
   `app_secret_env` names; an empty or unset variable fails startup. A `token`
@@ -1070,7 +1077,7 @@ listen = "127.0.0.1:9465"          # the default; "" turns the endpoint off
   load. `app_id` is not a secret and is required. The agent process is
   started without these variables, so tools run by Otto cannot read them.
 - `otto acp` inherits the rest of the environment and reads its provider key
-  as usual (the profile's `api_key_env` variable or `OTTO_API_KEY`), or uses
+  as usual (the provider's `api_key_env` variable or `OTTO_API_KEY`), or uses
   the `chatgpt` provider after `otto login`. For Claude, export the selected
   API-key variable (and optional `workspace_id_env`) in the environment that
   starts `otto acp`; `otto-connect` never reads, stores, or forwards either
@@ -1180,7 +1187,7 @@ Build the two programs first (`make build`, `make connect-build`), or install
 them and set `OTTO_BIN` and `OTTO_CONNECT_BIN`.
 
 It reads the same `otto.env` as [the launcher](getting-started.md#launcher-script), so the
-provider, model, profile, base URL, workspace, sandbox mode, thinking effort
+provider and model selector, base URL, workspace, sandbox mode, thinking effort
 and shell limits are shared with the terminal frontends:
 
 | Setting | Meaning |
@@ -1317,7 +1324,7 @@ a log line.
 A message whose whole text is one of these commands (for `/use`, the
 command and its argument) is handled by `otto-connect` and not sent to Otto,
 except `/compact`, `/context`, and `/skill`, which are sent to
-Otto as typed for agent-side command handling, and `/model <profile>`, which the
+Otto as typed for agent-side command handling, and `/model <provider>/<model_id>`, which the
 connector forwards to Otto as a prompt. Bare `/model` is answered by the
 connector itself.
 Any other text, including other words starting with `/`, is a prompt.
@@ -1330,8 +1337,8 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/queue <prompt>` | Queues an independent prompt without model routing. Starts immediately when idle, otherwise waits behind the task and any approval; acknowledges actual admission. |
 | `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](servers-and-connectors.md#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
-| `/model` | Answered by `otto-connect`: it posts the profiles from the local `~/.config/otto/config.toml`, one line each with provider and model, plus one button per profile. Choosing a button switches the conversation exactly as `/model <profile>` does. On a platform without buttons the same list is posted as text. It makes no model request. The list covers the user configuration only (a workspace's `.otto/config.toml` is not read), and it marks the configured default profile, not the session's current one. |
-| `/model <profile>` | Sent to Otto as a prompt; `otto acp` rebuilds this session on the named profile, replies "Switched to profile …", and leaves the configuration file and every other session unchanged. It works whether the connector runs `otto acp` or `otto acp --attach`, uses no model request, and is therefore the way to move off a profile whose quota is exhausted. An unknown profile answers with an error. |
+| `/model` | Answered by `otto-connect`: it posts the models from the local `~/.config/otto/config.toml` (`[providers.<name>.models]`, and converted legacy `[profiles]`), one line each as `provider/model_id`, plus one button per model. Choosing a button switches the conversation exactly as `/model <provider>/<model_id>` does. On a platform without buttons the same list is posted as text. It makes no model request. The list covers the user configuration only (a workspace's `.otto/config.toml` is not read), and it marks the configured `default_model`, not the session's current one. |
+| `/model <provider>/<model_id>` | Sent to Otto as a prompt; `otto acp` rebuilds this session on the named model, replies "Switched to model …", and leaves the configuration file and every other session unchanged. It works whether the connector runs `otto acp` or `otto acp --attach`, uses no model request, and is therefore the way to move off a model whose quota is exhausted. An unknown selector answers with an error. |
 | `/allow` | Answers the pending permission request with Allow once. |
 | `/deny` | Answers the pending permission request with Deny. |
 | `/sessions` | Lists the 10 newest sessions of the workspace, one per line: `*` for the chat's session or a space, the first 8 characters of the id, the last change as `YYYY-MM-DD HH:MM` (`-` when unknown), and the title (`(untitled)` when empty). With none: "No sessions." |
@@ -1342,7 +1349,7 @@ Any other text, including other words starting with `/`, is a prompt.
 
 At startup `otto-connect` sets the Telegram bot's command menu to these
 commands, including `/compact`, `/context`, `/model`, `/skill`, `/steer`, and `/queue`, and to `/models` and `/config` (see
-[Provider-profile management](servers-and-connectors.md#provider-profile-management)): `setMyCommands`
+[Provider and model management](servers-and-connectors.md#provider-and-model-management)): `setMyCommands`
 for the default scope, then `deleteMyCommands` for the `all_private_chats` and
 `all_group_chats` scopes, whose lists Telegram would show instead. Lists set
 for a single chat, for chat administrators, or for a specific language are not
@@ -1366,42 +1373,49 @@ A message that arrives while `/use` is loading gets "A session switch is in
 progress; the message was not queued." A failed `session/list` call in
 `/sessions` or `/use` gets "Error: session/list failed: `<error>`".
 
-### Provider-profile management
+### Provider and model management
 
 When the connector starts `otto acp --attach`, the same admitted chat senders
-can manage Otto's existing provider profiles through the running `otto serve`:
+can manage models ([format](getting-started.md#providers-and-models)) through
+the running `otto serve`:
 
 ```text
 /config
-/config profiles
-/config show <profile>
-/models <profile>
-/config add <profile> --provider chatgpt --model <model> [--thinking <level>]
-/config set <profile> <model|thinking> <value>
-/config use <profile>
-/config remove <profile>
-/config confirm <token>
-/config cancel
+/config models
+/config show <provider>
+/models <provider>
+/config add <provider>/<model_id> [--thinking <level>]
+/config set <provider>/<model_id> thinking <level>
+/config use <provider>/<model_id>
+/config remove <provider>/<model_id>
+/config confirm <id>
+/config cancel <id>
 ```
 
-`/config` lists names/providers/models/default; `show` adds endpoint and API-key
-**variable name**, never its value. `/models` queries OpenAI-compatible model
-IDs; this connector command does not enumerate ChatGPT models.
+`/config` and `/config models` list the default model and each
+`provider/model_id`. `show <provider>` adds the endpoint and API-key
+**variable name**, never its value. `/models <provider>` queries the provider's
+model IDs through `GET /v1/config/models`; it reports an error for `chatgpt`.
+`add` creates a model table, `set` changes its `thinking`, `use` sets
+`default_model`, and `remove` deletes the table.
 
 Management requires `otto acp --attach` and a running server. Direct ACP rejects
-these commands without sending them to the model; `/model <profile>` still
-switches the current conversation in either deployment without saving config.
+these commands without sending them to the model; `/model <provider>/<model_id>`
+still switches the current conversation in either deployment without saving
+config.
 
-Mutations return a redacted preview and one-time token. The same chat/sender
-must `/config confirm <token>` within ten minutes, or `/config cancel`. No raw
-TOML, arbitrary writes, credential values or unsupported providers are accepted.
-Base URL and API-key binding are **host-only**: chat cannot change where server
-environment credentials are sent. Thus OpenAI-compatible profile creation and
-`--base-url`/`--api-key-env` changes must be performed on the host.
+Each mutation calls `POST /v1/config/changes` and returns a redacted preview
+and an id. The same chat and sender must `/config confirm <id>` within ten
+minutes, or `/config cancel <id>`. No raw TOML, arbitrary writes or credential
+values are accepted. Chat cannot create or edit providers: creating a provider
+or changing its `base_url`, `api_key_env`, `api_version` or `workspace_id_env`
+is host-only, so chat cannot change where server environment credentials are
+sent. A change is refused with `legacy_profiles_config` while the host file
+still uses `[profiles]`.
 
 Restart `otto serve` after saving; existing sessions never silently switch.
 On failed previews search connector/server logs for `request_id`. Logs contain
-IDs/profile names/outcomes, not text, config bytes or credential values.
+IDs/selectors/outcomes, not text, config bytes or credential values.
 
 ### Memory review
 

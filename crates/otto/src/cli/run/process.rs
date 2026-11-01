@@ -75,6 +75,9 @@ pub async fn run_with_extensions(
             return 2;
         }
     };
+    for warning in options.deprecation_warnings() {
+        let _ = stderr.write_all(warning.as_bytes());
+    }
     let host_entries = match capture_environment(environment_entries) {
         Ok(entries) => entries,
         Err(message) => return fail(stderr, &message),

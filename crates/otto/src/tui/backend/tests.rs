@@ -10,8 +10,8 @@ async fn repeated_reads_are_coalesced_and_keep_the_original_ticket() {
         surface: 7,
         generation: 4,
     };
-    driver.submit(ticket.clone(), Request::Profiles);
-    driver.submit(ticket.clone(), Request::Profiles);
+    driver.submit(ticket.clone(), Request::Models);
+    driver.submit(ticket.clone(), Request::Models);
     let completion = driver.next().await;
     assert_eq!(completion.ticket, ticket);
     assert!(completion.result.is_err());
@@ -49,28 +49,31 @@ async fn profile_switch_saves_the_default_and_reports_the_applied_profile() {
         toml::to_string(&crate::cli::fixture_tests::config()).unwrap(),
     )
     .unwrap();
-    let reply = local_command(controller.clone(), Command::SwitchProfile("beta".into()))
-        .await
-        .unwrap();
+    let reply = local_command(
+        controller.clone(),
+        Command::SwitchModel("beta/gpt-beta".into()),
+    )
+    .await
+    .unwrap();
     assert!(
-        matches!(reply, Reply::Operation { info, history: Some(_), message, .. } if info.profile == "beta" && message.contains("Set as default profile"))
+        matches!(reply, Reply::Operation { info, history: Some(_), message, .. } if info.model_selector == "beta/gpt-beta" && message.contains("Set as default model"))
     );
     let saved =
         otto_core::config::parse(&std::fs::read_to_string(controller.config_path()).unwrap())
             .unwrap();
-    assert_eq!(saved.default_profile, "beta");
+    assert_eq!(saved.default_model, "beta/gpt-beta");
 }
 
 #[tokio::test]
-async fn profile_switch_receipt_survives_a_later_thinking_failure() {
+async fn model_switch_receipt_survives_a_later_thinking_failure() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let controller =
         Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
     let reply = local_command(
         controller,
-        Command::SwitchProfileThinking {
-            profile: "beta".into(),
+        Command::SwitchModelThinking {
+            model: "beta/gpt-beta".into(),
             thinking: "invalid".into(),
             save: false,
         },
@@ -78,7 +81,7 @@ async fn profile_switch_receipt_survives_a_later_thinking_failure() {
     .await
     .unwrap();
     assert!(
-        matches!(reply, Reply::Operation { info, history: Some(_), message, .. } if info.profile == "beta" && message.contains("/thinking:") && message.contains("switch was applied"))
+        matches!(reply, Reply::Operation { info, history: Some(_), message, .. } if info.model_selector == "beta/gpt-beta" && message.contains("/thinking:") && message.contains("switch was applied"))
     );
 }
 
@@ -99,7 +102,7 @@ async fn thinking_save_failure_keeps_the_applied_state_receipt() {
     .await
     .unwrap();
     assert!(
-        matches!(reply, Reply::Operation { info, message, .. } if info.thinking == "high" && message.contains("profile was not saved"))
+        matches!(reply, Reply::Operation { info, message, .. } if info.thinking == "high" && message.contains("model was not saved"))
     );
 }
 

@@ -11,18 +11,18 @@ external operation did nothing: inspect state before repeating a write.
 
 ### `otto: missing api key`
 
-Set the active profile's `api_key_env` variable privately in the runtime's
+Set the active provider's `api_key_env` variable privately in the runtime's
 environment, then restart. For Claude this is normally `ANTHROPIC_API_KEY`; if
 the key is not scoped to one workspace, also set the variable named by
 `workspace_id_env`. When using `otto-connect`, change the environment of the
 `otto acp` child or existing `otto serve` process that performs model requests,
 not the chat connector's config. Use `otto config explain --json` to check the
-active profile/source without resolving credentials. Never paste a key into
+active provider and its source without resolving credentials. Never paste a key into
 chat.
 
 ### `otto: missing base_url`, `otto: invalid base_url`, or request failures
 
-Check the selected profile, `--base-url` and endpoint path. Claude requests use
+Check the selected provider, `--base-url` and endpoint path. Claude requests use
 `<base-url>/v1/messages` and require the configured `anthropic-version`; the
 default base URL is `https://api.anthropic.com`. OpenAI-compatible requests go
 to `<base-url>/chat/completions`; confirm the endpoint supports streaming chat
@@ -75,8 +75,9 @@ checkpoint for a typed context overflow. If still failing:
 
 - `/compact [focus]` creates a manual checkpoint; `/new` starts fresh.
 - Reduce large pasted inputs/tool output.
-- Set profile `context_window`/`compaction_window` for private/unknown models,
-  or select a profile/model with a larger window.
+- Set `context_window`/`compaction_window` in the model table
+  (`[providers.<name>.models."<model_id>"]`) for private/unknown models, or
+  select a model with a larger window.
 
 See [context compaction](interactive-use.md#context-compaction); compaction does
 not erase the append-only session history.

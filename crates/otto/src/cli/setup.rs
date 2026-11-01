@@ -276,7 +276,10 @@ mod tests {
         let text = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
         let file = otto_core::config::parse(&text).unwrap();
         assert_eq!(file.default_model, "claude/fixture-claude");
-        assert!(!text.contains("[providers.claude]"), "{text}");
+        assert!(
+            text.contains("[providers.claude]\ntype = \"claude\"\nmodels.\"fixture-claude\" = {}"),
+            "{text}"
+        );
         assert!(!text.contains("api_key_env"), "{text}");
         let runtime = otto_core::config::resolve(
             &file,
@@ -309,7 +312,10 @@ mod tests {
             config.contains("default_model = \"chatgpt/my-model\""),
             "{config}"
         );
-        assert!(!config.contains("[providers.chatgpt]"), "{config}");
+        assert!(
+            config.contains("[providers.chatgpt]\ntype = \"chatgpt\"\nmodels.\"my-model\" = {}"),
+            "{config}"
+        );
         assert!(!config.contains("profile"), "{config}");
         assert!(!config.contains("api_key"), "{config}");
         assert!(!config.contains("subagent_models"), "{config}");

@@ -1,7 +1,13 @@
-//! Shared scaffolding for the `cli` unit tests: a two-provider configuration
-//! that resolves offline, and a [`Controller`] built on temporary
-//! directories. Used by `controller.rs` and `repl.rs`, which both need a
-//! working composition root but never reach the provider.
+//! Test support shared by this crate's unit tests and by the tests of the
+//! crates that build on it: a two-provider configuration that resolves
+//! offline, a [`Controller`] built on temporary directories, and
+//! [`scripted_provider`], a loopback OpenAI-compatible origin server.
+//!
+//! Compiled under `cfg(test)` or the `test-support` feature; never part of a
+//! shipped build. `test-support` implies `fault-injection`, because the
+//! scripted provider runs on `crate::faults::http`.
+
+pub mod scripted_provider;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,7 +20,7 @@ use otto_core::config::providers::{ModelEntry, ProviderEntry};
 use otto_core::config::resolve::{Overrides, Runtime};
 use otto_core::model::{Block, BlockType, Message, Role};
 
-use super::controller::Controller;
+use crate::app::Controller;
 use crate::runtime::builder::{Builder, Shared, resolve_initial_runtime};
 use crate::runtime::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
@@ -208,7 +214,7 @@ pub async fn controller(workspace_root: &Path, session_root: &Path) -> Controlle
 
 /// A controller whose builder carries a usable file-backed memory service.
 /// Shared with `tui::app`'s tests, which need the same fixture to exercise
-/// `/memory`/`/remember` dispatch; `repl_commands.rs`'s own memory tests
+/// `/memory`/`/remember` dispatch; `cli/repl_commands`'s own memory tests
 /// keep their private copy since it predates this one.
 pub async fn controller_with_memory(
     workspace: &Path,

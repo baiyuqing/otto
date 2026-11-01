@@ -3,7 +3,7 @@ use crate::runtime::mcp_server_fixture_tests::shell_mcp_server;
 use otto_core::config::{McpRuntime, McpServerRuntime};
 
 fn builder_with_servers(root: &std::path::Path, servers: Vec<McpServerRuntime>) -> Builder {
-    let mut builder = crate::cli::fixture_tests::builder(root, &root.join("sessions"));
+    let mut builder = crate::fixtures::builder(root, &root.join("sessions"));
     builder.mcp = McpRuntime {
         enabled: true,
         call_timeout_secs: 5,

@@ -110,6 +110,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Development
 
+- The test scaffolding shared by the crate's tests is `otto::fixtures`, compiled
+  under `cfg(test)` or the new `test-support` feature (which implies
+  `fault-injection`); it holds the former `cli::fixture_tests` and the scripted
+  provider server from the integration-test harness, so the tests of dependent
+  crates can use both through a dev-dependency. First step of the crate split.
 - `otto eval view-tree` evaluates a summary-tree context view on an existing
   session: it builds the tree with the compressor model, generates and
   validates recall probes, answers them with zoom over the view and with the

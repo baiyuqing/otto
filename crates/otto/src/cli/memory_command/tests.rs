@@ -91,7 +91,7 @@ fn status_reports_standing_usage_and_over_budget_records() {
         "{empty}"
     );
 
-    crate::cli::fixture_tests::seed_over_budget_standing(&store_dir(home.path()));
+    crate::fixtures::seed_over_budget_standing(&store_dir(home.path()));
     let over = status();
     let line = over
         .lines()

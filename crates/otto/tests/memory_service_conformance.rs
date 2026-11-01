@@ -1,6 +1,6 @@
 //! An independent Rust service: no Otto repository or storage implementation.
-mod binary_harness;
 
+use otto::fixtures::scripted_provider;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},

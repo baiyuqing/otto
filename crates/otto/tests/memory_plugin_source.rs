@@ -1,10 +1,10 @@
 //! A `[memory] backend = "plugin:<package>"` source: the package's memory
 //! command replaces the file store. Offline: a scripted provider and a shell
 //! script package that logs its requests.
-mod binary_harness;
 #[path = "memory_plugin_source/fixture.rs"]
 mod fixture;
 
+use otto::fixtures::scripted_provider;
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use fixture::{Fixture, RECALL_MARKER, plugin_memory_config};
@@ -30,7 +30,7 @@ fn run<F: std::future::Future<Output = ()> + Send + 'static>(future: F) {
 }
 
 fn serve(replies: Vec<String>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
-    binary_harness::serve(binary_harness::Script {
+    scripted_provider::serve(scripted_provider::Script {
         replies,
         served: Arc::new(AtomicUsize::new(0)),
     })
@@ -83,7 +83,7 @@ fn recall_reaches_the_request_and_the_file_store_stays_closed() {
     run(async {
         let fixture = Fixture::new();
         fixture.install(true, false);
-        let (url, requests) = serve(vec![binary_harness::text_reply("done")]);
+        let (url, requests) = serve(vec![scripted_provider::text_reply("done")]);
         let otto = fixture
             .builder(&url, &plugin_memory_config())
             .build()
@@ -109,7 +109,7 @@ fn a_failing_recall_command_is_a_warning_and_the_turn_completes() {
     run(async {
         let fixture = Fixture::new();
         fixture.install(true, true);
-        let (url, _) = serve(vec![binary_harness::text_reply("done")]);
+        let (url, _) = serve(vec![scripted_provider::text_reply("done")]);
         let otto = fixture
             .builder(&url, &plugin_memory_config())
             .build()
@@ -128,7 +128,7 @@ fn disabled_memory_never_runs_the_package_command() {
     run(async {
         let fixture = Fixture::new();
         fixture.install(true, false);
-        let (url, requests) = serve(vec![binary_harness::text_reply("done")]);
+        let (url, requests) = serve(vec![scripted_provider::text_reply("done")]);
         let memory = format!("{}\nenabled = false", plugin_memory_config());
         let otto = fixture.builder(&url, &memory).build().await.unwrap();
         let session = otto.new_session(None).await.unwrap();
@@ -150,8 +150,8 @@ fn a_finished_turn_is_observed_with_text_tool_call_and_tool_result() {
         std::fs::create_dir_all(fixture.workspace()).unwrap();
         std::fs::write(fixture.workspace().join("notes.txt"), "file-body-marker").unwrap();
         let (url, _) = serve(vec![
-            binary_harness::tool_call_reply("call-1", "read", r#"{"path":"notes.txt"}"#),
-            binary_harness::text_reply("assistant-final-text"),
+            scripted_provider::tool_call_reply("call-1", "read", r#"{"path":"notes.txt"}"#),
+            scripted_provider::text_reply("assistant-final-text"),
         ]);
         let otto = fixture
             .builder(&url, &plugin_memory_config())
@@ -215,7 +215,7 @@ fn an_untrusted_package_gives_no_memory_tools_when_not_required() {
     run(async {
         let fixture = Fixture::new();
         fixture.install(false, false);
-        let (url, requests) = serve(vec![binary_harness::text_reply("done")]);
+        let (url, requests) = serve(vec![scripted_provider::text_reply("done")]);
         let otto = fixture
             .builder(&url, &plugin_memory_config())
             .build()

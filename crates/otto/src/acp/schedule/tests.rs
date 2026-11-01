@@ -459,10 +459,10 @@ async fn writes_back_after_prompt(meta: Value) -> bool {
         .claim_deliveries(&Scope::Any, Duration::from_secs(60), 10, now)
         .unwrap();
     assert!(store.delivered(item.id, item.due_at, now).unwrap());
-    let mut builder = crate::cli::fixture_tests::builder(workspace.path(), sessions.path());
+    let mut builder = crate::fixtures::builder(workspace.path(), sessions.path());
     builder.shared_mut().schedule = Some(store);
     let builder = Arc::new(builder);
-    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+    let runtime = crate::fixtures::initial_runtime(&builder);
     let controller = crate::app::Controller::create(Arc::clone(&builder), &runtime)
         .await
         .unwrap();

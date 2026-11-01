@@ -170,7 +170,7 @@ fn both_reload_paths_keep_interleaved_approvals_in_place_through_updates() {
     for receipt in [false, true] {
         let (mut app, _) = app();
         let history = vec![
-            crate::cli::fixture_tests::user("same input"),
+            crate::fixtures::user("same input"),
             Message {
                 role: Role::Assistant,
                 blocks: vec![Block {
@@ -197,7 +197,7 @@ fn both_reload_paths_keep_interleaved_approvals_in_place_through_updates() {
                 blocks: vec![Block::text("reply")],
                 ..Message::default()
             },
-            crate::cli::fixture_tests::user("same input"),
+            crate::fixtures::user("same input"),
             Message {
                 role: Role::Assistant,
                 blocks: vec![Block::text("last reply")],
@@ -262,7 +262,7 @@ fn both_reload_paths_keep_interleaved_approvals_in_place_through_updates() {
             assert_eq!(retained, requests.iter().collect::<Vec<_>>());
         }
         let mut extended = history.clone();
-        extended.push(crate::cli::fixture_tests::user("new input"));
+        extended.push(crate::fixtures::user("new input"));
         reload_approvals(&mut app, extended, receipt);
         let mut expected_extended = expected;
         expected_extended.push("new input");
@@ -275,8 +275,8 @@ fn both_reload_paths_anchor_before_surviving_successor_when_predecessor_is_gone(
     for receipt in [false, true] {
         let (mut app, _) = app();
         let history = vec![
-            crate::cli::fixture_tests::user("removed"),
-            crate::cli::fixture_tests::user("surviving"),
+            crate::fixtures::user("removed"),
+            crate::fixtures::user("surviving"),
         ];
         let (rows, _) = crate::tui::entries::entries_from_history(&history);
         app.entries.push(rows[0].clone());
@@ -311,7 +311,7 @@ fn same_session_history_refresh_retains_live_projection_but_not_new_session_or_p
         OperationReceipt {
             message: String::new(),
             info: app.info.clone(),
-            history: Some(vec![crate::cli::fixture_tests::user("retained user input")]),
+            history: Some(vec![crate::fixtures::user("retained user input")]),
             prompt: None,
             draft: None,
         },

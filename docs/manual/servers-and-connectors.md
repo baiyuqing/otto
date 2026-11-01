@@ -1396,8 +1396,8 @@ the running `otto serve`:
 `provider/model_id`. `show <provider>` adds the endpoint and API-key
 **variable name**, never its value. `/models <provider>` queries the provider's
 model IDs through `GET /v1/config/models`; it reports an error for `chatgpt`.
-`add` creates a model table, `set` changes its `thinking`, `use` sets
-`default_model`, and `remove` deletes the table.
+`add` creates a model entry, `set` changes its `thinking`, `use` sets
+`default_model`, and `remove` deletes the entry.
 
 Management requires `otto acp --attach` and a running server. Direct ACP rejects
 these commands without sending them to the model; `/model <provider>/<model_id>`

@@ -220,7 +220,7 @@ impl Snapshot {
                     .iter()
                     .map(|d| format!("plugin {}: {d}", installed.name)),
             );
-            if !installed.trusted && package.otto.has_executables() {
+            if !installed.trusted && package.has_executables() {
                 snapshot.diagnostics.push(format!(
                     "plugin {}: hooks, custom tools and memory disabled; run otto plugin trust {}",
                     installed.name, installed.name
@@ -319,6 +319,7 @@ pub(super) fn expand(raw: &str, root: &Path, data: &Path, legacy: bool) -> Strin
     if legacy {
         value
             .replace("${CLAUDE_PLUGIN_ROOT}", &root.to_string_lossy())
+            .replace("${CLAUDE_PLUGIN_DATA}", &data.to_string_lossy())
             .replace("${CODEX_PLUGIN_ROOT}", &root.to_string_lossy())
     } else {
         value
@@ -326,7 +327,10 @@ pub(super) fn expand(raw: &str, root: &Path, data: &Path, legacy: bool) -> Strin
 }
 fn confined_path(raw: &str, root: &Path, data: &Path, legacy: bool) -> Result<String, String> {
     let expanded = expand(raw, root, data, legacy);
-    let in_data = raw == "${PLUGIN_DATA}" || raw.starts_with("${PLUGIN_DATA}/");
+    let in_data = raw == "${PLUGIN_DATA}"
+        || raw.starts_with("${PLUGIN_DATA}/")
+        || (legacy
+            && (raw == "${CLAUDE_PLUGIN_DATA}" || raw.starts_with("${CLAUDE_PLUGIN_DATA}/")));
     let in_root = raw == "${PLUGIN_ROOT}"
         || raw.starts_with("${PLUGIN_ROOT}/")
         || raw.starts_with("./")

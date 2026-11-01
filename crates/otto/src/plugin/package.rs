@@ -26,6 +26,17 @@ pub struct Package {
         skip_serializing_if = "otto_core::config::plugins::Components::is_default"
     )]
     pub otto: otto_core::config::plugins::Components,
+    /// `command` hooks of a `claude` package in the Claude Code hook format; see
+    /// `super::claude_hooks`. Absent from registries written before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_hooks: Vec<super::claude_hooks::ClaudeHook>,
+}
+impl Package {
+    /// Whether trusting the package authorizes commands: `dev.otto` hooks, tools or memory,
+    /// or Claude-format hooks.
+    pub fn has_executables(&self) -> bool {
+        self.otto.has_executables() || !self.claude_hooks.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -139,6 +150,7 @@ pub fn discover(path: &Path) -> Result<Package, String> {
         servers: Vec::new(),
         diagnostics: Vec::new(),
         otto: Default::default(),
+        claude_hooks: Vec::new(),
     };
     if let Some(value) = manifest.pointer("/extensions/dev.otto") {
         package.otto =
@@ -203,8 +215,15 @@ pub fn discover(path: &Path) -> Result<Package, String> {
             }
         }
     } else {
+        // `claude` packages run their hooks natively; `codex` packages still report them.
+        let native_hooks = format == "claude";
+        if native_hooks {
+            let discovered = super::claude_hooks::manifest::discover(&root, &manifest);
+            package.claude_hooks = discovered.hooks;
+            package.diagnostics.extend(discovered.diagnostics);
+        }
         for key in ["commands", "agents", "hooks", "apps", "lspServers"] {
-            if manifest.get(key).is_some() {
+            if manifest.get(key).is_some() && !(native_hooks && key == "hooks") {
                 package
                     .diagnostics
                     .push(format!("unsupported component {key}"));
@@ -216,6 +235,9 @@ pub fn discover(path: &Path) -> Result<Package, String> {
             ("hooks", "hooks/hooks.json"),
             ("LSP", ".lsp.json"),
         ] {
+            if native_hooks && component == "hooks" {
+                continue;
+            }
             if root.lstat(Path::new(location)).is_ok() {
                 package
                     .diagnostics

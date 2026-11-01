@@ -153,6 +153,12 @@ The other modules group native responsibilities:
 - **Test-only fault injection:** `faults/` (compiled under `cfg(test)` or the
   `fault-injection` feature; `faults/http.rs` is the scripted loopback HTTP
   server; see [Fault injection](development/testing.md#fault-injection)).
+- **Test support:** `fixtures.rs` (compiled under `cfg(test)` or the
+  `test-support` feature, which implies `fault-injection`): the offline
+  two-provider configuration, controllers on temporary directories and
+  `fixtures/scripted_provider.rs`, the scripted OpenAI-compatible origin
+  server on `faults/http.rs` that the binary, `embed` and controller tests
+  talk to. Dependent crates enable `test-support` through a dev-dependency.
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
   `urlprivacy.rs`, `tls_provider.rs` (installs `ring` as the process-wide
   rustls crypto provider; every reqwest client is built through its

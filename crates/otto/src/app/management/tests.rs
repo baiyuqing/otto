@@ -58,7 +58,7 @@ impl port::MemoryService for Recorder {
 async fn controller_with_service(service: Arc<Recorder>) -> crate::app::Controller {
     let workspace = tempfile::tempdir().unwrap().keep();
     let sessions = tempfile::tempdir().unwrap().keep();
-    let mut builder = crate::cli::fixture_tests::builder(&workspace, &sessions);
+    let mut builder = crate::fixtures::builder(&workspace, &sessions);
     builder.workspace_scope = crate::memory::Scope {
         namespace: "workspace".into(),
         id: "w1".into(),
@@ -77,7 +77,7 @@ async fn controller_with_service(service: Arc<Recorder>) -> crate::app::Controll
         usable: true,
         ..Default::default()
     };
-    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+    let runtime = crate::fixtures::initial_runtime(&builder);
     let session = builder.create_session(&runtime).unwrap();
     let runner = builder.build_runner(&session, &runtime).await.unwrap();
     let info = builder.runtime_info(&runtime);

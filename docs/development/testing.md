@@ -63,9 +63,13 @@ acceptance criteria.
 ## Fault injection
 
 `otto::faults` provides deterministic seams, compiled only for tests or the
-`fault-injection` feature. The crate's self dev-dependency enables integration
-tests. `crates/otto/tests/faults_boundary.rs` guards production references and
-forbids faults from depending on frontend/runtime/provider/tool modules.
+`fault-injection` feature. The crate's self dev-dependency enables it, together
+with `test-support` (`otto::fixtures`: offline configuration, controllers on
+temporary directories and the scripted provider server), for the integration
+tests. `otto-server`, `otto-acp` and `otto-cli` enable both features through
+a dev-dependency on `otto`. `crates/otto/tests/faults_boundary.rs` guards
+production references and forbids faults from depending on
+frontend/runtime/provider/tool modules.
 
 A `FaultPlan<Op>` holds rules with operation, subject filter (`Any`, `NameSuffix`,
 `NameContains`, `SqlPrefix`), trigger (`Always`, `Nth`, `FromNth`, counted from 1)

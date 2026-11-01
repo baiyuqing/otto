@@ -1666,7 +1666,6 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 name = "otto"
 version = "0.4.8"
 dependencies = [
- "agent-client-protocol-schema",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -1682,7 +1681,6 @@ dependencies = [
  "otto-core",
  "pulldown-cmark",
  "ratatui",
- "rcgen",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1703,6 +1701,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-acp"
+version = "0.4.8"
+dependencies = [
+ "agent-client-protocol-schema",
+ "async-trait",
+ "axum",
+ "chrono",
+ "otto",
+ "otto-core",
+ "otto-server",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "otto-cli"
+version = "0.4.8"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "libc",
+ "nix",
+ "otto",
+ "otto-acp",
+ "otto-core",
+ "otto-server",
+ "rcgen",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "unicode-width",
+]
+
+[[package]]
 name = "otto-core"
 version = "0.4.8"
 dependencies = [
@@ -1720,6 +1760,29 @@ dependencies = [
  "toml",
  "url",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "otto-server"
+version = "0.4.8"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "nix",
+ "otto",
+ "otto-core",
+ "rcgen",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
 ]
 
 [[package]]

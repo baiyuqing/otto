@@ -62,11 +62,7 @@ impl ReplyCollector {
 
 /// Runs `text` as a user turn on `controller`'s current session and maps the
 /// end of the turn to an outcome.
-pub(crate) async fn run(
-    controller: &Controller,
-    text: &str,
-    cancel: &CancellationToken,
-) -> RunOutcome {
+pub async fn run(controller: &Controller, text: &str, cancel: &CancellationToken) -> RunOutcome {
     if let Ok(runner) = controller.runner() {
         runner.set_scheduled_authorization_run("unbound");
     }
@@ -100,7 +96,7 @@ pub(crate) async fn run(
 
 /// Installs creation-time original user evidence, bound to the immutable item.
 /// Generated scheduled prompt text itself supplies no authorization.
-pub(crate) async fn inherit_authority(
+pub async fn inherit_authority(
     controller: &Controller,
     item: &crate::schedule::Item,
 ) -> Result<(), String> {
@@ -267,7 +263,7 @@ mod tests {
     async fn scheduled_lineage_uses_frozen_human_evidence_and_rejects_changed_task() {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
-        let source = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
+        let source = crate::fixtures::controller(workspace.path(), sessions.path()).await;
         let runner = source.runner().unwrap();
         runner
             .record_user_authorization("Check the approved build later; do not publish it.")
@@ -343,8 +339,7 @@ mod tests {
     async fn a_scheduled_delivery_is_a_notice_and_rings_the_bell_once() {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
-        let controller =
-            crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
+        let controller = crate::fixtures::controller(workspace.path(), sessions.path()).await;
         assert!(!controller.take_bell());
         controller.push_scheduled("[scheduled] drink water");
         assert!(controller.take_bell());

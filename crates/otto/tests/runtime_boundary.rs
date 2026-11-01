@@ -1,23 +1,24 @@
 //! Source guard for the layer boundary inside `crates/otto`.
 //!
-//! The frontends (`cli`, `tui`, `acp`, `server`, `client`) build on the
+//! The frontends left in this crate (`cli`, `tui`, `client`) build on the
 //! runtime layer: every other top-level module, including `runtime`, which
 //! assembles the agent. The runtime layer must not depend on a frontend, so
-//! that the two can become separate crates. See
-//! `docs/specs/2026-10-05-otto-crate-split.md`.
+//! that the remaining frontends can move to their own crates as `server` and
+//! `acp` did (`otto-server`, `otto-acp`). See
+//! `docs/development/architecture.md#package-boundaries`.
 //!
 //! The scan covers the non-test source of every runtime module. Test code
-//! may still use frontend helpers such as `cli::fixture_tests`. Fix a failure by
+//! may still import frontend modules. Fix a failure by
 //! moving the item the runtime needs into the runtime layer, not by adding an
 //! exemption.
 
 use std::path::{Path, PathBuf};
 
-/// The frontend modules, which only the frontends and `main.rs` may import.
-const FRONTENDS: &[&str] = &["cli", "tui", "acp", "server", "client"];
+/// The frontend modules, which only the frontends and dependent crates may import.
+const FRONTENDS: &[&str] = &["cli", "tui", "client"];
 
-/// The crate root files, which declare every module and are not a layer.
-const ROOT_FILES: &[&str] = &["lib.rs", "main.rs"];
+/// The crate root file, which declares every module and is not a layer.
+const ROOT_FILES: &[&str] = &["lib.rs"];
 
 fn sources(path: &Path) -> Vec<PathBuf> {
     if path.is_file() {
@@ -202,15 +203,15 @@ fn the_runtime_layer_does_not_depend_on_a_frontend() {
 fn the_scan_finds_paths_groups_and_super_imports() {
     let source = "use crate::cli::run;\n\
                   use crate::{\n    app::Controller,\n    tui::{self, app},\n};\n\
-                  fn f() { super::server::listen(); }\n\
-                  // crate::acp::serve in a comment is ignored\n\
+                  fn f() { super::client::connect(); }\n\
+                  // crate::client::connect in a comment is ignored\n\
                   use crate::clientele::Thing;\n\
                   use crate::{runtime::{cli_like, builder::Runner}, tool};\n";
     assert_eq!(
         frontend_references(source, true),
-        vec!["cli".to_string(), "tui".to_string(), "server".to_string()]
+        vec!["cli".to_string(), "tui".to_string(), "client".to_string()]
     );
-    // Below the top level, `super::server` is a sibling module of that name.
+    // Below the top level, `super::client` is a sibling module of that name.
     assert_eq!(
         frontend_references(source, false),
         vec!["cli".to_string(), "tui".to_string()]
@@ -220,12 +221,12 @@ fn the_scan_finds_paths_groups_and_super_imports() {
 #[test]
 fn test_only_items_are_not_scanned() {
     let source = "use crate::app::Controller;\n\
-                  #[cfg(test)]\nmod mcp_tests {\n    use crate::cli::fixture_tests;\n}\n\
-                  #[cfg(test)]\npub(crate) fn helper() {\n    use crate::cli::fixture_tests::builder;\n}\n\
+                  #[cfg(test)]\nmod mcp_tests {\n    use crate::cli::flags;\n}\n\
+                  #[cfg(test)]\npub(crate) fn helper() {\n    use crate::cli::flags::parse;\n}\n\
                   #[cfg(test)]\nuse crate::tui::app;\n\
-                  fn production() { crate::server::listen(); }\n";
+                  fn production() { crate::client::connect(); }\n";
     assert_eq!(
         frontend_references(&non_test(source), true),
-        vec!["server".to_string()]
+        vec!["client".to_string()]
     );
 }

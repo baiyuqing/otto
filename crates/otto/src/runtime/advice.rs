@@ -280,7 +280,7 @@ mod tests {
         let workspace = directory.path().join("ws");
         let sessions = directory.path().join("sessions");
         std::fs::create_dir_all(&workspace).expect("workspace");
-        let mut builder = crate::cli::fixture_tests::builder(&workspace, &sessions);
+        let mut builder = crate::fixtures::builder(&workspace, &sessions);
         if let Some(key) = key {
             builder
                 .shared_mut()
@@ -344,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn a_built_runner_registers_remember_only_when_memory_is_usable() {
         let (_directory, builder) = selection_builder(None, true);
-        let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+        let runtime = crate::fixtures::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
 
         let runner = builder
@@ -359,7 +359,7 @@ mod tests {
                 .any(|tool| tool.name == "remember")
         );
         let (_directory, builder) = selection_builder(None, false);
-        let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+        let runtime = crate::fixtures::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder
             .build_runner(&session, &runtime)

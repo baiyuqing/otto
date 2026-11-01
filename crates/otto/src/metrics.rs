@@ -163,7 +163,7 @@ impl Metrics {
         Self::with_logger(Arc::new(crate::log::Logger::discard()))
     }
 
-    pub(crate) fn with_logger(logger: Arc<crate::log::Logger>) -> Self {
+    pub fn with_logger(logger: Arc<crate::log::Logger>) -> Self {
         Self {
             state: Mutex::new(State {
                 turn_duration: Some(Histogram::new(TURN_TOOL_BUCKETS)),

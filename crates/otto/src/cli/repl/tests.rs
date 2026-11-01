@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::*;
 use crate::cli::controller::SANDBOX_RELOAD_UNAVAILABLE;
-use crate::cli::fixture_tests::{self, controller, user};
+use crate::fixtures::{self, controller, user};
 use crate::runtime::builder::Runner;
 use crate::runtime::info::SandboxNetwork;
 use crate::subagent::tasks::Tasks;
@@ -62,7 +62,7 @@ impl Write for Buffer {
 async fn background_notices_print_before_the_prompt() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     controller.push_notice("memory: 1 candidate(s) queued for review (/memory review), 0 dropped");
 
     let (stdout, stderr, result) = session("/exit\n", &controller).await;
@@ -103,7 +103,7 @@ async fn session(input: &str, controller: &Controller) -> (String, String, Resul
 async fn idle_repl_decides_a_restored_confirmation_with_feedback_without_a_retry() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     let service = controller.approval_service();
     service
         .set_mode(&controller.approval_scope(), ApprovalMode::Manual)
@@ -376,8 +376,8 @@ fn scripted_controller(
     provider: Arc<ScriptedProvider>,
     tasks: Arc<Tasks>,
 ) -> Controller {
-    let builder = crate::cli::fixture_tests::builder(workspace_root, session_root);
-    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+    let builder = crate::fixtures::builder(workspace_root, session_root);
+    let runtime = crate::fixtures::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let info = builder.runtime_info(&runtime);
     let runner = Runner::scripted(

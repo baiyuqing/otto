@@ -1,14 +1,25 @@
 # Native runtime
 
 The [repository rules](../../AGENTS.md) apply. Start with the
-[ownership map](../../docs/code-organization.md#cratesotto-native-application)
+[ownership map](../../docs/code-organization.md#cratesotto-native-runtime-library)
 and [package contracts](../../docs/development/architecture.md#package-boundaries).
 
-- `runtime/startup.rs` is the startup composition root; `cli::run`,
+- This crate is a library. It keeps the runtime, tools, `tui`, `client`,
+  `embed`, `cli::{login, repl, repl_commands}` (used by `tui`) and
+  `fixtures`. The HTTP server, ACP frontends and the `otto` binary live in
+  [otto-server](../otto-server/AGENTS.md), [otto-acp](../otto-acp/AGENTS.md)
+  and [otto-cli](../otto-cli/AGENTS.md); dependencies run one way,
+  `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <- `otto-cli`.
+- `runtime/startup.rs` is the startup composition root; `otto_cli::run`,
   `otto serve` and `embed` call its phases. `runtime` assembles agents;
-  `app` owns shared lifecycle. CLI/TUI/ACP/server/client consume services;
-  services and `embed` never import frontends. `tests/runtime_boundary.rs`
-  enforces this.
+  `app` owns shared lifecycle. Services and `embed` never import frontends.
+  `tests/runtime_boundary.rs` enforces this.
+- The public API is what the frontend crates need: widen an item from
+  `pub(crate)` to `pub` when one calls it, and put new frontend code into
+  the frontend crates, not here.
+- A test-only item that a dependent crate's tests need is `pub` and gated
+  `#[cfg(any(test, feature = "test-support"))]`, not `#[cfg(test)]`.
+  Shared scaffolding lives in `otto::fixtures`.
 - `otto::embed` is public API and changes only by addition; see the
   [embedding API contract](../../docs/development/architecture.md#embedding-api).
 - Native `config` owns source discovery, executable trust and the backed-up

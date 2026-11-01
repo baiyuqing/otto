@@ -59,7 +59,7 @@ impl SharedSession {
 
     /// Installs resources built by a test around a fixed registry; ignored
     /// when the session already has resources.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install_test_resources(
         &self,
         resources: Arc<super::super::session_resources::SessionResources>,

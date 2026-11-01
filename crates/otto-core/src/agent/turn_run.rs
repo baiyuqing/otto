@@ -156,10 +156,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let result = async {
             let mut context = system_context.to_owned();
             let start=self.start_hooks(control).await.map_err(|message|self.fail(emit,self.hook_error(message,control)))?;
+            if !self.options.hook_state.start_notified.swap(true, std::sync::atomic::Ordering::SeqCst) {self.hook_notice(emit,&start);}
             if start.decision==Some(hooks::Decision::Deny) {return Err(self.fail(emit,AgentError::Other(start.reason.unwrap_or_else(||"Hook denied session".into()))));}
             if let Some(text)=start.context {context.push_str(&format!("\n<plugin_context>Untrusted plugin context:\n{text}\n</plugin_context>"));}
             for event in ["before_prompt"] {
                 let response = self.hook(event, serde_json::json!({"prompt": self.redactor.redact_string(user_text), "followup":followup,"has_image":image.is_some()}), control).await
+                    .inspect(|response| self.hook_notice(emit, response))
                     .map_err(|message| self.fail(emit, self.hook_error(message,control)))?;
                 if response.decision == Some(hooks::Decision::Deny) {
                     return Err(self.fail(emit, AgentError::Other(response.reason.unwrap_or_else(|| "Hook denied this turn".into()))));
@@ -185,8 +187,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let mut turn_end_data = serde_json::json!({"status":status,"stop_reason":control.stop_reason(),"error":result.as_ref().err().map(|e|self.redactor.redact_string(&e.to_string()))});
         let turn = hooks::turn_json(&turn_messages);
         turn_end_data["turn"] = turn.clone();
-        if let Err(message) = self.hook("turn_end", turn_end_data, &end_control).await {
-            self.hook_warning(emit, &message);
+        match self.hook("turn_end", turn_end_data, &end_control).await {
+            Ok(response) => self.hook_notice(emit, &response),
+            Err(message) => self.hook_warning(emit, &message),
         }
         if observes_turns
             && !turn_messages.is_empty()

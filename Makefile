@@ -71,7 +71,7 @@ release-tag: ## tag origin/main with the Cargo.toml version, push the tag and cr
 test-tui: ## run only the TUI PTY tests, local and --attach (rust-test runs them too)
 	cargo test -p otto-cli --test tui_pty --test tui_attach_pty
 
-# `cargo test --workspace --no-run` rather than `cargo build -p otto`: both
+# `cargo test --workspace --no-run` rather than `cargo build -p otto-cli`: both
 # leave target/debug/otto, but only this one resolves the same features as
 # rust-test, so in a gate it reuses that build instead of compiling the whole
 # dependency tree and otto again (a `cargo build` leaves dev-dependency

@@ -7,7 +7,6 @@
 //! Seatbelt runtime that stays Seatbelt is reconfigured in place; any other
 //! reload opens a replacement runtime.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -211,7 +210,6 @@ pub struct SandboxReloader {
     pub(crate) config_path: PathBuf,
     pub(crate) explicit_config: bool,
     pub(crate) driver_override: Option<String>,
-    pub(crate) environment: HashMap<String, String>,
     pub(crate) api_key_env: String,
     pub(crate) reopen: OpenOptions,
     pub(crate) cancel: CancellationToken,
@@ -232,8 +230,6 @@ impl SandboxControl for SandboxReloader {
         let file = self.load_config()?;
         let settings = crate::runtime::startup::resolve_sandbox_settings(
             &file,
-            &self.environment,
-            &self.reopen.workspace,
             self.driver_override.as_deref(),
         )?;
         let options = OpenOptions {
@@ -446,10 +442,6 @@ mod tests {
             config_path: path,
             explicit_config: true,
             driver_override: Some("off".to_string()),
-            environment: HashMap::from([(
-                "HOME".to_string(),
-                home.path().to_string_lossy().into_owned(),
-            )]),
             api_key_env: "OTTO_API_KEY".to_string(),
             reopen: options(home, &[]),
             cancel: CancellationToken::new(),
@@ -680,10 +672,6 @@ mod tests {
                 config_path: path.clone(),
                 explicit_config: true,
                 driver_override: Some("seatbelt".to_string()),
-                environment: HashMap::from([(
-                    "HOME".to_string(),
-                    fixture.home.path().to_string_lossy().into_owned(),
-                )]),
                 api_key_env: "OTTO_API_KEY".to_string(),
                 reopen: fixture.options.clone(),
                 cancel: CancellationToken::new(),

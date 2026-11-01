@@ -54,8 +54,8 @@ fn embedding_uses_neutral_prompt_context_and_releases_only_session_bindings() {
 
 async fn embedding_conformance() {
     use otto::embed::{ApprovalDecision, Input};
-    let (url, requests) = binary_harness::serve(binary_harness::Script {
-        replies: vec![binary_harness::text_reply("done")],
+    let (url, requests) = scripted_provider::serve(scripted_provider::Script {
+        replies: vec![scripted_provider::text_reply("done")],
         served: Arc::new(AtomicUsize::new(0)),
     });
     let directory = tempfile::tempdir().unwrap();

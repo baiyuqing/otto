@@ -2,9 +2,14 @@
 //!
 //! `faults` exists only under `cfg(test)` or the `fault-injection` feature.
 //! Production code must not reference it, and it must not depend on
-//! frontends or the application layer.
+//! frontends or the application layer. `fixtures` (`cfg(test)` or the
+//! `test-support` feature, which implies `fault-injection`) is the other
+//! test-only module and may reference `faults`.
 
 use std::path::{Path, PathBuf};
+
+/// Modules compiled only for tests or a test feature; see `src/lib.rs`.
+const TEST_ONLY: &[&str] = &["faults", "fixtures"];
 
 const UPWARD: &[&str] = &[
     "cli", "tui", "acp", "server", "client", "app", "runtime", "provider", "tool",
@@ -68,9 +73,12 @@ fn code(source: &str) -> String {
         .join("\n")
 }
 
-/// `src/lib.rs` declares the module; no other production file names it.
+/// `src/lib.rs` declares the module and the test-only modules may use it;
+/// no other production file names it.
 fn production_violations(relative: &Path, source: &str) -> Vec<String> {
-    if relative == Path::new("lib.rs") {
+    if relative == Path::new("lib.rs")
+        || TEST_ONLY.iter().any(|module| relative.starts_with(module))
+    {
         return Vec::new();
     }
     let source = code(source);
@@ -96,9 +104,6 @@ fn production_code_does_not_reference_faults() {
     let mut offenders = Vec::new();
     for path in sources(&src) {
         let relative = path.strip_prefix(&src).unwrap();
-        if relative.starts_with("faults") {
-            continue;
-        }
         let body = std::fs::read_to_string(&path).expect("read source");
         for problem in production_violations(relative, &body) {
             offenders.push(format!("{}: {problem}", path.display()));
@@ -138,6 +143,16 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     );
     assert!(production_violations(file, "// crate::faults::http").is_empty());
     assert!(production_violations(Path::new("lib.rs"), "pub mod faults;").is_empty());
+    assert!(
+        production_violations(
+            Path::new("fixtures/scripted_provider.rs"),
+            "use crate::faults::http;"
+        )
+        .is_empty()
+    );
+    assert!(
+        production_violations(Path::new("faults/http.rs"), "use crate::faults::io;").is_empty()
+    );
     assert!(
         production_violations(file, "use otto_core::config::resolve::SessionDefaults::x;")
             .is_empty()

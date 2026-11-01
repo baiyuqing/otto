@@ -14,6 +14,12 @@ storage-conformance = []
 # Test-only fault injection (`otto::faults`). Off in every shipped build; the
 # integration tests turn it on through the self dev-dependency below.
 fault-injection = []
+# Test-only scaffolding (`otto::fixtures`): offline configuration, controllers
+# on temporary directories and the scripted provider. Off in every shipped
+# build; the tests of dependent crates turn it on through a dev-dependency.
+# It implies `fault-injection` because the scripted provider runs on
+# `otto::faults::http`.
+test-support = ["fault-injection"]
 
 [dependencies]
 # Static shell analysis for approval rules and review facts (`tool::shell`).
@@ -74,9 +80,9 @@ tower.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
-# Gives the integration tests `otto::faults` without compiling it into a
-# default build.
-otto = { path = ".", features = ["fault-injection"] }
+# Gives the integration tests `otto::faults` and `otto::fixtures` without
+# compiling them into a default build.
+otto = { path = ".", features = ["fault-injection", "test-support"] }
 # `pty` for the TUI's PTY smoke test (crates/otto/tests/tui_pty.rs).
 nix = { workspace = true, features = ["term"] }
 # `start_paused` drives the bash timeout deterministically without real waits.

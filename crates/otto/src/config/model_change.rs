@@ -313,7 +313,7 @@ fn apply(
                 if !thinking.is_empty() {
                     body.insert("thinking".into(), thinking.into());
                 }
-                otto_core::config::edit::insert_table(content, &path, body)?
+                add_model(content, file, &selector, body)?
             };
             Ok((updated, metadata("set model", &selector.to_string(), None)))
         }
@@ -337,7 +337,7 @@ fn apply(
                 if !value.is_empty() {
                     body.insert(field.key().into(), value.as_str().into());
                 }
-                otto_core::config::edit::insert_table(content, &path, body)?
+                add_model(content, file, &selector, body)?
             };
             Ok((
                 updated,
@@ -364,8 +364,13 @@ fn apply(
             }
             let path = model_path(&selector);
             let path: Vec<&str> = path.iter().map(String::as_str).collect();
+            let updated = if otto_core::config::edit::has_header(content, &path) {
+                otto_core::config::edit::remove_table(content, &path)?
+            } else {
+                otto_core::config::edit::set_inline_table(content, &path[..2], &path[2..], None)?
+            };
             Ok((
-                otto_core::config::edit::remove_table(content, &path)?,
+                updated,
                 metadata("remove model", &selector.to_string(), None),
             ))
         }
@@ -408,6 +413,46 @@ fn model_path(selector: &ModelSelector) -> [String; 4] {
         "models".into(),
         selector.model_id.clone(),
     ]
+}
+
+/// Writes a new model as `models."<id>" = { ... }` in `[providers.<name>]`,
+/// creating that header when absent. A provider that already has a model
+/// written as a `[providers.<name>.models.<id>]` table gets the new model as
+/// such a table too, so one provider does not mix both forms (a dotted
+/// `models.<id>` key after such headers is accepted by this crate's parser but
+/// not guaranteed by others). The header form is also the fallback when the
+/// inline text does not parse to the original plus the model.
+fn add_model(
+    content: &str,
+    file: &File,
+    selector: &ModelSelector,
+    body: toml::Table,
+) -> Result<String, ConfigError> {
+    let path = model_path(selector);
+    let path: Vec<&str> = path.iter().map(String::as_str).collect();
+    let header_style = file.providers.get(&selector.provider).is_some_and(|entry| {
+        entry.models.keys().any(|id| {
+            let existing = [
+                "providers",
+                selector.provider.as_str(),
+                "models",
+                id.as_str(),
+            ];
+            otto_core::config::edit::has_header(content, &existing)
+        })
+    });
+    if header_style {
+        return otto_core::config::edit::insert_table(content, &path, body);
+    }
+    match otto_core::config::edit::set_inline_table(
+        content,
+        &path[..2],
+        &path[2..],
+        Some(body.clone()),
+    ) {
+        Ok(updated) => Ok(updated),
+        Err(_) => otto_core::config::edit::insert_table(content, &path, body),
+    }
 }
 
 fn set_thinking(content: &str, path: &[&str], thinking: &str) -> Result<String, ConfigError> {

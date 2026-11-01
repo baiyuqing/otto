@@ -143,10 +143,43 @@ fn fingerprint_file(workspace: &Path, path: &Path) -> Result<String, String> {
     Ok(to_hex(&Sha256::digest(bytes)))
 }
 
+/// One configured hook in dispatch order: standalone Otto hooks first, then for each
+/// trusted package its Otto hooks followed by its Claude-format hooks.
+#[derive(Clone)]
+enum HookEntry {
+    Otto {
+        event: String,
+        hook: Hook,
+        package: Option<Package>,
+    },
+    Claude {
+        /// The Otto event that produces this hook's Claude event; see `claude_hooks::EVENTS`.
+        otto_event: &'static str,
+        hook: super::claude_hooks::ClaudeHook,
+        matcher: super::claude_hooks::matcher::Matcher,
+        package: Package,
+    },
+}
+
+/// A process that exited on its own; a nonzero `exit_code` is reported, not an error.
+struct CommandOutput {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// The expanded argv, full environment and validated timeout of one hook or tool process.
+struct Invocation<'a> {
+    argv: Vec<String>,
+    environment: Vec<String>,
+    timeout: Duration,
+    package: Option<&'a Package>,
+}
+
 #[derive(Clone)]
 pub struct Runtime {
     packages: Vec<Package>,
-    hooks: Vec<(String, Hook, Option<Package>)>,
+    hooks: Vec<HookEntry>,
     execution: Execution,
     sources: Vec<(PathBuf, String)>,
 }
@@ -173,7 +206,7 @@ impl Runtime {
         let packages = snapshot
             .packages
             .iter()
-            .filter(|p| p.trusted && p.package.otto.has_executables())
+            .filter(|p| p.trusted && p.package.has_executables())
             .map(|installed| {
                 let root = service.package_path(&installed.digest);
                 let package_data_dir = service.ensure_data(&installed.name)?;
@@ -190,15 +223,44 @@ impl Runtime {
             for hook in entries {
                 validate_command(&hook.command, &hook.timeout)?;
                 validate_matcher(event, hook)?;
-                hooks.push((event.into(), hook.clone(), None));
+                hooks.push(HookEntry::Otto {
+                    event: event.into(),
+                    hook: hook.clone(),
+                    package: None,
+                });
             }
         }
         for package in &packages {
             for (event, entries) in package.installed.package.otto.hooks.entries() {
                 for hook in entries {
                     validate_matcher(event, hook)?;
-                    hooks.push((event.into(), hook.clone(), Some(package.clone())));
+                    hooks.push(HookEntry::Otto {
+                        event: event.into(),
+                        hook: hook.clone(),
+                        package: Some(package.clone()),
+                    });
                 }
+            }
+            for hook in &package.installed.package.claude_hooks {
+                // Discovery already dropped events that never fire; a stale registry entry
+                // written by another Otto version may still hold one.
+                let Some(otto_event) = super::claude_hooks::otto_event(&hook.event) else {
+                    continue;
+                };
+                let matcher = super::claude_hooks::matcher::Matcher::parse(&hook.matcher).map_err(
+                    |error| {
+                        format!(
+                            "plugin {}: invalid hook matcher {}: {error}",
+                            package.installed.name, hook.matcher
+                        )
+                    },
+                )?;
+                hooks.push(HookEntry::Claude {
+                    otto_event,
+                    hook: hook.clone(),
+                    matcher,
+                    package: package.clone(),
+                });
             }
         }
         let sources = crate::config::layered::command_sources(configured, &execution.workspace)
@@ -255,6 +317,8 @@ impl Runtime {
     fn redact(&self, text: &str) -> String {
         crate::tool::result::redact_exact_text(text, &self.execution.secrets, "[REDACTED]")
     }
+    /// Runs an Otto hook, custom tool or memory command: the JSON `data` on stdin, the
+    /// stdout on success. A nonzero exit is `plugin command failed`.
     async fn command(
         &self,
         command: &[String],
@@ -265,20 +329,7 @@ impl Runtime {
         guard: Option<&Arc<SessionGuard>>,
     ) -> Result<String, CommandError> {
         let event = data.get("event").and_then(Value::as_str).unwrap_or("tool");
-        if control.admission_stop_reason().is_some() {
-            return Err("hook operation stopped".into());
-        }
-        if guard.is_some_and(|g| g.before(event).is_err()) {
-            return Err("session ownership lost".into());
-        }
-        if !self.valid(package) {
-            return Err(
-                "plugin source changed or project trust revoked; restart after review".into(),
-            );
-        }
-        let Some(executor) = &self.execution.executor else {
-            return Err("sandbox execution unavailable".into());
-        };
+        let timeout = validate_command(command, timeout).map_err(CommandError::from)?;
         let mut argv = command.to_vec();
         if let Some(package) = package {
             for arg in &mut argv {
@@ -290,6 +341,23 @@ impl Runtime {
                 );
             }
         }
+        let input = self.redacted_input(&data)?;
+        let invocation = Invocation {
+            argv,
+            environment: self.command_environment(package),
+            timeout,
+            package,
+        };
+        let output = self
+            .run_process(invocation, input, event, control, guard)
+            .await?;
+        if output.exit_code != 0 {
+            return Err(CommandError::started("plugin command failed"));
+        }
+        Ok(output.stdout)
+    }
+    /// The redacted JSON stdin line for `data`, at most 1 MiB.
+    fn redacted_input(&self, data: &Value) -> Result<Vec<u8>, CommandError> {
         let mut input = self.redact_json(&data.to_string()).into_bytes();
         input.push(b'\n');
         // An oversized `turn_end` input drops the turn content so the hook still runs.
@@ -305,8 +373,36 @@ impl Runtime {
         if input.len() > MAX_INPUT {
             return Err("plugin input exceeds 1 MiB".into());
         }
-        let timeout = validate_command(command, timeout)
-            .map_err(CommandError::from)?
+        Ok(input)
+    }
+    /// Runs one sandboxed process for `event` and returns how it exited. Errors cover
+    /// admission, trust and source checks, an unavailable sandbox, the timeout, a signal and
+    /// stdout over 64 KiB; the exit code is left to the caller.
+    async fn run_process(
+        &self,
+        invocation: Invocation<'_>,
+        input: Vec<u8>,
+        event: &str,
+        control: &dyn OperationControl,
+        guard: Option<&Arc<SessionGuard>>,
+    ) -> Result<CommandOutput, CommandError> {
+        let package = invocation.package;
+        if control.admission_stop_reason().is_some() {
+            return Err("hook operation stopped".into());
+        }
+        if guard.is_some_and(|g| g.before(event).is_err()) {
+            return Err("session ownership lost".into());
+        }
+        if !self.valid(package) {
+            return Err(
+                "plugin source changed or project trust revoked; restart after review".into(),
+            );
+        }
+        let Some(executor) = &self.execution.executor else {
+            return Err("sandbox execution unavailable".into());
+        };
+        let timeout = invocation
+            .timeout
             .min(control.remaining().unwrap_or(Duration::from_secs(300)));
         let token = control.cancellation_token().child_token();
         let mut stdout = crate::tool::result::RedactingCollector::new(
@@ -322,10 +418,10 @@ impl Runtime {
         let status = {
             let run = executor.execute_with_grace(
                 Request {
-                    argv,
+                    argv: invocation.argv,
                     stdin: Some(input),
                     dir: self.execution.workspace.clone(),
-                    env: self.command_environment(package),
+                    env: invocation.environment,
                     report_denials: false,
                 },
                 Streams {
@@ -367,7 +463,7 @@ impl Runtime {
                 _ => CommandError::started("plugin command failed"),
             });
         }
-        if status.0.signaled || status.0.code != 0 {
+        if status.0.signaled {
             return Err(CommandError::started("plugin command failed"));
         }
         if !self.valid(package) {
@@ -381,10 +477,16 @@ impl Runtime {
             ));
         }
         stdout.flush();
+        stderr.flush();
         if stdout.collector().discarded() != 0 {
             return Err(CommandError::started("plugin output exceeds 64 KiB"));
         }
-        Ok(String::from_utf8_lossy(stdout.collector().bytes()).into_owned())
+        Ok(CommandOutput {
+            exit_code: status.0.code,
+            stdout: String::from_utf8_lossy(stdout.collector().bytes()).into_owned(),
+            // Collected up to 64 KiB; the rest is dropped.
+            stderr: String::from_utf8_lossy(stderr.collector().bytes()).into_owned(),
+        })
     }
     pub fn tools(self: &Arc<Self>) -> Vec<Box<dyn crate::tool::Tool + Send + Sync>> {
         self.packages
@@ -617,6 +719,9 @@ mod memory_source;
 pub use memory_source::PluginMemoryService;
 
 mod binding;
+mod claude_binding;
+#[cfg(test)]
+mod claude_binding_tests;
 #[cfg(test)]
 mod memory_source_tests;
 pub use binding::SessionBinding;

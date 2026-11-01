@@ -27,6 +27,31 @@ otto plugin trust tokeneconomizer
 Editing the source example does not change its installed snapshot: reinstall
 and trust the new digest.
 
+## Native install without the bridge
+
+Otto reads Claude Code hooks from a `claude` package
+([Claude Code hook format](../../../docs/manual/memory-and-extensions.md#claude-code-hook-format)),
+so a TokenEconomizer checkout can be installed directly, without `bridge.py`:
+
+```sh
+otto plugin install /path/to/TokenEconomizer/plugin
+otto plugin inspect <name>
+otto plugin trust <name>
+```
+
+The path is the plugin directory that contains `.claude-plugin/plugin.json`.
+`<name>` is the plugin name printed by `otto plugin install`. The package's
+`te-hook` hooks for `SessionStart`, `UserPromptSubmit`, `PostToolUse`,
+`PostToolUseFailure`, `Stop` and `SessionEnd` then run natively: micro-skill
+injection at session start, the loop guard on prompts and tool results, and the
+turn close on `Stop`. Otto sets `CLAUDE_CODE_SESSION_ATTENDED` (`0` for
+`otto --prompt`, else `1`).
+
+Limitation: TokenEconomizer's Claude host reads `transcript_path` as a Claude
+transcript, and Otto writes its own JSONL file there. Transcript-based learning
+records nothing, and micro-skills that depend on the transcript still need the
+bridge.
+
 ## Configuration
 
 Export the checkout's `plugin` directory before starting Otto:
@@ -101,6 +126,8 @@ The check uses a fake `te-hook` and needs neither TokenEconomizer nor Otto.
   that is removed on close. `~/.tokeneconomizer` and `PLUGIN_DATA` are not
   writable, so state defaults to `<workspace>/.otto/tokeneconomizer`. A
   per-package writable grant is possible follow-up work.
+- This list applies to the bridge. The native install is described in
+  [Native install without the bridge](#native-install-without-the-bridge).
 - Whether the detached `te fold` process survives the end of the hook process
   under the sandbox has not been verified.
 - TokenEconomizer's notice texts refer to Pi (`/te microskills`, "Press Esc to

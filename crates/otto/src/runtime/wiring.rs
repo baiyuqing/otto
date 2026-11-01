@@ -681,7 +681,7 @@ mod tests;
 /// Each case is folded onto the composition seam it exercises:
 /// [`Builder::build_catalogs`] for the prompt sections, the tool list and the
 /// warnings, [`Builder::boundary_catalog_definitions`] for the redaction
-/// boundary, and `resolve_sandbox_settings` for the Seatbelt read paths. A full
+/// boundary, and `resolve_sandbox_settings` for the check that catalog roots stay out of `read_paths`. A full
 /// `skill` tool call/result round trip belongs to `skill::tool`'s own tests and
 /// the section's XML position after `<environment>` to `system_prompt_for`, so
 /// neither is repeated here.

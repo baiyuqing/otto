@@ -119,6 +119,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             )
             .await
             .map_err(|message| self.hook_error(message, control))?;
+        self.hook_notice(emit, &response);
         if response.decision == Some(super::hooks::Decision::Deny) {
             return Err(AgentError::Other(
                 response
@@ -332,7 +333,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             })?;
         result.checkpoint_id = metadata.id;
         let token = CancellationToken::new();
-        if let Err(message) = self
+        match self
             .hook(
                 "after_compaction",
                 serde_json::json!({
@@ -343,7 +344,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             )
             .await
         {
-            self.hook_warning(emit, &message);
+            Ok(response) => self.hook_notice(emit, &response),
+            Err(message) => self.hook_warning(emit, &message),
         }
         emit(Event::CompactionCompleted {
             compaction: result.clone(),

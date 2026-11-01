@@ -51,6 +51,22 @@ commit ledger; Git and release tags retain the full history. See the
   `profiles.*` fails to load and names the new keys. Existing sessions, usage
   records and workflows load unchanged.
 
+### Plugins
+
+- Hook protocol v1 payloads carry `session.history_path` (the session file
+  path, empty while a new session has no file yet) and a top-level `headless`
+  flag (true for `otto --prompt` runs), and every event accepts a `notice`
+  response field that Otto shows to the user as a notification and never to
+  the model. Package hook and custom-tool commands receive `PLUGIN_ROOT` and
+  `PLUGIN_DATA` in their environment. See
+  [hook protocol v1](docs/manual/memory-and-extensions.md#hook-protocol-v1).
+- [examples/plugins/tokeneconomizer](examples/plugins/tokeneconomizer/README.md)
+  runs TokenEconomizer's `te-hook --host pi` from Otto's hooks: micro-skill
+  injection at session start, the loop guard after each tool call and the
+  learning fold at session end. Its state root defaults to
+  `<workspace>/.otto/tokeneconomizer`; the TokenEconomizer checkout and
+  `~/.otto/sessions` must be listed in `[sandbox] read_paths`.
+
 ### Fixes
 
 - A model or reasoning-effort switch no longer cancels the session's

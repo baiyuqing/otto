@@ -1,7 +1,7 @@
 //! The Seatbelt driver's private per-session state directory.
 //!
 //! The tree lives beneath a cache base outside the workspace and holds the
-//! child's `HOME`, `TMPDIR`, cache root and the generated profile. Every step
+//! child's `TMPDIR`, cache root and the generated profile. Every step
 //! is performed through directory descriptors with `O_NOFOLLOW` and
 //! re-validated against the inode identities recorded at creation, so a
 //! concurrent rename or symlink swap can never redirect a write or a removal
@@ -55,7 +55,7 @@ const DIRECTORY_MODE: u32 = 0o700;
 const PROFILE_FILE_MODE: u32 = 0o600;
 
 /// The fixed children of the state root, in creation order.
-const CHILD_NAMES: [&str; 4] = ["home", "tmp", "cache", "profiles"];
+const CHILD_NAMES: [&str; 3] = ["tmp", "cache", "profiles"];
 
 /// The generated profile's fixed leaf name inside `profiles`.
 const PROFILE_LEAF: &str = "profile.sb";

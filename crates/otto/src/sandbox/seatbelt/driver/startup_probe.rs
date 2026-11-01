@@ -6,7 +6,7 @@ impl SeatbeltDriver {
     /// Proves the profile allows what it promises and denies what it forbids.
     ///
     /// Five probes run under the real profile: the profile loads at all, a file
-    /// under the private home reads back, two writable fixtures accept a write
+    /// under the private temp directory reads back, two writable fixtures accept a write
     /// through a descriptor they re-identify by device, inode, type, owner,
     /// permissions and link count, and a file under the profile directory is
     /// refused for both reading and writing.
@@ -26,10 +26,8 @@ impl SeatbeltDriver {
                 token.cancel();
             })
         };
-        let home = self.state.directories.home.to_string_lossy().into_owned();
         let temp_path = self.state.directories.temp.to_string_lossy().into_owned();
         let mut fixtures = selftest::Fixtures::prepare(
-            &home,
             &self.workspace,
             &temp_path,
             &self.state.profiles,
@@ -167,7 +165,6 @@ impl SeatbeltDriver {
         let mut ordinary = BoundedCollector::new(SELF_TEST_OUTPUT_LIMIT);
         let mut stderr = StderrFilter::new(&mut ordinary, None);
 
-        let home = self.state.directories.home.to_string_lossy().into_owned();
         let temp_path = self.state.directories.temp.to_string_lossy().into_owned();
         let spec = Spec {
             stdin: None,
@@ -176,7 +173,6 @@ impl SeatbeltDriver {
             directory: std::path::PathBuf::from(&self.workspace),
             environment: vec![
                 "PATH=/usr/bin:/bin".to_string(),
-                format!("HOME={home}"),
                 format!("TMPDIR={temp_path}"),
                 "LC_ALL=C".to_string(),
             ],

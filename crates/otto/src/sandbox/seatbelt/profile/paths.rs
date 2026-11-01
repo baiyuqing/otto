@@ -91,15 +91,6 @@ fn classify_io(error: std::io::Error) -> ResolveError {
     }
 }
 
-/// The active developer directory, if `xcode-select` has recorded one.
-pub(crate) fn discover_developer_root() -> Result<Option<String>, Rejected> {
-    match std::fs::canonicalize("/var/db/xcode_select_link") {
-        Ok(root) => root.to_str().map(str::to_string).map(Some).ok_or(Rejected),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(Rejected),
-    }
-}
-
 pub(in crate::sandbox::seatbelt) fn valid_resolved(path: &ResolvedPath) -> bool {
     valid_path_text(&path.path) && is_absolute(&path.path) && clean(&path.path) == path.path
 }

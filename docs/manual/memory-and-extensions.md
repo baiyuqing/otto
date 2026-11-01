@@ -450,7 +450,9 @@ Plugins package Skills/MCP using Agent Plugins 1.0, with limited
 `.claude-plugin/plugin.json`/`.codex-plugin/plugin.json` adapters. No installed
 packages means no added capability. A portable package contains `plugin.json`,
 `skills/<name>/SKILL.md`, optional `mcp.json`, and its server/scripts. A runnable
-[hook demo](../../examples/plugins/hook-demo/README.md) covers extension commands.
+[hook demo](../../examples/plugins/hook-demo/README.md) covers extension commands;
+the [TokenEconomizer bridge](../../examples/plugins/tokeneconomizer/README.md)
+runs an external hook host from a package.
 
 ```bash
 otto plugin install ./my-plugin

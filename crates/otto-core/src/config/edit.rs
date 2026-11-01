@@ -75,6 +75,16 @@ pub fn has_header(text: &str, table: &[&str]) -> bool {
     !table.is_empty() && block(text, table).is_some()
 }
 
+/// Whether some table header lies below `table`: its decoded path starts with
+/// `table` and is longer.
+pub fn has_header_below(text: &str, table: &[&str]) -> bool {
+    table_headers(text).iter().any(|header| {
+        header
+            .path()
+            .is_some_and(|path| path.len() > table.len() && starts_with(&path, table))
+    })
+}
+
 /// Sets, replaces or removes the dotted inline-table statement
 /// `<key_path> = { ... }` inside the block of `[header]`.
 ///

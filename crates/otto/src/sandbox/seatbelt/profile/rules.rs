@@ -1,36 +1,52 @@
 //! Rendering of the read, write, network and shell rule sections.
 
 use super::*;
+use crate::sandbox::read_denylist::PRIVATE_ROOT_LEAF_PREFIX;
 
+/// The deny section (every `otto-sandbox-*` root, the denylist entries) and
+/// the allow section after it (the session's own `tmp` and `cache`, the active
+/// `read_paths` exceptions). Seatbelt applies the last matching rule, so the
+/// allow section must follow the deny section.
 pub(super) fn render_read_rules(
-    metadata: &[String],
-    writable: &[String],
-    roots: &[ResolvedPath],
+    policy: &ReadPolicy,
+    directories: &PrivateDirectories,
+    deny_message: &str,
 ) -> Result<String, Rejected> {
     let mut builder = String::new();
-    builder.push_str("; OTTO-DYNAMIC-READ-BEGIN\n");
-    builder.push_str("; OTTO-DYNAMIC-METADATA-BEGIN\n");
-    let literals: Vec<Filter> = metadata
-        .iter()
-        .map(|path| Filter::Literal(path.clone()))
-        .collect();
-    write_rule(&mut builder, "allow", "file-read-metadata", &literals, None)?;
-    builder.push_str("; OTTO-DYNAMIC-METADATA-END\n");
-    builder.push_str("; OTTO-DYNAMIC-READ-DATA-BEGIN\n");
-    let mut filters: Vec<Filter> = Vec::with_capacity(writable.len() + roots.len());
-    for path in writable {
-        filters.push(Filter::Subpath(path.clone()));
-    }
-    for root in roots {
-        filters.push(if root.kind == PathKind::Directory {
+    builder.push_str("; OTTO-DYNAMIC-READ-DENY-BEGIN\n");
+    let mut denied: Vec<Filter> = Vec::with_capacity(policy.deny_paths.len() + 1);
+    denied.push(Filter::RegexPrefix {
+        directory: policy.cache_base.clone(),
+        leaf_prefix: PRIVATE_ROOT_LEAF_PREFIX,
+    });
+    denied.extend(
+        policy
+            .deny_paths
+            .iter()
+            .map(|path| Filter::Subpath(path.clone())),
+    );
+    write_rule(
+        &mut builder,
+        "deny",
+        "file-read*",
+        &denied,
+        Some(deny_message),
+    )?;
+    builder.push_str("; OTTO-DYNAMIC-READ-DENY-END\n");
+    builder.push_str("; OTTO-DYNAMIC-READ-ALLOW-BEGIN\n");
+    let mut allowed: Vec<Filter> = vec![
+        Filter::Subpath(directory_text(&directories.temp)?),
+        Filter::Subpath(directory_text(&directories.cache)?),
+    ];
+    allowed.extend(policy.exceptions.iter().map(|root| {
+        if root.kind == PathKind::Directory {
             Filter::Subpath(root.path.clone())
         } else {
             Filter::Literal(root.path.clone())
-        });
-    }
-    write_rule(&mut builder, "allow", "file-read*", &filters, None)?;
-    builder.push_str("; OTTO-DYNAMIC-READ-DATA-END\n");
-    builder.push_str("; OTTO-DYNAMIC-READ-END");
+        }
+    }));
+    write_rule(&mut builder, "allow", "file-read*", &allowed, None)?;
+    builder.push_str("; OTTO-DYNAMIC-READ-ALLOW-END");
     Ok(builder)
 }
 
@@ -170,6 +186,14 @@ enum Filter {
     /// `(require-all (subpath "<root>") (regex #"<pattern>"))`. The pattern is
     /// a constant, so no untrusted text is ever embedded in a regex.
     SubpathMatching { root: String, pattern: &'static str },
+    /// `(regex #"^<directory>/<leaf_prefix>")`: every path whose first
+    /// component below `directory` starts with `leaf_prefix`. `directory` is
+    /// escaped by [`regex_escape`]; `leaf_prefix` is a constant without regex
+    /// metacharacters.
+    RegexPrefix {
+        directory: String,
+        leaf_prefix: &'static str,
+    },
 }
 
 impl Filter {
@@ -183,6 +207,15 @@ impl Filter {
                     "(require-all (subpath {}) (regex #\"{pattern}\"))",
                     string_literal(root)?
                 )
+            }
+            Self::RegexPrefix {
+                directory,
+                leaf_prefix,
+            } => {
+                if !valid_path_text(directory) {
+                    return Err(Rejected);
+                }
+                format!("(regex #\"^{}/{leaf_prefix}\")", regex_escape(directory))
             }
         })
     }
@@ -236,4 +269,34 @@ pub(super) fn string_literal(value: &str) -> Result<String, Rejected> {
     }
     builder.push('"');
     Ok(builder)
+}
+
+/// Escapes `value` for a Seatbelt `#"..."` regex: each regex metacharacter
+/// `\ . + * ? ( ) [ ] { } | ^ $` gets a backslash, and `"` is written `\"`.
+/// [`valid_path_text`] has already excluded control characters.
+pub(super) fn regex_escape(value: &str) -> String {
+    let mut builder = String::with_capacity(value.len() + 8);
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '|'
+                | '^'
+                | '$'
+                | '"'
+        ) {
+            builder.push('\\');
+        }
+        builder.push(character);
+    }
+    builder
 }

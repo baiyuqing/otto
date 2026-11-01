@@ -174,8 +174,8 @@ func ottoHome(t *testing.T, providerURL string) string {
 			t.Fatal(err)
 		}
 	}
-	cfg := "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"" + providerURL +
-		"\"\nmodel = \"gpt-test\"\napi_key_env = \"OTTO_API_KEY\"\n"
+	cfg := "default_model = \"test/gpt-test\"\n\n[providers.test]\ntype = \"openai-compatible\"\nbase_url = \"" + providerURL +
+		"\"\napi_key_env = \"OTTO_API_KEY\"\n\n[providers.test.models.\"gpt-test\"]\n"
 	if err := os.WriteFile(filepath.Join(home, ".config/otto/config.toml"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

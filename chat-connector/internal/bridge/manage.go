@@ -44,7 +44,7 @@ func (c *chat) manager(m Message) (*manage.Client, bool) {
 	}
 	// The session-level switch needs no management client, so point at it
 	// instead of leaving the sender without a way forward.
-	c.notify(m.MessageID, "This command requires otto acp --attach connected to a running otto serve. Use /model <profile> to switch this conversation's profile.")
+	c.notify(m.MessageID, "This command requires otto acp --attach connected to a running otto serve. Use /model <provider>/<model_id> to switch this conversation's model.")
 	return nil, false
 }
 func (c *chat) manageContext() (context.Context, context.CancelFunc) {

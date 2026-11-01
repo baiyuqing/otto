@@ -35,10 +35,87 @@ fn join_notices(earlier: Option<String>, later: Option<String>) -> Option<String
     }
 }
 
-struct Bound {
-    runtime: Arc<Runtime>,
-    guard: Option<Arc<SessionGuard>>,
-    binding: SessionBinding,
+/// Rejects response fields that `event` cannot carry.
+pub(super) fn check_response_fields(event: &str, response: &Response) -> Result<(), String> {
+    if response.arguments.is_some() && event != "before_tool"
+        || response.content.is_some() && event != "after_tool"
+        || response.context.is_some()
+            && !["session_start", "before_prompt", "before_compaction"].contains(&event)
+        || (response.decision.is_some() || response.reason.is_some())
+            && ![
+                "session_start",
+                "before_prompt",
+                "before_tool",
+                "before_compaction",
+            ]
+            .contains(&event)
+    {
+        return Err("hook response field is not supported for this event".into());
+    }
+    Ok(())
+}
+
+/// The tool name an Otto hook matcher is tested against: the remote tool name for
+/// `mcp_call_tool`, the Otto tool name otherwise.
+fn otto_matcher_name(data: &Value) -> &str {
+    if data.get("tool").and_then(Value::as_str) == Some("mcp_call_tool") {
+        data.pointer("/arguments/tool")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp_call_tool")
+    } else {
+        data.get("tool").and_then(Value::as_str).unwrap_or("")
+    }
+}
+
+pub(super) struct Bound {
+    pub(super) runtime: Arc<Runtime>,
+    pub(super) guard: Option<Arc<SessionGuard>>,
+    pub(super) binding: SessionBinding,
+}
+impl Bound {
+    /// Runs one Otto hook with the protocol v1 payload and parses its JSON response.
+    async fn run_otto(
+        &self,
+        event: &str,
+        data: &Value,
+        hook: &Hook,
+        package: Option<&Package>,
+        control: &dyn OperationControl,
+    ) -> Result<Response, String> {
+        let output = self
+            .runtime
+            .command(
+                &hook.command,
+                &hook.timeout,
+                package,
+                json!({
+                    "version":1,
+                    "event":event,
+                    "workspace":self.runtime.execution.workspace,
+                    "headless":self.binding.headless,
+                    "session":{
+                        "session_id":self.binding.session_id,
+                        "parent_session_id":self.binding.parent_session_id,
+                        "task_id":self.binding.task_id,
+                        "mode":self.binding.mode,
+                        "history_path":(self.binding.history_path)()
+                    },
+                    "data":data
+                }),
+                control,
+                self.guard.as_ref(),
+            )
+            .await
+            .map_err(|error| error.message)?;
+        let response: Response = if output.trim().is_empty() {
+            Response::default()
+        } else {
+            serde_json::from_str(&self.runtime.redact_json(&output))
+                .map_err(|_| "invalid hook JSON response")?
+        };
+        check_response_fields(event, &response)?;
+        Ok(response)
+    }
 }
 #[async_trait::async_trait]
 impl Hooks for Bound {
@@ -50,70 +127,41 @@ impl Hooks for Bound {
     ) -> Result<Response, String> {
         let mut combined = Response::default();
         let mut diagnostics = Vec::new();
-        for (kind, hook, package) in &self.runtime.hooks {
-            if kind != event {
-                continue;
-            }
-            let name = if data.get("tool").and_then(Value::as_str) == Some("mcp_call_tool") {
-                data.pointer("/arguments/tool")
-                    .and_then(Value::as_str)
-                    .unwrap_or("mcp_call_tool")
-            } else {
-                data.get("tool").and_then(Value::as_str).unwrap_or("")
-            };
-            if !hook.matcher.is_empty() && !hook.matcher.iter().any(|p| matches(p, name)) {
-                continue;
-            }
-            let result = async {
-                let output = self
-                    .runtime
-                    .command(
-                        &hook.command,
-                        &hook.timeout,
-                        package.as_ref(),
-                        json!({
-                            "version":1,
-                            "event":event,
-                            "workspace":self.runtime.execution.workspace,
-                            "headless":self.binding.headless,
-                            "session":{
-                                "session_id":self.binding.session_id,
-                                "parent_session_id":self.binding.parent_session_id,
-                                "task_id":self.binding.task_id,
-                                "mode":self.binding.mode,
-                                "history_path":(self.binding.history_path)()
-                            },
-                            "data":data
-                        }),
-                        control,
-                        self.guard.as_ref(),
-                    )
-                    .await
-                    .map_err(|error| error.message)?;
-                let response: Response = if output.trim().is_empty() {
-                    Response::default()
-                } else {
-                    serde_json::from_str(&self.runtime.redact_json(&output))
-                        .map_err(|_| "invalid hook JSON response")?
-                };
-                if response.arguments.is_some() && event != "before_tool"
-                    || response.content.is_some() && event != "after_tool"
-                    || response.context.is_some()
-                        && !["session_start", "before_prompt", "before_compaction"].contains(&event)
-                    || (response.decision.is_some() || response.reason.is_some())
-                        && ![
-                            "session_start",
-                            "before_prompt",
-                            "before_tool",
-                            "before_compaction",
-                        ]
-                        .contains(&event)
-                {
-                    return Err("hook response field is not supported for this event".into());
+        for entry in &self.runtime.hooks {
+            let result = match entry {
+                HookEntry::Otto {
+                    event: hook_event,
+                    hook,
+                    package,
+                } => {
+                    if hook_event != event {
+                        continue;
+                    }
+                    let name = otto_matcher_name(&data);
+                    if !hook.matcher.is_empty() && !hook.matcher.iter().any(|p| matches(p, name)) {
+                        continue;
+                    }
+                    self.run_otto(event, &data, hook, package.as_ref(), control)
+                        .await
                 }
-                Ok(response)
-            }
-            .await;
+                HookEntry::Claude {
+                    otto_event,
+                    hook,
+                    matcher,
+                    package,
+                } => {
+                    if *otto_event != event {
+                        continue;
+                    }
+                    match self
+                        .run_claude(event, &data, hook, matcher, package, control)
+                        .await
+                    {
+                        Some(result) => result,
+                        None => continue,
+                    }
+                }
+            };
             match result {
                 Err(message) if event.starts_with("before_") || event == "session_start" => {
                     return Err(message);

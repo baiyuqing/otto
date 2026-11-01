@@ -11,7 +11,7 @@ fn resolves_deadline_defaults_and_explicit_values() {
         &HashMap::new(),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "sub".into(),
+            legacy_profile: "sub".into(),
             ..Default::default()
         },
     )
@@ -29,7 +29,7 @@ fn resolves_deadline_defaults_and_explicit_values() {
         &HashMap::new(),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "sub".into(),
+            legacy_profile: "sub".into(),
             ..Default::default()
         },
     )
@@ -56,7 +56,7 @@ fn resolves_progress_defaults_and_explicit_values() {
         &HashMap::new(),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "sub".into(),
+            legacy_profile: "sub".into(),
             ..Default::default()
         },
     )
@@ -71,7 +71,7 @@ fn resolves_progress_defaults_and_explicit_values() {
         &HashMap::new(),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "sub".into(),
+            legacy_profile: "sub".into(),
             ..Default::default()
         },
     )
@@ -118,7 +118,7 @@ fn rejects_out_of_range_progress_limits() {
                 &HashMap::new(),
                 &SessionDefaults::default(),
                 &Overrides {
-                    profile: "sub".into(),
+                    legacy_profile: "sub".into(),
                     ..Default::default()
                 },
             )
@@ -160,7 +160,7 @@ fn resolves_unattended_turn_timeout() {
             &HashMap::new(),
             &SessionDefaults::default(),
             &Overrides {
-                profile: "sub".into(),
+                legacy_profile: "sub".into(),
                 ..Default::default()
             },
         )
@@ -211,7 +211,7 @@ fn rejects_invalid_deadline_durations() {
                 &HashMap::new(),
                 &SessionDefaults::default(),
                 &Overrides {
-                    profile: "sub".into(),
+                    legacy_profile: "sub".into(),
                     ..Default::default()
                 },
             )
@@ -246,7 +246,7 @@ fn rejects_invalid_shell_timeout() {
             &env_map(&[("PROFILE_KEY", "secret")]),
             &SessionDefaults::default(),
             &Overrides {
-                profile: "local".into(),
+                legacy_profile: "local".into(),
                 ..Default::default()
             },
         )
@@ -283,7 +283,7 @@ fn rejects_base_urls_rejected_by_openai_client() {
             &env_map(&[("PROFILE_KEY", "secret")]),
             &SessionDefaults::default(),
             &Overrides {
-                profile: "local".into(),
+                legacy_profile: "local".into(),
                 ..Default::default()
             },
         )
@@ -312,7 +312,7 @@ fn normalizes_base_url_like_openai_client() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
+            legacy_profile: "local".into(),
             ..Default::default()
         },
     )

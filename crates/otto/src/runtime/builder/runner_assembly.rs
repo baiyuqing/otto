@@ -574,7 +574,7 @@ impl Builder {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
             ProviderClient::Unavailable => None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             ProviderClient::Scripted(_) => None,
         };
         let options = Options {

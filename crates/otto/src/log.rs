@@ -106,7 +106,7 @@ fn quote(value: &str) -> String {
 
 /// Reduces a client-supplied `X-Request-ID` or ACP `_meta.otto.requestId` to at most 64 printable ASCII
 /// bytes, per the design's trust-and-safety rule.
-pub(crate) fn request_id(raw: &[u8]) -> String {
+pub fn request_id(raw: &[u8]) -> String {
     raw.iter()
         .take(64)
         .filter(|byte| (0x20..0x7f).contains(*byte))

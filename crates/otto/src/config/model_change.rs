@@ -422,7 +422,7 @@ fn model_path(selector: &ModelSelector) -> [String; 4] {
 /// spelling and one place in the file; a provider with inline models or no
 /// models gets the inline form. The header form is also the fallback when the
 /// inline text does not parse to the original plus the model.
-pub(crate) fn add_model_entry(
+pub fn add_model_entry(
     content: &str,
     provider: &str,
     model_id: &str,

@@ -7,7 +7,10 @@
 //! shipped build. `test-support` implies `fault-injection`, because the
 //! scripted provider runs on `crate::faults::http`.
 
+pub mod embed_harness;
+pub mod plugin_package;
 pub mod scripted_provider;
+pub mod subagent_doubles;
 
 use std::collections::HashMap;
 use std::path::Path;

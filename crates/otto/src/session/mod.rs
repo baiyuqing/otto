@@ -11,7 +11,7 @@ pub use crate::storage::backends::posix::session::{
     ArchiveResult, Forked, MAX_LIST_SESSIONS, Prepared, Recovery, RecoveryCause, Store,
     UnansweredCall, inspect, list, session_directory,
 };
-pub(crate) use fsops::workspace_key;
+pub use fsops::workspace_key;
 pub use legacy::archive;
 pub use repository::{PreparedSession, SessionHandle, SessionRepository, WriterOwnership};
 

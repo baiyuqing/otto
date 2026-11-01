@@ -1,6 +1,6 @@
 //! The process sandbox switch and the `[sandbox]` reloader.
 //!
-//! The composition root (`cli::run`, and the embedding startup) opens one sandbox and hands it to a
+//! The composition root (`otto_cli::run`, and the embedding startup) opens one sandbox and hands it to a
 //! [`SandboxSwitch`]; the bash tool captures the switch as its executor, so
 //! `/sandbox reload`, `POST /v1/sandbox/reload` and the TUI all replace the
 //! runtime underneath a live session instead of restarting the process. A
@@ -206,7 +206,7 @@ fn reload_reason(info: &SandboxInfo) -> &'static str {
 /// workspace, shell, home, host environment, and the provider key name the
 /// sandbox environment was resolved from.
 pub struct SandboxReloader {
-    pub(crate) control: Arc<SandboxSwitch>,
+    pub control: Arc<SandboxSwitch>,
     pub(crate) config_path: PathBuf,
     pub(crate) explicit_config: bool,
     pub(crate) driver_override: Option<String>,

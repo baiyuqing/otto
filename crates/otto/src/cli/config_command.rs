@@ -155,12 +155,9 @@ fn execute(
                 let body: toml::Table = toml::from_str(&format!("{key} = {}", words[1]))
                     .map_err(|_| "invalid configuration value")?;
                 match table {
-                    ["providers", _, "models", _] => otto_core::config::edit::set_inline_table(
-                        text,
-                        &table[..2],
-                        &table[2..],
-                        Some(body),
-                    ),
+                    ["providers", provider, "models", model_id] => {
+                        crate::config::add_model_entry(text, provider, model_id, body)
+                    }
                     _ => otto_core::config::edit::insert_table(text, table, body),
                 }
             }
@@ -435,6 +432,40 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "[providers.chatgpt]\ntype = 'chatgpt'\nmodels.\"gpt-5.6-luna\" = { thinking = \"high\" }\n"
         );
+    }
+    #[test]
+    fn set_keeps_header_style_models_of_a_provider_in_header_style() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".config/otto");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.chatgpt.models.\"a\"]\nthinking = 'low'\n",
+        )
+        .unwrap();
+        let env = HashMap::from([("HOME".into(), home.path().display().to_string())]);
+        let args = [
+            "set",
+            "providers.chatgpt.models.\"b\".thinking",
+            "\"high\"",
+            "--scope",
+            "user",
+        ]
+        .map(str::to_string);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            run(&args, &mut out, &mut err, &env),
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[providers.chatgpt.models.b]\nthinking = \"high\""),
+            "{text}"
+        );
+        assert!(!text.contains("[providers.chatgpt]"), "{text}");
     }
     #[test]
     fn config_keys_split_at_dots_outside_quotes() {

@@ -313,7 +313,7 @@ fn apply(
                 if !thinking.is_empty() {
                     body.insert("thinking".into(), thinking.into());
                 }
-                add_model(content, file, &selector, body)?
+                add_model_entry(content, &selector.provider, &selector.model_id, body)?
             };
             Ok((updated, metadata("set model", &selector.to_string(), None)))
         }
@@ -337,7 +337,7 @@ fn apply(
                 if !value.is_empty() {
                     body.insert(field.key().into(), value.as_str().into());
                 }
-                add_model(content, file, &selector, body)?
+                add_model_entry(content, &selector.provider, &selector.model_id, body)?
             };
             Ok((
                 updated,
@@ -416,32 +416,20 @@ fn model_path(selector: &ModelSelector) -> [String; 4] {
 }
 
 /// Writes a new model as `models."<id>" = { ... }` in `[providers.<name>]`,
-/// creating that header when absent. A provider that already has a model
-/// written as a `[providers.<name>.models.<id>]` table gets the new model as
-/// such a table too, so one provider does not mix both forms (a dotted
-/// `models.<id>` key after such headers is accepted by this crate's parser but
-/// not guaranteed by others). The header form is also the fallback when the
+/// creating that header (without a `type`) when absent. A provider whose
+/// models are already written as `[providers.<name>.models."<id>"]` tables
+/// gets the new model in that form, so all models of one provider keep one
+/// spelling and one place in the file; a provider with inline models or no
+/// models gets the inline form. The header form is also the fallback when the
 /// inline text does not parse to the original plus the model.
-fn add_model(
+pub(crate) fn add_model_entry(
     content: &str,
-    file: &File,
-    selector: &ModelSelector,
+    provider: &str,
+    model_id: &str,
     body: toml::Table,
 ) -> Result<String, ConfigError> {
-    let path = model_path(selector);
-    let path: Vec<&str> = path.iter().map(String::as_str).collect();
-    let header_style = file.providers.get(&selector.provider).is_some_and(|entry| {
-        entry.models.keys().any(|id| {
-            let existing = [
-                "providers",
-                selector.provider.as_str(),
-                "models",
-                id.as_str(),
-            ];
-            otto_core::config::edit::has_header(content, &existing)
-        })
-    });
-    if header_style {
+    let path = ["providers", provider, "models", model_id];
+    if otto_core::config::edit::has_header_below(content, &path[..3]) {
         return otto_core::config::edit::insert_table(content, &path, body);
     }
     match otto_core::config::edit::set_inline_table(

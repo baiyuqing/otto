@@ -178,7 +178,7 @@ impl Builder {
                 hook_guard,
                 model: runtime.model.clone(),
                 subagent_models: runtime.subagent_models.clone(),
-                provider_name: runtime.provider.clone(),
+                provider_name: runtime.provider_type.clone(),
                 thinking: runtime.thinking.clone(),
                 compaction: otto_core::agent::CompactionSettings {
                     auto: runtime.compaction.auto,
@@ -367,7 +367,7 @@ impl Builder {
         prompt_tail: &str,
     ) -> PromptFor {
         let sandbox = self.effective_sandbox_info();
-        let provider = runtime.provider.clone();
+        let provider = runtime.provider_type.clone();
         let host = endpoint_host.to_string();
         let model = runtime.model.clone();
         let tail = prompt_tail.to_string();

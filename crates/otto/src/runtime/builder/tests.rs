@@ -2,7 +2,6 @@ use super::runner::{log_runtime_event, turn_limit};
 use super::*;
 use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
-use otto_core::config::Profile;
 use otto_core::model::{EffectCertainty, OperationDisposition};
 use otto_core::operation::OperationControl;
 use otto_core::provider::ProviderSettlement;
@@ -149,8 +148,12 @@ fn user_message(text: &str) -> Message {
 
 fn runtime() -> Runtime {
     Runtime {
-        profile: "default".to_string(),
-        provider: "openai-compatible".to_string(),
+        model_selector: otto_core::config::ModelSelector {
+            provider: "default".to_string(),
+            model_id: "gpt-test".to_string(),
+        },
+        provider_name: "default".to_string(),
+        provider_type: "openai-compatible".to_string(),
         base_url: "https://gw.example.com/v1".to_string(),
         model: "gpt-test".to_string(),
         api_key: "sk-secret-value".to_string(),

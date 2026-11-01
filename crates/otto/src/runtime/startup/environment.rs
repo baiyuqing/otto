@@ -176,7 +176,7 @@ pub(super) fn load_config(
 
 /// Every fixed key is always present, even when the process has no such
 /// variable: the empty string is inserted, and resolution distinguishes
-/// "absent" from "empty" nowhere. The map also holds each profile's
+/// "absent" from "empty" nowhere. The map also holds each provider's
 /// `api_key_env`, Claude workspace bindings and the `web_search` key names.
 pub(crate) fn config_environment(
     file: &File,
@@ -199,12 +199,12 @@ pub(crate) fn config_environment(
         BRAVE_KEY_ENV,
         "ANTHROPIC_API_KEY",
     ]);
-    for profile in file.profiles.values() {
-        if !profile.api_key_env.is_empty() {
-            keys.insert(profile.api_key_env.as_str());
+    for provider in file.providers.values() {
+        if !provider.api_key_env.is_empty() {
+            keys.insert(provider.api_key_env.as_str());
         }
-        if !profile.workspace_id_env.is_empty() {
-            keys.insert(profile.workspace_id_env.as_str());
+        if !provider.workspace_id_env.is_empty() {
+            keys.insert(provider.workspace_id_env.as_str());
         }
     }
     let credential_variables = file.plugins.credential_variables();

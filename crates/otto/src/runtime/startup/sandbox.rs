@@ -11,12 +11,12 @@ pub(crate) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
     if !selected.is_empty() {
         names.insert(selected.to_string());
     }
-    for profile in file.profiles.values() {
-        if !profile.api_key_env.is_empty() {
-            names.insert(profile.api_key_env.clone());
+    for provider in file.providers.values() {
+        if !provider.api_key_env.is_empty() {
+            names.insert(provider.api_key_env.clone());
         }
-        if !profile.workspace_id_env.is_empty() {
-            names.insert(profile.workspace_id_env.clone());
+        if !provider.workspace_id_env.is_empty() {
+            names.insert(provider.workspace_id_env.clone());
         }
     }
     names.extend(file.plugins.credential_variables());

@@ -84,7 +84,7 @@ pub fn authorize_url(
 /// The token endpoint client. Every redirect is refused so a 3xx from the token
 /// endpoint cannot move the client credentials to another origin.
 pub fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::tls_provider::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "build oauth http client".to_owned())

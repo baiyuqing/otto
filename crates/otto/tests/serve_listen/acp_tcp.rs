@@ -149,7 +149,7 @@ async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
         }
     }
     assert_eq!(requests.lock().unwrap().len(), 1);
-    let response = reqwest::Client::new()
+    let response = otto::tls_provider::http_client()
         .get(format!("{base}/v1/sessions/{sid}/history"))
         .bearer_auth(&http_token)
         .send()
@@ -273,7 +273,7 @@ async fn acp_tcp_clients_select_admitted_workspaces_without_crossing_history_or_
     )
     .await;
     let (base, token) = await_startup(&stdout, &stderr).await;
-    let http = reqwest::Client::new();
+    let http = otto::tls_provider::http_client();
     let admitted = http
         .post(format!("{base}/v1/workspaces"))
         .bearer_auth(&token)

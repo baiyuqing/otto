@@ -136,6 +136,8 @@ pub(crate) struct Options {
     /// The host environment, only read for its single `PATH` entry.
     pub(crate) host_entries: Vec<String>,
     pub(crate) read_paths: Vec<String>,
+    /// `[sandbox] deny_read_paths`: additions to the built-in read denylist.
+    pub(crate) deny_read_paths: Vec<String>,
     pub(crate) network: Option<NetworkMode>,
 }
 

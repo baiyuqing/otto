@@ -372,8 +372,13 @@ impl Builder {
         let model = runtime.model.clone();
         let tail = prompt_tail.to_string();
         Arc::new(move |definitions: &[ToolDefinition]| {
-            super::super::prompt::system_prompt_for(definitions, sandbox, &provider, &host, &model)
-                + &tail
+            super::super::prompt::system_prompt_for(
+                definitions,
+                sandbox.clone(),
+                &provider,
+                &host,
+                &model,
+            ) + &tail
         })
     }
 }

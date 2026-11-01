@@ -12,6 +12,7 @@
 //! than a failure with nothing to re-point.
 
 use crate::runtime::info::SandboxInfo;
+use crate::sandbox::read_denylist::ReadDenylist;
 
 /// Reads the live sandbox state and replaces it.
 ///
@@ -26,4 +27,9 @@ pub trait SandboxControl: Send + Sync {
     /// that is now in effect. On failure the previous sandbox stays in force
     /// and the message says why.
     async fn reload(&self) -> Result<SandboxInfo, String>;
+
+    /// The read denylist in effect, `None` when no Seatbelt sandbox runs.
+    fn read_denylist(&self) -> Option<ReadDenylist> {
+        None
+    }
 }

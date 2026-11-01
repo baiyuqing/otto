@@ -40,7 +40,6 @@ impl Contract for SeatbeltContract {
             shell: "/bin/sh".to_string(),
             home: private_directory(fixture, "host-home"),
             cache_base: private_directory(fixture, "user-cache"),
-            host_entries: fixture.environment.clone(),
             read_paths: vec![
                 fixture
                     .allowed_read
@@ -48,6 +47,7 @@ impl Contract for SeatbeltContract {
                     .expect("allowed read")
                     .to_string(),
             ],
+            deny_read_paths: Vec::new(),
             network: Some(self.network),
         };
         let driver = SeatbeltDriver::open(options, &CancellationToken::new())

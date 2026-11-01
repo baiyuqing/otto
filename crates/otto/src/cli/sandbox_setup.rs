@@ -541,6 +541,7 @@ mod tests {
                 driver: DriverMode::Off,
                 network: Some(NetworkMode::Allow),
                 read_paths: Vec::new(),
+                deny_read_paths: Vec::new(),
                 allow_env: vec!["GH_CONFIG_DIR".to_string()],
             },
             workspace: workspace.clone(),

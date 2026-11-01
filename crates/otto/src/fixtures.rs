@@ -109,6 +109,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         network: SandboxNetwork::Unconfined,
         bash_available: false,
         reason: SandboxReason::None,
+        ..Default::default()
     };
     builder
 }
@@ -351,14 +352,14 @@ impl FakeSandbox {
 #[async_trait::async_trait]
 impl crate::app::SandboxControl for FakeSandbox {
     fn info(&self) -> SandboxInfo {
-        self.info
+        self.info.clone()
     }
 
     async fn reload(&self) -> Result<SandboxInfo, String> {
         *self.calls.lock().expect("calls") += 1;
         match &self.failure {
             Some(message) => Err(message.clone()),
-            None => Ok(self.reloaded),
+            None => Ok(self.reloaded.clone()),
         }
     }
 }
@@ -370,5 +371,6 @@ pub fn seatbelt_info(network: SandboxNetwork) -> SandboxInfo {
         network,
         bash_available: true,
         reason: SandboxReason::None,
+        ..Default::default()
     }
 }

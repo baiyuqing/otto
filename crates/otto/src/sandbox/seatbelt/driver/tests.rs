@@ -98,8 +98,8 @@ async fn fixture_with(git: bool) -> Option<Reconfigure> {
             shell: "/bin/sh".to_string(),
             home: directory("host-home").to_str().expect("home").to_string(),
             cache_base: directory("user-cache").to_str().expect("cache").to_string(),
-            host_entries: vec!["PATH=/usr/bin:/bin".to_string()],
             read_paths: Vec::new(),
+            deny_read_paths: Vec::new(),
             network: Some(NetworkMode::Deny),
         },
         &CancellationToken::new(),
@@ -167,6 +167,7 @@ async fn reconfigure_applies_new_read_paths_and_network_in_the_same_private_tree
         .driver
         .reconfigure(
             vec![fixture.outside.to_str().expect("outside").to_string()],
+            Vec::new(),
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
             &CancellationToken::new(),
@@ -201,6 +202,7 @@ async fn reconfigure_with_unchanged_settings_leaves_the_profile_file_alone() {
         .driver
         .reconfigure(
             read_paths.clone(),
+            Vec::new(),
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
             &cancel,
@@ -213,6 +215,7 @@ async fn reconfigure_with_unchanged_settings_leaves_the_profile_file_alone() {
         .driver
         .reconfigure(
             read_paths,
+            Vec::new(),
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
             &cancel,
@@ -240,6 +243,7 @@ async fn a_missing_read_path_reconfigure_keeps_the_driver_running() {
         .driver
         .reconfigure(
             vec!["/otto-reconfigure-missing-directory".to_string()],
+            Vec::new(),
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Allow,
             &CancellationToken::new(),
@@ -269,6 +273,7 @@ async fn reconfigure_on_a_closed_driver_is_refused() {
     let error = fixture
         .driver
         .reconfigure(
+            Vec::new(),
             Vec::new(),
             vec![fixture.workspace.to_str().expect("workspace").to_string()],
             NetworkMode::Deny,

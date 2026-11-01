@@ -130,7 +130,7 @@ pub(crate) async fn compose_workspace_sandbox(
         // No sandbox opens and bash stays unavailable; the switch still
         // exists because every frontend reads sandbox state through it.
         let runtime = crate::runtime::sandbox_runtime::policy_disabled_runtime();
-        builder.sandbox_info = runtime.info;
+        builder.sandbox_info = runtime.info.clone();
         return WorkspaceSandbox {
             control: SandboxSwitch::new(runtime),
             approval_executor: None,
@@ -153,7 +153,7 @@ pub(crate) async fn compose_workspace_sandbox(
     // without rebuilding the session or the runner.
     let had_executor = sandbox.executor.is_some();
     let sandbox_environment = sandbox.environment.clone();
-    let sandbox_info = sandbox.info;
+    let sandbox_info = sandbox.info.clone();
     let redaction_values = sandbox.redaction_values.clone();
     let redactions_complete = sandbox.redactions_complete;
     let control = SandboxSwitch::new(sandbox);
@@ -162,7 +162,7 @@ pub(crate) async fn compose_workspace_sandbox(
             Some(Arc::clone(&control) as Arc<dyn crate::sandbox::CommandExecutor>);
     }
     builder.sandbox_environment = sandbox_environment;
-    builder.sandbox_info = sandbox_info;
+    builder.sandbox_info = sandbox_info.clone();
     let (merged, merged_complete) = merge_redactions(&builder.sandbox_secrets, &redaction_values);
     builder.sandbox_secrets = merged;
     builder.sandbox_secrets_complete =
@@ -210,7 +210,7 @@ pub(crate) async fn compose_workspace_sandbox(
             approval_executor = Some(executor);
         }
     }
-    if let Some(warning) = sandbox_runtime_warning(builder.effective_sandbox_info()) {
+    if let Some(warning) = sandbox_runtime_warning(&builder.effective_sandbox_info()) {
         let _ = stderr.write_all(warning.as_bytes());
     }
     // No reloader at all without a usable sandbox, because there is then

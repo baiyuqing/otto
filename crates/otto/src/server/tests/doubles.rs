@@ -445,7 +445,7 @@ impl TestFactory {
                 model: "test-model".to_string(),
                 thinking: "high".to_string(),
                 context_window: 128_000,
-                sandbox: self.builder.sandbox_info,
+                sandbox: self.builder.sandbox_info.clone(),
             },
         )
     }

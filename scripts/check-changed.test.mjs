@@ -74,6 +74,8 @@ test('test support directories and crate entry files select full tests', () => {
   for (const p of [
     'crates/otto/tests/binary_harness/mod.rs',
     'crates/otto/tests/fixtures/x.json',
+    'crates/otto/src/fixtures.rs',
+    'crates/otto/src/fixtures/scripted_provider.rs',
     'crates/otto/src/lib.rs',
     'crates/otto/build.rs',
     'crates/otto/Cargo.toml',

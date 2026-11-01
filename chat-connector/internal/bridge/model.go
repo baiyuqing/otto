@@ -2,30 +2,23 @@ package bridge
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 )
 
-// ProfileOption is one profile a chat may switch to.
-type ProfileOption struct {
-	Name     string
-	Provider string
-	Model    string
-}
-
-// ProfileSnapshot is the local Otto configuration the connector shows.
-type ProfileSnapshot struct {
-	// Default is the configured default_profile; empty when unset.
+// ModelSnapshot is the local Otto configuration the connector shows.
+type ModelSnapshot struct {
+	// Default is the selector of the configured default model; empty when unset.
 	Default string
-	// Profiles is the list to offer, in the order it should be shown.
-	Profiles []ProfileOption
+	// Models is the list of "<provider>/<model_id>" selectors to offer, in the
+	// order it should be shown.
+	Models []string
 }
 
-// ProfileSource reads the local Otto configuration's profiles. The composition
+// ModelSource reads the local Otto configuration's models. The composition
 // root injects it; a nil source leaves every "/model" to Otto itself.
-type ProfileSource interface {
-	Profiles() (ProfileSnapshot, error)
+type ModelSource interface {
+	Models() (ModelSnapshot, error)
 }
 
 // Choice is one button of a message: choosing it delivers Command to the bridge
@@ -42,61 +35,68 @@ type ChoicePlatform interface {
 	SendChoices(ctx context.Context, chatID, replyTo, text string, choices []Choice) error
 }
 
-// ValidProfileArg reports whether name may travel as the argument of a switch
-// command: 1 to 64 printable ASCII characters, without whitespace, quotes,
-// backslashes, '/' or ':'.
+// ValidModelSelector reports whether selector may travel as the argument of a
+// switch command: "<provider>/<model_id>" of 3 to 128 printable ASCII
+// characters, without whitespace, quotes, backslashes or ':'. The provider
+// part uses letters, digits, '_' and '-'; the model ID may also hold '.', '+',
+// '@' and further '/' (for example "openrouter/anthropic/claude-x").
 //
-// Otto accepts any hand-written profile name, including one with dots such as
-// "chatgpt-5.5", so this is deliberately wider than Otto's own editing rule.
-// The point is that a name stays one command argument: a tapped button or card
-// can then never deliver a second word, another option, or anything but a
-// profile name.
-func ValidProfileArg(name string) bool {
-	if name == "" || len(name) > 64 {
+// The point is that a selector stays one command argument: a tapped button or
+// card can then never deliver a second word, another option, or anything but a
+// model selector.
+func ValidModelSelector(selector string) bool {
+	provider, modelID, ok := strings.Cut(selector, "/")
+	if !ok || provider == "" || modelID == "" || len(selector) > 128 {
 		return false
 	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '_', r == '-', r == '.', r == '+', r == '@':
-		default:
+	for _, r := range provider {
+		if !isSelectorWord(r) {
+			return false
+		}
+	}
+	for _, r := range modelID {
+		if !isSelectorWord(r) && r != '.' && r != '+' && r != '@' && r != '/' {
 			return false
 		}
 	}
 	return true
 }
 
-// cmdModel answers bare "/model" with the profiles this connector can switch
+func isSelectorWord(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-'
+}
+
+// cmdModel answers bare "/model" with the models this connector can switch
 // to, one button each. It returns true when it handled the text.
 //
-// "/model <profile>" is forwarded to Otto unchanged, and so is bare "/model"
-// when no profile source is configured: Otto's own "/model" then answers.
+// "/model <selector>" is forwarded to Otto unchanged, and so is bare "/model"
+// when no model source is configured: Otto's own "/model" then answers.
 func (c *chat) cmdModel(m Message, args string) bool {
-	if args != "" || c.b.opts.Profiles == nil {
+	if args != "" || c.b.opts.Models == nil {
 		return false
 	}
-	go c.showProfiles(m)
+	go c.showModels(m)
 	return true
 }
 
-func (c *chat) showProfiles(m Message) {
+func (c *chat) showModels(m Message) {
 	ctx, stop := context.WithTimeout(c.b.workCtx, 30*time.Second)
 	defer stop()
-	snapshot, err := c.b.opts.Profiles.Profiles()
+	snapshot, err := c.b.opts.Models.Models()
 	if err != nil {
 		c.send(ctx, m.MessageID, "Could not read the local Otto configuration: "+err.Error()+
-			". Send /model <profile> to switch directly.")
+			". Switch with /model <provider>/<model_id>.")
 		return
 	}
-	if len(snapshot.Profiles) == 0 {
-		c.send(ctx, m.MessageID, "The local Otto configuration lists no profiles."+
-			" Send /model <profile> to switch directly.")
+	if len(snapshot.Models) == 0 {
+		c.send(ctx, m.MessageID, "The local Otto configuration lists no models."+
+			" Switch with /model <provider>/<model_id>.")
 		return
 	}
-	text := renderProfiles(snapshot)
-	choices := make([]Choice, 0, len(snapshot.Profiles))
-	for _, profile := range snapshot.Profiles {
-		choices = append(choices, Choice{Label: profile.Name, Command: "/model " + profile.Name})
+	text := renderModels(snapshot)
+	choices := make([]Choice, 0, len(snapshot.Models))
+	for _, selector := range snapshot.Models {
+		choices = append(choices, Choice{Label: selector, Command: "/model " + selector})
 	}
 	if platform, ok := c.p.(ChoicePlatform); ok {
 		if err := platform.SendChoices(ctx, c.id, m.MessageID, text, choices); err == nil {
@@ -106,18 +106,18 @@ func (c *chat) showProfiles(m Message) {
 	c.send(ctx, m.MessageID, text)
 }
 
-// renderProfiles is the plain-text form of the picker, used by platforms
+// renderModels is the plain-text form of the picker, used by platforms
 // without buttons and as the message that carries the buttons.
-func renderProfiles(snapshot ProfileSnapshot) string {
-	lines := make([]string, 0, len(snapshot.Profiles)+2)
-	lines = append(lines, "Profiles:")
-	for _, profile := range snapshot.Profiles {
+func renderModels(snapshot ModelSnapshot) string {
+	lines := make([]string, 0, len(snapshot.Models)+2)
+	lines = append(lines, "Configured models:")
+	for _, selector := range snapshot.Models {
 		mark := ""
-		if snapshot.Default != "" && profile.Name == snapshot.Default {
+		if snapshot.Default != "" && selector == snapshot.Default {
 			mark = " (default)"
 		}
-		lines = append(lines, fmt.Sprintf("• %s — %s / %s%s", profile.Name, profile.Provider, profile.Model, mark))
+		lines = append(lines, "• "+selector+mark)
 	}
-	lines = append(lines, "Send /model <profile> to switch this conversation.")
+	lines = append(lines, "Switch with /model <provider>/<model_id>.")
 	return strings.Join(lines, "\n")
 }

@@ -117,7 +117,7 @@ func TestMenuCommandsAreHandled(t *testing.T) {
 	}
 }
 
-// A session-level /model switch is how a chat leaves a profile whose quota is
+// A session-level /model switch is how a chat leaves a model whose quota is
 // exhausted, so it must reach Otto even without a management client; /config
 // stays attached-only and points at it.
 func TestModelSwitchReachesTheAgentWithoutAManagementClient(t *testing.T) {
@@ -130,7 +130,7 @@ func TestModelSwitchReachesTheAgentWithoutAManagementClient(t *testing.T) {
 	settle()
 
 	h.say("/config profiles")
-	want := "This command requires otto acp --attach connected to a running otto serve. Use /model <profile> to switch this conversation's profile."
+	want := "This command requires otto acp --attach connected to a running otto serve. Use /model <provider>/<model_id> to switch this conversation's model."
 	h.waitFor(func() bool {
 		for _, text := range h.plat.texts() {
 			if text == want {

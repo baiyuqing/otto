@@ -94,7 +94,7 @@ func (p *fakePlatform) Typing(context.Context, string) error {
 }
 
 // SendChoices makes the fake a ChoicePlatform: the bridge then posts the
-// profile picker as buttons instead of falling back to plain text.
+// model picker as buttons instead of falling back to plain text.
 func (p *fakePlatform) SendChoices(_ context.Context, chat, replyTo, text string, choices []Choice) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -150,7 +150,7 @@ type setup struct {
 	mod      func(*Options)
 	manage   *manage.Client
 	agent    *agent.Options // replaces the fake agent's options
-	profiles ProfileSource  // nil leaves bare "/model" to Otto
+	models   ModelSource    // nil leaves bare "/model" to Otto
 }
 
 func newHarness(t *testing.T, s setup) *harness {
@@ -189,7 +189,7 @@ func newHarness(t *testing.T, s setup) *harness {
 		Access:         map[string]Access{h.plat.Name(): {Chats: s.chats, Senders: s.senders}},
 		Store:          s.store,
 		TypingInterval: time.Hour,
-		Profiles:       s.profiles,
+		Models:         s.models,
 	}
 	if s.textOnly {
 		opts.Platforms = []Platform{textPlatform{h.plat}}

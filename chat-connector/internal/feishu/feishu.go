@@ -267,11 +267,11 @@ func format(args []interface{}) string {
 
 func cardMessage(e *types.CardActionEvent) (bridge.Message, bool) {
 	// A choice button delivers the command it stands for; only the connector's
-	// own profile switcher travels this way.
+	// own model switcher travels this way.
 	if action, _ := e.Action.Value["action"].(string); action == "command" {
 		command, _ := e.Action.Value["command"].(string)
 		name, ok := strings.CutPrefix(command, "/model ")
-		if !ok || !bridge.ValidProfileArg(name) || e.ChatID == "" || e.Operator.OpenID == "" {
+		if !ok || !bridge.ValidModelSelector(name) || e.ChatID == "" || e.Operator.OpenID == "" {
 			return bridge.Message{}, false
 		}
 		return bridge.Message{Platform: "feishu", ChatID: e.ChatID, SenderID: e.Operator.OpenID, Text: "/model " + name, Time: time.Now()}, true

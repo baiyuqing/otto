@@ -75,7 +75,7 @@ func run() error {
 		Platforms: platforms,
 		Access:    access,
 		Store:     store,
-		Profiles:  profileSource{path: ottoconfig.Path(home)},
+		Models:    modelSource{path: ottoconfig.Path(home)},
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -139,26 +139,22 @@ func withoutVars(env []string, names ...string) []string {
 	return out
 }
 
-// profileSource adapts the local Otto configuration to the bridge's profile
+// modelSource adapts the local Otto configuration to the bridge's model
 // picker. Every "/model" re-reads it, so an edit on the host shows up without
 // restarting the connector.
-type profileSource struct{ path string }
+type modelSource struct{ path string }
 
-func (s profileSource) Profiles() (bridge.ProfileSnapshot, error) {
+func (s modelSource) Models() (bridge.ModelSnapshot, error) {
 	snapshot, err := ottoconfig.Read(s.path)
 	if err != nil {
-		return bridge.ProfileSnapshot{}, err
+		return bridge.ModelSnapshot{}, err
 	}
-	out := bridge.ProfileSnapshot{
-		Default:  snapshot.Default,
-		Profiles: make([]bridge.ProfileOption, 0, len(snapshot.Profiles)),
+	out := bridge.ModelSnapshot{
+		Default: snapshot.Default,
+		Models:  make([]string, 0, len(snapshot.Models)),
 	}
-	for _, profile := range snapshot.Profiles {
-		out.Profiles = append(out.Profiles, bridge.ProfileOption{
-			Name:     profile.Name,
-			Provider: profile.Provider,
-			Model:    profile.Model,
-		})
+	for _, model := range snapshot.Models {
+		out.Models = append(out.Models, model.Selector)
 	}
 	return out, nil
 }

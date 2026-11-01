@@ -33,7 +33,7 @@ pub(crate) fn failure(message: &str) -> ProviderError {
 
 /// Uses a separate no-redirect client even when completion transport was injected.
 pub(crate) fn http() -> Result<reqwest::Client, ProviderError> {
-    reqwest::Client::builder()
+    crate::tls_provider::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(TIMEOUT)
         .timeout(TIMEOUT)

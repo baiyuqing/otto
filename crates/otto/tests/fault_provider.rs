@@ -296,7 +296,7 @@ async fn openai_deadline_budget_smaller_than_the_backoff_stops_without_waiting()
 /// A reqwest client whose read timeout is 200 ms, so a silent peer fails the
 /// attempt without waiting for the 60 s production timeout.
 fn short_timeout_http() -> reqwest::Client {
-    reqwest::Client::builder()
+    otto::tls_provider::http_client_builder()
         .read_timeout(Duration::from_millis(200))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -576,7 +576,7 @@ fn chatgpt_short(server: &Server) -> chatgpt::Client {
         &server.url,
         tokens("token"),
         "acct-1",
-        reqwest::Client::builder()
+        otto::tls_provider::http_client_builder()
             .read_timeout(Duration::from_millis(200))
             .redirect(reqwest::redirect::Policy::none())
             .build()

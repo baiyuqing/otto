@@ -176,7 +176,7 @@ async fn serve_listens_on_loopback_tcp_behind_the_token() {
     let (stdout, stderr, handle) =
         run_serve(&fixture, &["--listen", "127.0.0.1:0"], cancel.clone()).await;
     let (base, token) = await_startup(&stdout, &stderr).await;
-    let client = reqwest::Client::new();
+    let client = otto::tls_provider::http_client();
 
     let health = client
         .get(format!("{base}/healthz"))
@@ -250,7 +250,9 @@ async fn the_listen_address_can_come_from_the_config_file() {
     let (stdout, stderr, handle) = run_serve(&fixture, &[], cancel.clone()).await;
     let (base, _token) = await_startup(&stdout, &stderr).await;
 
-    let page = reqwest::get(format!("{base}/"))
+    let page = otto::tls_provider::http_client()
+        .get(format!("{base}/"))
+        .send()
         .await
         .expect("root request");
     assert_eq!(page.status().as_u16(), 404);
@@ -298,7 +300,7 @@ async fn socket_and_tcp_listeners_serve_one_server_with_the_token_on_tcp_only() 
     )
     .await;
     let (base, token) = await_startup(&stdout, &stderr).await;
-    let client = reqwest::Client::new();
+    let client = otto::tls_provider::http_client();
 
     assert_eq!(socket_status(&socket, "/v1/sessions").await, 200);
 
@@ -349,7 +351,7 @@ async fn model_queued_followup_runs_after_the_task_with_agent_provenance() {
     )
     .await;
     let (base, token) = await_startup(&stdout, &stderr).await;
-    let client = reqwest::Client::new();
+    let client = otto::tls_provider::http_client();
     let created = client
         .post(format!("{base}/v1/sessions"))
         .bearer_auth(&token)

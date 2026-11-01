@@ -53,15 +53,11 @@ pub(crate) fn compose(
     }
 
     let sandbox_driver_override = options.sandbox_driver_override;
-    let sandbox_settings = match resolve_sandbox_settings(
-        config_file,
-        environment,
-        workspace_path,
-        sandbox_driver_override.as_deref(),
-    ) {
-        Ok(settings) => settings,
-        Err(message) => return Err(startup.redact(&message)),
-    };
+    let sandbox_settings =
+        match resolve_sandbox_settings(config_file, sandbox_driver_override.as_deref()) {
+            Ok(settings) => settings,
+            Err(message) => return Err(startup.redact(&message)),
+        };
     let mcp_config = match resolve_mcp(config_file, environment, workspace_path) {
         Ok(config) => config,
         Err(error) => return Err(error.to_string()),

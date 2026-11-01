@@ -132,6 +132,16 @@ components:
           type: boolean
         summary:
           type: string
+        inert_read_paths:
+          type: array
+          description: Configured read_paths entries that lie below no denied path and change nothing. Present only when non-empty.
+          items:
+            type: string
+        skipped_deny_paths:
+          type: array
+          description: Built-in read denylist entries (as ~/ paths) that contain a writable root and are not applied. Present only when non-empty.
+          items:
+            type: string
     WorkspaceReload:
       type: object
       description: One workspace's own POST /v1/sandbox/reload outcome. Exactly one of sandbox or error is present.

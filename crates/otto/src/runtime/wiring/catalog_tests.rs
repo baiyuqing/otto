@@ -303,42 +303,32 @@ fn an_out_of_range_max_parallel_fails_the_build() {
     );
 }
 
-/// Skill and agent sandbox read paths, folded into one table because both
-/// roots travel the same code path.
+/// Catalog roots are readable through the global read allow, so resolving the
+/// sandbox settings leaves `read_paths` as configured.
 #[test]
-fn sandbox_read_paths_pick_up_only_existing_enabled_roots() {
-    for (name, make_directories, disabled, want) in [
-        ("both roots exist", true, false, true),
-        ("roots absent", false, false, false),
-        ("disabled with roots present", true, true, false),
+fn sandbox_read_paths_stay_as_configured_whatever_catalog_roots_exist() {
+    for (name, make_directories, disabled) in [
+        ("both roots exist", true, false),
+        ("roots absent", false, false),
+        ("disabled with roots present", true, true),
     ] {
         let fixture = fixture();
-        let skills = fixture.workspace.join(".otto/skills");
-        let agents = fixture.workspace.join(".otto/agents");
         if make_directories {
-            std::fs::create_dir_all(&skills).expect("skills root");
-            std::fs::create_dir_all(&agents).expect("agents root");
+            std::fs::create_dir_all(fixture.workspace.join(".otto/skills")).expect("skills root");
+            std::fs::create_dir_all(fixture.workspace.join(".otto/agents")).expect("agents root");
         }
         let mut config = fixture.builder.config.clone();
+        config.sandbox.read_paths = vec!["/configured/read/path".to_string()];
         if disabled {
             config.skills.enabled = Some(false);
             config.agents.enabled = Some(false);
         }
-        let settings = crate::runtime::startup::resolve_sandbox_settings(
-            &config,
-            &fixture.builder.environment,
-            &fixture.workspace.to_string_lossy(),
-            None,
-        )
-        .expect("sandbox settings");
-        for root in [&skills, &agents] {
-            let root = root.to_string_lossy().into_owned();
-            assert_eq!(
-                settings.read_paths.contains(&root),
-                want,
-                "{name}: {:?} against {root}",
-                settings.read_paths
-            );
-        }
+        let settings = crate::runtime::startup::resolve_sandbox_settings(&config, None)
+            .expect("sandbox settings");
+        assert_eq!(
+            settings.read_paths, config.sandbox.read_paths,
+            "{name}: {:?}",
+            settings.read_paths
+        );
     }
 }

@@ -69,7 +69,7 @@ release-tag: ## tag origin/main with the Cargo.toml version, push the tag and cr
 	node scripts/release.mjs tag
 
 test-tui: ## run only the TUI PTY tests, local and --attach (rust-test runs them too)
-	cargo test -p otto --test tui_pty --test tui_attach_pty
+	cargo test -p otto-cli --test tui_pty --test tui_attach_pty
 
 # `cargo test --workspace --no-run` rather than `cargo build -p otto`: both
 # leave target/debug/otto, but only this one resolves the same features as

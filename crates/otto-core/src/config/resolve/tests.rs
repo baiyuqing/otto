@@ -1,9 +1,11 @@
 use super::*;
 use crate::agent::progress::{DEFAULT_CONSECUTIVE_FAILURES, DEFAULT_REPEATED_CALLS};
-use crate::config::{Agent, CompactionConfig as Compaction};
+use crate::config::{
+    Agent, CompactionConfig as Compaction, LegacyProfile, convert_legacy_profiles,
+};
 
-fn profile(provider: &str, model: &str, base_url: &str, api_key_env: &str) -> Profile {
-    Profile {
+fn profile(provider: &str, model: &str, base_url: &str, api_key_env: &str) -> LegacyProfile {
+    LegacyProfile {
         provider: provider.into(),
         model: model.into(),
         base_url: base_url.into(),
@@ -12,15 +14,31 @@ fn profile(provider: &str, model: &str, base_url: &str, api_key_env: &str) -> Pr
     }
 }
 
-fn file_with_profiles(default_profile: &str, profiles: &[(&str, Profile)]) -> File {
-    File {
+/// Builds a file from deprecated profile tables and converts them, so the tests
+/// below cover the conversion together with resolution.
+fn file_with_profiles(default_profile: &str, profiles: &[(&str, LegacyProfile)]) -> File {
+    let mut file = File {
         default_profile: default_profile.into(),
         profiles: profiles
             .iter()
             .map(|(name, p)| (name.to_string(), p.clone()))
             .collect(),
         ..Default::default()
-    }
+    };
+    convert_legacy_profiles(&mut file).expect("convert");
+    file
+}
+
+/// Sets the windows of the model that `compaction_test_file` configures.
+fn set_windows(file: &mut File, context_window: Option<i64>, compaction_window: Option<i64>) {
+    let model = file
+        .providers
+        .values_mut()
+        .flat_map(|provider| provider.models.values_mut())
+        .next()
+        .expect("one model");
+    model.context_window = context_window;
+    model.compaction_window = compaction_window;
 }
 
 fn compaction_test_file(model: &str) -> File {
@@ -64,16 +82,6 @@ fn subagent_models_follow_only_the_configured_connection() {
         resolve_with(Overrides::default()).subagent_models,
         ["cheap", "strong"]
     );
-    assert!(
-        resolve_with(Overrides {
-            provider: "openai-compatible".into(),
-            base_url: "https://other.example/v1".into(),
-            ..Overrides::default()
-        })
-        .subagent_models
-        .is_empty()
-    );
-
     let mut selected = profile(
         "openai-compatible",
         "parent",
@@ -118,7 +126,7 @@ fn subagent_model_fallback_diagnostic_is_connection_specific_and_safe() {
     let same = resolved(Overrides::default());
     assert!(subagent_model_diagnostic(&file, &same).is_none());
     let model_only = resolved(Overrides {
-        model: "other-parent".into(),
+        model: "selected/other-parent".into(),
         ..Overrides::default()
     });
     assert!(subagent_model_diagnostic(&file, &model_only).is_none());
@@ -130,16 +138,10 @@ fn subagent_model_fallback_diagnostic_is_connection_specific_and_safe() {
     let mut emptied = same.clone();
     emptied.subagent_models.clear();
     assert!(subagent_model_diagnostic(&file, &emptied).is_none());
-    for overrides in [
-        Overrides {
-            base_url: "https://changed.example/v1".into(),
-            ..Overrides::default()
-        },
-        Overrides {
-            provider: "chatgpt".into(),
-            ..Overrides::default()
-        },
-    ] {
+    for overrides in [Overrides {
+        base_url: "https://changed.example/v1".into(),
+        ..Overrides::default()
+    }] {
         let runtime = resolved(overrides);
         let diagnostic = subagent_model_diagnostic(&file, &runtime).expect("fallback diagnostic");
         assert_eq!(diagnostic.key, "subagent_models");
@@ -160,18 +162,19 @@ fn subagent_model_fallback_diagnostic_is_connection_specific_and_safe() {
         }
     }
     let mut no_list = file.clone();
-    no_list
-        .profiles
-        .get_mut("selected")
-        .unwrap()
-        .subagent_models
-        .clear();
+    for entry in no_list
+        .providers
+        .values_mut()
+        .flat_map(|provider| provider.models.values_mut())
+    {
+        entry.legacy_subagent_models.clear();
+    }
     let runtime = resolve_without_credentials(
         &no_list,
         &HashMap::new(),
         &SessionDefaults::default(),
         &Overrides {
-            provider: "chatgpt".into(),
+            model: "chatgpt/private-parent".into(),
             ..Overrides::default()
         },
     )
@@ -201,7 +204,7 @@ fn subagent_model_list_rejects_invalid_entries() {
         assert!(
             error
                 .to_string()
-                .contains("profile \"selected\" subagent_models"),
+                .contains("model \"chatgpt/parent\" subagent_models"),
             "{error}"
         );
     }

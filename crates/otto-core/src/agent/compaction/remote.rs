@@ -168,7 +168,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ..CompactionResult::default()
         };
         let token = CancellationToken::new();
-        if let Err(message) = self
+        match self
             .hook(
                 "after_compaction",
                 serde_json::json!({"checkpoint_id":result.checkpoint_id,"reason":format!("{reason:?}")}),
@@ -176,7 +176,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             )
             .await
         {
-            self.hook_warning(emit, &message);
+            Ok(response) => self.hook_notice(emit, &response),
+            Err(message) => self.hook_warning(emit, &message),
         }
         emit(Event::CompactionCompleted {
             compaction: result.clone(),

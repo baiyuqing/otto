@@ -12,6 +12,8 @@ pub struct Response {
     pub context: Option<String>,
     pub arguments: Option<Value>,
     pub content: Option<String>,
+    /// Text shown to the user as a notification; never sent to the model.
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +38,8 @@ pub trait Hooks: Send + Sync {
 pub struct State {
     pub start: std::sync::OnceLock<Result<Response, String>>,
     pub starting: std::sync::atomic::AtomicBool,
+    /// Set once the `session_start` notice has been shown for this session.
+    pub start_notified: std::sync::atomic::AtomicBool,
     pub start_done: tokio_util::sync::CancellationToken,
     pub closed: tokio_util::sync::CancellationToken,
     pub end_requested: std::sync::atomic::AtomicBool,
@@ -158,6 +162,13 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
             present: false,
             cached_input_tokens_present: false,
         });
+    }
+
+    /// Shows a hook response `notice` as a notification; absent notices emit nothing.
+    pub(super) fn hook_notice(&self, emit: super::EventSink<'_>, response: &Response) {
+        if let Some(text) = &response.notice {
+            self.hook_warning(emit, text);
+        }
     }
 
     pub fn claim_end_hooks(&self) -> bool {

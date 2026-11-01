@@ -514,8 +514,9 @@ and a [memory command](#memory-command-protocol):
 Commands are argv arrays, not implicit shells. `${PLUGIN_ROOT}`/`${PLUGIN_DATA}`
 refer to the snapshot/data directory. Commands start in the workspace through
 the current sandbox/filtered env, without new filesystem grants. A package's
-commands also receive the variables bound to that package name in user or
-managed configuration:
+commands also receive `PLUGIN_ROOT` and `PLUGIN_DATA` as environment variables
+(standalone hooks do not) and the variables bound to that package name in user
+or managed configuration:
 
 ```toml
 [plugins.bindings.demo]
@@ -554,7 +555,7 @@ MCP matching uses selected remote names; router arguments stay `{tool, arguments
 Each command receives one stdin JSON object followed by EOF:
 
 ```json
-{"version":1,"event":"before_tool","workspace":"/project","session":{"session_id":"s1","parent_session_id":null,"task_id":"","mode":"new"},"data":{"turn_id":"op_1","tool":"bash","tool_call_id":"call1","operation_id":"op_1","attempt":1,"arguments":{"command":"git status"}}}
+{"version":1,"event":"before_tool","workspace":"/project","headless":false,"session":{"session_id":"s1","parent_session_id":null,"task_id":"","mode":"new","history_path":"/home/u/.otto/sessions/<key>/s1.jsonl"},"data":{"turn_id":"op_1","tool":"bash","tool_call_id":"call1","operation_id":"op_1","attempt":1,"arguments":{"command":"git status"}}}
 ```
 
 Ignore unknown input fields. Session metadata identifies child ownership;
@@ -565,14 +566,22 @@ refuses late hooks; asynchronous shutdown awaits bounded cleanup.
 
 | Event | Data beyond turn ID | Accepted response fields |
 | --- | --- | --- |
-| `session_start` | Session metadata | `decision`, `reason`, `context` |
-| `before_prompt` | `prompt`, `followup`, `has_image` | `decision`, `reason`, `context` |
-| `before_tool` | Identity/arguments above | `decision`, `reason`, `arguments` |
-| `after_tool` | Identity/arguments, `content`, `is_error`, typed `outcome` | `content` |
-| `before_compaction` | `reason`, `focus` | `decision`, `reason`, `context` retention hint |
-| `after_compaction` | Committed `checkpoint_id`, `reason` | `{}` |
-| `turn_end` | `status`: `success`, `error`, `cancelled`; optional error/stop reason; `turn` or `turn_omitted` | `{}` |
-| `session_end` | Session metadata | `{}` |
+| `session_start` | Session metadata | `decision`, `reason`, `context`, `notice` |
+| `before_prompt` | `prompt`, `followup`, `has_image` | `decision`, `reason`, `context`, `notice` |
+| `before_tool` | Identity/arguments above | `decision`, `reason`, `arguments`, `notice` |
+| `after_tool` | Identity/arguments, `content`, `is_error`, typed `outcome` | `content`, `notice` |
+| `before_compaction` | `reason`, `focus` | `decision`, `reason`, `context` retention hint, `notice` |
+| `after_compaction` | Committed `checkpoint_id`, `reason` | `notice` |
+| `turn_end` | `status`: `success`, `error`, `cancelled`; optional error/stop reason; `turn` or `turn_omitted` | `notice` |
+| `session_end` | Session metadata | `notice` |
+
+`session.history_path` is the session file path read at each call. It is empty
+while a lazily created session has no file, as in the `session_start` of a new
+session. `headless` is true for `otto --prompt` runs only. `notice` is shown to
+the user as a notification and is never sent to the model. The notices of
+several hooks for one event are joined with newlines, and a denying hook's
+notice is kept with the earlier ones. A `session_end` notice is not displayed
+because that event has no output sink.
 
 Exit zero and emit one JSON object, or no stdout for no-op; diagnostics go to
 stderr. Unknown/unsupported response fields and malformed JSON fail. `decision`

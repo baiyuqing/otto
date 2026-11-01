@@ -83,6 +83,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     control,
                 )
                 .await
+                .inspect(|response| self.hook_notice(emit, response))
             {
                 Err(message) => hook_denial = Some(message),
                 Ok(response) if response.decision == Some(hooks::Decision::Deny) => {
@@ -191,6 +192,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             {
                 Err(message) => self.hook_warning(emit, &message),
                 Ok(response) => {
+                    self.hook_notice(emit, &response);
                     if let Some(content) = response.content {
                         let audit = serde_json::json!({
                             "version": 1,

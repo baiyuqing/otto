@@ -47,7 +47,7 @@ impl Contract for SeatbeltContract {
                     .expect("allowed read")
                     .to_string(),
             ],
-            deny_read_paths: Vec::new(),
+            deny_read_paths: vec![fixture.denied_dir.to_str().expect("denied dir").to_string()],
             network: Some(self.network),
         };
         let driver = SeatbeltDriver::open(options, &CancellationToken::new())

@@ -135,7 +135,7 @@ func TestManagementUsesMessageRequestID(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	h := newHarness(t, setup{platform: "telegram", manage: client})
-	h.say("/config use work")
+	h.say("/config use work/small")
 	h.waitSent(1)
 	id := <-header
 	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) {

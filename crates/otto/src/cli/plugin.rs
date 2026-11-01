@@ -100,6 +100,15 @@ pub fn run(
                     )
                     .map_err(|_| "cannot write trust details")?;
                 }
+                if !p.package.claude_hooks.is_empty() {
+                    writeln!(
+                        stdout,
+                        "Claude hooks: {}",
+                        serde_json::to_string(&p.package.claude_hooks)
+                            .map_err(|_| "cannot encode execution details")?
+                    )
+                    .map_err(|_| "cannot write trust details")?;
+                }
                 service.change(name, action)?;
                 writeln!(
                     stdout,

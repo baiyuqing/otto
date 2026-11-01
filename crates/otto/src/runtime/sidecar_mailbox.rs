@@ -22,7 +22,7 @@ use crate::tool::remind;
 /// A fresh input id for a notification enqueued without one: `in_` followed
 /// by 32 random hex digits, or empty when randomness is unavailable (the
 /// notification is then delivered at least once).
-pub(crate) fn new_input_id() -> String {
+pub fn new_input_id() -> String {
     super::builder::random_id()
         .map(|random| format!("in_{random}"))
         .unwrap_or_default()

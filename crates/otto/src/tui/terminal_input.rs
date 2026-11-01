@@ -128,7 +128,7 @@ impl Drop for TerminalInput {
 /// Disables mouse reporting and bracketed paste on stdout when a TUI session
 /// enabled them. Called from the panic hook, where `Drop` does not run.
 /// Writes nothing when no session enabled them, because stdout may be a pipe.
-pub(crate) fn reset_terminal_input_modes_after_panic() {
+pub fn reset_terminal_input_modes_after_panic() {
     reset_input_modes(&TERMINAL_INPUT_MODES_ENABLED, std::io::stdout());
 }
 

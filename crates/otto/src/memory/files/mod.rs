@@ -586,8 +586,8 @@ impl crate::memory::MemoryStore for FileStore {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testsupport {
+#[cfg(any(test, feature = "test-support"))]
+pub mod testsupport {
     use chrono::{DateTime, TimeZone, Utc};
 
     use super::*;

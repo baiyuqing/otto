@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/otto-core", "crates/otto"]
+members = [
+    "crates/otto-core",
+    "crates/otto",
+    "crates/otto-server",
+    "crates/otto-acp",
+    "crates/otto-cli",
+]
 
 [workspace.package]
 edition = "2024"
@@ -80,6 +86,9 @@ tokio-rustls = { version = "=0.26.6", default-features = false, features = ["rin
 # Embedded SQLite, compiled from the bundled C source.
 rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }
+otto = { path = "crates/otto" }
+otto-server = { path = "crates/otto-server" }
+otto-acp = { path = "crates/otto-acp" }
 
 # Release binary size. Measured 2026-10-25 on macOS arm64 with Rust 1.99.0:
 # the default release profile produced a 65,633,504-byte `otto` (52,751,472

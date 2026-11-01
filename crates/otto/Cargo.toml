@@ -70,12 +70,6 @@ crossterm = "=0.29.0"
 # `tui::render::composer_lines`). Already in the tree as ratatui's own
 # width source; depending on it directly keeps the two in agreement.
 unicode-width = "=0.2.2"
-# ACP v1 message types for `otto acp` (`otto::acp`). The default feature only
-# adds JSON Schema generation. The crate enables serde_json's
-# `preserve_order`, so every serde_json map in a native workspace build keeps
-# insertion order (see docs/development.md).
-agent-client-protocol-schema = { version = "=1.12.0", default-features = false }
-
 tower.workspace = true
 tokio-rustls.workspace = true
 
@@ -83,15 +77,9 @@ tokio-rustls.workspace = true
 # Gives the integration tests `otto::faults` and `otto::fixtures` without
 # compiling them into a default build.
 otto = { path = ".", features = ["fault-injection", "test-support"] }
-# `pty` for the TUI's PTY smoke test (crates/otto/tests/tui_pty.rs).
-nix = { workspace = true, features = ["term"] }
 # `start_paused` drives the bash timeout deterministically without real waits.
 # `net` gives the in-file provider tests a loopback TCP origin server.
 tokio = { workspace = true, features = ["test-util", "net"] }
-# Self-signed certificates for the TLS listener tests; a key must not live in
-# a fixture.
-rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
-
 [[test]]
 name = "mcp_stdio"
 path = "tests/mcp_stdio.rs"

@@ -18,7 +18,7 @@ pub(super) fn environment_snapshot(
 }
 
 /// Bounds the snapshot before anything reads it.
-pub(crate) fn capture_environment(entries: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, String> {
+pub fn capture_environment(entries: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, String> {
     if entries.len() > MAX_CAPTURED_ENVIRONMENT_ENTRIES {
         return Err(ENVIRONMENT_SNAPSHOT_TOO_LARGE.to_string());
     }
@@ -34,7 +34,7 @@ pub(crate) fn capture_environment(entries: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>,
 
 /// Parses `KEY=VALUE` entries, skipping every malformed one and refusing an
 /// oversized set outright.
-pub(crate) fn environment_lookup(entries: &[Vec<u8>]) -> Result<EnvironmentLookup, String> {
+pub fn environment_lookup(entries: &[Vec<u8>]) -> Result<EnvironmentLookup, String> {
     let mut parsed: EnvironmentLookup = HashMap::new();
     let mut total = 0usize;
     for entry in entries {
@@ -79,35 +79,31 @@ fn valid_environment_name(name: &str) -> bool {
 }
 
 /// `$HOME`, else the passwd entry, made absolute.
-pub(crate) fn resolve_home_for(lookup: &EnvironmentLookup) -> Result<String, String> {
+pub fn resolve_home_for(lookup: &EnvironmentLookup) -> Result<String, String> {
     resolve_home(lookup)
 }
 
 /// The `otto memory` flag grammar names its own config path, so it cannot
 /// build a [`CliOptions`].
-pub(crate) fn load_config_for(
+pub fn load_config_for(
     config_path: &str,
     explicit: bool,
     home: &str,
-) -> Result<(String, File), ()> {
+) -> Result<(String, File), String> {
     let path = if config_path.is_empty() {
         PathBuf::from(home).join(".config/otto/config.toml")
     } else {
         PathBuf::from(config_path)
     };
-    let file =
-        crate::config::layered::load_user(Path::new(home), &path, explicit).map_err(|_| ())?;
+    let file = crate::config::layered::load_user(Path::new(home), &path, explicit)?;
     Ok((path.display().to_string(), file))
 }
 
-pub(crate) fn config_environment_for(
-    file: &File,
-    lookup: &EnvironmentLookup,
-) -> HashMap<String, String> {
+pub fn config_environment_for(file: &File, lookup: &EnvironmentLookup) -> HashMap<String, String> {
     config_environment(file, lookup)
 }
 
-pub(crate) fn resolve_home(lookup: &EnvironmentLookup) -> Result<String, String> {
+pub fn resolve_home(lookup: &EnvironmentLookup) -> Result<String, String> {
     const FAILED: &str = "resolve home directory";
     let mut home = lookup.get("HOME").cloned().unwrap_or_default();
     if home.is_empty() {
@@ -136,7 +132,7 @@ fn current_user_home() -> Option<String> {
 
 /// Opens `~/.otto/schedule.db`. Without it the process runs with no schedule
 /// store and no delivery worker, after one warning.
-pub(crate) fn open_schedule(
+pub fn open_schedule(
     storage: &crate::runtime::storage::Storage,
     home: &str,
     stderr: &mut (dyn Write + Send),
@@ -178,10 +174,7 @@ pub(super) fn load_config(
 /// variable: the empty string is inserted, and resolution distinguishes
 /// "absent" from "empty" nowhere. The map also holds each provider's
 /// `api_key_env`, Claude workspace bindings and the `web_search` key names.
-pub(crate) fn config_environment(
-    file: &File,
-    lookup: &EnvironmentLookup,
-) -> HashMap<String, String> {
+pub fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String, String> {
     const FIXED_KEYS: [&str; 7] = [
         "HOME",
         "OTTO_PROVIDER",

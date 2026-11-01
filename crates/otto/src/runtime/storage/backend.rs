@@ -137,13 +137,13 @@ impl BackendRegistry {
 }
 
 #[derive(Clone)]
-pub(crate) struct ConfiguredEndpoint {
+pub struct ConfiguredEndpoint {
     pub factory: String,
     pub endpoint: StorageEndpoint,
     pub options: BTreeMap<String, String>,
 }
 
-pub(crate) fn resolve(
+pub fn resolve(
     configuration: &Configuration,
     environment: &HashMap<String, String>,
     _home: &Path,
@@ -188,7 +188,7 @@ pub(crate) fn resolve(
         .collect()
 }
 
-pub(crate) fn configured_routes(configuration: &Configuration) -> BTreeMap<String, StorageRoute> {
+pub fn configured_routes(configuration: &Configuration) -> BTreeMap<String, StorageRoute> {
     configuration
         .routes
         .iter()

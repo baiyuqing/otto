@@ -13,7 +13,7 @@ impl BashApprovals {
         }
     }
 
-    pub(crate) fn request(&self, session_id: &str, command: &str) -> String {
+    pub fn request(&self, session_id: &str, command: &str) -> String {
         self.request_read_path(session_id, command, "")
     }
 
@@ -160,7 +160,7 @@ impl BashApprovals {
         usize::from(state.requests.contains_key(session_id))
     }
 
-    pub(crate) fn take(&self, session_id: &str, command: &str) -> bool {
+    pub fn take(&self, session_id: &str, command: &str) -> bool {
         self.take_read_path(session_id, command, "")
     }
 

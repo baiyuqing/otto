@@ -64,7 +64,7 @@ export function rewriteLock(text, names, v) {
 
 export const FILES = [
   ['Cargo.toml', rewriteCargoToml],
-  ['Cargo.lock', (t, v) => rewriteLock(t, ['otto', 'otto-core'], v)],
+  ['Cargo.lock', (t, v) => rewriteLock(t, ['otto', 'otto-core', 'otto-server', 'otto-acp', 'otto-cli'], v)],
 ];
 
 export function bump(root, next) {

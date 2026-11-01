@@ -6,7 +6,7 @@ use super::*;
 async fn the_task_commands_report_an_empty_registry_and_reject_bad_arguments() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
 
     let (stdout, stderr) = session(
         "/task\n/tasks\n/task cancel\n/task nope\n/exit\n",
@@ -31,15 +31,15 @@ async fn the_task_commands_report_an_empty_registry_and_reject_bad_arguments() {
 }
 
 /// A controller whose builder carries a task recorder, in place of the
-/// default `None` `fixture_tests::builder` sets.
+/// default `None` `fixtures::builder` sets.
 async fn controller_with_task_recorder(
     workspace: &Path,
     sessions: &Path,
     store: Arc<record::Store>,
 ) -> Controller {
-    let mut builder = fixture_tests::builder(workspace, sessions);
+    let mut builder = fixtures::builder(workspace, sessions);
     builder.shared_mut().task_recorder = Some(store);
-    let runtime = fixture_tests::initial_runtime(&builder);
+    let runtime = fixtures::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder
         .build_runner(&session, &runtime)
@@ -89,7 +89,7 @@ async fn agents_lists_recorded_tasks_across_sessions_and_reports_when_empty() {
 async fn timers_lists_cancels_and_reports_bad_input() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     let reminders = controller.reminders().expect("timer registry");
     reminders
         .schedule(std::time::Duration::from_secs(90), "check the build".into())
@@ -122,7 +122,7 @@ async fn timers_lists_cancels_and_reports_bad_input() {
 async fn task_detail_prints_the_line_model_and_result() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     let tasks = controller.subagent_tasks().expect("sub-agent tasks");
     let task = tasks
         .add(
@@ -153,7 +153,7 @@ async fn task_detail_prints_the_line_model_and_result() {
 async fn cancelling_a_queued_task_reports_it() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     let tasks = controller.subagent_tasks().expect("sub-agent tasks");
     let task = tasks
         .add(
@@ -185,7 +185,7 @@ async fn cancelling_a_queued_task_reports_it() {
 async fn the_task_list_prints_one_line_per_task() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     let tasks = controller.subagent_tasks().expect("sub-agent tasks");
 
     let started = Utc::now() - chrono::TimeDelta::seconds(42);
@@ -263,11 +263,11 @@ async fn the_task_list_prints_one_line_per_task() {
 async fn task_detail_prints_the_child_steps_between_the_model_and_the_result() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     let tasks = controller.subagent_tasks().expect("sub-agent tasks");
 
     let history = vec![
-        fixture_tests::user("review please"),
+        fixtures::user("review please"),
         otto_core::model::Message {
             role: otto_core::model::Role::Assistant,
             blocks: vec![otto_core::model::Block {
@@ -349,7 +349,7 @@ async fn task_detail_prints_the_child_steps_between_the_model_and_the_result() {
 async fn the_task_commands_resolve_a_task_name() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = fixtures::controller(workspace.path(), sessions.path()).await;
     let tasks = controller.subagent_tasks().expect("sub-agent tasks");
     let canceled = Arc::new(CancellationToken::new());
     let task = tasks
@@ -382,9 +382,9 @@ async fn the_task_commands_resolve_a_task_name() {
 async fn the_task_commands_without_a_registry_report_it_once_each() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let mut builder = fixture_tests::builder(workspace.path(), sessions.path());
+    let mut builder = fixtures::builder(workspace.path(), sessions.path());
     builder.shared_mut().config.agents.enabled = Some(false);
-    let runtime = fixture_tests::initial_runtime(&builder);
+    let runtime = fixtures::initial_runtime(&builder);
     let session_store = builder.create_session(&runtime).expect("session");
     let runner = builder
         .build_runner(&session_store, &runtime)

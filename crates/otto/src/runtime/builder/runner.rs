@@ -369,7 +369,7 @@ impl Runner {
         self.agent.set_next_input_id(input_id);
     }
 
-    pub(crate) fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
+    pub fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
         Arc::clone(&self.task_control)
     }
 
@@ -401,6 +401,21 @@ impl Runner {
 
     pub fn subagents(&self) -> Option<Arc<crate::subagent::runner::Runner>> {
         self.subagents.clone()
+    }
+
+    /// Replaces the skill catalogs, for a test that builds them apart from
+    /// the runner.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_skill_catalogs(&mut self, skills: Catalog, discovered_skills: Catalog) {
+        self.skills = skills;
+        self.discovered_skills = discovered_skills;
+    }
+
+    /// Installs the sub-agent runner, for a test that spawns sub-agents
+    /// through a scripted runner.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_subagents(&mut self, subagents: Arc<crate::subagent::runner::Runner>) {
+        self.subagents = Some(subagents);
     }
 
     /// Releases what this runner owns: its approval reviewer registration
@@ -476,7 +491,7 @@ impl Runner {
     /// `tasks` is wired to both [`Options::tasks`] and [`Options::inbox`], so
     /// an empty-text wake turn reaches the provider instead of being rejected
     /// as empty user text.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn scripted(
         session: SharedSession,
         provider: Arc<dyn Provider + Send + Sync>,
@@ -487,7 +502,7 @@ impl Runner {
 
     /// [`Self::scripted`] with `tools` registered, for a test that needs the
     /// provider's tool call to reach a tool double.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn scripted_with_tools(
         session: SharedSession,
         provider: Arc<dyn Provider + Send + Sync>,

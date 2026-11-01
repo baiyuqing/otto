@@ -5,7 +5,7 @@ use super::*;
 /// Opens the memory service and the workspace memory scope when the boundary
 /// allows dynamic content, then the advice audit log and the recall limits.
 /// The error is already redacted; the caller closes what it opened.
-pub(crate) fn open_memory(
+pub fn open_memory(
     builder: &mut Builder,
     memory_config: &MemoryRuntime,
     runtime: &Runtime,
@@ -110,28 +110,28 @@ pub(crate) fn open_memory(
 
 // ---- straight-through start ----
 
-pub(crate) struct StartOptions {
-    pub(crate) memory_extension: Option<super::super::wiring::MemoryExtension>,
-    pub(crate) host_entries: Vec<Vec<u8>>,
-    pub(crate) config_path: String,
-    pub(crate) explicit_config: bool,
-    pub(crate) cwd: String,
-    pub(crate) overrides: Overrides,
-    pub(crate) logger: Arc<crate::log::Logger>,
-    pub(crate) disabled: Disabled,
+pub struct StartOptions {
+    pub memory_extension: Option<super::super::wiring::MemoryExtension>,
+    pub host_entries: Vec<Vec<u8>>,
+    pub config_path: String,
+    pub explicit_config: bool,
+    pub cwd: String,
+    pub overrides: Overrides,
+    pub logger: Arc<crate::log::Logger>,
+    pub disabled: Disabled,
 }
 
-pub(crate) struct Started {
-    pub(crate) builder: Builder,
-    pub(crate) runtime: Runtime,
-    pub(crate) workspace_path: String,
-    pub(crate) sandbox: WorkspaceSandbox,
+pub struct Started {
+    pub builder: Builder,
+    pub runtime: Runtime,
+    pub workspace_path: String,
+    pub sandbox: WorkspaceSandbox,
 }
 
 /// Builds the runtime `otto acp` runs on, from environment capture to the
 /// memory service, without a frontend. Warnings go to `stderr` as each step
 /// emits them; `Err` is the text the CLI would pass to `fail`.
-pub(crate) async fn start(
+pub async fn start(
     options: StartOptions,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),

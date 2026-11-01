@@ -75,7 +75,17 @@ run `cargo fmt --all` and tests covering the changed behavior, for example:
 ```bash
 cargo test -p otto --test storage_boundary
 cargo test -p otto --lib approval
+cargo test -p otto-cli --test tui_pty --test tui_attach_pty
 ```
+
+Build the binary with `cargo build -p otto-cli` (or `cargo build`). Tests of
+the moved frontends run per crate: `cargo test -p otto-server`,
+`cargo test -p otto-acp`, and `cargo test -p otto-cli --test <name>` for a file
+in `crates/otto-cli/tests/`. The first `cargo test -p <crate>` after a
+`--workspace` build compiles a second set of dependency artifacts, because
+`-p` unifies Cargo features over fewer packages; both sets stay cached in
+`target/`. `make check-fast` therefore selects tests with `--workspace --lib
+-- <module>::` and `--workspace --test <name>`.
 
 Docs-only changes need no new tests: check links, paths, examples and Markdown.
 Report each verification command, result and cause of failure in the PR body;
@@ -99,7 +109,7 @@ A Rust file under `crates/*/src` is test-only when its `mod name;`
 declaration, or an ancestor module's, carries a `cfg` that requires `test`,
 such as `#[cfg(test)]` or `#[cfg(all(test, unix))]` but not
 `#[cfg(any(test, feature = "..."))]`. The check walks the module tree from
-`lib.rs` and `main.rs` and resolves `#[path]`. A test-only file needs a
+`lib.rs` and `main.rs` of each crate and resolves `#[path]`. A test-only file needs a
 directory or file stem named `tests` or ending in `_tests` in its path, and a
 file with such a name must be test-only. Inline `#[cfg(test)] mod name { ... }`
 blocks are not files and are not checked.
@@ -112,7 +122,7 @@ untracked, not ignored, code file in the worktree.
 
 ### ACP integration-test navigation
 
-`crates/otto/tests/acp_stdio.rs` and `acp_attach.rs` own the process/JSON-RPC
+`crates/otto-cli/tests/acp_stdio.rs` and `acp_attach.rs` own the process/JSON-RPC
 harnesses. Scenario modules under their matching directories cover protocol,
 memory, approvals, commands, tasks and relay behavior. Add cases to the owning
 scenario module rather than duplicating harnesses.
@@ -171,8 +181,9 @@ Git and release tags are the archive. No parallel historical index is required.
 
 ## Releases
 
-`[workspace.package] version` in `Cargo.toml` is shared by `otto` and
-`otto-core`; their `Cargo.lock` entries must match (covered by tests).
+`[workspace.package] version` in `Cargo.toml` is shared by `otto`, `otto-core`,
+`otto-server`, `otto-acp` and `otto-cli`; their `Cargo.lock` entries must match
+(covered by `crates/otto-cli/tests/version.rs`).
 Version changes belong **only in release PRs** via `make bump VERSION=X.Y.Z`,
 never feature/fix PRs. Versioning is patch-only in 0.x, even for incompatible
 changes; 1.0.0 is a maintainer decision.

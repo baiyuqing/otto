@@ -162,7 +162,7 @@ impl Client {
     }
 
     /// Dispatch against the same serve router without a socket or extra process.
-    pub(crate) fn in_process(router: axum::Router) -> Self {
+    pub fn in_process(router: axum::Router) -> Self {
         Self {
             http: crate::tls_provider::http_client(),
             router: Some(router),

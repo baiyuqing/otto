@@ -167,7 +167,7 @@ impl Builder {
     /// The provider client for `runtime`; `Unavailable` when the redaction
     /// boundary is closed.
     pub(super) fn provider_client(&self, runtime: &Runtime) -> Result<ProviderClient, BuildError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some((_, provider)) = TEST_PROVIDERS
             .lock()
             .unwrap_or_else(|p| p.into_inner())

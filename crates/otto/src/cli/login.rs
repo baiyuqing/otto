@@ -72,13 +72,13 @@ fn launch_browser(url: &str) {
 /// the `Send + Sync` bound on [`Opener`], and the lock is only ever held
 /// inside the synchronous closure body, never across an await point.
 ///
-/// `pub(crate)` so `repl_commands.rs`'s `/mcp login` can reuse the same
+/// Public so `repl_commands.rs`'s `/mcp login` and `otto mcp login` reuse the same
 /// URL-printing convention instead of duplicating it.
-pub(crate) type SharedWriter<'a> = Mutex<&'a mut (dyn Write + Send)>;
+pub type SharedWriter<'a> = Mutex<&'a mut (dyn Write + Send)>;
 
 /// Print the URL, which is the reliable path, then also try to launch the
-/// default browser. `pub(crate)` for the same reason as [`SharedWriter`].
-pub(crate) fn browser_opener<'a, 'w: 'a>(
+/// default browser. Public for the same reason as [`SharedWriter`].
+pub fn browser_opener<'a, 'w: 'a>(
     stdout: &'a SharedWriter<'w>,
 ) -> impl Fn(&str) -> Result<(), String> + Send + Sync + 'a {
     move |url: &str| {
@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use crate::auth::Credentials;
     use crate::auth::login::{LoginError, Opener};
-    use crate::cli::fixture_tests;
+    use crate::fixtures;
     use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -349,9 +349,9 @@ mod tests {
         provider: &str,
         dynamic: bool,
     ) -> Controller {
-        let mut builder = fixture_tests::builder(workspace, sessions);
+        let mut builder = fixtures::builder(workspace, sessions);
         builder.shared_mut().auth_path = auth_path.to_string_lossy().into_owned();
-        let runtime = fixture_tests::initial_runtime(&builder);
+        let runtime = fixtures::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder
             .build_runner(&session, &runtime)

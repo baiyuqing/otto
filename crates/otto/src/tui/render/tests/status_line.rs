@@ -33,7 +33,7 @@ async fn footer_omits_the_provider_and_uses_compact_status_labels() {
     app.info.model_selector = "chatgpt/gpt-5.6-terra".to_string();
     app.info.model = "gpt-5.6-terra".to_string();
     app.info.thinking.clear();
-    app.info.sandbox = fixture_tests::seatbelt_info(crate::runtime::info::SandboxNetwork::Allowed);
+    app.info.sandbox = fixtures::seatbelt_info(crate::runtime::info::SandboxNetwork::Allowed);
 
     let footer = footer_text(&app);
 

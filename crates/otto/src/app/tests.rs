@@ -1,7 +1,5 @@
 use super::*;
-use crate::cli::fixture_tests::{
-    FakeSandbox, builder, controller, initial_runtime, seatbelt_info, user,
-};
+use crate::fixtures::{FakeSandbox, builder, controller, initial_runtime, seatbelt_info, user};
 use crate::runtime::info::SandboxNetwork;
 use crate::runtime::sandbox_config::SandboxChange;
 

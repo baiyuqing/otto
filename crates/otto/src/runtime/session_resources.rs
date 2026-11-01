@@ -148,7 +148,7 @@ impl SessionResources {
     }
 
     /// Resources for a scripted test runner built around `tasks`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_tests(session_id: &str, tasks: Option<Arc<Tasks>>) -> Arc<Self> {
         let notifications = match &tasks {
             Some(tasks) => Arc::clone(tasks.notifications_inbox()),

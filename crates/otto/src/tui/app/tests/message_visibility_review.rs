@@ -30,7 +30,7 @@ fn delivered_projection_survives_before_turn_history_until_actual_row() {
         assert_eq!(rendered(&app).matches("foreign turn input").count(), 1);
         app.apply_steering(vec![]);
         assert_eq!(app.pending_steers.len(), 1);
-        let history = Remote::offline(vec![crate::cli::fixture_tests::user("foreign turn input")]);
+        let history = Remote::offline(vec![crate::fixtures::user("foreign turn input")]);
         app.refresh(&Backend::Attach(&history));
         assert!(app.pending_steers.is_empty());
         assert!(app.delivered_steers.contains(&1));
@@ -90,8 +90,8 @@ fn first_observed_delivery_is_visible_once_before_and_after_notification() {
 fn first_observed_deliveries_match_historical_occurrences_without_losing_repeated_text() {
     for attached in [false, true] {
         let remote = Remote::offline(vec![
-            crate::cli::fixture_tests::user("repeated delivery"),
-            crate::cli::fixture_tests::user("old delivery"),
+            crate::fixtures::user("repeated delivery"),
+            crate::fixtures::user("old delivery"),
         ]);
         let mut app = App::new(&Backend::Attach(&remote));
         app.attached = attached;

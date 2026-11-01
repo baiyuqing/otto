@@ -347,7 +347,17 @@ Shared commands:
   ([selectors](getting-started.md#providers-and-models)). Resuming another session keeps
   the current selection, including reasoning effort; it does not restore that
   session's historical model settings. In the REPL, use
-  `/model PROVIDER/MODEL_ID --thinking LEVEL [--save]`.
+  `/model PROVIDER/MODEL_ID --thinking LEVEL [--save]`. After a typed
+  `/model PROVIDER/MODEL_ID` switches, the REPL replies `Switched to model
+  <selector> (type <type>, thinking <effort>). Set as default model.` and the
+  TUI replies `Switched to model <selector> (type <type>). Set as default
+  model.`; both write `default_model` to the host configuration. When that
+  write fails, the reply instead ends with `but the default model was not
+  saved: <error>` (REPL) or `The default model was not saved: <error>` (TUI),
+  for example when the file still holds `[profiles]`, `default_profile` or
+  `approval.reviewer_profile` (error `legacy_profiles_config`; convert the
+  file first, see [migration](getting-started.md#migrating-from-profiles)).
+  The switch itself still applies to the running session.
   Changing the model or reasoning effort keeps the session's running
   sub-agents, pending notifications, timers and MCP servers; only the model
   connection and system prompt are rebuilt. `/new`, `/load`, closing the

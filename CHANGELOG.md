@@ -66,6 +66,15 @@ commit ledger; Git and release tags retain the full history. See the
   learning fold at session end. Its state root defaults to
   `<workspace>/.otto/tokeneconomizer`; the TokenEconomizer checkout and
   `~/.otto/sessions` must be listed in `[sandbox] read_paths`.
+- Packages with a `.claude-plugin/plugin.json` run the `command` hooks of
+  their `hooks/hooks.json` and manifest `hooks` field natively, with Claude
+  Code event names, stdin payloads, exit-code and JSON response handling,
+  matchers and `${CLAUDE_PLUGIN_ROOT}` substitution, under Otto's trust,
+  sandbox and size limits. `otto plugin inspect` lists them under
+  `claude_hooks`. A `claude` package trusted before this change runs its hooks
+  after the upgrade without a new trust step. Hooks in Claude settings files
+  and in `codex` packages are not read. See
+  [Claude Code hook format](docs/manual/memory-and-extensions.md#claude-code-hook-format).
 
 ### Fixes
 

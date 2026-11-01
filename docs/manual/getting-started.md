@@ -44,16 +44,16 @@ environment, not TOML, a command-line argument, or a prompt:
 
 ```bash
 export ANTHROPIC_API_KEY='…'  # set privately; avoid saving a real key in shell history
-otto --provider claude --model MODEL_ID
+otto --model claude/MODEL_ID
 
 export OPENAI_API_KEY='…'
-otto --provider openai-compatible --base-url https://api.example.com/v1 --model MODEL_ID
+otto --model openai-compatible/MODEL_ID --base-url https://llm.example.com/v1
 ```
 
-A Claude profile defaults to `https://api.anthropic.com`, API version
+The built-in `claude` provider defaults to `https://api.anthropic.com`, API version
 `2026-10-21`, and the `ANTHROPIC_API_KEY` binding. If the key is not scoped to
 one Claude workspace, set a separate environment variable containing the
-workspace ID and name it with the profile's `workspace_id_env`; do not put the
+workspace ID and name it with the provider's `workspace_id_env`; do not put the
 workspace ID or key in TOML. `api_version` can pin a different Claude API
 version when required. The Claude provider covers the Messages API used by
 Otto; Bedrock, Vertex AI, Foundry, OAuth and workload identity are different
@@ -66,7 +66,8 @@ requests from the same prompt cache. If the endpoint answers HTTP 400 or 422 wit
 error body that names `prompt_cache_key`, Otto resends that request once
 without the field and omits it from later requests until the provider client
 is rebuilt, for example when Otto restarts. `otto setup` can create a provider
-profile. `otto --help` and each subcommand's `--help` are the complete CLI
+and model entry; [Providers and models](#providers-and-models) describes the
+configuration format. `otto --help` and each subcommand's `--help` are the complete CLI
 reference; the tables below highlight daily entry points.
 
 ### Launcher script
@@ -102,8 +103,8 @@ Rebuild the image and recreate the service after upgrades; preserve its volume.
 
 Create the host workspace first and allow it in Docker Desktop file sharing;
 the container runs as UID/GID 1000 and needs write access. In setup choose the
-API-key variable that Compose forwards, or add the profile's selected variable
-to the service `environment` mapping. A default Claude profile therefore needs
+API-key variable that Compose forwards, or add the provider's selected variable
+to the service `environment` mapping. A default Claude provider therefore needs
 `ANTHROPIC_API_KEY` added there; add `ANTHROPIC_WORKSPACE_ID` too when
 `workspace_id_env` names it. Export values before `compose up`; they are not
 build arguments. Use `host.docker.internal`, not container `localhost`, for a
@@ -111,7 +112,7 @@ model endpoint on the Mac. The published API is Mac-loopback only, retains
 bearer authentication, and gets a new token after each server restart.
 
 Compose does not publish ChatGPT OAuth callback ports. Sign in natively, select
-a ChatGPT profile in container setup, and import private login state into its
+a ChatGPT provider in container setup, and import private login state into its
 volume before starting:
 
 ```bash
@@ -168,10 +169,10 @@ runtime.
 
 | Entry point | Purpose |
 | --- | --- |
-| `otto setup` | Guided provider/profile setup |
+| `otto setup` | Guided provider and model setup |
 | `otto --cwd DIR` | Start in a selected workspace |
-| `otto --profile NAME` | Select a configured connection |
-| `otto --provider … --model …` | Override the startup connection/model |
+| `otto --model PROVIDER/MODEL_ID` | Select the model for this run ([selectors](#providers-and-models)) |
+| `otto --base-url URL` | Override the selected provider's endpoint |
 | `otto --prompt TEXT` | One headless turn; combine with `--no-session` if persistence is unwanted |
 | `otto --continue` / `--resume PATH` | Reopen history for the current workspace |
 | `otto --archive PATH` | Archive one active session and exit |
@@ -193,8 +194,8 @@ line: process listings and shell history can expose them.
 
 ## Environment variables
 
-Use the environment binding selected by the active provider profile
-(`api_key_env` for Claude and OpenAI-compatible profiles, plus optional
+Use the environment binding selected by the active provider
+(`api_key_env` for Claude and OpenAI-compatible providers, plus optional
 `workspace_id_env` for Claude). MCP, chat and plugin package credentials
 likewise come from their configured environment bindings, never literal
 secrets in configuration. `otto login` manages ChatGPT credentials.
@@ -226,12 +227,14 @@ local files in Git yourself. Unsafe paths or malformed discovered files fail
 loading.
 
 Scalars override, tables merge recursively, and lists replace (`[]` clears).
-Profiles/MCP servers merge by name then field. There is no `+item`, `-item`,
+Providers merge by name, then model ID, then field; MCP servers merge by name then field. There is no `+item`, `-item`,
 `null` or deletion syntax. Use `enabled = false` where supported. Changing an
 MCP transport removes its former transport's fields.
 
-Projects may set `default_profile`, UI mode, agent limits/deadlines and profile
-model/thinking/context/compaction windows. Provider identity/URL, credentials,
+Projects may set `default_model`, UI mode, agent limits/deadlines and the
+`thinking`, `context_window` and `compaction_window` fields of a model table
+of a built-in or host-defined provider. A project cannot define a provider or
+set a provider-level field. Provider type/URL, credentials,
 sandbox grants, listeners, admission, storage and catalog roots
 require user/managed sources. Ignored fields produce diagnostics. Projects
 cannot retarget credential-bound MCP servers, interpolate environment variables
@@ -243,8 +246,8 @@ Plugin package bindings (`[plugins.bindings.*]`) are also host-only.
 ```bash
 otto config explain --cwd ./project --json
 otto config set ui.mode '"repl"' --scope local --cwd ./project
-otto config set profiles.work.model '"MODEL_ID"' --scope shared --cwd ./project
-otto config set default_profile '"work"' --scope user
+otto config set 'providers.chatgpt.models."gpt-5.6-luna".thinking' '"high"' --scope shared --cwd ./project
+otto config set default_model '"chatgpt/gpt-5.6-luna"' --scope user
 ```
 
 `explain` is offline: no provider/MCP calls, hooks or credential resolution. It
@@ -281,18 +284,19 @@ weakening the policy or trying another project scope.
 A small user configuration illustrates the common settings:
 
 ```toml
-default_profile = "work"
+default_model = "claude/MODEL_ID"
 
 [ui]
 mode = "tui"
 
-[profiles.work]
-provider = "claude"
+[providers.claude]
 base_url = "https://api.anthropic.com"
-model = "MODEL_ID"
 api_key_env = "ANTHROPIC_API_KEY"
 api_version = "2026-10-21"
 # workspace_id_env = "ANTHROPIC_WORKSPACE_ID"  # only when the key requires it
+
+[providers.claude.models."MODEL_ID"]
+thinking = "high"
 
 [sandbox]
 driver = "auto"
@@ -321,19 +325,127 @@ socket = "~/.otto/otto.sock"
 # listen = "127.0.0.1:8787"
 ```
 
+### Providers and models
+
+A provider is one endpoint and credential binding of one API type. A model is
+one model of a provider. A model is selected by `<provider>/<model_id>`, split
+at the first `/`, so the model ID may contain `/`. Otto has no model aliases.
+
+```toml
+default_model = "chatgpt/gpt-5.6-luna"
+
+[providers.chatgpt.models."gpt-5.6-luna"]
+[providers.chatgpt.models."gpt-5.6-terra"]
+[providers.chatgpt.models."gpt-5.6-sol"]
+
+[providers.gateway]
+type = "openai-compatible"
+base_url = "https://llm.example.com/v1"
+api_key_env = "LLM_GATEWAY_API_KEY"
+
+[providers.gateway.models."model-a"]
+thinking = "high"
+context_window = 128000
+compaction_window = 100000
+```
+
+`[providers.<name>]` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `type` | `claude`, `openai-compatible` or `chatgpt`. Required unless the name is a built-in provider. |
+| `base_url` | Endpoint. Required for `openai-compatible`; Claude default `https://api.anthropic.com`; rejected for `chatgpt`. |
+| `api_key_env` | Environment variable holding the key; Claude default `ANTHROPIC_API_KEY`; rejected for `chatgpt`. |
+| `api_version` | Claude only. |
+| `workspace_id_env` | Claude only; environment variable holding the workspace ID. |
+
+`[providers.<name>.models."<model_id>"]` fields: `thinking` (`low`, `medium`,
+`high`, `xhigh` or `max`), `context_window`, and `compaction_window`, which
+requires `context_window`. A model ID containing `.` must be quoted. An empty
+model table lists the model in the `/model` picker and uses built-in limits.
+
+A provider name uses ASCII letters, digits, `_` and `-`. Three providers are
+built in and named after the API types: `claude`, `openai-compatible` and
+`chatgpt`. A table with a built-in name adds models to that provider or
+overrides its fields; `type` may be omitted and, when present, must equal the
+name. A selector may name a model ID that has no model table, under any
+configured or built-in provider; built-in limits and defaults then apply. An
+unknown provider name is an error.
+
+| Selector input | Meaning |
+| --- | --- |
+| `default_model = "P/ID"` | Default model. |
+| `--model P/ID` | Model for this run. |
+| `OTTO_MODEL=P/ID` | Model for processes started with this variable. |
+| `approval.reviewer_model = "P/ID"` | Model of the approval reviewer. |
+| `--provider P --model ID`, `OTTO_PROVIDER=P` with `OTTO_MODEL=ID` | Deprecated; same as `P/ID`. |
+| `--model ID` without `--provider` | Error; Otto does not take the provider from `default_model`. |
+
 ### Precedence
 
-Command-line connection/model choices and session commands affect the runtime;
-ordinary stored values still follow the source rules above. Resuming history
-does not restore its historical model settings. Select an intended profile
-rather than mixing provider/endpoint/credential overrides accidentally.
+The model is chosen in this order: `--model`, `OTTO_MODEL`, the resumed
+session's model (only when neither of the two selected one), then
+`default_model`. The deprecated `--profile` ranks with `--model` and the
+deprecated `OTTO_PROFILE` ranks after the resumed session. `--provider` without
+`--model` is an error. A session recorded before selectors existed stores a
+provider type and model ID; it resumes on the provider of `default_model` when
+that provider has the same type, otherwise on the built-in provider of that
+type. `--base-url` overrides the endpoint of the selected provider. Other
+stored values follow the source rules above. Select a model by its full
+selector rather than mixing provider, endpoint and credential overrides.
+
+### Migrating from `[profiles]`
+
+Files that use `[profiles.<name>]`, `default_profile`,
+`approval.reviewer_profile`, `--profile` or `OTTO_PROFILE` still load. Otto
+converts each profile to a model of the built-in provider of its type, or, when
+its connection fields differ from the built-in defaults, to a provider shared by
+profiles with identical connection fields. Each converted file produces a
+startup diagnostic, also shown by `otto config explain`, that prints the
+equivalent new TOML. A file that mixes legacy and new tables is an error, as are
+two profiles that convert to the same selector with different settings. Otto
+does not rewrite the file.
+
+Before:
+
+```toml
+default_profile = "luna"
+
+[profiles.luna]
+provider = "chatgpt"
+model = "gpt-5.6-luna"
+
+[profiles.terra]
+provider = "chatgpt"
+model = "gpt-5.6-terra"
+
+[profiles.sol]
+provider = "chatgpt"
+model = "gpt-5.6-sol"
+```
+
+After:
+
+```toml
+default_model = "chatgpt/gpt-5.6-luna"
+
+[providers.chatgpt.models."gpt-5.6-luna"]
+[providers.chatgpt.models."gpt-5.6-terra"]
+[providers.chatgpt.models."gpt-5.6-sol"]
+```
+
+A managed policy that forces `default_profile` or `profiles.*` fails to load
+with an error naming the replacement keys (`default_model`,
+`providers.<name>.<field>`, `providers.<name>.models."<id>".thinking`).
+Session history, usage records and workflows written earlier keep their stored
+`profile` field names and load without migration.
 
 Subagents normally use authenticated `list_models` discovery, falling back to
 the session model if discovery is unavailable or suitability unknown. Explicit
 user model choices and named-agent defaults take precedence. The optional,
-deprecated user-profile `subagent_models` list overrides catalog selection; it
-is not required and is disabled by a change to its provider connection. See
-[`list_models`](safety-and-tools.md#list_models).
+deprecated `subagent_models` list of a converted legacy profile overrides
+catalog selection; it is not required and is disabled by a change to its
+provider connection. See [`list_models`](safety-and-tools.md#list_models).
 
 Deadlines use Go-duration strings; `0` disables an optional condition. Most
 end-to-end deadlines are disabled when omitted, except unattended chat/headless

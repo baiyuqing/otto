@@ -76,7 +76,6 @@ fn a_failed_resolution_retains_bounded_redactions_from_every_valid_entry() {
             "raw user",
             "raw/pass",
             &display_path(&directories.root),
-            &display_path(&directories.home),
             &display_path(&directories.temp),
             &display_path(&directories.cache),
         ],

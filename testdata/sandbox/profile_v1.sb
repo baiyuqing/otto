@@ -1,8 +1,15 @@
 (version 1)
 (deny default @@OTTO_DENY_MESSAGE@@)
 
-; /System is a reviewed runtime root, but its Data-volume subtree aliases host
-; files outside that root. This narrow deny wins over the later /System allow.
+; Reads are allowed everywhere. The dynamic read section below denies the read
+; denylist and then re-allows the session's own private directories and the
+; configured exceptions. Seatbelt applies the last matching rule.
+(allow file-read*)
+
+; Paths that physically live below /System/Volumes are not readable. Seatbelt
+; evaluates the firmlink-normalized path, so a /System/Volumes/Data spelling of
+; a denied or readable path gets the verdict of the path itself. This deny must
+; follow the global read allow.
 (deny file-read*
   (subpath "/System/Volumes")
   @@OTTO_DENY_MESSAGE@@)
@@ -56,38 +63,7 @@
   (global-name "com.apple.system.opendirectoryd.libinfo")
   (global-name "com.apple.system.opendirectoryd.membership"))
 
-; Every supported command inherits a cwd; exact-root access lets libc resolve it
-; without granting file contents beneath the filesystem root.
-(allow file-read-data
-  (literal "/"))
-
-; /bin/sh consults this exact Apple selector symlink before choosing its system
-; shell. Its canonical /bin target is already in the reviewed read-only roots.
-(allow file-read-metadata
-  (literal "/private/var/select/sh"))
-
-; Git's Apple shim and xcrun read this exact selector symlink through both the
-; /var firmlink spelling and its physical spelling. Ancestor metadata permits
-; traversal only; the canonical target is a separately reviewed developer root.
-(allow file-read-metadata
-  (literal "/var")
-  (literal "/var/select")
-  (literal "/private/var/select")
-  (literal "/var/select/developer_dir")
-  (literal "/private/var/select/developer_dir"))
-
-; Tools that hardcode the /etc spelling (libcurl's default CA bundle at
-; /etc/ssl/cert.pem, for example) need metadata on this exact root symlink to
-; reach its /private/etc target. Metadata permits traversal only; the target
-; subtree is granted separately by the reviewed read roots.
-(allow file-read-metadata
-  (literal "/etc"))
-
-; Inherited streams and non-stateful character devices.
-(allow file-read*
-  (literal "/dev/null")
-  (literal "/dev/random")
-  (literal "/dev/urandom"))
+; Inherited output streams and the null device are writable.
 (allow file-write*
   (literal "/dev/null")
   (literal "/dev/stdout")

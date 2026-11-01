@@ -217,13 +217,12 @@ pub struct Settings {
     pub allow_env: Vec<String>,
 }
 
-/// The private per-session directories a confined child sees as `HOME`,
-/// `TMPDIR` and the cache roots. All are created at mode 0700 and owned by the
-/// driver that created them.
+/// The private per-session directories a confined child sees as `TMPDIR` and
+/// the cache roots. All are created at mode 0700 and owned by the driver that
+/// created them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrivateDirectories {
     pub root: PathBuf,
-    pub home: PathBuf,
     pub temp: PathBuf,
     pub cache: PathBuf,
 }

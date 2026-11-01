@@ -189,7 +189,6 @@ impl State {
         let root = &self.root_text;
         safe_state_leaf(&self.root_parent, root)
             && self.root_name == base(root)
-            && self.directories.home == std::path::Path::new(&profile::join(root, "home"))
             && self.directories.temp == std::path::Path::new(&profile::join(root, "tmp"))
             && self.directories.cache == std::path::Path::new(&profile::join(root, "cache"))
             && self.profiles == profile::join(root, "profiles")

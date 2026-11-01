@@ -2,15 +2,29 @@
 
 use super::*;
 
+/// A directory that `deny_read_paths` denies, so `read_paths` entries below it
+/// render as exceptions.
+fn denied_directory(fixture: &mut Fixture, name: &str) -> String {
+    let denied = make_directory(&join(&fixture.base, name));
+    fixture.options.deny_read_paths = vec![denied.clone()];
+    denied
+}
+
 #[test]
 fn expands_only_resolved_home_tilde_prefix() {
     let mut fixture = new_fixture();
-    let tool_directory = make_directory(&join(&join(&fixture.options.home, "tool roots"), "bin"));
+    let denied = make_directory(&join(&fixture.options.home, "tool roots"));
+    fixture.options.deny_read_paths = vec!["~/tool roots".to_string()];
+    let tool_directory = make_directory(&join(&denied, "bin"));
     fixture.options.read_paths = vec!["~/tool roots/bin".to_string()];
     let profile = fixture.render();
     assert!(
-        section(&profile, "READ").contains(&filter("subpath", &tool_directory)),
-        "~/ was not expanded from the resolved home"
+        section(&profile, "READ-DENY").contains(&filter("subpath", &denied)),
+        "~/ in deny_read_paths was not expanded from the resolved home"
+    );
+    assert!(
+        section(&profile, "READ-ALLOW").contains(&filter("subpath", &tool_directory)),
+        "~/ in read_paths was not expanded from the resolved home"
     );
 
     for syntax in [
@@ -21,7 +35,8 @@ fn expands_only_resolved_home_tilde_prefix() {
         "*.tools",
     ] {
         let mut fixture = new_fixture();
-        let literal = join(&fixture.base, syntax);
+        let denied = denied_directory(&mut fixture, "denied");
+        let literal = join(&denied, syntax);
         fixture.options.read_paths = vec![literal.clone()];
         let seen = Arc::new(Mutex::new(String::new()));
         let recorder = seen.clone();
@@ -35,8 +50,8 @@ fn expands_only_resolved_home_tilde_prefix() {
         });
         let profile = fixture.render();
         assert!(
-            !section(&profile, "READ").contains(&literal),
-            "an unavailable legacy path was granted"
+            !section(&profile, "READ-ALLOW").contains(&literal),
+            "an unavailable path was granted"
         );
         assert_eq!(
             *seen.lock().expect("seen"),
@@ -49,20 +64,21 @@ fn expands_only_resolved_home_tilde_prefix() {
 #[test]
 fn canonicalizes_read_paths_and_rejects_special_entries() {
     let mut fixture = new_fixture();
-    let directory = make_directory(&join(&join(&fixture.base, "canonical"), "directory"));
-    let file = make_file(&join(&join(&fixture.base, "canonical"), "file"), 0o600);
+    let denied = denied_directory(&mut fixture, "denied");
+    let directory = make_directory(&join(&join(&denied, "canonical"), "directory"));
+    let file = make_file(&join(&join(&denied, "canonical"), "file"), 0o600);
     let directory_alias = join(&fixture.base, "directory-alias");
     let file_alias = join(&fixture.base, "file-alias");
     symlink(&directory, &directory_alias);
     symlink(&file, &file_alias);
     fixture.options.read_paths = vec![directory_alias.clone(), file_alias.clone()];
     let profile = fixture.render();
-    let read_section = section(&profile, "READ");
+    let allow_section = section(&profile, "READ-ALLOW");
     assert!(
-        read_section.contains(&filter("subpath", &directory))
-            && read_section.contains(&filter("literal", &file))
-            && !read_section.contains(&directory_alias)
-            && !read_section.contains(&file_alias),
+        allow_section.contains(&filter("subpath", &directory))
+            && allow_section.contains(&filter("literal", &file))
+            && !allow_section.contains(&directory_alias)
+            && !allow_section.contains(&file_alias),
         "read path aliases were not canonicalized to typed grants"
     );
 
@@ -94,25 +110,31 @@ fn canonicalizes_read_paths_and_rejects_special_entries() {
     }
 
     let mut fixture = new_fixture();
-    let missing = join(&fixture.base, "missing");
+    let denied = denied_directory(&mut fixture, "denied");
+    let missing = join(&denied, "missing");
     fixture.options.read_paths = vec![missing.clone()];
-    let profile = fixture.render();
+    let generated = fixture.generated();
     assert!(
-        !section(&profile, "READ").contains(&missing),
-        "a missing legacy grant must not reach the profile"
+        !generated.text.contains(&missing) && generated.inert_read_paths.is_empty(),
+        "a missing read path must be skipped without a trace in the profile or the inert list"
     );
 }
 
 #[test]
 fn escapes_dynamic_literals_without_injection() {
     let mut fixture = new_fixture();
+    let denied = denied_directory(&mut fixture, "denied");
     let name = "tools 空格 \\\" ) (allow network-outbound) ; #";
-    let path = make_directory(&join(&fixture.base, name));
+    let path = make_directory(&join(&denied, name));
     fixture.options.read_paths = vec![path.clone()];
+    let denied_name = "secrets 空格 \\\" ) (allow network-outbound) ; #";
+    let denied_path = make_directory(&join(&fixture.base, denied_name));
+    fixture.options.deny_read_paths = vec![denied.clone(), denied_path.clone()];
 
     let profile = fixture.render();
     assert!(
-        profile.contains(&filter("subpath", &path)),
+        section(&profile, "READ-ALLOW").contains(&filter("subpath", &path))
+            && section(&profile, "READ-DENY").contains(&filter("subpath", &denied_path)),
         "spaces, Unicode, quotes, backslashes, or profile punctuation were not safely represented"
     );
     assert!(
@@ -121,8 +143,7 @@ fn escapes_dynamic_literals_without_injection() {
     );
 
     // `String` cannot hold invalid UTF-8, so a non-UTF-8 value is
-    // unrepresentable rather than rejected. Rust's `String` cannot hold
-    // invalid UTF-8, so that input is unrepresentable.
+    // unrepresentable rather than rejected.
     let base = fixture.base.clone();
     drop(fixture);
     let invalid = [
@@ -133,20 +154,29 @@ fn escapes_dynamic_literals_without_injection() {
         join(&base, "nul\0x"),
     ];
     for path in invalid {
-        let mut fixture = new_fixture();
-        fixture.options.read_paths = vec![path.clone()];
-        fixture
-            .deps
-            .with_synthetic_directories(std::slice::from_ref(&path));
-        let error = match fixture.generate() {
-            Err(error) => error,
-            Ok(profile) => panic!("control/invalid path generated {} bytes", profile.len()),
-        };
-        let text = error.to_string();
-        assert!(
-            text.len() <= 128 && !text.contains(&fixture.base) && !text.contains("allow"),
-            "profile error is not bounded and source-free: {text:?}"
-        );
+        for as_deny_entry in [false, true] {
+            let mut fixture = new_fixture();
+            if as_deny_entry {
+                fixture.options.deny_read_paths = vec![path.clone()];
+            } else {
+                fixture.options.read_paths = vec![path.clone()];
+            }
+            fixture
+                .deps
+                .with_synthetic_directories(std::slice::from_ref(&path));
+            let error = match fixture.generate() {
+                Err(error) => error,
+                Ok(profile) => panic!(
+                    "control/invalid path generated {} bytes",
+                    profile.text.len()
+                ),
+            };
+            let text = error.to_string();
+            assert!(
+                text.len() <= 128 && !text.contains(&fixture.base) && !text.contains("allow"),
+                "profile error is not bounded and source-free: {text:?}"
+            );
+        }
     }
 }
 
@@ -155,7 +185,8 @@ fn marker_like_path_text_renders_without_template_reprocessing() {
     let mut fixture = new_fixture();
     let markers = [READ_MARKER, WRITE_MARKER, NETWORK_MARKER, SHELL_MARKER];
     let marker_name = markers.join("-");
-    let read_directory = make_directory(&join(&join(&fixture.base, "marker-paths"), &marker_name));
+    let denied = denied_directory(&mut fixture, &marker_name);
+    let read_directory = make_directory(&join(&denied, &marker_name));
     let shell = make_file(
         &join(&join(&fixture.base, "marker-shells"), &marker_name),
         0o700,
@@ -170,18 +201,20 @@ fn marker_like_path_text_renders_without_template_reprocessing() {
         "marker-like path text rendered nondeterministically"
     );
     assert!(
-        section(&first, "READ-DATA").contains(&filter("subpath", &read_directory))
+        section(&first, "READ-DENY").contains(&filter("subpath", &denied))
+            && section(&first, "READ-ALLOW").contains(&filter("subpath", &read_directory))
             && section(&first, "SHELL").contains(&filter("literal", &shell)),
         "marker-like filenames were not rendered as escaped literal path text"
     );
     for marker in markers {
-        assert_eq!(
-            count(&first, marker),
-            2,
-            "marker-like text {marker} does not appear exactly twice"
+        // Once in the denied directory and once in each path below it, the
+        // shell included.
+        assert!(
+            count(&first, marker) >= 2,
+            "marker-like text {marker} is missing from the rendered paths"
         );
     }
-    for name in ["READ", "WRITE", "NETWORK", "SHELL"] {
+    for name in ["READ-DENY", "READ-ALLOW", "WRITE", "NETWORK", "SHELL"] {
         assert!(
             count(&first, &format!("; OTTO-DYNAMIC-{name}-BEGIN")) == 1
                 && count(&first, &format!("; OTTO-DYNAMIC-{name}-END")) == 1,
@@ -197,125 +230,66 @@ fn marker_like_path_text_renders_without_template_reprocessing() {
 }
 
 #[test]
-fn ancestor_metadata_does_not_grant_ancestor_contents() {
-    let mut fixture = new_fixture();
-    let ancestor = make_directory(&join(&fixture.base, "metadata-only"));
-    let approved = make_directory(&join(&join(&ancestor, "approved"), "bin"));
-    fixture.options.read_paths = vec![approved.clone()];
-    let profile = fixture.render();
-
-    let metadata = section(&profile, "METADATA");
-    let read_data = section(&profile, "READ-DATA");
-    assert!(
-        metadata.contains(&filter("literal", &ancestor)),
-        "approved root ancestor lacks traversal metadata"
-    );
-    assert!(
-        !read_data.contains(&quote(&ancestor)) && read_data.contains(&filter("subpath", &approved)),
-        "ancestor content was granted or approved root content was omitted"
-    );
-}
-
-#[test]
-fn dynamic_root_limits_apply_after_deterministic_collapse() {
-    let mut fixture = new_fixture();
-    let paths: Vec<String> = (0..129)
-        .map(|index| format!("/dynamic/tool-{index:03}"))
-        .collect();
-    fixture.options.read_paths = paths.clone();
-    fixture.deps.with_synthetic_directories(&paths);
-    fixture.assert_rejected("129 effective roots");
-    drop(fixture);
-
+fn dynamic_read_rules_are_bounded_by_total_path_bytes() {
     let mut fixture = new_fixture();
     let paths: Vec<String> = ["a", "b", "c"]
         .iter()
         .map(|letter| format!("/dynamic/{letter}-{}", letter.repeat(11_000)))
         .collect();
-    fixture.options.read_paths = paths.clone();
+    fixture.options.deny_read_paths = paths.clone();
     fixture.deps.with_synthetic_directories(&paths);
-    fixture.assert_rejected("oversized roots");
+    fixture.assert_rejected("oversized deny entries");
     drop(fixture);
 
     let mut fixture = new_fixture();
-    let parent = "/dynamic/tools".to_string();
-    let mut paths = vec![parent.clone(), parent.clone()];
-    for index in 0..129 {
-        paths.push(format!("{parent}/tool-{index:03}/bin"));
-    }
-    fixture.options.read_paths = paths.clone();
+    let denied = "/dynamic/denied".to_string();
+    let exceptions: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|letter| format!("{denied}/{letter}-{}", letter.repeat(11_000)))
+        .collect();
+    fixture.options.deny_read_paths = vec![denied.clone()];
+    fixture.options.read_paths = exceptions.clone();
+    let mut synthetic = exceptions;
+    synthetic.push(denied);
+    fixture.deps.with_synthetic_directories(&synthetic);
+    fixture.assert_rejected("oversized exceptions");
+    drop(fixture);
+
+    let mut fixture = new_fixture();
+    let paths: Vec<String> = (0..300)
+        .map(|index| format!("/dynamic-{index:03}/secrets"))
+        .collect();
+    fixture.options.deny_read_paths = paths.clone();
     fixture.deps.with_synthetic_directories(&paths);
     let profile = fixture.render();
-    let read_data = section(&profile, "READ-DATA");
-    assert!(
-        count(read_data, &filter("subpath", &parent)) == 1 && !read_data.contains("tool-000"),
-        "nested/duplicate roots were not collapsed to their parent"
+    assert_eq!(
+        count(section(&profile, "READ-DENY"), "(subpath \"/dynamic-"),
+        300,
+        "many short deny entries within the byte bound must all render"
     );
-    drop(fixture);
-
-    let mut fixture = new_fixture();
-    let paths: Vec<String> = (0..128)
-        .map(|index| format!("/dynamic-{index:03}/bin"))
-        .collect();
-    fixture.options.read_paths = paths.clone();
-    fixture.deps.with_synthetic_directories(&paths);
-    let _ = fixture.render();
 }
 
 #[test]
 fn equivalent_semantic_inputs_render_byte_identically() {
     let fixture = new_fixture();
-    let parent = make_directory(&join(&join(&fixture.base, "deterministic"), "tools"));
+    let denied = make_directory(&join(&fixture.base, "deterministic"));
+    let parent = make_directory(&join(&denied, "tools"));
     let child = make_directory(&join(&join(&parent, "nested"), "bin"));
     let alias = join(&fixture.base, "deterministic-alias");
     symlink(&parent, &alias);
-    let path_one = make_directory(&join(&fixture.base, "path-one"));
-    let path_two = make_directory(&join(&fixture.base, "path-two"));
 
     let mut first_options = fixture.options.clone();
-    first_options.read_paths = vec![child.clone(), alias, parent.clone(), child];
-    first_options.host_entries = vec![format!("PATH={path_one}:{path_two}")];
-    let first_deps = Deps {
-        resolve: Box::new(resolve_path),
-        fixed_paths: vec![
-            AutomaticPath {
-                path: path_two.clone(),
-                kind: PathKind::Directory,
-            },
-            AutomaticPath {
-                path: path_one.clone(),
-                kind: PathKind::Directory,
-            },
-        ],
-        developer_root: Box::new(|| Ok(None)),
-    };
-
+    first_options.deny_read_paths = vec![denied.clone(), denied.clone()];
+    first_options.read_paths = vec![child.clone(), alias, parent.clone(), child.clone()];
     let mut second_options = fixture.options.clone();
-    second_options.read_paths = vec![parent];
-    second_options.host_entries = vec!["LANG=C".to_string(), format!("PATH={path_two}:{path_one}")];
-    let second_deps = Deps {
-        resolve: Box::new(resolve_path),
-        fixed_paths: vec![
-            AutomaticPath {
-                path: path_one.clone(),
-                kind: PathKind::Directory,
-            },
-            AutomaticPath {
-                path: path_two,
-                kind: PathKind::Directory,
-            },
-            AutomaticPath {
-                path: path_one,
-                kind: PathKind::Directory,
-            },
-        ],
-        developer_root: Box::new(|| Ok(None)),
-    };
+    second_options.deny_read_paths = vec![denied];
+    second_options.read_paths = vec![parent.clone(), child.clone(), parent];
 
-    let first = generate_with(&first_options, &first_deps.view()).expect("first profile");
-    let second = generate_with(&second_options, &second_deps.view()).expect("second profile");
+    let deps = Deps::new();
+    let first = generate_with(&first_options, &deps.view()).expect("first profile");
+    let second = generate_with(&second_options, &deps.view()).expect("second profile");
     assert_eq!(
-        first, second,
-        "semantically equal roots rendered different profile bytes"
+        first.text, second.text,
+        "semantically equal inputs rendered different profile bytes"
     );
 }

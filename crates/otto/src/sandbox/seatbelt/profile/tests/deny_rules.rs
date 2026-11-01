@@ -18,7 +18,6 @@ fn profile_is_closed_by_default_and_limits_private_writes() {
         "profile does not begin closed by default:\n{profile}"
     );
     for unfiltered in [
-        "(allow file-read*)",
         "(allow file-write*)",
         "(allow network-outbound)",
         "(allow network-inbound)",
@@ -29,18 +28,15 @@ fn profile_is_closed_by_default_and_limits_private_writes() {
         );
     }
 
-    let read_section = section(&profile, "READ");
     let write_section = section(&profile, "WRITE");
     for path in [
         fixture.options.workspace.clone(),
-        fixture.directory(&fixture.options.directories.home),
         fixture.directory(&fixture.options.directories.temp),
         fixture.directory(&fixture.options.directories.cache),
     ] {
-        let grant = filter("subpath", &path);
         assert!(
-            read_section.contains(&grant) && write_section.contains(&grant),
-            "writable path {} is not read/write",
+            write_section.contains(&filter("subpath", &path)),
+            "writable path {} is not writable",
             base_name(&path)
         );
     }
@@ -51,16 +47,10 @@ fn profile_is_closed_by_default_and_limits_private_writes() {
             base_name(path)
         );
     }
-    assert!(
-        read_section.contains(&filter("subpath", &external_directory))
-            && read_section.contains(&filter("literal", &external_file)),
-        "external directory/file did not become read-only subpath/literal grants"
-    );
 
     let root = fixture.directory(&fixture.options.directories.root);
     assert!(
-        !read_section.contains(&filter("subpath", &root))
-            && !write_section.contains(&filter("subpath", &root)),
+        !profile.contains(&filter("subpath", &root)),
         "private state parent received a subpath grant"
     );
     assert!(
@@ -206,31 +196,28 @@ fn every_deny_form_carries_the_message_tag() {
         );
         forms += 1;
     }
-    assert_eq!(forms, 6, "expected five template denies and the git deny");
+    assert_eq!(
+        forms, 7,
+        "expected five template denies, the read deny and the git deny"
+    );
 }
 
 #[test]
-fn rejects_every_external_root_overlapping_private_state() {
+fn rejects_every_read_path_overlapping_private_state() {
     type Mutate = fn(&mut Fixture);
-    let cases: [(&str, Mutate); 5] = [
+    let cases: [(&str, Mutate); 4] = [
         ("explicit ancestor", |fixture| {
             fixture.options.read_paths = vec![fixture.state().root_parent.clone()];
         }),
         ("explicit profiles child", |fixture| {
             fixture.options.read_paths = vec![fixture.state().profiles.clone()];
         }),
-        ("fixed automatic ancestor", |fixture| {
-            fixture.deps.fixed_paths = vec![AutomaticPath {
-                path: fixture.state().root_parent.clone(),
-                kind: PathKind::Directory,
-            }];
+        ("another private root", |fixture| {
+            let other = make_directory(&join(&fixture.state().root_parent, "otto-sandbox-other"));
+            fixture.options.read_paths = vec![make_directory(&join(&other, "tmp"))];
         }),
-        ("PATH automatic ancestor", |fixture| {
-            fixture.options.host_entries = vec![format!("PATH={}", fixture.state().root_parent)];
-        }),
-        ("developer root ancestor", |fixture| {
-            let root = fixture.state().root_parent.clone();
-            fixture.deps.developer_root_is(root);
+        ("own tmp directory", |fixture| {
+            fixture.options.read_paths = vec![fixture.directory(&fixture.options.directories.temp)];
         }),
     ];
     for (name, mutate) in cases {

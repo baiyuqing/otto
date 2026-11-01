@@ -9,14 +9,14 @@ import (
 	"github.com/larksuite/channel-sdk-go/types"
 )
 
-func TestChoicesCardSwitchesProfiles(t *testing.T) {
+func TestChoicesCardSwitchesModels(t *testing.T) {
 	f := newFake()
 	p := &Platform{ch: f}
 	choices := []bridge.Choice{
-		{Label: "terra", Command: "/model terra"},
-		{Label: "chatgpt-5.5", Command: "/model chatgpt-5.5"},
+		{Label: "chatgpt/gpt-5.6-terra", Command: "/model chatgpt/gpt-5.6-terra"},
+		{Label: "chatgpt/gpt-5.5", Command: "/model chatgpt/gpt-5.5"},
 	}
-	if err := p.SendChoices(context.Background(), "oc_test", "", "Profiles:\n• terra", choices); err != nil {
+	if err := p.SendChoices(context.Background(), "oc_test", "", "Configured models:\n• chatgpt/gpt-5.6-terra", choices); err != nil {
 		t.Fatal(err)
 	}
 	var card map[string]any
@@ -24,7 +24,7 @@ func TestChoicesCardSwitchesProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	elements := card["elements"].([]any)
-	if elements[0].(map[string]any)["text"].(map[string]any)["content"] != "Profiles:\n• terra" {
+	if elements[0].(map[string]any)["text"].(map[string]any)["content"] != "Configured models:\n• chatgpt/gpt-5.6-terra" {
 		t.Fatalf("card = %v", elements[0])
 	}
 	actions := elements[1].(map[string]any)["actions"].([]any)
@@ -47,10 +47,11 @@ func TestChoicesCardSwitchesProfiles(t *testing.T) {
 	}
 }
 
-func TestChoiceCardActionsAcceptOnlyProfileSwitches(t *testing.T) {
+func TestChoiceCardActionsAcceptOnlyModelSwitches(t *testing.T) {
 	for _, value := range []map[string]any{
 		{"action": "command", "command": "rm -rf /"},
 		{"action": "command", "command": "/model a b"},
+		{"action": "command", "command": "/model terra"},
 		{"action": "command", "command": "/stop"},
 		{"action": "command"},
 	} {
@@ -65,7 +66,7 @@ func TestChoiceCardActionsAcceptOnlyProfileSwitches(t *testing.T) {
 	}
 	if _, ok := cardMessage(&types.CardActionEvent{
 		Operator: types.CardActionOperator{OpenID: "ou_test"},
-		Action:   types.CardActionPayload{Value: map[string]any{"action": "command", "command": "/model terra"}},
+		Action:   types.CardActionPayload{Value: map[string]any{"action": "command", "command": "/model chatgpt/gpt-5.6-terra"}},
 	}); ok {
 		t.Error("a choice without a chat was accepted")
 	}

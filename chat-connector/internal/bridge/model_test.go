@@ -9,37 +9,34 @@ import (
 	"github.com/baiyuqing/otto/chat-connector/internal/agent/fake"
 )
 
-// staticProfiles is a ProfileSource with a fixed answer.
-type staticProfiles struct {
-	snapshot ProfileSnapshot
+// staticModels is a ProfileSource with a fixed answer.
+type staticModels struct {
+	snapshot ModelSnapshot
 	err      error
 }
 
-func (s staticProfiles) Profiles() (ProfileSnapshot, error) { return s.snapshot, s.err }
+func (s staticModels) Models() (ModelSnapshot, error) { return s.snapshot, s.err }
 
-func pickerFixture() staticProfiles {
-	return staticProfiles{snapshot: ProfileSnapshot{
-		Default: "deepseek",
-		Profiles: []ProfileOption{
-			{Name: "deepseek", Provider: "openai-compatible", Model: "deepseek-v4-flash"},
-			{Name: "terra", Provider: "chatgpt", Model: "gpt-5.6-terra"},
-		},
+func pickerFixture() staticModels {
+	return staticModels{snapshot: ModelSnapshot{
+		Default: "deepseek/deepseek-v4-flash",
+		Models:  []string{"deepseek/deepseek-v4-flash", "chatgpt/gpt-5.6-terra"},
 	}}
 }
 
-const pickerText = "Profiles:\n" +
-	"• deepseek — openai-compatible / deepseek-v4-flash (default)\n" +
-	"• terra — chatgpt / gpt-5.6-terra\n" +
-	"Send /model <profile> to switch this conversation."
+const pickerText = "Configured models:\n" +
+	"• deepseek/deepseek-v4-flash (default)\n" +
+	"• chatgpt/gpt-5.6-terra\n" +
+	"Switch with /model <provider>/<model_id>."
 
 func TestBareModelPostsThePickerWithoutReachingTheAgent(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{profiles: pickerFixture()})
+	h := newHarness(t, setup{models: pickerFixture()})
 	h.say("/model")
 	h.waitFor(func() bool {
 		_, ok := h.plat.picker()
 		return ok
-	}, "profile picker")
+	}, "model picker")
 	call, _ := h.plat.picker()
 	if call.chat != "c1" || call.replyTo != "m1" {
 		t.Errorf("picker went to chat %q replying to %q", call.chat, call.replyTo)
@@ -48,8 +45,8 @@ func TestBareModelPostsThePickerWithoutReachingTheAgent(t *testing.T) {
 		t.Errorf("picker text = %q, want %q", call.text, pickerText)
 	}
 	want := []Choice{
-		{Label: "deepseek", Command: "/model deepseek"},
-		{Label: "terra", Command: "/model terra"},
+		{Label: "deepseek/deepseek-v4-flash", Command: "/model deepseek/deepseek-v4-flash"},
+		{Label: "chatgpt/gpt-5.6-terra", Command: "/model chatgpt/gpt-5.6-terra"},
 	}
 	if !slices.Equal(call.choices, want) {
 		t.Errorf("choices = %+v, want %+v", call.choices, want)
@@ -60,22 +57,22 @@ func TestBareModelPostsThePickerWithoutReachingTheAgent(t *testing.T) {
 	}
 }
 
-func TestModelWithAProfileStillReachesTheAgent(t *testing.T) {
+func TestModelWithASelectorStillReachesTheAgent(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{profiles: pickerFixture()})
-	h.say("/model terra")
+	h := newHarness(t, setup{models: pickerFixture()})
+	h.say("/model chatgpt/gpt-5.6-terra")
 	h.waitFor(func() bool {
-		return slices.Contains(fake.Calls(h.dir), "start:/model terra")
+		return slices.Contains(fake.Calls(h.dir), "start:/model chatgpt/gpt-5.6-terra")
 	}, "agent command prompt")
 	settle()
 	if _, ok := h.plat.picker(); ok {
-		t.Error("/model <profile> posted the picker instead of switching")
+		t.Error("/model <selector> posted the picker instead of switching")
 	}
 }
 
-func TestTextOnlyPlatformGetsTheProfileListAsText(t *testing.T) {
+func TestTextOnlyPlatformGetsTheModelListAsText(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{textOnly: true, profiles: pickerFixture()})
+	h := newHarness(t, setup{textOnly: true, models: pickerFixture()})
 	h.say("/model")
 	sent := h.waitSent(1)
 	if sent[0] != pickerText {
@@ -89,7 +86,7 @@ func TestTextOnlyPlatformGetsTheProfileListAsText(t *testing.T) {
 
 func TestPickerFallsBackToTextWhenButtonsAreRefused(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{profiles: pickerFixture()})
+	h := newHarness(t, setup{models: pickerFixture()})
 	h.plat.mu.Lock()
 	h.plat.choicesErr = errors.New("button too long")
 	h.plat.mu.Unlock()
@@ -100,9 +97,9 @@ func TestPickerFallsBackToTextWhenButtonsAreRefused(t *testing.T) {
 	}
 }
 
-func TestProfileSourceFailureIsReportedAndNotForwarded(t *testing.T) {
+func TestModelSourceFailureIsReportedAndNotForwarded(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{profiles: staticProfiles{err: errors.New("permission denied")}})
+	h := newHarness(t, setup{models: staticModels{err: errors.New("permission denied")}})
 	h.say("/model")
 	sent := h.waitSent(1)
 	if !strings.Contains(sent[0], "Could not read the local Otto configuration: permission denied") {
@@ -114,16 +111,16 @@ func TestProfileSourceFailureIsReportedAndNotForwarded(t *testing.T) {
 	}
 }
 
-func TestEmptyProfileListIsReported(t *testing.T) {
+func TestEmptyModelListIsReported(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{profiles: staticProfiles{}})
+	h := newHarness(t, setup{models: staticModels{}})
 	h.say("/model")
 	sent := h.waitSent(1)
-	if !strings.Contains(sent[0], "lists no profiles") {
+	if !strings.Contains(sent[0], "lists no models") {
 		t.Errorf("sent = %q", sent[0])
 	}
 	if _, ok := h.plat.picker(); ok {
-		t.Error("the picker was posted with no profiles")
+		t.Error("the picker was posted with no models")
 	}
 }
 
@@ -136,16 +133,16 @@ func TestBareModelWithoutASourceReachesTheAgent(t *testing.T) {
 	}, "agent command prompt")
 }
 
-func TestValidProfileArgMatchesOttoProfileNames(t *testing.T) {
+func TestValidModelSelectorAcceptsOnlyOneProviderSlashModelWord(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"deepseek", "chatgpt-5.5", "gpt_5", "a", "x.y+z@w"} {
-		if !ValidProfileArg(name) {
-			t.Errorf("%q must be a valid profile argument", name)
+	for _, selector := range []string{"chatgpt/gpt-5.6-luna", "openrouter/anthropic/claude-x", "deepseek/deepseek-v4-flash", "p_1/x.y+z@w"} {
+		if !ValidModelSelector(selector) {
+			t.Errorf("%q must be a valid model selector", selector)
 		}
 	}
-	for _, name := range []string{"", "with space", "a/b", "a:b", `a"b`, `a\b`, "é", strings.Repeat("x", 65)} {
-		if ValidProfileArg(name) {
-			t.Errorf("%q must not be a valid profile argument", name)
+	for _, selector := range []string{"", "terra", "/gpt", "chatgpt/", "a b/c", "a/b c", "a.b/c", "a/b:c", `a/b"c`, `a/b\c`, "é/x", "p/" + strings.Repeat("x", 128)} {
+		if ValidModelSelector(selector) {
+			t.Errorf("%q must not be a valid model selector", selector)
 		}
 	}
 }

@@ -368,6 +368,32 @@ fn manual_session(client: &mut Client, workspace: &Path) -> String {
     session_id
 }
 
+/// Creates `<home>/denied/fixture.txt`, the file a read grant test asks to read.
+fn denied_read_dir(home: &Path) -> std::path::PathBuf {
+    let denied_dir = home.join("denied");
+    std::fs::create_dir(&denied_dir).unwrap();
+    std::fs::write(denied_dir.join("fixture.txt"), "outside-seatbelt\n").unwrap();
+    denied_dir
+}
+
+/// Appends a `[sandbox] deny_read_paths` entry for `denied_dir` to the written config.
+fn deny_read_dir(home: &Path, denied_dir: &Path) {
+    let config_path = home.join(".config/otto/config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config.push_str(&format!(
+        "\n[sandbox]\ndeny_read_paths = [\"{}\"]\n",
+        denied_dir.canonicalize().unwrap().display()
+    ));
+    std::fs::write(config_path, config).unwrap();
+}
+
+/// Whether the config holds a `read_paths` key; `deny_read_paths` does not count.
+fn grants_read_paths(config: &str) -> bool {
+    config
+        .lines()
+        .any(|line| line.trim_start().starts_with("read_paths"))
+}
+
 struct Run {
     frames: Vec<Value>,
     response: Value,
@@ -380,7 +406,8 @@ fn run(option: &str, replies: Vec<String>) -> Run {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join("elevated.txt"), "outside-seatbelt\n").unwrap();
-    let read_path = home.path().join("elevated.txt").canonicalize().unwrap();
+    let denied_dir = denied_read_dir(home.path());
+    let read_path = denied_dir.join("fixture.txt").canonicalize().unwrap();
     let replies = replies
         .into_iter()
         .map(|reply| reply.replace("__READ_PATH__", read_path.to_str().unwrap()))
@@ -391,6 +418,7 @@ fn run(option: &str, replies: Vec<String>) -> Run {
         served: Arc::clone(&served),
     });
     configure(home.path(), &base_url);
+    deny_read_dir(home.path(), &denied_dir);
     let mut client = Client::spawn(home.path(), workspace.path(), "seatbelt");
     client.initialize();
     let session_id = manual_session(&mut client, workspace.path());
@@ -501,7 +529,7 @@ fn persistent_read_grant_executes_prepared_call_and_denial_does_not_write_config
         );
         let granted = option == "allow_once";
         assert_eq!(
-            result.config.contains("read_paths"),
+            grants_read_paths(&result.config),
             granted,
             "{}",
             result.config

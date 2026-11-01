@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 mod binary_harness;
-use binary_harness::{Script, serve, text_reply, tool_call_reply};
+use otto::fixtures::scripted_provider::{Script, serve, text_reply, tool_call_reply};
 
 /// Wait for one ACP frame. Session creation takes about 0.9 s alone and about
 /// 10 s when this file's tests run in parallel in a debug build.

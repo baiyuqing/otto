@@ -42,8 +42,8 @@ async fn delivery_factory_preflight_and_apply_bind_source_before_effect_capabili
         git_text,
         head,
     ])));
-    let shared = crate::cli::fixture_tests::shared_with_offline_sandbox(home.path());
-    let mut builder = crate::cli::fixture_tests::builder(&target_path, home.path());
+    let shared = crate::fixtures::shared_with_offline_sandbox(home.path());
+    let mut builder = crate::fixtures::builder(&target_path, home.path());
     builder.command_executor = Some(replies as Arc<dyn crate::sandbox::CommandExecutor>);
     builder.sandbox_environment = Some(Vec::new());
     let host = Arc::new(WorkspaceHost {
@@ -62,7 +62,7 @@ async fn delivery_factory_preflight_and_apply_bind_source_before_effect_capabili
             host,
         )])),
     });
-    let runtime = crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder);
+    let runtime = crate::fixtures::initial_runtime(&workspaces.startup_host.builder);
     let manager = Arc::new(
         DeliveryManager::open(
             &home.path().to_string_lossy(),
@@ -137,7 +137,7 @@ async fn delivery_manager_owns_private_receipts_status_and_shutdown() {
         config_path: PathBuf::new(),
         loaded: tokio::sync::Mutex::new(BTreeMap::new()),
     });
-    let runtime = crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder);
+    let runtime = crate::fixtures::initial_runtime(&workspaces.startup_host.builder);
     let manager = DeliveryManager::open(
         &home.path().to_string_lossy(),
         &shared,
@@ -201,7 +201,7 @@ async fn delivery_manager_owns_private_receipts_status_and_shutdown() {
     let restarted = DeliveryManager::open(
         &home.path().to_string_lossy(),
         &shared,
-        crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder),
+        crate::fixtures::initial_runtime(&workspaces.startup_host.builder),
         CancellationToken::new(),
     )
     .expect("restarted manager");
@@ -235,7 +235,7 @@ async fn the_delivery_factory_is_installed_exactly_once_for_later_parent_runners
         DeliveryManager::open(
             &home.path().to_string_lossy(),
             &shared,
-            crate::cli::fixture_tests::initial_runtime(&host.builder),
+            crate::fixtures::initial_runtime(&host.builder),
             CancellationToken::new(),
         )
         .expect("manager"),
@@ -271,7 +271,7 @@ async fn delivery_broker_refuses_unadmitted_target_before_loading_a_host() {
     });
     let broker = DeliveryBroker::new(
         &shared,
-        crate::cli::fixture_tests::initial_runtime(&workspaces.startup_host.builder),
+        crate::fixtures::initial_runtime(&workspaces.startup_host.builder),
         CancellationToken::new(),
     );
     broker.attach_workspaces(&workspaces);

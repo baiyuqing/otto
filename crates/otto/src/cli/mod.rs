@@ -12,8 +12,6 @@ pub use crate::app as controller;
 pub use crate::runtime::sandbox_switch;
 pub mod config_command;
 pub mod eval_command;
-#[cfg(test)]
-pub mod fixture_tests;
 pub mod flags;
 pub mod login;
 pub mod mcp;

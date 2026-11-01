@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT_RUST = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'];
 const FULL_FILES = [...ROOT_RUST, 'crates/otto/Cargo.toml', 'crates/otto/build.rs', 'crates/otto/src/lib.rs', 'crates/otto/src/main.rs'];
+const FIXTURES = /^crates\/otto\/src\/fixtures(?:\/|\.rs$)/;
 const LICENSE_INPUTS = /^(Cargo\.toml|Cargo\.lock|crates\/[^/]+\/Cargo\.toml|scripts\/license-check\.mjs)$/;
 
 // plan maps repo-relative POSIX paths to the ordered commands that check them
@@ -24,6 +25,7 @@ export function plan(paths) {
       inRust || ROOT_RUST.includes(p) || /^(connect|scripts|docs)\//.test(p) || p === 'LICENSE' || p.endsWith('.md');
     if (!known) unchecked.push(p);
     if (ROOT_RUST.includes(p) || p.startsWith('testdata/') || p.startsWith('crates/otto-core/') || FULL_FILES.includes(p)) full = true;
+    else if (FIXTURES.test(p)) full = true; // `otto::fixtures` backs tests in every module
     else if (inRust) {
       const mod = p.match(/^crates\/otto\/src\/([^/.]+)(?:\/|\.rs$)/);
       const test = p.match(/^crates\/otto\/tests\/([^/]+)\.rs$/);

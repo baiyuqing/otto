@@ -83,7 +83,7 @@ impl PluginFixture {
 
     /// A builder whose memory source is the package; its plugin commands run unconfined.
     fn builder(&self, required: bool) -> Builder {
-        let mut builder = crate::cli::fixture_tests::builder(&self.workspace, &self.sessions);
+        let mut builder = crate::fixtures::builder(&self.workspace, &self.sessions);
         let executor = crate::sandbox::Executor::new(
             Arc::new(crate::sandbox::direct::DirectDriver::new()),
             crate::sandbox::Policy {
@@ -122,7 +122,7 @@ async fn runner_memory_client(
     builder: &Builder,
     warnings: &mut Vec<u8>,
 ) -> Result<Option<Arc<crate::memory::client::Client>>, String> {
-    let runtime = crate::cli::fixture_tests::initial_runtime(builder);
+    let runtime = crate::fixtures::initial_runtime(builder);
     let plugins = crate::plugin::Snapshot::load(
         Path::new(&builder.home),
         &builder.config,
@@ -176,7 +176,7 @@ async fn untrusted_package_warns_and_continues_without_memory_unless_required() 
 async fn remember_command_sends_a_human_remember_and_opens_no_file_store() {
     let fixture = PluginFixture::new(true);
     let builder = fixture.builder(false);
-    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+    let runtime = crate::fixtures::initial_runtime(&builder);
     let session = builder.create_session(&runtime).unwrap();
     let runner = builder.build_runner(&session, &runtime).await.unwrap();
     let info = builder.runtime_info(&runtime);

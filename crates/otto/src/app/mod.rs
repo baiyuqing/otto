@@ -666,7 +666,7 @@ pub(crate) async fn controller_with_approvals_and_schedule(
     Arc<crate::tool::bash::BashApprovals>,
     Arc<Mutex<usize>>,
 ) {
-    use crate::cli::fixture_tests::{FakeSandbox, builder, initial_runtime, seatbelt_info};
+    use crate::fixtures::{FakeSandbox, builder, initial_runtime, seatbelt_info};
     use crate::runtime::info::SandboxNetwork;
     use crate::sandbox::direct::DirectDriver;
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};

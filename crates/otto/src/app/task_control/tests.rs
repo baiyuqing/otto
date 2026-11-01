@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     app::Controller,
-    cli::fixture_tests::{builder, initial_runtime},
+    fixtures::{builder, initial_runtime},
     runtime::builder::Runner,
     subagent::tasks::Tasks,
 };

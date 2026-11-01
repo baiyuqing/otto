@@ -42,11 +42,10 @@ async fn stale_mutation_is_rejected_before_attempting_the_request() {
 async fn profile_switch_saves_the_default_and_reports_the_applied_profile() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let controller = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
     std::fs::write(
         controller.config_path(),
-        toml::to_string(&crate::cli::fixture_tests::config()).unwrap(),
+        toml::to_string(&crate::fixtures::config()).unwrap(),
     )
     .unwrap();
     let reply = local_command(
@@ -68,8 +67,7 @@ async fn profile_switch_saves_the_default_and_reports_the_applied_profile() {
 async fn model_switch_receipt_survives_a_later_thinking_failure() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let controller = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
     let reply = local_command(
         controller,
         Command::SwitchModelThinking {
@@ -89,8 +87,7 @@ async fn model_switch_receipt_survives_a_later_thinking_failure() {
 async fn thinking_save_failure_keeps_the_applied_state_receipt() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let controller = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
     std::fs::create_dir(controller.config_path()).unwrap();
     let reply = local_command(
         controller,
@@ -297,8 +294,7 @@ async fn exact_approval_revision_cannot_be_rebound_to_current_state() {
 async fn steering_commands_reach_the_controller_for_the_active_run() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let controller = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
 
     // The read reaches `Controller::steering_messages`; an idle session has
     // no guidance, which is what the TUI paints as nothing queued.
@@ -373,8 +369,7 @@ async fn attach_steering_commands_route_to_the_client_transport() {
 async fn a_guidance_read_follows_the_command_it_observes() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let controller = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
     let info = controller.info();
     let ticket = Ticket {
         workspace: info.workspace,

@@ -7,9 +7,8 @@ async fn stale_callback_allow_or_deny_cannot_decide_reopened_revision() {
     for stale in [ApprovalDecision::Allow, ApprovalDecision::Deny] {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
-        let controller = Arc::new(
-            crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await,
-        );
+        let controller =
+            Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
         let scope = controller.approval_scope();
         let service = controller.approval_service().clone();
         service

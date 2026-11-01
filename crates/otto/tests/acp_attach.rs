@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod binary_harness;
-use binary_harness::{
-    Script, assert_terminal_tool_update, serve, summary_reply, text_reply, tool_call_reply,
+use binary_harness::assert_terminal_tool_update;
+use otto::fixtures::scripted_provider::{
+    Script, serve, summary_reply, text_reply, tool_call_reply,
 };
 
 use serde_json::{Value, json};

@@ -17,7 +17,7 @@ use binary_harness::pty::{
     raw_contains, spawn, wait_for_raw_bytes, wait_for_screen_text, wait_for_screen_text_gone,
     wait_until,
 };
-use binary_harness::{Script, serve, text_reply};
+use otto::fixtures::scripted_provider::{Script, serve, text_reply};
 
 fn otto(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_otto"));

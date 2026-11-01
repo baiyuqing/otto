@@ -64,15 +64,15 @@ async fn migrate_cancels_a_running_child_task_and_releases_the_lease() {
 
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let mut builder = fixture_tests::builder(workspace.path(), sessions.path());
+    let mut builder = fixtures::builder(workspace.path(), sessions.path());
     builder.shared_mut().config.failover = otto_core::config::Failover {
         enabled: true,
         lease_seconds: 12,
     };
-    let runtime = fixture_tests::initial_runtime(&builder);
+    let runtime = fixtures::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("create session");
     session
-        .append(fixture_tests::user("go"))
+        .append(fixtures::user("go"))
         .await
         .expect("first append");
     let session_path = session.path();

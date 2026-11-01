@@ -17,7 +17,9 @@ use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 mod binary_harness;
-use binary_harness::{Script, serve, text_reply, tool_call_reply, two_tool_call_reply};
+use otto::fixtures::scripted_provider::{
+    Script, serve, text_reply, tool_call_reply, two_tool_call_reply,
+};
 
 use otto::session::Store;
 use otto_core::model::{Block, BlockType};

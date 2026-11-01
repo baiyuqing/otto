@@ -2,7 +2,7 @@ use super::*;
 
 use crate::{
     app::PROMPT_ACTIVE,
-    cli::fixture_tests::initial_runtime,
+    fixtures::initial_runtime,
     runtime::builder::Runner,
     subagent::tasks::Tasks,
     tool::{Tool, definition},

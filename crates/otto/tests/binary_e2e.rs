@@ -21,7 +21,7 @@ use std::{
 };
 
 mod binary_harness;
-use binary_harness::{Script, serve, text_reply, tool_call_reply};
+use otto::fixtures::scripted_provider::{Script, serve, text_reply, tool_call_reply};
 
 /// Reads the single session file the run left under `$HOME/.otto/sessions`.
 fn only_session_transcript(home: &std::path::Path) -> String {

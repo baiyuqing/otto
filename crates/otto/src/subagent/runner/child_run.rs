@@ -260,24 +260,36 @@ impl Runner {
                 .as_ref()
                 .filter(|p| p.has_hooks())
                 .map(|p| {
+                    let child_history_path = self
+                        .config
+                        .tasks
+                        .get(&task.id)
+                        .map(|t| t.session_path)
+                        .unwrap_or_default();
                     p.bind(
-                        format!(
-                            "{}:{}",
-                            self.config
+                        crate::plugin::hooks::SessionBinding {
+                            session_id: format!(
+                                "{}:{}",
+                                self.config
+                                    .approval
+                                    .as_ref()
+                                    .map_or("child", |(_, s)| s.session_id.as_str()),
+                                task.id
+                            ),
+                            parent_session_id: self
+                                .config
                                 .approval
                                 .as_ref()
-                                .map_or("child", |(_, s)| s.session_id.as_str()),
-                            task.id
-                        ),
-                        self.config
-                            .approval
-                            .as_ref()
-                            .map(|(_, s)| s.session_id.clone()),
-                        task.id.clone(),
-                        if transcript.messages().is_empty() {
-                            "new"
-                        } else {
-                            "resume"
+                                .map(|(_, s)| s.session_id.clone()),
+                            task_id: task.id.clone(),
+                            mode: if transcript.messages().is_empty() {
+                                "new"
+                            } else {
+                                "resume"
+                            }
+                            .into(),
+                            headless: false,
+                            history_path: Arc::new(move || child_history_path.clone()),
                         },
                         template.hook_guard.clone(),
                     )

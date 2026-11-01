@@ -155,6 +155,10 @@ impl hooks::Hooks for TestHooks {
     ) -> Result<hooks::Response, String> {
         self.events.lock().unwrap().push((event.into(), data));
         match event {
+            "session_start" => Ok(hooks::Response {
+                notice: Some("started".into()),
+                ..Default::default()
+            }),
             "before_prompt" => Ok(hooks::Response {
                 context: Some("plugin context".into()),
                 ..Default::default()
@@ -171,6 +175,7 @@ impl hooks::Hooks for TestHooks {
             "after_tool" if self.after_fail => Err("failed after hook".into()),
             "after_tool" => Ok(hooks::Response {
                 content: Some("filtered".into()),
+                notice: Some("after-tool note".into()),
                 ..Default::default()
             }),
             _ => Ok(Default::default()),
@@ -204,6 +209,15 @@ async fn hooks_rewrite_before_execution_preserve_effects_and_share_session_lifec
         .unwrap();
     agent.end_hooks().await;
     agent.end_hooks().await;
+    let notifications = |wanted: &str| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Notification { text, .. } if text == wanted))
+            .count()
+    };
+    // The session_start notice is shown once across both runs.
+    assert_eq!(notifications("[hook] started"), 1);
+    assert_eq!(notifications("[hook] after-tool note"), 1);
     let recorded = hooks.events.lock().unwrap();
     assert_eq!(
         recorded.iter().map(|(e, _)| e.as_str()).collect::<Vec<_>>(),

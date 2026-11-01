@@ -214,12 +214,22 @@ impl Runtime {
     }
     fn command_environment(&self, package: Option<&Package>) -> Vec<String> {
         let mut environment = self.execution.environment.clone();
-        let Some(bound) =
-            package.and_then(|p| self.execution.package_environment.get(&p.installed.name))
-        else {
+        let Some(package) = package else {
             return environment;
         };
-        for (name, value) in bound {
+        let bound = self
+            .execution
+            .package_environment
+            .get(&package.installed.name)
+            .into_iter()
+            .flatten()
+            .map(|(name, value)| (name.as_str(), value.clone()));
+        // Pushed last so a bound value cannot override the package locations.
+        let locations = [
+            ("PLUGIN_ROOT", package.root.to_string_lossy().into_owned()),
+            ("PLUGIN_DATA", package.data.to_string_lossy().into_owned()),
+        ];
+        for (name, value) in bound.chain(locations.iter().map(|(n, v)| (*n, v.clone()))) {
             let prefix = format!("{name}=");
             environment.retain(|entry| !entry.starts_with(&prefix));
             environment.push(format!("{prefix}{value}"));
@@ -376,20 +386,6 @@ impl Runtime {
         }
         Ok(String::from_utf8_lossy(stdout.collector().bytes()).into_owned())
     }
-    pub fn bind(
-        self: &Arc<Self>,
-        session: String,
-        parent: Option<String>,
-        task: String,
-        mode: &str,
-        guard: Option<Arc<SessionGuard>>,
-    ) -> Arc<dyn Hooks> {
-        Arc::new(Bound {
-            runtime: self.clone(),
-            guard,
-            context: json!({"session_id":session,"parent_session_id":parent,"task_id":task,"mode":mode}),
-        })
-    }
     pub fn tools(self: &Arc<Self>) -> Vec<Box<dyn crate::tool::Tool + Send + Sync>> {
         self.packages
             .iter()
@@ -447,117 +443,6 @@ impl From<String> for CommandError {
     }
 }
 
-struct Bound {
-    runtime: Arc<Runtime>,
-    guard: Option<Arc<SessionGuard>>,
-    context: Value,
-}
-#[async_trait::async_trait]
-impl Hooks for Bound {
-    async fn run(
-        &self,
-        event: &str,
-        mut data: Value,
-        control: &dyn OperationControl,
-    ) -> Result<Response, String> {
-        let mut combined = Response::default();
-        let mut diagnostics = Vec::new();
-        for (kind, hook, package) in &self.runtime.hooks {
-            if kind != event {
-                continue;
-            }
-            let name = if data.get("tool").and_then(Value::as_str) == Some("mcp_call_tool") {
-                data.pointer("/arguments/tool")
-                    .and_then(Value::as_str)
-                    .unwrap_or("mcp_call_tool")
-            } else {
-                data.get("tool").and_then(Value::as_str).unwrap_or("")
-            };
-            if !hook.matcher.is_empty() && !hook.matcher.iter().any(|p| matches(p, name)) {
-                continue;
-            }
-            let result = async {
-                let output = self
-                    .runtime
-                    .command(
-                        &hook.command,
-                        &hook.timeout,
-                        package.as_ref(),
-                        json!({
-                            "version":1,
-                            "event":event,
-                            "workspace":self.runtime.execution.workspace,
-                            "session":self.context,
-                            "data":data
-                        }),
-                        control,
-                        self.guard.as_ref(),
-                    )
-                    .await
-                    .map_err(|error| error.message)?;
-                let response: Response = if output.trim().is_empty() {
-                    Response::default()
-                } else {
-                    serde_json::from_str(&self.runtime.redact_json(&output))
-                        .map_err(|_| "invalid hook JSON response")?
-                };
-                if response.arguments.is_some() && event != "before_tool"
-                    || response.content.is_some() && event != "after_tool"
-                    || response.context.is_some()
-                        && !["session_start", "before_prompt", "before_compaction"].contains(&event)
-                    || (response.decision.is_some() || response.reason.is_some())
-                        && ![
-                            "session_start",
-                            "before_prompt",
-                            "before_tool",
-                            "before_compaction",
-                        ]
-                        .contains(&event)
-                {
-                    return Err("hook response field is not supported for this event".into());
-                }
-                Ok(response)
-            }
-            .await;
-            match result {
-                Err(message) if event.starts_with("before_") || event == "session_start" => {
-                    return Err(message);
-                }
-                Err(message) => diagnostics.push(message),
-                Ok(response) => {
-                    if response.decision == Some(Decision::Deny) {
-                        return Ok(response);
-                    }
-                    if let Some(arguments) = response.arguments {
-                        data["arguments"] = arguments.clone();
-                        combined.arguments = Some(arguments);
-                    }
-                    if let Some(content) = response.content {
-                        data["content"] = content.clone().into();
-                        combined.content = Some(content);
-                    }
-                    if let Some(context) = response.context {
-                        combined
-                            .context
-                            .get_or_insert_default()
-                            .push_str(&format!("\n{context}"));
-                    }
-                }
-            }
-        }
-        if !diagnostics.is_empty() {
-            self.runtime.execution.logger.warn(
-                "hook_failed",
-                &[
-                    ("event", event.into()),
-                    ("error", self.runtime.redact(&diagnostics.join("; "))),
-                ],
-            );
-            return Err(diagnostics.join("; "));
-        }
-        Ok(combined)
-    }
-}
 fn matches(pattern: &str, name: &str) -> bool {
     match pattern.split_once('*') {
         Some((prefix, suffix)) => {
@@ -731,7 +616,10 @@ fn schema(spec: &Value, value: Option<&Value>) -> Result<(), String> {
 mod memory_source;
 pub use memory_source::PluginMemoryService;
 
+mod binding;
 #[cfg(test)]
 mod memory_source_tests;
+pub use binding::SessionBinding;
+
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

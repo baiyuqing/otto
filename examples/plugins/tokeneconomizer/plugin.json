@@ -1,0 +1,18 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tokeneconomizer",
+  "version": "1.0.0",
+  "description": "Bridges Otto hook events to a local TokenEconomizer checkout through its Pi host interface.",
+  "extensions": {
+    "dev.otto": {
+      "version": 1,
+      "hooks": {
+        "session_start": [{"command": ["python3", "${PLUGIN_ROOT}/bridge.py"], "timeout": "30s"}],
+        "before_prompt": [{"command": ["python3", "${PLUGIN_ROOT}/bridge.py"], "timeout": "15s"}],
+        "after_tool": [{"command": ["python3", "${PLUGIN_ROOT}/bridge.py"], "timeout": "15s"}],
+        "turn_end": [{"command": ["python3", "${PLUGIN_ROOT}/bridge.py"], "timeout": "15s"}],
+        "session_end": [{"command": ["python3", "${PLUGIN_ROOT}/bridge.py"], "timeout": "30s"}]
+      }
+    }
+  }
+}

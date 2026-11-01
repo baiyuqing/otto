@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::*;
-use crate::cli::fixture_tests;
+use crate::fixtures;
 use crate::runtime::builder::{Builder, Runner, RuntimeInfo, SharedSession};
 use axum::body::Body;
 use axum::http::Request;

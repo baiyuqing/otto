@@ -119,7 +119,7 @@ impl Harness {
         // an already-canonical path, and macOS's `$TMPDIR` is a symlink.
         let canonical_workspace = std::fs::canonicalize(workspace.path())
             .unwrap_or_else(|_| workspace.path().to_path_buf());
-        let mut builder = fixture_tests::builder(&canonical_workspace, sessions.path());
+        let mut builder = fixtures::builder(&canonical_workspace, sessions.path());
         if let Some(skill_path) = options.skill_path {
             builder.shared_mut().config.skills.paths =
                 Some(vec![skill_path.to_string_lossy().into_owned()]);

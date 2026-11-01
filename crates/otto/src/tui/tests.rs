@@ -103,7 +103,7 @@ async fn releasing_a_drag_copies_the_text_that_is_on_screen() {
 
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = crate::fixtures::controller(workspace.path(), sessions.path()).await;
     let mut app = App::new(&app::Backend::Local(&controller));
     app.push_system(NEEDLE.to_string());
 
@@ -163,7 +163,7 @@ async fn releasing_a_drag_copies_the_text_that_is_on_screen() {
 async fn a_click_without_a_drag_clears_the_selection_and_copies_nothing() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = crate::fixtures::controller(workspace.path(), sessions.path()).await;
     let mut app = App::new(&app::Backend::Local(&controller));
     app.selection = Some(Selection::new(1, 1));
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(40, 10)).expect("terminal");
@@ -257,7 +257,7 @@ fn mouse_wheel_scrolls_without_becoming_a_composer_key() {
 async fn a_turn_scrolls_on_the_wheel_and_still_cancels_on_esc() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
-    let controller = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = crate::fixtures::controller(workspace.path(), sessions.path()).await;
     let mut app = App::new(&app::Backend::Local(&controller));
     app.max_scroll.set(10);
     app.start_turn();
@@ -410,8 +410,8 @@ async fn the_idle_loop_wakes_only_when_a_notification_is_pending() {
     let sessions = tempfile::tempdir().expect("sessions");
     let tasks = Arc::new(Tasks::new());
     let provider = ScriptedProvider::new(|_| Ok("woke up".to_string()));
-    let builder = crate::cli::fixture_tests::builder(workspace.path(), sessions.path());
-    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+    let builder = crate::fixtures::builder(workspace.path(), sessions.path());
+    let runtime = crate::fixtures::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let info = builder.runtime_info(&runtime);
     let runner = Runner::scripted(
@@ -480,8 +480,8 @@ async fn saved_queued_prompts_run_in_order_when_the_tui_opens_the_session() {
     let sessions = tempfile::tempdir().expect("sessions");
     let tasks = Arc::new(Tasks::new());
     let provider = ScriptedProvider::new(|call| Ok(format!("answer {call}")));
-    let builder = crate::cli::fixture_tests::builder(workspace.path(), sessions.path());
-    let runtime = crate::cli::fixture_tests::initial_runtime(&builder);
+    let builder = crate::fixtures::builder(workspace.path(), sessions.path());
+    let runtime = crate::fixtures::initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let info = builder.runtime_info(&runtime);
     let runner = Runner::scripted(

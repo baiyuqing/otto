@@ -35,6 +35,7 @@ use binary_harness::pty::{
     Screen, raw_contains, spawn, wait_for_raw_bytes, wait_for_screen_text,
     wait_for_screen_text_gone, wait_until,
 };
+use otto::fixtures::scripted_provider;
 
 /// The text both busy composer titles end with (`draw_composer` in
 /// `src/tui/render.rs`): "Working — type, then Enter to queue next input ·
@@ -53,7 +54,7 @@ fn serve_with_held_second_turn(
     let base_url = format!("http://{}", listener.local_addr().expect("address"));
     let served = Arc::new(AtomicUsize::new(0));
     let received = Arc::clone(&served);
-    let first_reply = binary_harness::text_reply(first_reply);
+    let first_reply = scripted_provider::text_reply(first_reply);
     let prefix = format!(
         "data: {}\n\n",
         serde_json::json!({"choices": [{"delta": {"content": held_text}}]})
@@ -113,7 +114,8 @@ fn serve_with_held_second_turn(
                     let _ = stream.write_all(tail.as_bytes());
                 }
                 _ => {
-                    let fallback = binary_harness::text_reply("unexpected extra provider request");
+                    let fallback =
+                        scripted_provider::text_reply("unexpected extra provider request");
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{fallback}",
                         fallback.len()

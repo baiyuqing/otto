@@ -49,10 +49,8 @@ fn channel_metadata_is_structured_and_never_changes_prompt_text() {
 async fn reloading_a_session_rebinds_notices_to_the_current_controller() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let first =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
-    let second =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let first = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
+    let second = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
     let id = first.info().session_id;
     let builder = Arc::clone(first.builder());
     let (out, mut frames) = mpsc::unbounded_channel();
@@ -60,7 +58,7 @@ async fn reloading_a_session_rebinds_notices_to_the_current_controller() {
         workspace: workspace.path().to_path_buf(),
         backend: Backend::Local(Box::new(Local {
             config: Config {
-                runtime: crate::cli::fixture_tests::initial_runtime(&builder),
+                runtime: crate::fixtures::initial_runtime(&builder),
                 builder,
                 workspace: workspace.path().to_path_buf(),
                 sandbox: None,
@@ -146,7 +144,7 @@ async fn reloading_a_session_rebinds_notices_to_the_current_controller() {
 async fn idle_wake_checks_do_not_signal_slot_release() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller = crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await;
+    let controller = crate::fixtures::controller(workspace.path(), sessions.path()).await;
     let session = Session {
         controller: Arc::new(controller),
         prompt: Arc::new(PromptSlot::default()),
@@ -291,7 +289,7 @@ fn local_test_connection(
         workspace: workspace.to_path_buf(),
         backend: Backend::Local(Box::new(Local {
             config: Config {
-                runtime: crate::cli::fixture_tests::initial_runtime(&builder),
+                runtime: crate::fixtures::initial_runtime(&builder),
                 builder,
                 workspace: workspace.to_path_buf(),
                 sandbox: None,
@@ -339,13 +337,12 @@ fn enqueue_ignores_an_input_id_that_is_already_queued() {
 async fn drain_skips_a_queued_prompt_whose_input_id_is_in_the_session() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let controller = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
     let (connection, slot, session_id) = local_test_connection(workspace.path(), &controller);
     otto_core::session::Session::append_input_if_absent(
         &controller.current_session(),
         "in_done",
-        crate::cli::fixture_tests::user("already delivered"),
+        crate::fixtures::user("already delivered"),
     )
     .await
     .unwrap();
@@ -372,8 +369,7 @@ async fn drain_skips_a_queued_prompt_whose_input_id_is_in_the_session() {
 async fn cancel_read_right_after_a_prompt_finds_its_token() {
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
-    let controller =
-        Arc::new(crate::cli::fixture_tests::controller(workspace.path(), sessions.path()).await);
+    let controller = Arc::new(crate::fixtures::controller(workspace.path(), sessions.path()).await);
     let (connection, slot, session_id) = local_test_connection(workspace.path(), &controller);
     let mut dispatcher = Dispatcher {
         connection,

@@ -204,7 +204,7 @@ fn session_switch_clears_delivery_ids_and_unread_state() {
 
 #[test]
 fn same_session_history_reload_preserves_scroll_and_replaces_pending_body() {
-    let history = vec![crate::cli::fixture_tests::user("loaded delivery")];
+    let history = vec![crate::fixtures::user("loaded delivery")];
     let remote = Remote::offline(history);
     let mut app = App::new(&Backend::Attach(&remote));
     app.entries.clear();

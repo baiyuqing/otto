@@ -20,6 +20,10 @@ pub mod embed;
 pub mod failover;
 #[cfg(any(test, feature = "fault-injection"))]
 pub mod faults;
+/// Test support for this crate's tests and for the tests of dependent crates;
+/// see the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
 pub(crate) mod fsops;
 mod gourl;
 pub mod herdr;

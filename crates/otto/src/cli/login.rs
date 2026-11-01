@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use crate::auth::Credentials;
     use crate::auth::login::{LoginError, Opener};
-    use crate::cli::fixture_tests;
+    use crate::fixtures;
     use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -349,9 +349,9 @@ mod tests {
         provider: &str,
         dynamic: bool,
     ) -> Controller {
-        let mut builder = fixture_tests::builder(workspace, sessions);
+        let mut builder = fixtures::builder(workspace, sessions);
         builder.shared_mut().auth_path = auth_path.to_string_lossy().into_owned();
-        let runtime = fixture_tests::initial_runtime(&builder);
+        let runtime = fixtures::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder
             .build_runner(&session, &runtime)

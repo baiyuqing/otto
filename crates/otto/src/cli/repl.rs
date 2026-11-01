@@ -169,6 +169,7 @@ impl<'a> Repl<'a> {
             let _ = writeln!(self.stdout, "Session: {}", info.session_id);
         }
         let _ = writeln!(self.stdout, "Sandbox: {}", info.sandbox.summary());
+        self.print_sandbox_read_notes(&info.sandbox);
 
         let mut approval_queue = std::collections::VecDeque::<String>::new();
         let mut lines = spawn_reader(input);

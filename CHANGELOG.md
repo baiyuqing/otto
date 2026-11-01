@@ -18,11 +18,14 @@ commit ledger; Git and release tags retain the full history. See the
   ChatGPT model needs only `models."<model_id>" = {}` under
   `[providers.chatgpt]`. See
   [provider and model configuration](docs/manual/getting-started.md#providers-and-models).
-- `otto setup`, `otto config set`, the `/model` save and
-  `POST /v1/config/changes` write a new model as a `models."<model_id>"` line
-  inside `[providers.<name>]`, writing that table with `type` when the file
-  does not hold it, and edit or remove an existing model in either form in
-  place. The legacy-profile diagnostic prints the same form.
+- `otto setup`, `otto config set` and `POST /v1/config/changes` write a new
+  model as a `models."<model_id>"` line inside `[providers.<name>]`, creating
+  that table when the file does not hold it, and edit or remove an existing
+  model in either form in place; a provider whose models are all written as
+  `[providers.<name>.models."<model_id>"]` tables receives a new model in that
+  form. `otto config set` accepts a quoted model ID in the key
+  (`providers.chatgpt.models."gpt-5.6-luna".thinking`). The legacy-profile
+  diagnostic prints the one-line form.
 - [examples/config.example.toml](examples/config.example.toml) is a commented
   sample user configuration in the new format; an otto-core test parses it and
   resolves each of its models.

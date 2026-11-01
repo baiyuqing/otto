@@ -109,17 +109,26 @@ models."gpt-5.6-luna" = { thinking = "high" }   # one line per model
 thinking = "high"
 ```
 
-The one-line form is the written form: `otto setup`, `otto config set`, the
-`/model` save, `POST /v1/config/changes` (`set_model`, `set_model_field`) and
-the legacy-profile diagnostic emit it, inside `[providers.<name>]`, and write
-that header with `type = "<name>"` when the file does not hold it, built-in
-providers included. An existing model is edited or removed where it is
-written: a `models."<id>"` line is replaced or deleted; a
+The one-line form is the written form. `otto setup` and the legacy-profile
+diagnostic emit `[providers.<name>]` with `type = "<name>"`, built-in
+providers included, followed by one `models."<id>" = { ... }` line per model.
+`otto config set` and `POST /v1/config/changes` (`set_model`,
+`set_model_field`) add a new model as such a line inside the existing
+`[providers.<name>]` block, or append that header with the line when the file
+has no such header; they write no `type`, because the same writer serves
+project-scope files, where a provider-level field is rejected. A provider
+whose models are all written as `[providers.<name>.models."<id>"]` tables
+receives a new model as such a table, so one provider never holds both forms
+(a dotted `models."<id>"` key after such headers is accepted by Otto's parser
+but is not guaranteed by other TOML parsers, such as the chat connector's).
+An existing model is edited or removed where it is written: a
+`models."<id>"` line is replaced or deleted; a
 `[providers.<name>.models."<id>"]` table has its key set or is removed as a
 whole. `otto_core::config::edit` implements both in-place edits
-(`set_inline_table`, `set_value`, `remove_table`). The array form
-`models = [{ id = "..." }]` was rejected: it changes the schema and the
-addressing by model ID that `otto config set` and the HTTP changes use.
+(`set_inline_table`, `set_value`, `remove_table`, `has_header`,
+`has_header_below`). The array form `models = [{ id = "..." }]` was rejected:
+it changes the schema and the addressing by model ID that `otto config set`
+and the HTTP changes use.
 
 ## Selection
 

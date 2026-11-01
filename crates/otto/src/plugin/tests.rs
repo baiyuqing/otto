@@ -729,7 +729,7 @@ async fn otto_commands_require_content_trust_and_revoke_without_reloading() {
     )
     .unwrap();
     let response = runtime
-        .bind("s".into(), None, String::new(), "new", None)
+        .bind(super::hooks::tests::binding(), None)
         .run(
             "before_tool",
             json!({"tool":"write","arguments":{}}),
@@ -766,7 +766,7 @@ async fn otto_commands_require_content_trust_and_revoke_without_reloading() {
     );
     assert!(
         runtime
-            .bind("s".into(), None, String::new(), "new", None)
+            .bind(super::hooks::tests::binding(), None)
             .run(
                 "before_tool",
                 json!({"tool":"write"}),

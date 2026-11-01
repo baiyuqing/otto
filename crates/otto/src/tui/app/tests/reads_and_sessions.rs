@@ -31,7 +31,7 @@ fn obsolete_read_results_are_ignored_after_filter_or_session_changes() {
     let id = app.surfaces.top().unwrap().id;
     app.enqueue(id, Request::Sessions);
     let old = app.requests.last().unwrap().0.clone();
-    app.enqueue(id, Request::Profiles);
+    app.enqueue(id, Request::Models);
     app.apply_completion(Completion {
         mutation: false,
         ticket: old.clone(),
@@ -43,7 +43,7 @@ fn obsolete_read_results_are_ignored_after_filter_or_session_changes() {
     app.apply_completion(Completion {
         mutation: false,
         ticket: latest,
-        result: Ok(Reply::Profiles(vec![])),
+        result: Ok(Reply::Models(vec![])),
     });
     assert_eq!(received.load(Ordering::SeqCst), 0);
 }

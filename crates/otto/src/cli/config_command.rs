@@ -74,9 +74,10 @@ fn execute(
                     otto_core::config::resolve::subagent_model_diagnostic(&loaded.file, &r)
                         .into_iter()
                         .collect();
-                serde_json::json!({"profile":r.profile,
-                    "provider":r.provider,
-                    "model":r.model,
+                serde_json::json!({"model":r.model_selector.to_string(),
+                    "provider":r.provider_name,
+                    "provider_type":r.provider_type,
+                    "model_id":r.model,
                     "thinking":r.thinking,
                     "subagent_models":r.subagent_models,
                     "diagnostics":diagnostics,
@@ -249,7 +250,7 @@ mod tests {
         assert!(output.contains("redacted"));
     }
     #[test]
-    fn explain_displays_safe_child_model_fallback_without_credentials() {
+    fn explain_reports_the_selected_model_without_credentials_or_legacy_values() {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let dir = home.path().join(".config/otto");
@@ -272,7 +273,7 @@ mod tests {
         .map(str::to_string);
         let lookup = HashMap::from([
             ("HOME".into(), home.path().display().to_string()),
-            ("OTTO_PROVIDER".into(), "chatgpt".into()),
+            ("OTTO_MODEL".into(), "chatgpt/other-model".into()),
             ("PRIVATE_KEY".into(), "credential-marker".into()),
             ("UNRELATED".into(), "unrelated-marker".into()),
         ]);
@@ -286,18 +287,22 @@ mod tests {
         let runtime = &report["effective_runtime"];
         assert_eq!(runtime["provider"], "chatgpt");
         assert_eq!(runtime["subagent_models"], serde_json::json!([]));
-        let diagnostics = runtime["diagnostics"].as_array().unwrap();
-        assert_eq!(diagnostics.len(), 1);
-        let diagnostic = diagnostics[0].to_string();
-        assert!(diagnostic.contains("configure subagent_models"));
-        assert!(diagnostic.contains("not automatically retried"));
+        assert_eq!(runtime["model"], "chatgpt/other-model");
+        assert_eq!(runtime["provider_type"], "chatgpt");
+        assert_eq!(runtime["model_id"], "other-model");
+        // The explicit selector names a provider that has no legacy child models,
+        // so no fallback diagnostic is reported and no configured value is printed.
+        assert_eq!(runtime["diagnostics"], serde_json::json!([]));
         for private in [
             "PRIVATE_KEY",
             "example.test",
             "child\"",
             "credential-marker",
         ] {
-            assert!(!diagnostic.contains(private), "{diagnostic}");
+            assert!(
+                !runtime.to_string().contains(private),
+                "{private} leaked into {runtime}"
+            );
         }
     }
 

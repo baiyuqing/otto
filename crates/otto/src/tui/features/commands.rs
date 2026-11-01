@@ -156,7 +156,7 @@ const ENTRIES: &[Entry] = &[
         false,
         skill
     ),
-    entry!(DuringTask, "/model", "switch profiles", true, model),
+    entry!(DuringTask, "/model", "switch models", true, model),
     entry!(
         DuringTask,
         "/thinking",
@@ -301,13 +301,12 @@ fn session(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
         key: "session".into(),
         title: "Session".into(),
         text: format!(
-            "{}\nID: {}\nWorkspace: {}\nProfile: {}\nModel: {}/{}\nReasoning: {}{}",
+            "{}\nID: {}\nWorkspace: {}\nModel: {} (type {})\nReasoning: {}{}",
             info.session_name,
             info.session_id,
             info.workspace,
-            info.profile,
-            info.provider,
-            info.model,
+            info.model_selector,
+            info.provider_type,
             info.thinking,
             info.forked_from
                 .as_ref()
@@ -339,15 +338,15 @@ fn archive(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
 }
 fn model(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     if args.is_empty() {
-        push(Choice::new(ChoiceKind::Profiles, ""))
+        push(Choice::new(ChoiceKind::Models, ""))
     } else {
-        command("Switch profile", Command::SwitchProfile(args.into()))
+        command("Switch model", Command::SwitchModel(args.into()))
     }
 }
 fn thinking(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
     match args.split_whitespace().collect::<Vec<_>>().as_slice() {
         [] => push(Choice::new(
-            ChoiceKind::Thinking { profile: None },
+            ChoiceKind::Thinking { model: None },
             &info.thinking,
         )),
         [level] if *level != "--save" => command(

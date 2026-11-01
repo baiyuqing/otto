@@ -1,4 +1,4 @@
-//! Local-controller command handling and session or profile switches.
+//! Local-controller command handling and session or model switches.
 
 use super::*;
 
@@ -43,21 +43,21 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             history = true;
             format!("Archived: {}", result.path)
         }
-        Command::SwitchProfile(profile) => {
-            let message = switch_profile(c.clone(), profile).await?;
+        Command::SwitchModel(model) => {
+            let message = switch_model(c.clone(), model).await?;
             history = true;
             message
         }
-        Command::SwitchProfileThinking {
-            profile,
+        Command::SwitchModelThinking {
+            model,
             thinking,
             save,
         } => {
-            let mut message = switch_profile(c.clone(), profile).await?;
+            let mut message = switch_model(c.clone(), model).await?;
             history = true;
             let thinking = match apply_thinking(c.clone(), thinking, save).await {
                 Ok(message) => message,
-                Err(error) => format!("/thinking: {error}. The profile switch was applied."),
+                Err(error) => format!("/thinking: {error}. The model switch was applied."),
             };
             message.push('\n');
             message.push_str(&thinking);
@@ -238,17 +238,17 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
     })
 }
 
-async fn switch_profile(c: Arc<Controller>, profile: String) -> Result<String, String> {
-    let result = c.switch_profile_result(&profile).await?;
-    let saved = blocking(c.clone(), move |c| c.set_default_profile(&profile)).await;
+async fn switch_model(c: Arc<Controller>, model: String) -> Result<String, String> {
+    let result = c.switch_model_result(&model).await?;
+    let saved = blocking(c.clone(), move |c| c.set_default_model(&model)).await;
     let info = c.info();
     let mut message = format!(
-        "Switched to profile {} (provider {}, model {}).",
-        info.profile, info.provider, info.model
+        "Switched to model {} (type {}).",
+        info.model_selector, info.provider_type
     );
     match saved {
-        Ok(()) => message.push_str(" Set as default profile."),
-        Err(error) => message.push_str(&format!(" The default profile was not saved: {error}")),
+        Ok(()) => message.push_str(" Set as default model."),
+        Err(error) => message.push_str(&format!(" The default model was not saved: {error}")),
     }
     for warning in result.warnings {
         message.push('\n');
@@ -273,9 +273,9 @@ async fn apply_thinking(
     };
     let mut message = format!("Thinking: {display}");
     if save && !thinking.is_empty() {
-        match blocking(c, move |c| c.save_profile_thinking(&thinking)).await {
-            Ok(()) => message.push_str(". Saved to profile."),
-            Err(error) => message.push_str(&format!(", but the profile was not saved: {error}")),
+        match blocking(c, move |c| c.save_model_thinking(&thinking)).await {
+            Ok(()) => message.push_str(". Saved to model."),
+            Err(error) => message.push_str(&format!(", but the model was not saved: {error}")),
         }
     }
     Ok(message)

@@ -236,7 +236,7 @@ async fn approval_activity_accepts_legacy_snapshot_fields() {
 async fn session_maps_the_wire_into_info() {
     let body = json!({
         "id": "s1", "name": "work", "workspace": "/w", "provider": "chatgpt",
-        "profile": "p", "model": "m", "thinking": "high",
+        "provider_type": "chatgpt", "model": "m", "thinking": "high",
         "context_window": 1000,
         "usage": { "input_tokens": 5, "output_tokens": 7 },
         "context_input_tokens": 42,
@@ -251,6 +251,9 @@ async fn session_maps_the_wire_into_info() {
     assert_eq!(info.session_id, "s1");
     assert_eq!(info.session_name, "work");
     assert_eq!(info.model, "m");
+    assert_eq!(info.provider, "chatgpt");
+    assert_eq!(info.provider_type, "chatgpt");
+    assert_eq!(info.model_selector, "chatgpt/m");
     assert_eq!(info.context_window, 1000);
     assert_eq!(info.usage.input_tokens, 5);
     assert!(info.usage_present);
@@ -261,6 +264,35 @@ async fn session_maps_the_wire_into_info() {
     assert_eq!(info.sandbox.mode, SandboxMode::Seatbelt);
     assert_eq!(info.sandbox.network, SandboxNetwork::Denied);
     assert!(info.sandbox.bash_available);
+}
+
+#[tokio::test]
+async fn switch_model_posts_the_selector_and_models_lists_sorted_selectors() {
+    let (client, seen, _dir) = stub(|method, path| {
+        if path == "/v1/config/providers" {
+            json_body(
+                StatusCode::OK,
+                r#"{"default_model":"b/y","providers":[{"name":"b","models":[{"selector":"b/y"}]},{"name":"a","models":[{"selector":"a/x"},{"selector":"a/w"}]},{"name":"c"}]}"#,
+            )
+        } else {
+            assert_eq!(method, "POST");
+            json_body(
+                StatusCode::OK,
+                r#"{"id":"s1","provider":"a","provider_type":"claude","model":"x"}"#,
+            )
+        }
+    });
+    let info = client.switch_model("s1", "a/x").await.unwrap();
+    assert_eq!(
+        request(&seen, 0),
+        (
+            "POST /v1/sessions/s1/model".into(),
+            json!({ "model": "a/x" })
+        )
+    );
+    assert_eq!(info.model_selector, "a/x");
+    assert_eq!(info.provider_type, "claude");
+    assert_eq!(client.models().await.unwrap(), ["a/w", "a/x", "b/y"]);
 }
 
 #[tokio::test]

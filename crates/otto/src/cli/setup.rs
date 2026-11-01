@@ -84,7 +84,7 @@ pub fn run(
 
     let _ = writeln!(
         stdout,
-        "Otto setup creates a default profile without storing API keys. Shell commands remain sandboxed by default."
+        "Otto setup creates a default model without storing API keys. Shell commands remain sandboxed by default."
     );
     let Some(provider) = ask_choice(
         stdin,
@@ -96,22 +96,6 @@ pub fn run(
             PROVIDER_OPENAI_COMPATIBLE,
         ],
         PROVIDER_CHATGPT,
-    ) else {
-        let _ = writeln!(stdout, "Cancelled; configuration unchanged.");
-        return 0;
-    };
-    let default_profile = if provider == PROVIDER_CHATGPT {
-        "chatgpt"
-    } else {
-        "default"
-    };
-    let Some(profile) = ask_nonempty(
-        stdin,
-        stdout,
-        &format!("Profile name ({default_profile}): "),
-        default_profile,
-        valid_profile_name,
-        "Profile names use letters, digits, hyphens, and underscores.",
     ) else {
         let _ = writeln!(stdout, "Cancelled; configuration unchanged.");
         return 0;
@@ -175,16 +159,11 @@ pub fn run(
         (String::new(), String::new())
     };
 
-    let content = match crate::config::initial_profile_content(
-        &profile,
-        &provider,
-        &model,
-        &base_url,
-        &api_key_env,
-    ) {
-        Ok(content) => content,
-        Err(message) => return fail(stderr, &message),
-    };
+    let content =
+        match crate::config::initial_config_content(&provider, &model, &base_url, &api_key_env) {
+            Ok(content) => content,
+            Err(message) => return fail(stderr, &message),
+        };
     let _ = writeln!(
         stdout,
         "\nProposed configuration for {}:\n\n{content}",
@@ -196,14 +175,7 @@ pub fn run(
         return 0;
     }
 
-    match crate::config::create_initial_profile(
-        &path,
-        &profile,
-        &provider,
-        &model,
-        &base_url,
-        &api_key_env,
-    ) {
+    match crate::config::create_initial_config(&path, &provider, &model, &base_url, &api_key_env) {
         Ok(()) => {
             let _ = writeln!(stdout, "Created {}.", path.display());
             if provider == PROVIDER_CHATGPT {
@@ -269,11 +241,6 @@ fn read_line(stdin: &mut (dyn BufRead + Send)) -> Option<String> {
     }
 }
 
-fn valid_profile_name(name: &str) -> bool {
-    name.bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
 fn valid_environment_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
@@ -295,7 +262,7 @@ mod tests {
     #[test]
     fn creates_claude_with_native_defaults_without_storing_credentials() {
         let home = tempfile::tempdir().unwrap();
-        let mut input = Cursor::new(b"claude\nwork\nfixture-claude\n\n\nsave\n".to_vec());
+        let mut input = Cursor::new(b"claude\nfixture-claude\n\n\nsave\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = run(
@@ -308,18 +275,25 @@ mod tests {
         assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
         let text = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
         let file = otto_core::config::parse(&text).unwrap();
-        let profile = &file.profiles["work"];
-        assert_eq!(profile.provider, "claude");
-        assert_eq!(profile.base_url, "https://api.anthropic.com");
-        assert_eq!(profile.api_key_env, "ANTHROPIC_API_KEY");
-        assert_eq!(profile.api_version, "2026-10-21");
-        assert!(profile.workspace_id_env.is_empty());
+        assert_eq!(file.default_model, "claude/fixture-claude");
+        assert!(!text.contains("[providers.claude]"), "{text}");
+        assert!(!text.contains("api_key_env"), "{text}");
+        let runtime = otto_core::config::resolve(
+            &file,
+            &HashMap::from([("ANTHROPIC_API_KEY".to_string(), "test-value".to_string())]),
+            &otto_core::config::SessionDefaults::default(),
+            &otto_core::config::Overrides::default(),
+        )
+        .unwrap();
+        assert_eq!(runtime.provider_type, "claude");
+        assert_eq!(runtime.model, "fixture-claude");
+        assert_eq!(runtime.base_url, "https://api.anthropic.com/");
     }
 
     #[test]
-    fn creates_a_chatgpt_profile_without_a_secret() {
+    fn creates_a_chatgpt_default_model_without_a_secret() {
         let home = tempfile::tempdir().unwrap();
-        let mut input = Cursor::new(b"\n\nmy-model\nsave\n".to_vec());
+        let mut input = Cursor::new(b"\nmy-model\nsave\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = run(
@@ -331,9 +305,12 @@ mod tests {
         );
         assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
         let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
-        assert!(config.contains("default_profile = \"chatgpt\""), "{config}");
-        assert!(config.contains("provider = \"chatgpt\""), "{config}");
-        assert!(config.contains("model = \"my-model\""), "{config}");
+        assert!(
+            config.contains("default_model = \"chatgpt/my-model\""),
+            "{config}"
+        );
+        assert!(!config.contains("[providers.chatgpt]"), "{config}");
+        assert!(!config.contains("profile"), "{config}");
         assert!(!config.contains("api_key"), "{config}");
         assert!(!config.contains("subagent_models"), "{config}");
         let output = String::from_utf8(stdout).unwrap();
@@ -345,8 +322,8 @@ mod tests {
     #[test]
     fn scripted_save_confirms_after_preview_without_child_model_prompt() {
         for text in [
-            "\n\nparent\nsave\n",
-            "openai-compatible\nwork\nparent\nhttps://api.example/v1\nWORK_KEY\nsave\n",
+            "\nparent\nsave\n",
+            "openai-compatible\nparent\nhttps://api.example/v1\nWORK_KEY\nsave\n",
         ] {
             let home = tempfile::tempdir().unwrap();
             let mut input = Cursor::new(text.as_bytes());
@@ -366,7 +343,8 @@ mod tests {
             );
             let config =
                 std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
-            assert!(config.contains("model = \"parent\""), "{config}");
+            assert!(config.contains("/parent\""), "{config}");
+            assert!(config.contains("default_model = "), "{config}");
             assert!(!config.contains("subagent_models"), "{config}");
             let output = String::from_utf8(stdout).unwrap();
             assert!(output.contains("Proposed configuration"));
@@ -381,11 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn creates_an_openai_compatible_profile() {
+    fn creates_an_openai_compatible_provider_and_model() {
         let home = tempfile::tempdir().unwrap();
         let mut input = Cursor::new(
-            b"openai-compatible\nwork\ncheap-model\nhttps://api.example/v1\nWORK_KEY\nsave\n"
-                .to_vec(),
+            b"openai-compatible\ncheap-model\nhttps://api.example/v1\nWORK_KEY\nsave\n".to_vec(),
         );
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -400,6 +377,11 @@ mod tests {
             0
         );
         let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
+        assert!(
+            config.contains("default_model = \"openai-compatible/cheap-model\""),
+            "{config}"
+        );
+        assert!(config.contains("[providers.openai-compatible]"), "{config}");
         assert!(config.contains("api_key_env = \"WORK_KEY\""), "{config}");
         assert!(!config.contains("subagent_models"), "{config}");
         assert!(
@@ -411,18 +393,18 @@ mod tests {
     #[test]
     fn only_explicit_save_after_preview_writes_configuration() {
         for text in [
-            "\n\nparent\n",
-            "\n\nparent\ncancel\n",
-            "\n\nparent\ncancel\nsave\n",
-            "\n\nparent\n\n",
-            "\n\nparent\n\ncancel\n",
-            "\n\nparent\n\n\n",
-            "\n\nparent\n\ninvalid\n",
-            "\n\nparent\nchild\n",
-            "\n\nparent\nchild\ncancel\n",
-            "\n\nparent\nchild\n\n",
-            "\n\nparent\nchild\ninvalid\n",
-            "\n\nparent\ninvalid,,list\n",
+            "\nparent\n",
+            "\nparent\ncancel\n",
+            "\nparent\ncancel\nsave\n",
+            "\nparent\n\n",
+            "\nparent\n\ncancel\n",
+            "\nparent\n\n\n",
+            "\nparent\n\ninvalid\n",
+            "\nparent\nchild\n",
+            "\nparent\nchild\ncancel\n",
+            "\nparent\nchild\n\n",
+            "\nparent\nchild\ninvalid\n",
+            "\nparent\ninvalid,,list\n",
         ] {
             let home = tempfile::tempdir().unwrap();
             let mut input = Cursor::new(text.as_bytes().to_vec());

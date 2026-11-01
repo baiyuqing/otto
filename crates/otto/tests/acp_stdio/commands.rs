@@ -264,15 +264,19 @@ fn model_command_reports_and_switches_the_session_without_a_provider_request() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         message_text(&frames),
-        "Profile: test\nProvider: openai-compatible\nModel: gpt-test\n\
-         Configured profiles: other, test\nSwitch with /model <profile>."
+        "Model test/gpt-test (type openai-compatible)\n\
+         Configured models: other/gpt-other, test/gpt-test\n\
+         Switch with /model <provider>/<model_id>."
     );
 
-    let (frames, response) = client.call("session/prompt", prompt(&session_id, "/model other"));
+    let (frames, response) = client.call(
+        "session/prompt",
+        prompt(&session_id, "/model other/gpt-other"),
+    );
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         message_text(&frames),
-        "Switched to profile other (provider openai-compatible, model gpt-other)."
+        "Switched to model other/gpt-other (type openai-compatible)."
     );
     assert_eq!(
         requests.lock().unwrap().len(),
@@ -288,7 +292,7 @@ fn model_command_reports_and_switches_the_session_without_a_provider_request() {
     let (frames, response) = client.call("session/prompt", prompt(&session_id, "/model"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert!(
-        message_text(&frames).starts_with("Profile: other\n"),
+        message_text(&frames).starts_with("Model other/gpt-other "),
         "{frames:?}"
     );
     let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
@@ -297,7 +301,7 @@ fn model_command_reports_and_switches_the_session_without_a_provider_request() {
         "the switch wrote the configuration file: {config}"
     );
 
-    // An unknown profile is an error, not a model request.
+    // A bare model id without a provider is an error, not a model request.
     let (_, response) = client.call("session/prompt", prompt(&session_id, "/model nope"));
     assert!(response["error"].is_object(), "{response}");
     assert!(

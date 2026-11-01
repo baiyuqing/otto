@@ -192,7 +192,12 @@ for every workspace.
   any loaded workspace has a turn running, and also fails `409` if any
   workspace's reload itself errors. With one loaded workspace the response is
   unchanged, the reloaded sandbox object; with more than one, it adds a
-  `workspaces` array with each workspace's own reload result.
+  `workspaces` array with each workspace's own reload result. The sandbox
+  object has the optional string array `inert_read_paths`, which lists
+  `read_paths` entries that are not below any denied path, and the optional
+  string array `skipped_deny_paths`, which lists built-in denylist entries that
+  contain a writable root and are not applied. Each array is present only when
+  it is non-empty.
 - Each loaded workspace with a workflow database keeps its own file lock
   (`~/.otto/workflow-locks/{key}.lock`); a workspace whose lock is held by
   another process has workflows disabled for it (`GET/POST /v1/workflows`
@@ -485,7 +490,7 @@ are served at the root. Request and error bodies are JSON.
 | `POST /v1/workflows/{id}/cancel` | Cancel a run after its active attempts stop. |
 | `POST /v1/workflows/requests/{id}/approve` | Approve a durable workflow gate. Searches every loaded workspace for the request id. |
 | `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate: the run is canceled and its in-flight attempts stop. Searches every loaded workspace for the request id. |
-| `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to every loaded workspace; `409` while any session in any loaded workspace has a turn in flight, or `409 sandbox_reload_failed` when any workspace's reload fails; `501` when the process has no reloadable sandbox. With one loaded workspace, returns the sandbox object now in effect, as before; with more than one, the startup workspace's sandbox fields stay at the top level and an added `workspaces` array carries each workspace's own `{"workspace", "sandbox", "error"}` (`sandbox` and `error` are mutually exclusive). |
+| `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to every loaded workspace; `409` while any session in any loaded workspace has a turn in flight, or `409 sandbox_reload_failed` when any workspace's reload fails; `501` when the process has no reloadable sandbox. With one loaded workspace, returns the sandbox object now in effect, as before; with more than one, the startup workspace's sandbox fields stay at the top level and an added `workspaces` array carries each workspace's own `{"workspace", "sandbox", "error"}` (`sandbox` and `error` are mutually exclusive). The sandbox object carries the optional arrays `inert_read_paths` (`read_paths` entries not below any denied path) and `skipped_deny_paths` (built-in denylist entries that contain a writable root); each is present only when non-empty. |
 | `GET /v1/info` | Process-level static info: workspace, `provider` (provider name), `provider_type`, `model` (model ID), sandbox summary, and `models`, the configured selectors (`<provider>/<model_id>`). |
 | `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |
 | `GET /v1/usage/daily?days=30&session_id=<id>` | Return zero-filled daily usage and range totals for 1 to 365 UTC days. `session_id` is optional. |

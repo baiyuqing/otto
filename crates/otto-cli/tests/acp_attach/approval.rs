@@ -202,6 +202,32 @@ fn script() -> (Vec<String>, Arc<AtomicUsize>) {
     )
 }
 
+/// Creates `<home>/denied/fixture.txt`, the file a read grant test asks to read.
+fn denied_read_dir(home: &Path) -> std::path::PathBuf {
+    let denied_dir = home.join("denied");
+    std::fs::create_dir(&denied_dir).unwrap();
+    std::fs::write(denied_dir.join("fixture.txt"), "outside-seatbelt\n").unwrap();
+    denied_dir
+}
+
+/// Appends a `[sandbox] deny_read_paths` entry for `denied_dir` to the written config.
+fn deny_read_dir(home: &Path, denied_dir: &Path) {
+    let config_path = home.join(".config/otto/config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config.push_str(&format!(
+        "\n[sandbox]\ndeny_read_paths = [\"{}\"]\n",
+        denied_dir.canonicalize().unwrap().display()
+    ));
+    std::fs::write(config_path, config).unwrap();
+}
+
+/// Whether the config holds a `read_paths` key; `deny_read_paths` does not count.
+fn grants_read_paths(config: &str) -> bool {
+    config
+        .lines()
+        .any(|line| line.trim_start().starts_with("read_paths"))
+}
+
 fn start_with_read(
     read_grant: bool,
 ) -> (
@@ -213,9 +239,10 @@ fn start_with_read(
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join("elevated.txt"), "outside-seatbelt\n").unwrap();
+    let denied_dir = denied_read_dir(home.path());
     let (mut replies, served) = script();
     if read_grant {
-        let path = home.path().join("elevated.txt").canonicalize().unwrap();
+        let path = denied_dir.join("fixture.txt").canonicalize().unwrap();
         let call = |id| {
             tool_call_reply(
                 id,
@@ -235,6 +262,7 @@ fn start_with_read(
         served: Arc::clone(&served),
     });
     configure(home.path(), &base_url, None);
+    deny_read_dir(home.path(), &denied_dir);
     let serve = Serve::start(home.path(), workspace.path(), "seatbelt");
     (home, workspace, serve, served)
 }
@@ -354,7 +382,7 @@ fn persistent_read_permission_survives_the_serve_relay() {
             "the prepared call must not require a model-generated retry"
         );
         let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
-        assert_eq!(config.contains("read_paths"), granted, "{config}");
+        assert_eq!(grants_read_paths(&config), granted, "{config}");
         assert_eq!(
             serde_json::to_string(&frames)
                 .unwrap()

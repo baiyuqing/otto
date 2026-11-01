@@ -45,8 +45,10 @@ even if no output arrived; inspect effects before resubmitting.
 ### `warning: bash is unavailable because the configured sandbox could not be established ...`
 
 On macOS, `auto` means Seatbelt; confirm `/usr/bin/sandbox-exec` is usable.
-Narrow `read_paths` and move a workspace away from private sandbox cache/state
-if grants overlap it. Prefer exact grants over broad home/cache access.
+Narrow `read_paths` and `deny_read_paths`, and move a workspace away from private
+sandbox cache/state if entries overlap it. A `deny_read_paths` entry that equals or
+contains the workspace or a linked worktree prevents the sandbox from starting.
+Prefer exact exceptions over broad home/cache access.
 
 Linux has no confined shell driver (`unsupported-platform`). Otto never falls
 back to Docker or unconfined execution. `--sandbox off`/`driver = "off"` is an

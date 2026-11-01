@@ -14,10 +14,15 @@ fn new_fixture() -> Fixture {
     let workspace = base.join("workspace space ü 'quote;()[]");
     std::fs::create_dir(&workspace).expect("workspace");
     set_private(&workspace);
-    let outside_file = base.join("outside file");
-    let allowed_read = base.join("allowed read file");
+    let denied_dir = base.join("denied dir");
+    std::fs::create_dir(&denied_dir).expect("denied directory");
+    set_private(&denied_dir);
+    let outside_file = denied_dir.join("outside file");
+    let allowed_read = denied_dir.join("allowed read file");
+    let visible_file = base.join("visible file");
     write_private(&outside_file, "outside-data");
     write_private(&allowed_read, "allowed-data");
+    write_private(&visible_file, "visible-data");
     let special = workspace.join("special space ü 'quote;()[] file");
     Fixture {
         environment: vec![
@@ -33,8 +38,10 @@ fn new_fixture() -> Fixture {
         },
         base,
         workspace,
+        denied_dir,
         outside_file,
         allowed_read,
+        visible_file,
         _root: Arc::new(root),
     }
 }

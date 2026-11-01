@@ -26,8 +26,8 @@ pub enum SandboxNetworkMode {
 }
 
 /// The resolved, validated `[sandbox]` settings, ready to convert into a
-/// native `sandbox::Settings`. `read_paths` and `allow_env` are sorted and
-/// own their storage independently of the input `SandboxConfig`.
+/// native `sandbox::Settings`. `read_paths`, `deny_read_paths` and `allow_env`
+/// are sorted and own their storage independently of the input `SandboxConfig`.
 /// `excluded_commands` keeps the configured order and is not part of the
 /// native `sandbox::Settings`: the bash tool applies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,7 @@ pub struct SandboxSettings {
     pub driver: SandboxDriverMode,
     pub network: SandboxNetworkMode,
     pub read_paths: Vec<String>,
+    pub deny_read_paths: Vec<String>,
     pub allow_env: Vec<String>,
     pub excluded_commands: Vec<String>,
 }
@@ -68,6 +69,15 @@ pub fn resolve_sandbox(
     }
     read_paths.sort();
 
+    let mut deny_read_paths = raw.deny_read_paths.clone();
+    if !deny_read_paths
+        .iter()
+        .all(|path| valid_sandbox_read_path(path))
+    {
+        return Err(ConfigError::new("invalid sandbox deny_read_paths"));
+    }
+    deny_read_paths.sort();
+
     let mut allow_env = raw.allow_env.clone();
     let mut seen: std::collections::HashSet<&str> =
         std::collections::HashSet::with_capacity(allow_env.len());
@@ -90,6 +100,7 @@ pub fn resolve_sandbox(
         driver,
         network,
         read_paths,
+        deny_read_paths,
         allow_env,
         excluded_commands: raw.excluded_commands.clone(),
     })
@@ -333,6 +344,7 @@ mod tests {
             driver: driver.map(String::from),
             network: network.map(String::from),
             read_paths: read_paths.iter().map(|s| s.to_string()).collect(),
+            deny_read_paths: Vec::new(),
             allow_env: allow_env.iter().map(|s| s.to_string()).collect(),
             excluded_commands: Vec::new(),
         }
@@ -348,6 +360,7 @@ mod tests {
                 driver: SandboxDriverMode::Auto,
                 network: SandboxNetworkMode::Allow,
                 read_paths: vec![],
+                deny_read_paths: vec![],
                 allow_env: vec![],
                 excluded_commands: vec![],
             }
@@ -564,6 +577,42 @@ mod tests {
         let got = resolve_sandbox(&config(None, None, &[boundary.as_str()], &[]), None)
             .expect("boundary path accepted");
         assert_eq!(got.read_paths, vec![boundary]);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn deny_read_paths_follow_the_read_paths_text_rules_and_sort() {
+        let raw = SandboxConfig {
+            deny_read_paths: vec![
+                "~/.config/private".to_string(),
+                "/opt/secrets".to_string(),
+                "/opt/alpha".to_string(),
+            ],
+            ..SandboxConfig::default()
+        };
+        let got = resolve_sandbox(&raw, None).expect("resolve");
+        assert_eq!(
+            got.deny_read_paths,
+            vec!["/opt/alpha", "/opt/secrets", "~/.config/private"]
+        );
+
+        for path in [
+            "relative/path",
+            "~",
+            "~someone/secrets",
+            "/safe\0unsafe",
+            "",
+        ] {
+            let raw = SandboxConfig {
+                deny_read_paths: vec![path.to_string()],
+                ..SandboxConfig::default()
+            };
+            let err = resolve_sandbox(&raw, None).unwrap_err();
+            assert!(
+                err.to_string().contains("deny_read_paths"),
+                "{path:?}: {err}"
+            );
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

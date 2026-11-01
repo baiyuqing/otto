@@ -100,10 +100,9 @@ impl Builder {
         definitions.extend(self.boundary_memory_definitions(max_output));
         definitions.push(crate::tool::approval::request_definition());
         if self.planned_bash_available() {
-            let private_home = self.sandbox_info.mode == SandboxMode::Seatbelt;
             definitions.push(match self.bash_approvals.is_some() {
-                true => bash::bash_definition_with_approvals(private_home),
-                false => bash::bash_definition(private_home),
+                true => bash::bash_definition_with_approvals(),
+                false => bash::bash_definition(),
             });
         }
         if runtime.is_some() {
@@ -217,9 +216,10 @@ impl Builder {
                 network: SandboxNetwork::Unconfined,
                 bash_available: false,
                 reason: SandboxReason::RuntimeFailure,
+                ..Default::default()
             };
         }
-        self.sandbox_info
+        self.sandbox_info.clone()
     }
 
     /// A closed boundary disables bash and says only that the environment was
@@ -231,6 +231,7 @@ impl Builder {
                 network: SandboxNetwork::Unconfined,
                 bash_available: false,
                 reason: SandboxReason::EnvironmentRejected,
+                ..Default::default()
             };
         }
         self.planned_sandbox_info()

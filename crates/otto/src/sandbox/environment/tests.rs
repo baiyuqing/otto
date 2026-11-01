@@ -54,23 +54,17 @@ fn assert_redactions_sorted(values: &[String]) {
     );
 }
 
-/// Four owner-only directories under one temporary root, returned with the
+/// Three owner-only directories under one temporary root, returned with the
 /// guard that keeps them alive.
 fn new_private_directories() -> (tempfile::TempDir, PrivateDirectories) {
     let temp = tempfile::tempdir().expect("temporary directory");
     let root = temp.path().join("private");
     let directories = PrivateDirectories {
-        home: root.join("home"),
         temp: root.join("tmp"),
         cache: root.join("cache"),
         root,
     };
-    for path in [
-        &directories.root,
-        &directories.home,
-        &directories.temp,
-        &directories.cache,
-    ] {
+    for path in [&directories.root, &directories.temp, &directories.cache] {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(path)

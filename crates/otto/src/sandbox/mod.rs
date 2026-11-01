@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 pub mod direct;
 pub mod environment;
 pub mod process;
+pub mod read_denylist;
 /// macOS only: the driver shells out to `/usr/bin/sandbox-exec`, and its
 /// profile language has no meaning anywhere else. Keeping it off other
 /// targets is what lets the rest of the crate build for them.
@@ -208,17 +209,20 @@ pub struct Settings {
     pub network: Option<NetworkMode>,
     #[serde(default)]
     pub read_paths: Vec<String>,
+    /// Paths added to the built-in read denylist; see
+    /// [`read_denylist::BUILT_IN_DENY_PATHS`].
+    #[serde(default)]
+    pub deny_read_paths: Vec<String>,
     #[serde(default)]
     pub allow_env: Vec<String>,
 }
 
-/// The private per-session directories a confined child sees as `HOME`,
-/// `TMPDIR` and the cache roots. All are created at mode 0700 and owned by the
-/// driver that created them.
+/// The private per-session directories a confined child sees as `TMPDIR` and
+/// the cache roots. All are created at mode 0700 and owned by the driver that
+/// created them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrivateDirectories {
     pub root: PathBuf,
-    pub home: PathBuf,
     pub temp: PathBuf,
     pub cache: PathBuf,
 }

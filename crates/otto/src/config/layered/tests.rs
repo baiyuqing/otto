@@ -154,27 +154,24 @@ fn per_workspace_loads_do_not_inherit_the_startup_project_overlay() {
     let user = home.path().join("config.toml");
     write(
         &user,
-        "default_profile='a'\n[profiles.a]\nprovider='chatgpt'\nmodel='global'",
+        "default_model='a/global'\n[providers.a]\ntype='chatgpt'\n[providers.a.models.global]\n[providers.a.models.first]\n[providers.a.models.second]",
     );
     write(
         &first.path().join(".otto/config.toml"),
-        "[profiles.a]\nmodel='first'",
+        "default_model='a/first'",
     );
     write(
         &second.path().join(".otto/config.toml"),
-        "[profiles.a]\nmodel='second'",
+        "default_model='a/second'",
     );
     let base = load_with_policy(home.path(), &user, true, first.path(), None).unwrap();
     let other = for_workspace(home.path(), &user, &base.file, second.path()).unwrap();
-    assert_eq!(base.file.profiles["a"].model, "first");
-    assert_eq!(other.file.profiles["a"].model, "second");
-    assert_eq!(other.file.profiles["a"].provider, "chatgpt");
+    assert_eq!(base.file.default_model, "a/first");
+    assert_eq!(other.file.default_model, "a/second");
+    assert_eq!(other.file.providers["a"].type_, "chatgpt");
+    assert_eq!(other.merged.origins["providers.a.type"].layer, Layer::User);
     assert_eq!(
-        other.merged.origins["profiles.a.provider"].layer,
-        Layer::User
-    );
-    assert_eq!(
-        other.merged.origins["profiles.a.model"].source,
+        other.merged.origins["default_model"].source,
         std::fs::canonicalize(second.path())
             .unwrap()
             .join(".otto/config.toml")

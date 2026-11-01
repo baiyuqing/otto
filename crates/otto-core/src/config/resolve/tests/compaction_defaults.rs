@@ -23,6 +23,7 @@ fn session_defaults_win_over_default_profile() {
         &SessionDefaults {
             provider: "openai-compatible".into(),
             model: "session-model".into(),
+            ..Default::default()
         },
         &Overrides::default(),
     )
@@ -40,7 +41,7 @@ fn compaction_applies_defaults_and_explicit_auto() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
+            legacy_profile: "local".into(),
             ..Default::default()
         },
     )
@@ -64,7 +65,7 @@ fn compaction_applies_defaults_and_explicit_auto() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
+            legacy_profile: "local".into(),
             ..Default::default()
         },
     )
@@ -113,7 +114,7 @@ fn compaction_rejects_non_positive_targets_before_api_key_resolution() {
             &HashMap::new(),
             &SessionDefaults::default(),
             &Overrides {
-                profile: "local".into(),
+                legacy_profile: "local".into(),
                 ..Default::default()
             },
         )
@@ -125,31 +126,21 @@ fn compaction_rejects_non_positive_targets_before_api_key_resolution() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn compaction_applies_profile_overrides_after_model_precedence() {
+fn compaction_applies_model_table_windows_over_catalog_windows() {
     let mut file = compaction_test_file("gpt-5.6-sol");
-    let mut local = file.profiles["local"].clone();
-    local.context_window = Some(131_072);
-    local.compaction_window = Some(100_000);
-    file.profiles.insert("local".into(), local);
+    set_windows(&mut file, Some(131_072), Some(100_000));
 
     let runtime = resolve(
         &file,
-        &env_map(&[
-            ("OTTO_MODEL", "private-deployment"),
-            ("PROFILE_KEY", "secret"),
-        ]),
-        &SessionDefaults {
-            model: "session-model".into(),
-            ..Default::default()
-        },
+        &env_map(&[("PROFILE_KEY", "secret")]),
+        &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
-            model: "cli-private-deployment".into(),
+            legacy_profile: "local".into(),
             ..Default::default()
         },
     )
     .expect("resolve");
-    assert_eq!(runtime.model, "cli-private-deployment");
+    assert_eq!(runtime.model, "gpt-5.6-sol");
     assert_eq!(
         runtime.compaction,
         CompactionRuntime {
@@ -157,7 +148,7 @@ fn compaction_applies_profile_overrides_after_model_precedence() {
             context_window: 131_072,
             hard_input_window: 131_072,
             working_window: 100_000,
-            max_output_tokens: 0,
+            max_output_tokens: 128_000,
             reserve_tokens: 16_384,
             keep_recent_tokens: 20_000,
         }
@@ -168,16 +159,14 @@ fn compaction_applies_profile_overrides_after_model_precedence() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn compaction_context_override_replaces_catalog_windows() {
     let mut file = compaction_test_file("gpt-5.6-sol");
-    let mut local = file.profiles["local"].clone();
-    local.context_window = Some(65_536);
-    file.profiles.insert("local".into(), local);
+    set_windows(&mut file, Some(65_536), None);
 
     let runtime = resolve(
         &file,
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
+            legacy_profile: "local".into(),
             ..Default::default()
         },
     )
@@ -203,16 +192,13 @@ fn compaction_rejects_invalid_profile_windows() {
     ];
     for (context, compaction, field) in cases {
         let mut file = compaction_test_file("gpt-4o");
-        let mut local = file.profiles["local"].clone();
-        local.context_window = *context;
-        local.compaction_window = *compaction;
-        file.profiles.insert("local".into(), local);
+        set_windows(&mut file, *context, *compaction);
         let err = resolve(
             &file,
             &HashMap::new(),
             &SessionDefaults::default(),
             &Overrides {
-                profile: "local".into(),
+                legacy_profile: "local".into(),
                 ..Default::default()
             },
         )
@@ -227,15 +213,13 @@ fn compaction_rejects_invalid_profile_windows() {
 fn compaction_adjusts_targets_for_small_windows() {
     for (window, reserve, keep) in [(4_096_i64, 1_024_i64, 1_536_i64), (8_192, 2_048, 3_072)] {
         let mut file = compaction_test_file("private-model");
-        let mut local = file.profiles["local"].clone();
-        local.context_window = Some(window);
-        file.profiles.insert("local".into(), local);
+        set_windows(&mut file, Some(window), None);
         let runtime = resolve(
             &file,
             &env_map(&[("PROFILE_KEY", "secret")]),
             &SessionDefaults::default(),
             &Overrides {
-                profile: "local".into(),
+                legacy_profile: "local".into(),
                 ..Default::default()
             },
         )
@@ -262,7 +246,7 @@ fn compaction_unknown_model_preserves_configured_targets() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
+            legacy_profile: "local".into(),
             ..Default::default()
         },
     )
@@ -298,7 +282,7 @@ fn applies_agent_defaults() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            profile: "local".into(),
+            legacy_profile: "local".into(),
             ..Default::default()
         },
     )

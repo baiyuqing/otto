@@ -365,10 +365,12 @@ models."model-a" = { thinking = "high", context_window = 128000, compaction_wind
 `context_window`. The model ID is quoted. `models."<model_id>" = {}` lists the
 model in the `/model` picker and uses built-in limits. A model may also be
 written as its own table, `[providers.<name>.models."<model_id>"]`; both forms
-produce the same configuration. `otto setup`, `otto config set`, saving from
-`/model` and `POST /v1/config/changes` write a new model as a `models."<id>"`
-line inside `[providers.<name>]`, create that table when it is absent, and
-edit or remove an existing model in the form it is written in.
+produce the same configuration. `otto setup`, `otto config set` and
+`POST /v1/config/changes` write a new model as a `models."<id>"` line inside
+`[providers.<name>]`, create that table when it is absent, and edit or remove
+an existing model in the form it is written in. A provider whose models are
+all written as `[providers.<name>.models."<id>"]` tables receives a new model
+in that form, so one provider never holds both forms.
 
 A provider name uses ASCII letters, digits, `_` and `-`. Three providers are
 built in and named after the API types: `claude`, `openai-compatible` and

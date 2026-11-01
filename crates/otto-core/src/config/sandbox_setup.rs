@@ -1,7 +1,7 @@
 //! Updating the `[sandbox]` table in an existing `config.toml`.
 //!
 //! `otto sandbox setup`, `/sandbox allow`, and `/sandbox network` change only
-//! the four sandbox keys through [`super::edit::set_value`], so comments,
+//! the sandbox keys through [`super::edit::set_value`], so comments,
 //! blank lines, and every other table stay byte-for-byte as they were.
 //!
 //! Values are encoded as go-toml v2 marshals them, the encoding existing
@@ -11,7 +11,8 @@ use super::{ConfigError, SandboxConfig, edit, resolve_sandbox};
 
 /// Sets the `driver`, `network`, `read_paths`, and `allow_env` keys of the
 /// `[sandbox]` table to `settings`, removing an absent optional key, and
-/// appends a `[sandbox]` table when the document has none.
+/// appends a `[sandbox]` table when the document has none. `deny_read_paths`
+/// and `excluded_commands` are written only when non-empty.
 ///
 /// Errors: the content must already be a valid document, and an existing
 /// sandbox table must be written as its own `[sandbox]` header rather than
@@ -30,6 +31,10 @@ pub fn update_sandbox(content: &[u8], settings: &SandboxConfig) -> Result<Vec<u8
         ("driver", settings.driver.as_deref().map(encode_string)),
         ("network", settings.network.as_deref().map(encode_string)),
         ("read_paths", Some(encode_array(&settings.read_paths))),
+        (
+            "deny_read_paths",
+            (!settings.deny_read_paths.is_empty()).then(|| encode_array(&settings.deny_read_paths)),
+        ),
         ("allow_env", Some(encode_array(&settings.allow_env))),
         // Written only when used, so files without exclusions keep their
         // existing four keys.
@@ -98,6 +103,7 @@ mod tests {
         SandboxConfig {
             network: Some("deny".to_string()),
             read_paths: vec!["/tmp/gh".to_string()],
+            deny_read_paths: Vec::new(),
             allow_env: vec!["GH_CONFIG_DIR".to_string()],
             driver: None,
             excluded_commands: Vec::new(),
@@ -153,6 +159,7 @@ mod tests {
             driver: Some("auto".to_string()),
             network: Some("allow".to_string()),
             read_paths: vec!["/tmp/it's".to_string()],
+            deny_read_paths: Vec::new(),
             allow_env: Vec::new(),
             excluded_commands: Vec::new(),
         };
@@ -161,6 +168,38 @@ mod tests {
             String::from_utf8(updated).expect("utf-8"),
             "\n[sandbox]\ndriver = 'auto'\nnetwork = 'allow'\nread_paths = [\"/tmp/it's\"]\nallow_env = []\n"
         );
+    }
+
+    #[test]
+    fn update_sandbox_writes_deny_read_paths_only_when_present() {
+        let settings = SandboxConfig {
+            deny_read_paths: vec!["~/.config/private".to_string()],
+            ..raw()
+        };
+        let updated = update_sandbox(b"[sandbox]\nnetwork = 'allow'\n", &settings).expect("update");
+        let got = String::from_utf8(updated).expect("utf-8");
+        assert!(
+            got.contains("deny_read_paths = ['~/.config/private']\n"),
+            "{got}"
+        );
+        let parsed: SandboxConfig = toml::from_str::<toml::Table>(&got).expect("toml")["sandbox"]
+            .clone()
+            .try_into()
+            .expect("sandbox");
+        assert_eq!(parsed.deny_read_paths, settings.deny_read_paths);
+
+        let without = update_sandbox(b"", &raw()).expect("update");
+        assert!(
+            !String::from_utf8(without)
+                .expect("utf-8")
+                .contains("deny_read_paths")
+        );
+
+        let invalid = SandboxConfig {
+            deny_read_paths: vec!["relative".to_string()],
+            ..raw()
+        };
+        assert!(update_sandbox(b"", &invalid).is_err());
     }
 
     #[test]

@@ -347,6 +347,7 @@ fn interrupted_fixture_with_capabilities(
     .expect("child store");
 
     let spec = serde_json::to_string(&TaskSpecData {
+        agent: String::new(),
         id: task_id.to_string(),
         name: String::new(),
         description: String::new(),
@@ -447,6 +448,7 @@ async fn resume_with_recorded_tools(recorded: &[&str]) -> otto_core::provider::R
 }
 
 mod cancel_cases;
+mod external;
 mod notifications;
 mod records;
 mod resume;

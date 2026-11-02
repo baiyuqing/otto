@@ -52,7 +52,11 @@ const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and 
     for omitted sections, and ask follow-up questions only while the child \
     is queued or running. Put the initial goal, relevant paths, \
     constraints, and requested report format in prompt; pass agent to use a \
-    named definition from the Agents list.";
+    named definition from the Agents list. When the user explicitly asks for \
+    an external coding agent, agent may be acp:codex, acp:claude, or acp:pi. \
+    Those run installed adapters with their own permissions and sandbox, not \
+    Otto's tool restrictions; they accept fresh context only, do not support \
+    agent_send or resume, and use their own model settings.";
 
 const AGENT_YIELD_DESCRIPTION: &str = "Yield this parent turn when only child dependencies remain and there is \
     no independent work to do. Returns immediately and requests a \
@@ -85,14 +89,16 @@ const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running 
     update, when it cannot be saved to the child's pending-message file. \
     Updates not yet read survive a restart and reach the child when it is \
     resumed. To check progress instead, use agent_status, which reads the \
-    task registry and does not run the child model.";
+    task registry and does not run the child model. External ACP tasks do \
+    not support agent_send.";
 
 const AGENT_CANCEL_DESCRIPTION: &str = "Cancel a queued or running sub-agent task. Use it for tasks that are no \
     longer needed or have concrete failure/stall evidence. Do not infer a \
     stall from an unchanged last tool or step count while the task is in \
     provider/runtime or approval activity. Cancellation is cooperative: the \
     task stops at its next safe checkpoint, a task inside a tool call stops \
-    once that call settles, and a queued task never starts. The task ends \
+    once that call settles, and a queued task never starts. External ACP \
+    tasks receive session/cancel and are terminated after a grace period. The task ends \
     as canceled and produces the usual [task-notification].";
 
 const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): \
@@ -124,7 +130,7 @@ const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-ag
     and agent, model, name, description, and fork_before must be absent or \
     empty, and context absent or \"fresh\"; the task keeps its recorded \
     values. For completed tasks, use agent_status and read the saved report \
-    instead.";
+    instead. External ACP tasks cannot be resumed.";
 
 /// Parent agent tools, including explicit nonblocking `agent_yield`,
 /// without a built [`Runner`]. The redaction boundary check needs the tool set
@@ -192,7 +198,7 @@ fn agent_definition() -> ToolDefinition {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Name of a definition from the Agents list in the system prompt: it sets the sub-agent's instructions, tool set, and default model. Omit for the default sub-agent."
+                    "description": "Name of an agent definition, or acp:codex, acp:claude, or acp:pi for an installed external ACP adapter. Omit for the default sub-agent."
                 },
                 "context": {
                     "type": "string",
@@ -408,7 +414,10 @@ impl AgentTool {
             return error_result("prompt is required");
         }
         let requested_agent = args.agent.trim();
-        if !requested_agent.is_empty() && self.runner.catalog().lookup(requested_agent).is_none() {
+        if !requested_agent.is_empty()
+            && self.runner.catalog().lookup(requested_agent).is_none()
+            && super::runner::external::adapter(requested_agent).is_none()
+        {
             return error_result(unknown_agent_message(
                 self.runner.catalog(),
                 requested_agent,

@@ -295,6 +295,7 @@ async fn resume_of_a_task_already_resumed_and_running_again_is_rejected() {
     .expect("child store");
 
     let spec = serde_json::to_string(&TaskSpecData {
+        agent: String::new(),
         id: "t1".to_string(),
         name: String::new(),
         description: String::new(),

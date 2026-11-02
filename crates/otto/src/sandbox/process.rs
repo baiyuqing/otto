@@ -15,6 +15,8 @@
 //! Errors: only the fixed sandbox errors escape, never a message derived from
 //! the request, so a launch failure cannot leak an argument or a path.
 
+mod interactive;
+
 use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};

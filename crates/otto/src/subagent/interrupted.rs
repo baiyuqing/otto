@@ -133,10 +133,13 @@ fn scan_one(path: &Path) -> Option<ChildRecord> {
         path: path.to_path_buf(),
         task_id: spec.id,
         name: spec.name,
-        agent: spec
-            .definition
-            .as_ref()
-            .map_or_else(String::new, |definition| definition.name.clone()),
+        agent: if spec.agent.is_empty() {
+            spec.definition
+                .as_ref()
+                .map_or_else(String::new, |definition| definition.name.clone())
+        } else {
+            spec.agent
+        },
         description: spec.description,
         prompt: spec.prompt,
         model: spec.model,

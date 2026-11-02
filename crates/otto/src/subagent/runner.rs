@@ -518,6 +518,10 @@ pub enum StartError {
     ScratchUnavailable,
     #[error("unknown agent {0:?}")]
     UnknownAgent(String),
+    #[error("external ACP agents support fresh context and their own model configuration only")]
+    ExternalUnsupported,
+    #[error("external agent input cannot be safely recorded; remove secrets or restore redaction")]
+    ExternalSensitiveInput,
     #[error(r#"context must be "fresh" or "inherit""#)]
     InvalidContext,
     #[error("context inherit is not available in this session")]
@@ -543,6 +547,7 @@ pub enum StartError {
 mod child_run;
 mod child_tools;
 mod completion;
+pub(super) mod external;
 mod shared_provider;
 mod start;
 mod task_spec;

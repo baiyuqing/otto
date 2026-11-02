@@ -411,3 +411,43 @@ async fn agent_tool_reports_queued_when_at_the_limit() {
         wait_final(&tasks, id).await;
     }
 }
+
+#[tokio::test]
+async fn external_agent_is_routed_and_rejects_unsupported_context() {
+    let provider = FakeProvider::new();
+    let tasks = Arc::new(Tasks::new());
+    let runner = runner(test_config(&provider, &tasks, Vec::new()));
+    let result = run(
+        tool_named(&runner, "agent").as_ref(),
+        r#"{"prompt":"go","agent":"acp:codex","context":"inherit"}"#,
+    )
+    .await;
+    assert!(result.is_error);
+    assert!(result.content.contains("fresh context"));
+    assert!(tasks.list().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires installed codex-acp and authenticated live Codex"]
+async fn live_codex_delegation_returns_task_result() {
+    let provider = FakeProvider::new();
+    let tasks = Arc::new(Tasks::new());
+    let mut config = test_config(&provider, &tasks, Vec::new());
+    config.workspace_path = std::env::current_dir().unwrap();
+    let runner = runner(config);
+    let result = run(
+        tool_named(&runner, "agent").as_ref(),
+        r#"{"prompt":"Reply exactly ACP connection works. Do not use tools.","agent":"acp:codex"}"#,
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.content);
+    let task = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        tasks.wait("t1", &CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(task.status, TaskStatus::Succeeded, "{}", task.error);
+    assert!(task.result.contains("ACP connection works"));
+}

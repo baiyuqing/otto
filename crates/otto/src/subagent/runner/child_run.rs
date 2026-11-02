@@ -32,7 +32,7 @@ impl Runner {
             name: request.name.trim().to_string(),
             agent: definition
                 .as_ref()
-                .map_or(String::new(), |d| d.name.clone()),
+                .map_or_else(|| request.agent.trim().to_owned(), |d| d.name.clone()),
             description,
             prompt: request.prompt.clone(),
             context,
@@ -113,6 +113,7 @@ impl Runner {
         if resume_id.is_none() {
             let task_spec = TaskSpecData {
                 id: task.id.clone(),
+                agent: task.agent.clone(),
                 name: task.name.clone(),
                 description: task.description.clone(),
                 model: task.model.clone(),
@@ -145,6 +146,23 @@ impl Runner {
                 start_guard.disarm();
                 return Ok(self.config.tasks.get(&task.id).unwrap_or(task));
             }
+        }
+
+        if let Some(executable) = definition
+            .is_none()
+            .then(|| super::external::adapter(request.agent.trim()))
+            .flatten()
+        {
+            let runner = Arc::clone(self);
+            let task_id = task.id.clone();
+            let prompt = request.prompt;
+            tokio::spawn(async move {
+                runner
+                    .run_external(task_id, prompt, executable, cancel, transcript, deadline)
+                    .await;
+            });
+            start_guard.disarm();
+            return Ok(task);
         }
 
         let tools = ChildTools {
@@ -491,7 +509,7 @@ impl Runner {
     /// child-session builder itself failed), and before the registry update
     /// that releases [`Tasks::wait`], so a caller unblocked by a wait always
     /// finds the notification already in the inbox.
-    async fn finish(
+    pub(super) async fn finish(
         &self,
         task_id: &str,
         status: TaskStatus,

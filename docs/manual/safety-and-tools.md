@@ -666,6 +666,28 @@ temporary paths. This scratch directory is separate from the durable transcript.
 Filesystem failures or abrupt process termination can prevent cleanup. Without
 `bash`, no scratch directory is allocated; existing web/file tools still work.
 
+External coding agents can be selected with `agent` names `acp:codex`,
+`acp:claude`, and `acp:pi`; install their `codex-acp`, `claude-agent-acp`, or
+`pi-acp` executable on the absolute directories in `PATH` first. Otto starts an
+ACP session in the current workspace and returns its final text through the
+normal task notification. They share the sub-agent concurrency limit.
+
+External agents use their own authentication, tools, sandbox and permission
+settings. They do not inherit Otto's sandbox, child tool allowlists, or write
+policies. ACP permission requests with a reviewable action and an `allow_once`
+option go through Otto's approval service; other requests are declined. This
+cannot prevent an external agent from performing actions it does not ask ACP
+to authorize. Review the external agent's own settings before use.
+
+External agents accept fresh context and their own model settings. `agent_send`,
+`agent` resume, inherited context and per-call model selection are unsupported
+for them. Cancellation sends ACP `session/cancel` and, after a bounded grace,
+terminates the adapter process group. External adapter availability and
+capabilities depend on the installed version. Otto passes a restricted environment:
+home and runtime paths, locale, proxy and CA settings, agent config directories,
+provider base URLs, and variables ending in `_API_KEY` or `_AUTH_TOKEN`. Other
+environment variables are not passed to the adapter.
+
 When only child dependencies remain, call `agent_yield` with `{}`. It returns
 immediately and requests ending the current model turn at a safe boundary; it
 does not wait inside the tool, cancel a child, or poll. All tool results in the

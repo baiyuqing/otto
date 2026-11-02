@@ -456,6 +456,11 @@ impl Tasks {
             if entry.task.is_final() {
                 return Err(TaskError::Finished(reference.to_string()));
             }
+            if super::runner::external::adapter(&entry.task.agent).is_some() {
+                return Err(TaskError::Invalid(
+                    "sending messages to external ACP agents is not supported".into(),
+                ));
+            }
             (
                 entry.task.id.clone(),
                 Arc::clone(&entry.inbox),

@@ -10,6 +10,10 @@
 //! child's tool set beyond what the parent already holds, nor reach the memory
 //! tools.
 
+mod acp_approval;
+mod acp_process;
+pub mod acp_session;
+pub mod acp_transport;
 pub mod definition;
 pub mod format;
 pub mod inherit;

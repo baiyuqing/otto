@@ -23,12 +23,33 @@ impl Runner {
         let description = truncate_with_ellipsis(request.description.trim(), MAX_DESCRIPTION_CHARS);
 
         let agent_name = request.agent.trim();
+        let external =
+            inline_definition.is_none() && super::external::adapter(agent_name).is_some();
+        if external
+            && (!request.model.trim().is_empty()
+                || !request.fork_before.trim().is_empty()
+                || (!request.context.trim().is_empty() && request.context.trim() != "fresh"))
+        {
+            return Err(StartError::ExternalUnsupported);
+        }
+        if external {
+            let (_, environment_secrets) = super::external::adapter_environment();
+            let mut secrets = self.config.redaction_values.clone();
+            secrets.extend(environment_secrets);
+            let redactor = Redactor::with_completeness(&secrets, self.config.redaction_complete);
+            if !redactor.allows_dynamic_content()
+                || redactor.redact_string(&request.prompt) != request.prompt
+                || redactor.redact_string(&description) != description
+            {
+                return Err(StartError::ExternalSensitiveInput);
+            }
+        }
         let definition: Option<Definition> = if let Some(definition) = inline_definition {
             if agent_name != definition.name {
                 return Err(StartError::UnknownAgent(agent_name.to_string()));
             }
             Some(definition)
-        } else if agent_name.is_empty() {
+        } else if agent_name.is_empty() || external {
             None
         } else {
             Some(
@@ -61,6 +82,11 @@ impl Runner {
         .find(|(model, _)| !model.is_empty())
         .map(|(model, source)| (model.to_owned(), source))
         .unwrap_or_else(|| (String::new(), ModelSource::Parent));
+        let (model, model_source) = if external {
+            (String::new(), ModelSource::Unknown)
+        } else {
+            (model, model_source)
+        };
         let mut context = first_non_empty(&[
             request.context.trim(),
             definition.as_ref().map_or("", |d| d.context.trim()),
@@ -138,6 +164,11 @@ impl Runner {
             .find(|record| record.task_id == target)
             .or_else(|| records.iter().find(|record| record.name == target))
             .ok_or_else(|| StartError::ResumeNotFound(target.to_string()))?;
+        if super::external::adapter(&record.agent).is_some() {
+            return Err(StartError::ResumeFailed(
+                "resuming external ACP agents is not supported".into(),
+            ));
+        }
         if record.final_status.as_deref() != Some(interrupted::INTERRUPTED_STATUS) {
             return Err(StartError::ResumeNotInterrupted(record.task_id.clone()));
         }

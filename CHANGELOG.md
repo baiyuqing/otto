@@ -7,6 +7,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Agents
+
+- Delegate tasks to installed Codex, Claude and Pi ACP adapters using the
+  existing agent task controls. External agents use their own sandbox and
+  permissions.
+
 ### Sandbox
 
 - A sandboxed `bash` command reads every host path except a denylist, instead of

@@ -28,6 +28,8 @@ pub(crate) const TASK_RESULT_CUSTOM_TYPE: &str = "otto.task_result";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TaskSpecData {
     pub(crate) id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) agent: String,
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) model: String,

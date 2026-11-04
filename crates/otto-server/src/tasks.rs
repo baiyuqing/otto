@@ -40,6 +40,21 @@ pub async fn list(State(server): State<Arc<Server>>, Path(id): Path<String>) -> 
     json_response(StatusCode::OK, &TaskListResponse { tasks })
 }
 
+pub async fn observer(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let ctrl = Arc::clone(&session.ctrl);
+    match tokio::task::spawn_blocking(move || ctrl.observer_snapshot()).await {
+        Ok(Ok(snapshot)) => json_response(StatusCode::OK, &snapshot),
+        Ok(Err(_)) | Err(_) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "observer_unavailable",
+            "Child observer unavailable; retry or reopen the session.",
+        ),
+    }
+}
+
 pub async fn get(
     State(server): State<Arc<Server>>,
     Path((id, task_id)): Path<(String, String)>,

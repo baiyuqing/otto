@@ -41,6 +41,10 @@ impl App {
             }
             return;
         }
+        if t.surface == observer::OBSERVER_SURFACE {
+            self.complete_observer(&t, completion.result);
+            return;
+        }
         if t.surface == 0
             && completion.result.is_err()
             && self.steering_generation == Some(t.generation)
@@ -146,6 +150,8 @@ impl App {
         } = receipt;
         let old = (self.info.workspace.clone(), self.info.session_id.clone());
         self.info = info;
+        self.observer
+            .reset_scope(&self.info.workspace, &self.info.session_id);
         if let Some(history) = history {
             let frozen: Vec<_> = self
                 .session_changes
@@ -186,6 +192,7 @@ impl App {
             self.optimistic_user_echo = None;
             self.recalling_steer = None;
             self.invalidate_reads();
+            self.observer_refreshed = None;
             self.composer.reseed(prompt_history(&self.entries));
             self.refresh_steering();
         }

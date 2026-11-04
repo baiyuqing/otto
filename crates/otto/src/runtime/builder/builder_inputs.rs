@@ -33,6 +33,18 @@ impl Builder {
         }
     }
 
+    pub(crate) fn tasks_list_observer(
+        &self,
+        query: &crate::subagent::record::ListQuery,
+    ) -> Result<crate::subagent::record::ListResult, String> {
+        match &self.task_recorder {
+            Some(store) => store
+                .list_observer(query)
+                .map_err(|error| error.to_string()),
+            None => Ok(crate::subagent::record::ListResult::default()),
+        }
+    }
+
     pub fn tasks_get(
         &self,
         parent_session: &str,

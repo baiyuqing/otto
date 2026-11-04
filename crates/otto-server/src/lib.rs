@@ -592,6 +592,7 @@ impl Server {
             .route("/v1/sessions/{id}/compact", post(compact::handle))
             .route("/v1/sessions/{id}/wake-replies", get(wake_replies::list))
             .route("/v1/sessions/{id}/tasks", get(tasks::list))
+            .route("/v1/sessions/{id}/tasks/observer", get(tasks::observer))
             .route(
                 "/v1/sessions/{id}/deliveries/{approval_id}",
                 get(delivery::get),

@@ -50,6 +50,7 @@ use crate::cli::repl_commands;
 use app::{Action, App};
 use selection::{DragPhase, Selection};
 
+mod observer;
 mod operations;
 mod terminal_input;
 mod turns;
@@ -66,6 +67,17 @@ pub async fn run(
     controller: &Arc<Controller>,
     cancel: &CancellationToken,
 ) -> Result<(), ReplError> {
+    run_with_observer_bindings(controller, cancel, &Default::default()).await
+}
+
+/// Runs the TUI with client-local observer keys, validated before raw mode.
+pub async fn run_with_observer_bindings(
+    controller: &Arc<Controller>,
+    cancel: &CancellationToken,
+    bindings: &otto_core::config::ui::ObserverBindings,
+) -> Result<(), ReplError> {
+    let bindings = observer::bindings::Bindings::parse(bindings)
+        .map_err(|error| io_error(io::Error::new(io::ErrorKind::InvalidInput, error)))?;
     let mut terminal = ratatui::try_init().map_err(io_error)?;
     let mut input = TerminalInput::new();
     if let Err(error) = input.enable_terminal() {
@@ -73,7 +85,7 @@ pub async fn run(
         return Err(io_error(error));
     }
     let mut keys = spawn_key_reader();
-    let result = run_app(&mut terminal, controller, cancel, &mut keys).await;
+    let result = run_app(&mut terminal, controller, cancel, &mut keys, bindings).await;
     let _ = input.restore_terminal();
     let _ = ratatui::try_restore();
     result
@@ -153,6 +165,7 @@ fn redraw<B: Backend>(
     app.info.approval_mode = controller.info().approval_mode;
     app.info.approval_settings = controller.info().approval_settings;
     app.refresh_tasks(&app::Backend::Local(controller));
+    app.poll_observer();
     terminal
         .draw(|frame| render::draw(frame, app))
         .map(|_| ())
@@ -164,9 +177,11 @@ async fn run_app<B: Backend>(
     controller: &Arc<Controller>,
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
+    bindings: observer::bindings::Bindings,
 ) -> Result<(), ReplError> {
     let backend = app::Backend::Local(controller);
     let mut app = App::new(&backend);
+    app.observer.bindings = bindings;
     app.enable_program_status();
     app.driver = Some(backend::Driver::new(backend::Connection::Local(
         Arc::clone(controller),
@@ -249,6 +264,7 @@ async fn run_app<B: Backend>(
                 app.poll_steering();
             }
             IdleEvent::Animation => {
+                app.poll_observer();
                 if !render::needs_animation(&app) {
                     continue;
                 }
@@ -346,6 +362,10 @@ fn apply_input<B: Backend>(
             if app.has_surface() {
                 if phase == DragPhase::Start {
                     focus_surface(app, col, row);
+                }
+            } else if app.observer.active {
+                if phase == DragPhase::Start {
+                    app.observer.focus_at(col, row);
                 }
             } else if let Some(text) = apply_selection(app, terminal, phase, col, row)?
                 && let Err(error) = selection::copy(&text)

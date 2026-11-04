@@ -52,5 +52,14 @@ pub(super) async fn run_attach(
     } else {
         otto::tui::attach::Start::New
     };
-    otto::tui::attach::run(&socket, workspace_path, start, schedule, cancel, stderr).await
+    otto::tui::attach::run_with_observer_bindings(
+        &socket,
+        workspace_path,
+        start,
+        schedule,
+        cancel,
+        stderr,
+        &loaded.config.ui.observer,
+    )
+    .await
 }

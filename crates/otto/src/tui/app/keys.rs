@@ -51,6 +51,9 @@ impl App {
                 .min(self.geometry.borrow().max_scroll);
             if let Some(a) = activation {
                 if a == Activation::Back {
+                    // Dismissing an approval must not leave a pending request
+                    // hidden behind a read-only observer.
+                    self.observer.active = false;
                     if let Some(id) = self
                         .surfaces
                         .top()
@@ -96,6 +99,17 @@ impl App {
                 }
             }
             return self.actions.pop();
+        }
+        let was_observing = self.observer.active;
+        if self.observer.key(key) {
+            if self.observer.active && !was_observing {
+                self.observer_refreshed = None;
+                self.hidden_approvals.clear();
+                let snapshot = self.approval_snapshot.clone();
+                self.sync_shared_approval(&snapshot);
+                self.poll_observer();
+            }
+            return None;
         }
         if super::super::input::is_toggle_details(key) {
             self.show_details = !self.show_details;
@@ -199,6 +213,10 @@ impl App {
                     .handle(&view, interaction::Intent::Move(if up { -1 } else { 1 }));
                 surface.state.scroll = surface.state.scroll.min(geometry.max_scroll);
             }
+            return;
+        }
+        if self.observer.active {
+            self.observer.scroll_by(if up { -1 } else { 1 });
             return;
         }
         if up {

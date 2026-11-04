@@ -94,7 +94,10 @@ impl Server {
         // Under the state lock, and only while the registry still holds this
         // session, so a sweep that removes it ([`Self::remove_if_idle`]) either
         // sees the pin or makes this call return `false`.
-        let _state = session.lock();
+        let state = session.lock();
+        if state.deleting {
+            return false;
+        }
         let still_open = self
             .sessions
             .lock()
@@ -121,6 +124,9 @@ impl Server {
     }
 
     pub(super) fn lookup(&self, id: &str) -> Option<Arc<OpenSession>> {
+        if self.permanently_unavailable(id) {
+            return None;
+        }
         let session = self
             .sessions
             .lock()
@@ -131,6 +137,13 @@ impl Server {
             session.touch();
         }
         session
+    }
+
+    pub(super) fn permanently_unavailable(&self, id: &str) -> bool {
+        self.permanent_deletions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains(id)
     }
 
     pub(super) fn remove(&self, id: &str) -> Option<Arc<OpenSession>> {
@@ -290,7 +303,7 @@ impl Server {
     /// no turn, compaction, waiting approval, unfinished sub-agent
     /// task, undelivered notification or pin.
     pub(super) fn idle_session(&self, session: &OpenSession, state: &super::SessionState) -> bool {
-        if state.busy() || state.waiting.is_some() || session.pinned() {
+        if state.deleting || state.busy() || state.waiting.is_some() || session.pinned() {
             return false;
         }
         match session.ctrl.tasks() {
@@ -329,6 +342,9 @@ impl Server {
         id: &str,
         workspace: Option<&str>,
     ) -> Result<(Arc<OpenSession>, bool), String> {
+        if self.permanently_unavailable(id) {
+            return Err(SESSION_NOT_FOUND.to_string());
+        }
         if id.is_empty() {
             let ctrl = self.factory.create(workspace).await?;
             return Ok((self.register(ctrl), true));
@@ -340,6 +356,9 @@ impl Server {
             return Ok((existing, false));
         }
         let _gate = self.open_gate.lock().await;
+        if self.permanently_unavailable(id) {
+            return Err(SESSION_NOT_FOUND.to_string());
+        }
         // Re-check: another resume of this id may have finished while we
         // waited for the gate.
         if let Some(existing) = self.lookup(id) {

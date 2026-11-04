@@ -20,6 +20,7 @@ pub mod fs;
 pub mod listen;
 pub mod mcp;
 mod middleware;
+mod permanent_delete;
 mod registry;
 mod responses;
 pub mod sandbox;
@@ -196,6 +197,8 @@ struct WaitingApproval {
 
 #[derive(Default)]
 struct SessionState {
+    /// Irreversible close/delete admission; stale handles cannot start work.
+    deleting: bool,
     /// The running turn, or the last one that finished. Never a queued turn.
     turn: Option<Arc<Turn>>,
     /// Non-`None` while `POST .../compact` runs. `start_turn` and
@@ -340,6 +343,8 @@ pub struct Server {
     /// ponytail: one gate for every id instead of a per-id gate. Resuming is an
     /// admin-rate path; make it per-id if it ever contends.
     open_gate: tokio::sync::Mutex<()>,
+    /// IDs being permanently deleted, or already deleted in this process.
+    permanent_deletions: Mutex<std::collections::HashSet<String>>,
     /// One handle per running wake loop, awaited by [`Server::close`].
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Ids the sweeper evicted, oldest first. A request that names one
@@ -390,6 +395,7 @@ impl Server {
             log: logger,
             sessions: Mutex::new(HashMap::new()),
             open_gate: tokio::sync::Mutex::new(()),
+            permanent_deletions: Mutex::new(std::collections::HashSet::new()),
             wake_loops: Mutex::new(Vec::new()),
             evicted: Mutex::new(VecDeque::new()),
             session_idle_timeout: options.session_idle_timeout,
@@ -536,6 +542,10 @@ impl Server {
                 get(get_session)
                     .patch(rename_session)
                     .delete(delete_session),
+            )
+            .route(
+                "/v1/sessions/{id}/permanent",
+                axum::routing::delete(permanent_delete::handle),
             )
             .route("/v1/sessions/{id}/fork", post(fork_session))
             .route("/v1/sessions/{id}/model", post(set_session_model))

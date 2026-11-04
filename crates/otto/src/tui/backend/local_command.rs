@@ -38,6 +38,11 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
                     .collect::<String>()
             )
         }
+        Command::Delete(path) => {
+            c.delete_session(&path).await?;
+            history = true;
+            "Session permanently deleted.".into()
+        }
         Command::Archive(path) => {
             let result = c.archive_session(&path).await?;
             history = true;

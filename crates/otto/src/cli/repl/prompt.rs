@@ -12,7 +12,9 @@ impl<'a> Repl<'a> {
             stdout,
             stderr,
             program_status,
+            delete_confirmation,
         } = self;
+        *delete_confirmation = None;
         let wake = controller.prepare_wake().map_err(|message| Error::Turn {
             fatal: false,
             message,
@@ -101,7 +103,9 @@ impl<'a> Repl<'a> {
             stdout,
             stderr,
             program_status,
+            delete_confirmation,
         } = self;
+        *delete_confirmation = None;
         if let Some(reporter) = program_status {
             reporter.report(&mut **stdout, crate::program_status::State::Working);
         }

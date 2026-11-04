@@ -123,6 +123,7 @@ pub async fn run_with_extensions(
     let configured = startup::configure(&mut loaded, &host_entries, &lookup, &mut *stderr);
 
     if (!options.archive_path.is_empty()
+        || options.delete_target.is_some()
         || !options.resume_path.is_empty()
         || options.continue_last)
         && !loaded.boundary.allows_dynamic()
@@ -193,6 +194,23 @@ pub async fn run_with_extensions(
         && command.is_dry_run()
     {
         return crate::eval_command::run_dry(command, roots, stdout, stderr);
+    }
+
+    if let Some(target) = &options.delete_target {
+        return match storage.sessions() {
+            Ok(repository) => delete::run(
+                repository,
+                session_root,
+                &workspace_path,
+                target,
+                options.delete_force,
+                &mut *stdin,
+                stdout,
+                stderr,
+                |text| loaded.boundary.redact(text),
+            ),
+            Err(error) => fail(stderr, &loaded.boundary.redact(&error)),
+        };
     }
 
     if !options.archive_path.is_empty() {

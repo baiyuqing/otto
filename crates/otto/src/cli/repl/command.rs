@@ -13,6 +13,7 @@ impl<'a> Repl<'a> {
             let Some((name, args)) = split_command(command) else {
                 break 'dispatch None;
             };
+            let delete_confirmation = self.delete_confirmation.take();
             match name {
                 "help" => {
                     if !args.is_empty() {
@@ -46,6 +47,39 @@ impl<'a> Repl<'a> {
                             message,
                         })?;
                     self.print_session_id();
+                    Some(false)
+                }
+                "delete" => {
+                    if args.is_empty() {
+                        self.delete_confirmation = Some(self.controller.info().session_id);
+                        let _ = writeln!(
+                            self.stdout,
+                            "Permanently delete session {}? This cannot be undone. Default: Cancel. Use /delete confirm to delete; any other input cancels.",
+                            self.controller.info().session_id
+                        );
+                    } else if args == "confirm" {
+                        if delete_confirmation.as_deref()
+                            != Some(self.controller.info().session_id.as_str())
+                        {
+                            return Err(Error::Command {
+                                command: command.into(),
+                                message:
+                                    "Run /delete first to review the irreversible deletion warning."
+                                        .into(),
+                            });
+                        }
+                        self.controller
+                            .delete_current_session()
+                            .await
+                            .map_err(|message| Error::Command {
+                                command: command.to_string(),
+                                message,
+                            })?;
+                        let _ = writeln!(self.stdout, "Session permanently deleted.");
+                        self.print_session_id();
+                    } else if args != "cancel" {
+                        break 'dispatch None;
+                    }
                     Some(false)
                 }
                 "archive" => {

@@ -9,6 +9,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Sessions
 
+- Permanently delete sessions through the TUI, `/delete`, `otto delete <SESSION>`,
+  or the separately confirmed HTTP endpoint; the CLI accepts an ID or unique
+  exact name, with IDs taking precedence and `--force` limited to IDs. Unlike
+  archive, deletion is irreversible. After upgrading, restart Otto processes
+  before using the new session operations. See [session lifecycle](docs/manual/interactive-use.md#session-lifecycle)
+  and [the HTTP API](docs/manual/servers-and-connectors.md#http-api).
+
 - New session content and pending-input mailbox files receive local credential
   detection by default, covering common cloud keys, OAuth secrets, connection
   credentials and selected wallet formats. Tool execution keeps its original

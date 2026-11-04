@@ -81,6 +81,8 @@ const HELP: &str = concat!(
     "/new      start a new session\n",
     "/clear    start a new session\n",
     "/rename <name> rename current session\n",
+    "/delete   permanently delete current session; /delete confirm is irreversible
+",
     "/archive  archive current session and start a new one\n",
     "/session  show session details\n",
     "\n",
@@ -124,6 +126,7 @@ pub struct Repl<'a> {
     pub(super) stdout: Box<dyn Write + Send + 'a>,
     pub(super) stderr: Box<dyn Write + Send + 'a>,
     program_status: Option<crate::program_status::Reporter>,
+    delete_confirmation: Option<String>,
 }
 
 impl<'a> Repl<'a> {
@@ -137,6 +140,7 @@ impl<'a> Repl<'a> {
             stdout,
             stderr,
             program_status: None,
+            delete_confirmation: None,
         }
     }
 
@@ -154,6 +158,7 @@ impl<'a> Repl<'a> {
             stdout,
             stderr,
             program_status: Some(reporter),
+            delete_confirmation: None,
         }
     }
 

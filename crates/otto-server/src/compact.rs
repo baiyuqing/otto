@@ -42,7 +42,7 @@ pub async fn handle(
 
     let cancel = {
         let mut state = session.lock();
-        if state.busy() {
+        if state.deleting || state.busy() {
             return turn_active("a turn is already active for this session");
         }
         let cancel = server.cancel_token().child_token();

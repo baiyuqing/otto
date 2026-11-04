@@ -264,8 +264,8 @@ fn model_command_reports_and_switches_the_session_without_a_provider_request() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         message_text(&frames),
-        "Model test/gpt-test (type openai-compatible)\n\
-         Configured models: other/gpt-other, test/gpt-test\n\
+        "Model other/gpt-test (type openai-compatible)\n\
+         Configured models: other/gpt-other, other/gpt-test\n\
          Switch with /model <provider>/<model_id>."
     );
 

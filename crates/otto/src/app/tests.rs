@@ -1,3 +1,5 @@
+mod session_delete;
+
 use super::*;
 use crate::fixtures::{FakeSandbox, builder, controller, initial_runtime, seatbelt_info, user};
 use crate::runtime::info::SandboxNetwork;

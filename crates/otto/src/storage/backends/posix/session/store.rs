@@ -424,6 +424,42 @@ impl Store {
         self.lock().expect("session mutex").path.clone()
     }
 
+    pub(crate) fn delete_permanently(&self, root: &Path, workspace: &str) -> Result<(), PiError> {
+        let mut state = self.lock()?;
+        state.writable()?;
+        if state.writer_ownership.is_some() && state.lease.is_none() {
+            return Err(PiError::other(
+                "permanent delete requires top-level writer ownership",
+            ));
+        }
+        let lease = state.lease.clone();
+        let path = state.path.clone();
+        let file = state
+            .file
+            .as_mut()
+            .ok_or_else(|| PiError::other("session file is not open"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| PiError::other(error.to_string()))?;
+        let mut action = || {
+            super::permanent_delete::delete_open_file(
+                root,
+                workspace,
+                Path::new(&path),
+                file.as_mut(),
+                &metadata,
+            )
+        };
+        match lease {
+            Some(lease) => lease.deleting(action),
+            None => action(),
+        }?;
+        state.owns_lease = false;
+        state.closed = true;
+        state.file.take();
+        Ok(())
+    }
+
     /// Archives this store's locked session file without releasing ownership.
     pub fn archive(
         &self,

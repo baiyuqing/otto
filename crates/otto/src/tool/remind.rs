@@ -429,6 +429,20 @@ impl Reminders {
 
     /// Stops every timer and removes the file. Archiving a session calls this
     /// so its timers cannot come back when the file is gone.
+    /// Holds the callback persistence lock across irreversible session cleanup.
+    /// On failure pending timers are preserved; success cancels without saving.
+    pub(crate) fn deleting_session(
+        &self,
+        delete: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut armed = self.inner.armed.lock().expect(STATE_MUTEX);
+        delete()?;
+        for entry in armed.drain(..) {
+            entry.token.cancel();
+        }
+        Ok(())
+    }
+
     pub fn clear(&self) {
         let drained = {
             let mut armed = self.inner.armed.lock().expect(STATE_MUTEX);

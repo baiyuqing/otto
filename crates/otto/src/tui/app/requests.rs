@@ -56,6 +56,7 @@ impl App {
                     | backend::Command::Resume(_)
                     | backend::Command::Fork(_)
                     | backend::Command::Archive(_)
+                    | backend::Command::Delete(_)
                     | backend::Command::SwitchModel(_)
                     | backend::Command::SwitchModelThinking { .. }
             )

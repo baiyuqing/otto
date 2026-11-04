@@ -328,6 +328,13 @@ Shared commands:
 - `/session` shows session details (ID, path, provider, model, thinking effort,
   and sandbox state, plus the session name once `/rename` has set one).
 - `/new` closes the current session and starts a fresh one in the same process.
+- `/delete` permanently deletes the current session after an explicit
+  irreversible confirmation, then starts a fresh session. It removes the
+  session history and its associated sub-agent transcripts, sidecars, and
+  lease/queue state. Busy sessions cannot be deleted. For session selection,
+  the TUI also provides a Delete picker with the same irreversible confirmation.
+  Archiving is different: it remains recoverable and does not reclaim disk space;
+  see [Session lifecycle](interactive-use.md#session-lifecycle).
 - `/clear` is an alias for `/new`: it starts a fresh session, so the transcript,
   context counter, and per-session usage reset together.
 - `/fork` opens a picker of the current session's prompts that start a turn,
@@ -596,8 +603,15 @@ Notes:
   ./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
   ```
   `--archive PATH` archives one active session for the current `--cwd` and
-  exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
-  or `--prompt`.
+  exits. Archiving is recoverable and reclaims no disk space. It cannot be
+  combined with `--continue`, `--resume`, `--no-session`, or `--prompt`.
+- `otto delete <SESSION>` permanently deletes one session and exits. `SESSION`
+  accepts a session ID or exact name; an ID takes precedence, and a name must
+  identify exactly one session. The default interactive confirmation displays
+  the session ID. `--force` skips the prompt and accepts only an ID. Deletion
+  cannot be undone; it removes the session history and its associated sub-agent
+  transcripts, sidecars, and lease/queue state. A busy session is refused.
+  Internal file paths are not a user-facing deletion interface.
 - **Forking** writes a new session beside the current one whose history is the
   current session's history before a chosen prompt's turn, then switches to
   it with that prompt in the editor, to edit and send again. In the TUI,

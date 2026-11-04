@@ -39,12 +39,13 @@ fn catalog_lists_commands_by_workflow_group() {
             "/fork",
             "/rename",
             "/archive",
+            "/delete",
             "/session",
             "/exit",
         ]
     );
     assert_eq!(entries[0].group, CommandGroup::Help);
-    assert_eq!(entries[25].group, CommandGroup::Exit);
+    assert_eq!(entries[26].group, CommandGroup::Exit);
 }
 
 #[test]

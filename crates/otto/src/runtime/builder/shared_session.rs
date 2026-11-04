@@ -136,6 +136,10 @@ impl SharedSession {
         self.0.transcript.close()
     }
 
+    pub fn permanent_delete(&self, root: &Path, workspace: &str) -> Result<(), String> {
+        self.0.transcript.permanent_delete(root, workspace)
+    }
+
     pub fn archive(
         &self,
         root: &Path,

@@ -408,6 +408,21 @@ impl Lease {
         Ok(())
     }
 
+    /// Serializes destructive cleanup against heartbeat writes. Success stops
+    /// renewal without recreating a heartbeat in the removed lease directory.
+    pub(crate) fn deleting<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, otto_core::session::PiError>,
+    ) -> Result<T, otto_core::session::PiError> {
+        let _guard = self.write_lock.lock().unwrap();
+        self.check().map_err(otto_core::session::PiError::other)?;
+        let result = action();
+        if result.is_ok() {
+            self.released.store(true, Ordering::Release);
+        }
+        result
+    }
+
     /// Marks the lease released: the next `acquire` on this directory
     /// takes over immediately, without waiting out a liveness window.
     /// Safe to call after the lease directory has been renamed, since
@@ -421,7 +436,10 @@ impl Lease {
     /// without writing and without setting `released`.
     pub fn release(&self) -> std::io::Result<()> {
         let _guard = self.write_lock.lock().unwrap();
-        if self.superseded.load(Ordering::Acquire) || self.fenced.load(Ordering::Acquire) {
+        if self.released.load(Ordering::Acquire)
+            || self.superseded.load(Ordering::Acquire)
+            || self.fenced.load(Ordering::Acquire)
+        {
             return Ok(());
         }
         self.released.store(true, Ordering::Release);

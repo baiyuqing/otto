@@ -6,6 +6,8 @@ mod collection;
 #[cfg(test)]
 mod command_order_tests;
 mod commands;
+#[cfg(test)]
+mod delete_tests;
 mod review;
 pub(super) mod skills;
 #[cfg(test)]

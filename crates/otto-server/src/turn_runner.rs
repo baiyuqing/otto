@@ -85,7 +85,7 @@ impl Server {
     pub(super) async fn wake_turn(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let prepared = {
             let mut state = session.lock();
-            if state.busy_for_wake() {
+            if state.deleting || state.busy_for_wake() {
                 None
             } else {
                 let trigger = if session.ctrl.resumes_interrupted_turn() {
@@ -433,6 +433,9 @@ impl Server {
     ) -> Result<Arc<Turn>, String> {
         let (turn, running) = {
             let mut state = session.lock();
+            if state.deleting {
+                return Err(TURN_ACTIVE.to_string());
+            }
             if let Some(input_id) = &input_id {
                 if let Some((_, turn)) = state.inputs.iter().find(|(id, _)| id == input_id) {
                     return Ok(Arc::clone(turn));

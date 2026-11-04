@@ -317,6 +317,28 @@ pub fn unlink_at(dir: &Dir, name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Recursively removes one name without following symbolic links. Missing names
+/// are accepted; every other error, including entry limits, is propagated.
+pub fn remove_tree_at_no_follow(dir: &Dir, name: &str) -> io::Result<()> {
+    match open_dir_at_no_follow(dir, name) {
+        Ok(child) => {
+            for child_name in read_directory_names(&child, 100_000)? {
+                remove_tree_at_no_follow(&child, &child_name)?;
+            }
+            sync_dir(&child)?;
+            let name = c_name(name)?;
+            // SAFETY: dir is pinned and name is a validated single component.
+            if unsafe { libc::unlinkat(dir.fd(), name.as_ptr(), libc::AT_REMOVEDIR) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        Err(error) if is_enoent(&error) => Ok(()),
+        Err(error) if is_enotdir(&error) || is_eloop(&error) => unlink_at(dir, name),
+        Err(error) => Err(error),
+    }
+}
+
 /// Gives the file `from` the second name `to` inside a pinned directory;
 /// fails with `EEXIST` when `to` exists.
 fn link_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {

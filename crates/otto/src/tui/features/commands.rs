@@ -222,6 +222,13 @@ const ENTRIES: &[Entry] = &[
         rename
     ),
     entry!(Sessions, "/archive", "archive a session", true, archive),
+    entry!(
+        Sessions,
+        "/delete",
+        "permanently delete a session",
+        true,
+        delete
+    ),
     entry!(Sessions, "/session", "show session details", false, session),
     entry!(Exit, "/exit", "exit Otto", false, exit),
 ];
@@ -329,6 +336,13 @@ fn fork(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
         command("Fork", Command::Fork(args.into()))
     }
 }
+fn delete(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
+    if !args.is_empty() {
+        return Err("Use /delete and select a session to confirm permanent deletion".into());
+    }
+    push(Choice::new(ChoiceKind::Delete, ""))
+}
+
 fn archive(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     if args.is_empty() {
         push(Choice::new(ChoiceKind::Archive, ""))

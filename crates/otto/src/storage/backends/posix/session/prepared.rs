@@ -381,6 +381,89 @@ pub(crate) fn archive_with_driver_and_keeper(
 }
 
 impl Prepared {
+    pub(super) fn prepare_delete(
+        root: &Path,
+        workspace: &str,
+        path: &Path,
+        driver: Arc<dyn FileDriver>,
+        keeper: Arc<Keeper>,
+    ) -> Result<Self, PiError> {
+        let (root_path, workspace, basename, candidate) =
+            validate_listed_candidate_path(root, workspace, path)?;
+        let lease = if lease::is_lease_managed(Path::new(&candidate))
+            .map_err(|error| PiError::other(error.to_string()))?
+        {
+            Some(
+                lease::acquire_for_delete(Path::new(&candidate), &keeper)
+                    .map_err(|error| PiError::other(format!("delete session: {error}")))?,
+            )
+        } else {
+            None
+        };
+        let opened =
+            open_listed_prepared_session_file(driver.as_ref(), &root_path, &workspace, &basename)
+                .and_then(|(file, metadata)| {
+                    file.lock_exclusive()
+                        .map_err(|error| PiError::other(format!("lock session file: {error}")))?;
+                    Ok((file, metadata))
+                });
+        let (file, metadata) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                release_on_prepare_failure(&lease);
+                return Err(error);
+            }
+        };
+        let prepared = Self::from_opened(
+            candidate,
+            file,
+            metadata,
+            Identity::Listed {
+                root: root_path,
+                workspace: workspace.clone(),
+                basename,
+            },
+            lease,
+            driver,
+            keeper,
+        )?;
+        if !crate::workspace::owns_session(&workspace, &prepared.info.cwd)? {
+            prepared.close()?;
+            return Err(PiError::invalid(
+                "listed session workspace does not match expected workspace",
+            ));
+        }
+        Ok(prepared)
+    }
+
+    pub(super) fn delete_permanently(self, root: &Path, workspace: &str) -> Result<(), PiError> {
+        let mut handle = self
+            .handle
+            .lock()
+            .map_err(|_| PiError::other("prepared session mutex is poisoned"))?;
+        let (file, metadata) = handle
+            .as_mut()
+            .ok_or_else(|| PiError::other("prepared session is no longer available"))?;
+        self.verify_identity(metadata)?;
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| PiError::other("prepared lease mutex is poisoned"))?;
+        let mut action = || {
+            super::permanent_delete::delete_open_file(
+                root,
+                workspace,
+                Path::new(&self.path),
+                file.as_mut(),
+                metadata,
+            )
+        };
+        match lease.as_ref() {
+            Some((lease, _)) => lease.deleting(action),
+            None => action(),
+        }
+    }
+
     /// Archives the file this prepared handle already owns and locks.
     pub(crate) fn archive(self, root: &Path, workspace: &str) -> Result<ArchiveResult, PiError> {
         let path = self.path.clone();
@@ -405,6 +488,11 @@ pub(crate) fn archive_open_file(
 ) -> Result<ArchiveResult, PiError> {
     let (_, workspace_canonical, basename, _) =
         validate_listed_candidate_path(root, workspace, path)?;
+    if basename.starts_with("archive/") {
+        return Err(PiError::invalid(
+            "listed session candidate is outside the expected workspace directory",
+        ));
+    }
 
     let root_dir = open_session_root_no_follow(root)?;
     let Some((workspace_dir, directory)) =
@@ -530,7 +618,7 @@ fn ensure_archive_destination_absent(
 ///
 /// Returns the cleaned root, the canonical workspace, the basename and the
 /// cleaned candidate path.
-fn validate_listed_candidate_path(
+pub(super) fn validate_listed_candidate_path(
     root: &Path,
     workspace: &str,
     path: &Path,
@@ -545,7 +633,11 @@ fn validate_listed_candidate_path(
         .unwrap_or_default()
         .to_owned();
     let expected = format!("{root_path}/{key}/{basename}");
-    if candidate_path != expected
+    let archived = format!("{root_path}/{key}/archive/{basename}");
+    if (candidate_path != expected && candidate_path != archived)
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
         || basename == "."
         || basename == ".."
         || !basename.ends_with(".jsonl")
@@ -554,7 +646,12 @@ fn validate_listed_candidate_path(
             "listed session candidate is outside the expected workspace directory",
         ));
     }
-    Ok((root_path, workspace_canonical, basename, candidate_path))
+    let reference = if candidate_path == archived {
+        format!("archive/{basename}")
+    } else {
+        basename
+    };
+    Ok((root_path, workspace_canonical, reference, candidate_path))
 }
 
 /// The path joined to the working directory when relative.
@@ -594,6 +691,19 @@ fn open_listed_prepared_session_file(
             )
         }
     })?;
+    let (workspace_dir, basename) = if let Some(basename) = basename.strip_prefix("archive/") {
+        let archive = workspace_dir.open_directory("archive").map_err(|error| {
+            map_path_open_error(
+                error,
+                "open listed archive directory",
+                "archive directory is a symlink",
+                "archive path is not a directory",
+            )
+        })?;
+        (archive, basename)
+    } else {
+        (workspace_dir, basename)
+    };
     let file = workspace_dir
         .open_journal(basename, JournalOpen::ReadWrite)
         .map_err(|error| {

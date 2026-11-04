@@ -175,7 +175,8 @@ runtime.
 | `otto --base-url URL` | Override the selected provider's endpoint |
 | `otto --prompt TEXT` | One headless turn; combine with `--no-session` if persistence is unwanted |
 | `otto --continue` / `--resume PATH` | Reopen history for the current workspace |
-| `otto --archive PATH` | Archive one active session and exit |
+| `otto --archive PATH` | Archive one active session and exit; recoverable and does not reclaim disk space |
+| `otto delete <SESSION>` | Permanently delete by ID or exact name; prompts for confirmation and shows the ID (`--force` requires an ID); cannot be undone |
 | `otto --no-session` | Keep conversation history in memory only |
 | `otto --config PATH` | Select the user configuration source |
 | `otto config explain --cwd DIR --json` | Inspect resolved configuration offline |

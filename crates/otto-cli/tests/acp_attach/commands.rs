@@ -132,8 +132,8 @@ fn a_relay_lists_and_switches_profiles_on_serve() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         agent_text(&frames),
-        "Model test/gpt-test (type openai-compatible)\n\
-         Configured models: other/gpt-other, test/gpt-test\n\
+        "Model other/gpt-test (type openai-compatible)\n\
+         Configured models: other/gpt-other, other/gpt-test\n\
          Switch with /model <provider>/<model_id>."
     );
 

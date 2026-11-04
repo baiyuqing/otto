@@ -87,7 +87,6 @@ async fn sandbox_reload_reports_inert_and_skipped_paths_only_when_present() {
             reason: SandboxReason::None,
             inert_read_paths: vec!["~/.otto".to_string()],
             skipped_deny_paths: vec!["~/.config/gh".to_string()],
-            ..Default::default()
         })),
         ..Default::default()
     });

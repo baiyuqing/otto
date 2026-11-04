@@ -19,6 +19,24 @@ pub const MAX_DYNAMIC_VALUE_BYTES: usize = 8 << 10;
 const PREFERRED_DYNAMIC_MARKER: u32 = 0xE000;
 const DYNAMIC_MARKER_COUNT: u32 = 64;
 
+/// Stored arguments with replacement markers are incomplete and cannot be
+/// automatically replayed. Decode JSON to recognize escaped markers as well.
+pub fn contains_redaction_marker(text: &str) -> bool {
+    if text
+        .chars()
+        .any(|character| (0xE000..0xE040).contains(&(character as u32)))
+    {
+        return true;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value
+        .to_string()
+        .chars()
+        .any(|character| (0xE000..0xE040).contains(&(character as u32)))
+}
+
 /// Replaces each invalid UTF-8 byte with `U+FFFD`, leaving valid input alone.
 ///
 /// This takes bytes and returns a `String`; callers that already hold a `&str`
@@ -182,6 +200,14 @@ impl SecretCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_marker_detection_handles_literal_and_json_escaped_markers() {
+        assert!(contains_redaction_marker("prefix\u{e000}suffix"));
+        assert!(contains_redaction_marker(r#"{"nested":["\ue03f"]}"#));
+        assert!(!contains_redaction_marker(r#"{"text":"unchanged"}"#));
+        assert!(!contains_redaction_marker(r#"{"text":"\\ue000"}"#));
+    }
 
     #[test]
     fn a_single_value_larger_than_the_whole_byte_budget_is_rejected() {

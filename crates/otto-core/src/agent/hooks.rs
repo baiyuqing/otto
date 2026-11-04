@@ -89,6 +89,7 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
         &self,
         message: Message,
     ) -> Result<(), crate::session::SessionError> {
+        let message = self.redactor.redact_record_message(&message);
         let recording = self
             .hook_turn_messages
             .lock()

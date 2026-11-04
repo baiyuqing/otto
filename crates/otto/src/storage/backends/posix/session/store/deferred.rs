@@ -38,7 +38,9 @@ impl Store {
             drop(state);
             return self.append_custom_entry(custom_type, data);
         }
-        let data = raw_value(data.to_owned())?;
+        // Validate first so malformed custom JSON still reports an error.
+        raw_value(data.to_owned())?;
+        let data = raw_value(recording::custom_data(custom_type, data))?;
         state.deferred_custom_entries.push(DeferredCustomEntry {
             custom_type: custom_type.to_owned(),
             data,

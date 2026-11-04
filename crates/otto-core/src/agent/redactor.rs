@@ -464,9 +464,13 @@ fn encode_object(members: Vec<(String, String)>) -> String {
     encoded
 }
 
+mod connection_strings;
+mod credential_patterns;
 mod heuristics;
 mod json_parse;
 mod pii;
+mod recording;
+mod wallet_secrets;
 
 use heuristics::*;
 use pii::*;
@@ -475,5 +479,7 @@ use pii::*;
 mod egress_scan_tests;
 #[cfg(test)]
 mod pii_tests;
+#[cfg(test)]
+mod recording_tests;
 #[cfg(test)]
 mod tests;

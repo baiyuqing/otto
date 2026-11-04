@@ -313,7 +313,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ..CompactionResult::default()
         };
         let checkpoint = CompactionCheckpoint {
-            summary: final_summary,
+            summary: self.redactor.redact_record_text(&final_summary),
             first_kept_entry_id: selection.first_kept_id.clone(),
             tokens_before,
             usage: usage_present.then_some(usage),

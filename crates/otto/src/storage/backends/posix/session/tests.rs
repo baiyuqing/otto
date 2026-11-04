@@ -41,6 +41,7 @@ mod lease_prepare;
 mod listing_hardening;
 mod open_repair;
 mod prepare_archive;
+mod recording;
 mod turn_recovery;
 
 use compaction_list::*;

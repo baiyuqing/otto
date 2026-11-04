@@ -14,7 +14,7 @@ pub(super) fn blocked() -> AgentError {
     AgentError::ProviderEgressSecret
 }
 
-fn placeholder(value: &str) -> bool {
+pub(super) fn placeholder(value: &str) -> bool {
     let normalized: String = value
         .trim_matches(|character: char| {
             character.is_ascii_whitespace()
@@ -72,6 +72,17 @@ pub(super) fn sensitive_key(key: &str) -> bool {
             | "PASSWD"
             | "PRIVATEKEY"
             | "SECRETACCESSKEY"
+            | "ACCESSKEYID"
+            | "ACCESSKEY"
+            | "SECRETKEY"
+            | "AK"
+            | "SK"
+            | "CREDENTIAL"
+            | "CREDENTIALS"
+            | "MNEMONIC"
+            | "SEED"
+            | "SEEDPHRASE"
+            | "RECOVERYPHRASE"
     ) || normalized.ends_with("APIKEY")
         || normalized.ends_with("TOKEN")
         || normalized.ends_with("SECRET")
@@ -79,9 +90,17 @@ pub(super) fn sensitive_key(key: &str) -> bool {
         || normalized.ends_with("PRIVATEKEY")
         || normalized.ends_with("SECRETACCESSKEY")
         || normalized.ends_with("ACCESSTOKEN")
+        || normalized.ends_with("ACCESSKEYID")
+        || normalized.ends_with("ACCESSKEY")
+        || normalized.ends_with("SECRETKEY")
+        || normalized.ends_with("CREDENTIALS")
+        || normalized.ends_with("CREDENTIAL")
+        || normalized.ends_with("MNEMONIC")
+        || normalized.ends_with("SEEDPHRASE")
+        || normalized.ends_with("RECOVERYPHRASE")
 }
 
-fn credential_value(value: &str) -> bool {
+pub(super) fn credential_value(value: &str) -> bool {
     let trimmed = value.trim_matches(|character: char| {
         character.is_ascii_whitespace() || matches!(character, '"' | '\'' | '`' | ',' | ';')
     });
@@ -181,21 +200,28 @@ struct PemBoundary {
 }
 
 static PEM_BOUNDARIES: LazyLock<Vec<PemBoundary>> = LazyLock::new(|| {
-    ["PRIVATE", "RSA PRIVATE", "EC PRIVATE", "OPENSSH PRIVATE"]
-        .into_iter()
-        .map(|label| {
-            // Construct PEM boundaries from fragments so repository secret scanners
-            // do not mistake the detector itself for embedded key material.
-            let begin = format!("-----{} {label} KEY-----", "BEGIN");
-            let end = format!("-----{} {label} KEY-----", "END");
-            PemBoundary {
-                begin_bytes: begin.len(),
-                end_bytes: end.len(),
-                begin_finder: memchr::memmem::Finder::new(begin.as_bytes()).into_owned(),
-                end_finder: memchr::memmem::Finder::new(end.as_bytes()).into_owned(),
-            }
-        })
-        .collect()
+    [
+        "PRIVATE",
+        "RSA PRIVATE",
+        "EC PRIVATE",
+        "OPENSSH PRIVATE",
+        "ENCRYPTED PRIVATE",
+        "DSA PRIVATE",
+    ]
+    .into_iter()
+    .map(|label| {
+        // Construct PEM boundaries from fragments so repository secret scanners
+        // do not mistake the detector itself for embedded key material.
+        let begin = format!("-----{} {label} KEY-----", "BEGIN");
+        let end = format!("-----{} {label} KEY-----", "END");
+        PemBoundary {
+            begin_bytes: begin.len(),
+            end_bytes: end.len(),
+            begin_finder: memchr::memmem::Finder::new(begin.as_bytes()).into_owned(),
+            end_finder: memchr::memmem::Finder::new(end.as_bytes()).into_owned(),
+        }
+    })
+    .collect()
 });
 
 /// Reports each PEM private-key block. A block without an END boundary runs to
@@ -296,6 +322,9 @@ pub(super) fn heuristic_finding_ranges(text: &str) -> Vec<Range<usize>> {
     let _ = scan_pem_blocks(text, &mut collect)
         && scan_prefixed_tokens(text, &mut collect)
         && scan_assignment_lines(text, &mut collect);
+    findings.extend(super::credential_patterns::finding_ranges(text));
+    findings.extend(super::connection_strings::finding_ranges(text));
+    findings.extend(super::wallet_secrets::finding_ranges(text));
     findings
 }
 
@@ -305,6 +334,9 @@ pub(super) fn heuristic_secret(text: &str) -> bool {
     !(scan_pem_blocks(text, &mut stop_at_first)
         && scan_prefixed_tokens(text, &mut stop_at_first)
         && scan_assignment_lines(text, &mut stop_at_first))
+        || !super::credential_patterns::finding_ranges(text).is_empty()
+        || !super::connection_strings::finding_ranges(text).is_empty()
+        || !super::wallet_secrets::finding_ranges(text).is_empty()
 }
 
 pub(super) fn redact_ranges(
@@ -394,7 +426,7 @@ pub(super) fn redact_json_string_value(
     sensitive_association: bool,
 ) -> Option<String> {
     let exact = redactor.redact_string(text);
-    let mut ranges = independent_finding_ranges(&exact);
+    let mut ranges = heuristic_finding_ranges(&exact);
     if sensitive_association && credential_value(&exact) {
         ranges.push(0..exact.len());
     }

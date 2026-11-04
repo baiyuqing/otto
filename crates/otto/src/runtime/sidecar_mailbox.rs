@@ -130,7 +130,12 @@ fn write_with(
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
-    let body = serde_json::to_vec_pretty(entries)
+    let redactor = otto_core::agent::redactor::Redactor::new(&[]);
+    let mut recorded = entries.to_vec();
+    for entry in &mut recorded {
+        entry.notification.text = redactor.redact_record_text(&entry.notification.text);
+    }
+    let body = serde_json::to_vec_pretty(&recorded)
         .map_err(|error| format!("encode pending inputs: {error}"))?;
     remind::replace_private_with(path, &body, publish)
 }
@@ -195,6 +200,32 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).expect("sidecar")).expect("json");
         assert_eq!(stored.len(), 1);
         assert!(stored[0].notification.id.starts_with("in_"));
+    }
+
+    #[test]
+    fn recording_masks_queued_content_on_disk_but_keeps_the_live_queue() {
+        let (_dir, path) = session_dir();
+        let inbox = Inbox::new(None);
+        let hook_path = path.clone();
+        install(&inbox, ".inbox.json", move || Some(hook_path.clone()));
+        let candidate = "opaque-value-123";
+        let text = format!(r#"{{"text":"client_secret={candidate}","channel":"telegram"}}"#);
+        inbox
+            .enqueue(Notification {
+                id: "queued-1".into(),
+                text: text.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(inbox.queued()[0].notification.text, text);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains(candidate));
+        let restored = Inbox::new(None);
+        assert_eq!(load(&restored, &path), None);
+        assert_eq!(restored.queued()[0].notification.id, "queued-1");
+        assert!(!restored.queued()[0].notification.text.contains(candidate));
+        let saved: serde_json::Value =
+            serde_json::from_str(&restored.queued()[0].notification.text).unwrap();
+        assert_eq!(saved["channel"], "telegram");
     }
 
     /// Two notifications are enqueued through a sidecar whose publish ends

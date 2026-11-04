@@ -110,6 +110,7 @@ mod input_queue;
 mod message_visibility;
 mod message_visibility_review;
 mod mutations_and_commands;
+mod observer;
 mod reads_and_sessions;
 mod steering;
 mod step_interrupt;

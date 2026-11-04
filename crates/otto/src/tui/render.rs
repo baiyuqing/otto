@@ -34,7 +34,11 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         );
         return;
     }
-    draw_shell(frame, app, area);
+    if app.observer.active {
+        app.observer.draw(frame, area, app.connected);
+    } else {
+        draw_shell(frame, app, area);
+    }
     if let Some((view, surface)) = active {
         let panel = surface_panel_area(area);
         frame.render_widget(Clear, panel);

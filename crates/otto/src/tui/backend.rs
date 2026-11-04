@@ -48,6 +48,7 @@ pub(crate) enum Request {
     Context,
     SandboxPath(String),
     Agents(ListQuery),
+    ObserverSnapshot,
     AgentDetail {
         parent: String,
         id: String,
@@ -123,6 +124,7 @@ pub(crate) enum Reply {
     Context(ContextReport),
     SandboxPath(String),
     Agents(ListResult),
+    ObserverSnapshot(crate::app::tasks::ObserverSnapshot),
     AgentDetail {
         row: TaskRow,
         history: Vec<Message>,

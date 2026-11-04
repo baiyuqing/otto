@@ -212,6 +212,7 @@ impl Agents {
         Request::Agents(ListQuery {
             status: self.status.query(),
             workspace: (!self.all_workspaces).then(|| self.workspace.clone()),
+            parent_session: None,
             limit: None,
             before: None,
         })

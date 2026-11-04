@@ -62,6 +62,11 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
             .await
             .map(Reply::Context)
             .map_err(|e| e.to_string()),
+        Request::ObserverSnapshot => client
+            .observer_snapshot(session)
+            .await
+            .map(Reply::ObserverSnapshot)
+            .map_err(|error| error.to_string()),
         Request::Agents(query) => client
             .tasks(&query)
             .await

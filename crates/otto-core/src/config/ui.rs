@@ -10,6 +10,29 @@ use super::ConfigError;
 pub struct Ui {
     #[serde(default)]
     pub mode: String,
+    /// Client-side keys for the read-only sub-agent observer.
+    #[serde(default)]
+    pub observer: ObserverBindings,
+}
+
+/// Observer key names are parsed by the native TUI before entering raw mode.
+/// Empty strings disable a binding; omitted fields retain their defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ObserverBindings {
+    pub toggle: String,
+    pub open: String,
+    pub back: String,
+}
+
+impl Default for ObserverBindings {
+    fn default() -> Self {
+        Self {
+            toggle: "F6".into(),
+            open: String::new(),
+            back: "Esc".into(),
+        }
+    }
 }
 
 /// The resolved frontend a run uses.
@@ -78,6 +101,77 @@ mod tests {
 
     use super::*;
     use crate::config::File;
+
+    #[test]
+    fn observer_defaults_and_explicit_empty_bindings_are_distinct() {
+        let file: File = toml::from_str("").expect("default configuration");
+        assert_eq!(file.ui.observer, ObserverBindings::default());
+        let file: File = toml::from_str(
+            "[ui.observer]\ntoggle = \"\"\nopen = \"Ctrl+Left\"\nback = \"Ctrl+Right\"\n",
+        )
+        .expect("observer configuration");
+        assert_eq!(file.ui.observer.toggle, "");
+        assert_eq!(file.ui.observer.open, "Ctrl+Left");
+        assert_eq!(file.ui.observer.back, "Ctrl+Right");
+        assert!(toml::from_str::<File>("[ui.observer]\ntoggl = \"F6\"\n").is_err());
+    }
+
+    #[test]
+    fn observer_partial_managed_override_preserves_other_bindings() {
+        use crate::config::layered::{Layer, Merged};
+        let mut merged = Merged::default();
+        merged
+            .add(
+                "[ui.observer]\ntoggle = \"Alt+o\"\nopen = \"Ctrl+Left\"\n",
+                "user",
+                Layer::User,
+                true,
+            )
+            .expect("user bindings");
+        merged
+            .add(
+                "[ui.observer]\nback = \"F9\"\n",
+                "managed",
+                Layer::Managed,
+                true,
+            )
+            .expect("managed back binding");
+        let file: File = merged.values.try_into().expect("merged bindings");
+        assert_eq!(file.ui.observer.toggle, "Alt+o");
+        assert_eq!(file.ui.observer.open, "Ctrl+Left");
+        assert_eq!(file.ui.observer.back, "F9");
+    }
+
+    #[test]
+    fn project_configuration_cannot_replace_client_observer_bindings() {
+        use crate::config::layered::{Layer, Merged};
+        let mut merged = Merged::default();
+        merged
+            .add(
+                "[ui.observer]\ntoggle = \"Alt+o\"\n",
+                "user",
+                Layer::User,
+                true,
+            )
+            .expect("user configuration");
+        merged
+            .add(
+                "[ui.observer]\ntoggle = \"Ctrl+Left\"\n",
+                "project",
+                Layer::Local,
+                true,
+            )
+            .expect("project configuration");
+        let file: File = merged
+            .values
+            .clone()
+            .try_into()
+            .expect("merged configuration");
+        assert_eq!(file.ui.observer.toggle, "Alt+o");
+        assert!(merged.diagnostics.iter().any(|diagnostic| {
+            diagnostic.key == "ui.observer" && diagnostic.source == "project"
+        }));
+    }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]

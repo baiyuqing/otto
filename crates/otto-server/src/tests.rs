@@ -28,6 +28,7 @@ mod doubles;
 mod endpoint_cases;
 mod harness;
 mod model_config_cases;
+mod observer_cases;
 mod permanent_delete_cases;
 mod queue_cases;
 mod remote_listener_cases;

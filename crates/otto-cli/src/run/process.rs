@@ -687,7 +687,10 @@ pub async fn run_with_extensions(
             };
             console.run(stdin, cancel).await
         }
-        Frontend::Tui => otto::tui::run(&controller, cancel).await,
+        Frontend::Tui => {
+            otto::tui::run_with_observer_bindings(&controller, cancel, &loaded.config.ui.observer)
+                .await
+        }
     };
 
     let cancelled_before_exit = cancel.is_cancelled();

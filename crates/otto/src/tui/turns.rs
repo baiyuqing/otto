@@ -52,6 +52,7 @@ pub(super) async fn drive_turn<B: Backend, T, E>(
             _=frames.tick()=>{}
         }
         app.refresh_tasks(backend);
+        app.poll_observer();
         let _ = terminal.draw(|frame| render::draw(frame, app));
     }
 }

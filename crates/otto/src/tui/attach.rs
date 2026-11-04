@@ -195,6 +195,38 @@ pub async fn run(
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
 ) -> i32 {
+    run_with_observer_bindings(
+        socket,
+        workspace,
+        start,
+        schedule,
+        cancel,
+        stderr,
+        &Default::default(),
+    )
+    .await
+}
+
+/// Runs attach with client-local observer keys, validated before connecting/raw mode.
+pub async fn run_with_observer_bindings(
+    socket: &Path,
+    workspace: &str,
+    start: Start,
+    schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
+    cancel: &CancellationToken,
+    stderr: &mut (dyn Write + Send),
+    bindings: &otto_core::config::ui::ObserverBindings,
+) -> i32 {
+    let bindings = match super::observer::bindings::Bindings::parse(bindings) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "otto: {error}; edit [ui.observer] in your config and restart"
+            );
+            return 1;
+        }
+    };
     let opened = async {
         let remote = connect(socket, workspace, &start).await?;
         let status = within(remote.client.status()).await?;
@@ -254,6 +286,7 @@ pub async fn run(
         cancel,
         &mut keys,
         &mut deliveries,
+        bindings,
     )
     .await;
     // Sends after the loop has exited fail, so those items stay undelivered.

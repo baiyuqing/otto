@@ -37,6 +37,7 @@ mod completion;
 mod events;
 mod keys;
 mod lifecycle;
+mod observer;
 mod requests;
 mod submission;
 
@@ -110,6 +111,8 @@ pub(crate) struct App {
     pub selection: Option<Selection>,
     pub show_details: bool,
     pub tasks: Vec<Task>,
+    pub observer: super::observer::Observer,
+    observer_refreshed: Option<Instant>,
     pub(crate) attached: bool,
     pub driver: Option<Driver>,
     pub geometry: RefCell<Geometry>,
@@ -192,6 +195,8 @@ impl App {
             selection: None,
             show_details: false,
             tasks: Vec::new(),
+            observer: Default::default(),
+            observer_refreshed: None,
             attached: matches!(backend, Backend::Attach(_)),
             driver: None,
             geometry: Default::default(),

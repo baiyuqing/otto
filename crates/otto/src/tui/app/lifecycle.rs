@@ -151,6 +151,8 @@ impl App {
         self.entries = entries;
         self.usage = usage;
         self.info = info;
+        self.observer
+            .reset_scope(&self.info.workspace, &self.info.session_id);
         if !same_session {
             self.scroll = None;
         }

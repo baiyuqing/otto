@@ -24,6 +24,7 @@ pub(super) async fn local(
     ticket: &Ticket,
     request: Request,
 ) -> Result<Reply, String> {
+    let observer_scope = ticket.clone();
     match request {
         Request::Command(command) => {
             check_scope(&controller.info(), ticket)?;
@@ -95,6 +96,10 @@ pub(super) async fn local(
                         history: history.unwrap_or_default(),
                         missing,
                     })
+                }
+                Request::ObserverSnapshot => {
+                    check_scope(&c.info(), &observer_scope)?;
+                    c.observer_snapshot().map(Reply::ObserverSnapshot)
                 }
                 Request::Reviews => {
                     let snapshot = c.approval_snapshot().map_err(|error| error.to_string())?;

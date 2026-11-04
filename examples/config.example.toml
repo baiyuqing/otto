@@ -69,6 +69,14 @@ models."local-model" = { context_window = 131072, compaction_window = 100000 }
 [ui]
 mode = "tui"
 
+# Read-only sub-agent observer. Empty strings disable individual bindings.
+# Client-local: projects cannot override these; restart the TUI after edits.
+# macOS may require fn+F6; use a modified key such as Alt+o if preferred.
+[ui.observer]
+toggle = "F6"
+open = ""
+back = "Esc"
+
 [agent]
 shell_timeout = "120s"
 max_output_bytes = 51200

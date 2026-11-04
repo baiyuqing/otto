@@ -15,6 +15,32 @@ impl App {
                 self.push_system("TUI disconnected");
                 return None;
             }
+            if line.trim() == "/help" {
+                if let Ok(Transition::Push(help)) =
+                    self.catalog.open(line, &self.info, self.attached)
+                {
+                    let mut text = help.view().document;
+                    text.push_str(&format!(
+                        concat!(
+                            "\n\nSub-agent observer (read-only)\n{}\n",
+                            "Tab/Shift+Tab: focus panes/pages · Up/Down/PgUp/PgDn: scroll\n",
+                            "Home: oldest output · End: follow output\n",
+                            "Draft and main scroll are preserved; approvals and Ctrl+C retain normal controls.\n",
+                            "Configure [ui.observer] toggle/open/back in your user config; restart to apply."
+                        ),
+                        self.observer.bindings.label
+                    ));
+                    self.transition(
+                        0,
+                        Transition::Push(Box::new(features::Document {
+                            key: "help".into(),
+                            title: "Commands".into(),
+                            text,
+                        })),
+                    );
+                }
+                return self.actions.pop();
+            }
             match self.catalog.open(line, &self.info, self.attached) {
                 Ok(t) => self.transition(self.top_id().unwrap_or(0), t),
                 Err(e) => self.push_system(e),
@@ -106,7 +132,7 @@ impl App {
                     .state
                     .handle(&view, interaction::Intent::Text(value.into()));
             }
-        } else {
+        } else if !self.observer.active {
             self.composer.insert_text(value)
         }
     }

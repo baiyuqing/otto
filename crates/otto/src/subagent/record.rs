@@ -48,6 +48,11 @@ pub trait Recorder: Send + Sync {
 /// Reads persisted task snapshots for the task API and server views.
 pub trait TaskReader: Send + Sync {
     fn list(&self, query: &ListQuery) -> Result<ListResult>;
+    /// Observer metadata, bounded before decoding large payloads where supported.
+    /// Compatibility backends use `list`; callers still enforce their final cap.
+    fn list_observer(&self, query: &ListQuery) -> Result<ListResult> {
+        self.list(query)
+    }
     fn get(&self, parent_session: &str, task_id: &str) -> Result<Option<TaskRow>>;
 }
 
@@ -91,6 +96,8 @@ pub struct TaskRow {
 /// `interrupted`; an unrecognised value matches no rows.
 #[derive(Debug, Clone, Default)]
 pub struct ListQuery {
+    /// Restrict rows to one parent before ordering and limiting.
+    pub parent_session: Option<String>,
     pub status: Option<String>,
     pub workspace: Option<String>,
     /// Defaults to 100, clamped to 500, when `None`.
@@ -250,6 +257,37 @@ mod tests {
             last_tool: "read".into(),
             session_path: "/home/me/.otto/sessions/s1/t1-child.jsonl".into(),
             ..Task::default()
+        }
+    }
+
+    #[test]
+    fn observer_parent_filter_is_applied_before_limit_for_final_and_dynamic_rows() {
+        let store = Store::open_in_memory().expect("store");
+        for status in [TaskStatus::Succeeded, TaskStatus::Running] {
+            let mut selected = task();
+            selected.status = status;
+            store.upsert(&context(), &selected);
+            let mut unrelated = context();
+            unrelated.parent_session = "other".into();
+            for index in 0..40 {
+                let mut newer = selected.clone();
+                newer.id = format!("t{index}");
+                newer.created_at = selected
+                    .created_at
+                    .map(|time| time + chrono::Duration::seconds(index + 1));
+                store.upsert(&unrelated, &newer);
+            }
+            let result = store
+                .list(&ListQuery {
+                    parent_session: Some("s1".into()),
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .expect("scoped list");
+            assert_eq!(result.tasks.len(), 1);
+            assert_eq!(result.tasks[0].parent_session, "s1");
+            assert_eq!(result.tasks[0].task_id, "t1");
+            assert!(result.next_before.is_empty());
         }
     }
 

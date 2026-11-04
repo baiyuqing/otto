@@ -52,6 +52,7 @@ impl Runner {
         redaction_values.extend(environment_secrets);
         let redactor =
             Redactor::with_completeness(&redaction_values, self.config.redaction_complete);
+        self.config.tasks.observe_system(&task_id, "External adapter text is available after completion; tool status updates are shown when supplied by the adapter.");
         let user_message = Message {
             role: Role::User,
             blocks: vec![Block::text(redactor.redact_string(&prompt))],
@@ -103,15 +104,27 @@ impl Runner {
                     if update["sessionUpdate"] == "tool_call"
                         && let Some(title) = update["title"].as_str()
                     {
-                        self.config.tasks.record_tool_call(
+                        let title = first_runes(&redactor.redact_string(title), 200);
+                        self.config.tasks.record_tool_call(&task_id, &title);
+                        self.config.tasks.observe_external_tool(
                             &task_id,
-                            &first_runes(&redactor.redact_string(title), 200),
+                            update["toolCallId"].as_str().unwrap_or("adapter"),
+                            &title,
+                            false,
+                            false,
                         );
                     }
                     if update["sessionUpdate"] == "tool_call_update"
                         && matches!(update["status"].as_str(), Some("completed" | "failed"))
                     {
                         self.config.tasks.record_tool_finished(&task_id);
+                        self.config.tasks.observe_external_tool(
+                            &task_id,
+                            update["toolCallId"].as_str().unwrap_or("adapter"),
+                            "",
+                            true,
+                            update["status"] == "failed",
+                        );
                     }
                 },
             );
@@ -125,6 +138,7 @@ impl Runner {
             output.push_str("\n[external agent output truncated]");
         }
         let output = redactor.redact_string(&output);
+        self.config.tasks.observe_external_text(&task_id, &output);
         if !output.is_empty() {
             let message = Message {
                 role: Role::Assistant,

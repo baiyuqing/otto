@@ -58,6 +58,12 @@ description, model, context, prompt, status, created_at, started_at, finished_at
 tool_calls, last_tool, input_tokens, output_tokens, cached_tokens, result, error, session_path, \
 pid, process_started_at, model_source";
 
+// Same column positions as COLUMNS, without materializing transcript-sized data.
+const OBSERVER_COLUMNS: &str = "parent_session, task_id, workspace, parent_session_path, name, agent, \
+description, model, '' AS context, '' AS prompt, status, created_at, started_at, finished_at, steps, \
+tool_calls, last_tool, input_tokens, output_tokens, cached_tokens, '' AS result, error, session_path, \
+pid, process_started_at, model_source";
+
 /// One row exactly as stored, before liveness is applied.
 struct Row {
     parent_session: String,
@@ -361,6 +367,10 @@ impl Store {
 
     /// Rows newest first by `created_at`, with liveness applied.
     pub fn list(&self, query: &ListQuery) -> Result<ListResult> {
+        self.list_projected(query, COLUMNS)
+    }
+
+    fn list_projected(&self, query: &ListQuery, columns: &str) -> Result<ListResult> {
         let limit = i64::from(query.limit.unwrap_or(100).clamp(1, 500));
         let connection = self.connection.lock().map_err(|_| Error)?;
 
@@ -383,33 +393,25 @@ impl Store {
             candidates.extend(Self::query_rows(
                 &connection,
                 &format!(
-                    "SELECT {COLUMNS} FROM tasks
+                    "SELECT {columns} FROM tasks
                      WHERE status IN ('succeeded','failed','canceled','interrupted')
                      AND (?1 IS NULL OR workspace = ?1)
                      AND (?2 IS NULL OR created_at < ?2)
                      AND (?3 IS NULL OR status = ?3)
+                     AND (?5 IS NULL OR parent_session = ?5)
                      ORDER BY created_at DESC LIMIT ?4"
                 ),
-                params![query.workspace, query.before, final_status, limit + 1],
+                params![
+                    query.workspace,
+                    query.before,
+                    final_status,
+                    limit + 1,
+                    query.parent_session
+                ],
             )?);
         }
         if wants_dynamic {
-            // ponytail: every queued/running row is rescanned on each call,
-            // because liveness is computed on read and tasks.db is never
-            // pruned (see spec, "Out of scope: pruning"). Fine for local,
-            // personal use; cache the interrupted verdict per (pid, started
-            // at) if this ever shows up in a profile.
-            let live_rows = Self::query_rows(
-                &connection,
-                &format!(
-                    "SELECT {COLUMNS} FROM tasks
-                     WHERE status IN ('queued','running')
-                     AND (?1 IS NULL OR workspace = ?1)
-                     AND (?2 IS NULL OR created_at < ?2)
-                     ORDER BY created_at DESC"
-                ),
-                params![query.workspace, query.before],
-            )?;
+            let live_rows = Self::dynamic_rows(&connection, query, columns, limit)?;
             for row in live_rows {
                 let matches = match wanted_status {
                     None => true,
@@ -433,6 +435,38 @@ impl Store {
             tasks: candidates.into_iter().map(Row::into_task_row).collect(),
             next_before,
         })
+    }
+
+    fn dynamic_rows(
+        connection: &Connection,
+        query: &ListQuery,
+        columns: &str,
+        limit: i64,
+    ) -> Result<Vec<Row>> {
+        // Without a status predicate every dynamic row qualifies regardless of
+        // liveness. Status-filtered reads must still scan for stale owners.
+        let dynamic_limit = if query.status.is_none() {
+            limit + 1
+        } else {
+            -1
+        };
+        Self::query_rows(
+            connection,
+            &format!(
+                "SELECT {columns} FROM tasks
+                 WHERE status IN ('queued','running')
+                 AND (?1 IS NULL OR workspace = ?1)
+                 AND (?2 IS NULL OR created_at < ?2)
+                 AND (?3 IS NULL OR parent_session = ?3)
+                 ORDER BY created_at DESC LIMIT ?4"
+            ),
+            params![
+                query.workspace,
+                query.before,
+                query.parent_session,
+                dynamic_limit
+            ],
+        )
     }
 
     /// One row by its primary key.
@@ -463,12 +497,112 @@ impl TaskReader for Store {
         Store::list(self, query)
     }
 
+    fn list_observer(&self, query: &ListQuery) -> Result<ListResult> {
+        self.list_projected(query, OBSERVER_COLUMNS)
+    }
+
     fn get(&self, parent_session: &str, task_id: &str) -> Result<Option<TaskRow>> {
         Store::get(self, parent_session, task_id)
     }
 }
 
 impl TaskRepository for Store {}
+
+#[cfg(test)]
+mod observer_tests {
+    use super::*;
+
+    #[test]
+    fn observer_dynamic_sql_bounds_decoded_rows_and_omits_heavy_payloads() {
+        let store = Store::open_in_memory().unwrap();
+        let context = TaskContext {
+            parent_session: "parent".into(),
+            workspace: "workspace".into(),
+            ..Default::default()
+        };
+        for index in 0..240 {
+            store.upsert(
+                &context,
+                &Task {
+                    id: format!("t{index:03}"),
+                    status: crate::subagent::tasks::TaskStatus::Running,
+                    created_at: DateTime::from_timestamp(1_700_000_000 + index, 0),
+                    context: "context".repeat(4096),
+                    prompt: "prompt".repeat(4096),
+                    result: "result".repeat(4096),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(!store.is_disabled());
+        let query = ListQuery {
+            parent_session: Some("parent".into()),
+            workspace: Some("workspace".into()),
+            limit: Some(33),
+            ..Default::default()
+        };
+        {
+            let connection = store.connection.lock().unwrap();
+            let rows = Store::dynamic_rows(&connection, &query, OBSERVER_COLUMNS, 33).unwrap();
+            // Assert the SQL path, not just the post-truncate public count.
+            assert_eq!(rows.len(), 34);
+            assert_eq!(rows[0].task_id, "t239");
+            assert!(rows.iter().all(|row| row.prompt.is_empty()
+                && row.context.is_empty()
+                && row.result.is_empty()));
+            let filtered = Store::dynamic_rows(
+                &connection,
+                &ListQuery {
+                    status: Some("interrupted".into()),
+                    ..query.clone()
+                },
+                OBSERVER_COLUMNS,
+                33,
+            )
+            .unwrap();
+            assert_eq!(
+                filtered.len(),
+                240,
+                "status filters must retain stale-liveness scanning"
+            );
+        }
+        let page = store.list_observer(&query).unwrap();
+        assert_eq!(page.tasks.len(), 33);
+        assert!(!page.next_before.is_empty());
+        assert!(
+            page.tasks.iter().all(|row| row.prompt.is_empty()
+                && row.context.is_empty()
+                && row.result.is_empty())
+        );
+        assert!(
+            !store
+                .get("parent", "t239")
+                .unwrap()
+                .unwrap()
+                .prompt
+                .is_empty()
+        );
+        store.upsert(
+            &context,
+            &Task {
+                id: "terminal".into(),
+                status: crate::subagent::tasks::TaskStatus::Succeeded,
+                created_at: DateTime::from_timestamp(1_800_000_000, 0),
+                prompt: "terminal prompt".repeat(4096),
+                context: "terminal context".repeat(4096),
+                result: "terminal result".repeat(4096),
+                ..Default::default()
+            },
+        );
+        let page = store.list_observer(&query).unwrap();
+        assert_eq!(page.tasks[0].task_id, "terminal");
+        assert!(
+            page.tasks[0].prompt.is_empty()
+                && page.tasks[0].context.is_empty()
+                && page.tasks[0].result.is_empty()
+        );
+    }
+}
 
 #[cfg(test)]
 mod model_source_tests {

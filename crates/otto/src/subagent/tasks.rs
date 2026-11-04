@@ -51,6 +51,7 @@ pub const REPORT_BUDGET: usize = 10;
 struct Entry {
     task: Task,
     in_tool: bool,
+    observer: Option<observer::Projection>,
     cancel: Option<CancellationToken>,
     #[allow(clippy::type_complexity)]
     history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
@@ -299,6 +300,7 @@ impl Tasks {
                 Entry {
                     task,
                     in_tool: false,
+                    observer: Some(observer::Projection::default()),
                     cancel,
                     history,
                     inbox: Arc::new(Inbox::new(None)) as Arc<dyn Mailbox>,
@@ -307,6 +309,12 @@ impl Tasks {
                 },
             );
             state.order.push(id.clone());
+            if state.order.len() > observer::MAX_TASKS {
+                let evicted = state.order[state.order.len() - observer::MAX_TASKS - 1].clone();
+                if let Some(entry) = state.entries.get_mut(&evicted) {
+                    entry.observer = None;
+                }
+            }
             if !name.is_empty() {
                 state.names.insert(name, id);
             }
@@ -655,6 +663,7 @@ impl Tasks {
     }
 }
 
+pub(crate) mod observer;
 mod progress;
 mod task;
 mod task_names;

@@ -94,6 +94,7 @@ pub mod scheduled;
 mod session_delete;
 mod session_ops;
 mod steering;
+mod task_observer;
 pub mod tasks;
 mod trace;
 pub mod wake;
@@ -398,6 +399,7 @@ pub struct Controller {
     herdr: std::sync::RwLock<Option<Arc<crate::herdr::Reporter>>>,
     /// Parsed session files read for the trace.
     trace_cache: trace::TraceCache,
+    observer_cache: task_observer::ObserverCache,
 }
 
 /// Clears passive presentation routing when one logical user turn ends.
@@ -468,6 +470,7 @@ impl Controller {
             bell: std::sync::atomic::AtomicBool::new(false),
             herdr: std::sync::RwLock::new(None),
             trace_cache: trace::TraceCache::default(),
+            observer_cache: task_observer::ObserverCache::default(),
         };
         controller.notify_memory_state();
         controller

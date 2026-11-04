@@ -103,6 +103,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                             if replacement.get() != arguments.get() {
                                 let audit = serde_json::json!({
                                     "version": 1,
+                                    "tool": block.tool_name,
                                     "tool_call_id": block.tool_call_id,
                                     "operation_id": operation_id,
                                     "arguments": value
@@ -196,6 +197,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     if let Some(content) = response.content {
                         let audit = serde_json::json!({
                             "version": 1,
+                            "tool": block.tool_name,
                             "tool_call_id": block.tool_call_id,
                             "operation_id": operation_id,
                             "content": execution.result.persisted_text(),
@@ -385,9 +387,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Ok(());
         };
         if pending.is_empty()
-            || !pending
-                .iter()
-                .all(|call| self.options.hooks.is_none() && self.tools.replayable(&call.tool_name))
+            || !pending.iter().all(|call| {
+                self.options.hooks.is_none()
+                    && self.tools.replayable(&call.tool_name)
+                    && !call.arguments.as_ref().is_some_and(|arguments| {
+                        crate::safetext::contains_redaction_marker(arguments.get())
+                    })
+            })
         {
             return Ok(());
         }
@@ -455,10 +461,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             let appended = if notification.id.is_empty() {
                 self.append_message(message).await.map(|()| true)
             } else {
-                let recorded = message.clone();
+                let recorded = self.redactor.redact_record_message(&message);
                 let outcome = self
                     .session
-                    .append_input_if_absent(&notification.id, message)
+                    .append_input_if_absent(&notification.id, recorded.clone())
                     .await
                     .map(|outcome| outcome == crate::session::AppendOutcome::Appended);
                 if matches!(outcome, Ok(true)) {
@@ -573,10 +579,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             let appended = if steering.input_id.is_empty() {
                 self.append_message(message).await.map(|()| true)
             } else {
-                let recorded = message.clone();
+                let recorded = self.redactor.redact_record_message(&message);
                 let outcome = self
                     .session
-                    .append_input_if_absent(&steering.input_id, message)
+                    .append_input_if_absent(&steering.input_id, recorded.clone())
                     .await
                     .map(|outcome| outcome == crate::session::AppendOutcome::Appended);
                 if matches!(outcome, Ok(true)) {

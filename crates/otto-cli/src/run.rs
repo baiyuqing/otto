@@ -50,6 +50,7 @@ pub(crate) use otto::runtime::startup::{
 };
 
 mod attach;
+mod delete;
 mod process;
 mod session_setup;
 mod subcommands;

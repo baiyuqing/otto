@@ -64,6 +64,7 @@ pub(crate) enum Command {
     NewSession,
     Resume(String),
     Archive(String),
+    Delete(String),
     /// Fork the current session before the prompt with this entry id and
     /// switch to the fork.
     Fork(String),

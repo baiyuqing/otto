@@ -187,6 +187,9 @@ pub(super) async fn create_session(State(server): State<Arc<Server>>, body: Byte
         let path = workspace.as_deref().unwrap_or(&server.info.workspace);
         let id = command_session_id("create", path, request_id);
         let _gate = server.open_gate.lock().await;
+        if server.permanently_unavailable(&id) {
+            return not_found("session was permanently deleted");
+        }
         let existing = match server.lookup(&id) {
             Some(session) => Some(session),
             None => match server.factory.open(&id, Some(path)).await {
@@ -454,6 +457,9 @@ pub(super) async fn fork_session(
         let workspace = session.ctrl.info().workspace;
         let fork_id = command_session_id("fork", &workspace, request_id);
         let _gate = server.open_gate.lock().await;
+        if server.permanently_unavailable(&fork_id) {
+            return not_found("session was permanently deleted");
+        }
         let existing = match server.lookup(&fork_id) {
             Some(open) => Some(open),
             None => match server.factory.open(&fork_id, Some(&workspace)).await {
@@ -612,6 +618,7 @@ pub(super) async fn delete_session(
     State(server): State<Arc<Server>>,
     Path(id): Path<String>,
 ) -> Response {
+    let _gate = server.open_gate.lock().await;
     let Some(session) = server.remove(&id) else {
         return not_found("session not found");
     };

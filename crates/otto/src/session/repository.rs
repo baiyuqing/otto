@@ -33,6 +33,12 @@ pub trait SessionHandle: Session + Send + Sync {
         None
     }
 
+    /// Irreversibly removes this exclusively owned session and its sidecars.
+    /// Unsupported repositories fail closed.
+    fn permanent_delete(&self, _root: &Path, _workspace: &str) -> Result<(), String> {
+        Err("permanent session deletion is unavailable".into())
+    }
+
     fn archive(&self, _root: &Path, _workspace: &str) -> Result<ArchiveResult, String> {
         Err("session persistence is disabled".to_string())
     }
@@ -82,6 +88,18 @@ pub trait PreparedSession: Send + Sync {
     fn with_replayable(self: Box<Self>, replayable: fn(&str) -> bool) -> Box<dyn PreparedSession>;
     fn activate(self: Box<Self>) -> Result<(Arc<dyn SessionHandle>, Vec<Warning>), String>;
     fn close(self: Box<Self>) -> Result<(), String>;
+}
+
+/// A concrete session location for deletion target resolution.
+///
+/// Duplicate IDs and names are deliberately retained. Callers must resolve an
+/// ID before a name and reject ambiguous matches across the complete result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteCandidate {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub archived: bool,
 }
 
 /// Discovery, creation and preparation boundary for native session repositories.
@@ -146,12 +164,32 @@ pub trait SessionRepository: Send + Sync {
         current_reference: &str,
         limit: usize,
     ) -> Result<ListResult, String>;
+    /// Enumerates all active and archived sessions owned by this workspace.
+    /// No display limit, truncation or ID deduplication is applied. Any unreadable,
+    /// invalid or changed candidate fails the entire read; never delete from a
+    /// partial result. Deletion must still revalidate the selected path.
+    fn list_for_delete(
+        &self,
+        _root: &Path,
+        _workspace: &str,
+    ) -> Result<Vec<DeleteCandidate>, String> {
+        Err("complete session enumeration for deletion is unavailable".into())
+    }
     fn archive(
         &self,
         root: &Path,
         workspace: &str,
         reference: &str,
     ) -> Result<ArchiveResult, String>;
+    /// Irreversibly removes a listed session, refusing any active writer.
+    fn permanent_delete(
+        &self,
+        _root: &Path,
+        _workspace: &str,
+        _reference: &str,
+    ) -> Result<(), String> {
+        Err("permanent session deletion is unavailable".into())
+    }
     /// Writes a new session `new_id` beside `reference` whose history is
     /// `reference`'s up to the turn the user message `before` opens, or up to
     /// the last turn boundary without `before`. `reference` is only read.

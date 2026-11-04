@@ -13,7 +13,9 @@ pub use crate::storage::backends::posix::session::{
 };
 pub use fsops::workspace_key;
 pub use legacy::archive;
-pub use repository::{PreparedSession, SessionHandle, SessionRepository, WriterOwnership};
+pub use repository::{
+    DeleteCandidate, PreparedSession, SessionHandle, SessionRepository, WriterOwnership,
+};
 
 /// A session id is 32 lowercase hexadecimal characters. Checked before an id
 /// from a client becomes `<session directory>/<id>.jsonl`, so it cannot name

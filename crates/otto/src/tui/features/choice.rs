@@ -6,6 +6,8 @@ pub(crate) enum ChoiceKind {
     Resume,
     Fork,
     Archive,
+    Delete,
+    DeleteConfirm(String),
     Models,
     Thinking { model: Option<String> },
     Network,
@@ -69,6 +71,7 @@ impl Presenter for Choice {
             ChoiceKind::Resume => "resume",
             ChoiceKind::Fork => "fork",
             ChoiceKind::Archive => "archive",
+            ChoiceKind::Delete | ChoiceKind::DeleteConfirm(_) => "delete",
             ChoiceKind::Models => "model",
             ChoiceKind::Thinking { .. } => "thinking",
             ChoiceKind::Network | ChoiceKind::Allow(_) => "sandbox",
@@ -82,11 +85,16 @@ impl Presenter for Choice {
         }
     }
     fn view(&self) -> View {
-        let allow = matches!(self.kind, ChoiceKind::Allow(_));
+        let allow = matches!(
+            self.kind,
+            ChoiceKind::Allow(_) | ChoiceKind::DeleteConfirm(_)
+        );
         let title = match self.kind {
             ChoiceKind::Resume => "Resume session",
             ChoiceKind::Fork => "Fork session before a prompt",
             ChoiceKind::Archive => "Archive session",
+            ChoiceKind::Delete => "Delete session",
+            ChoiceKind::DeleteConfirm(_) => "Permanently delete session?",
             ChoiceKind::Models => "Switch model",
             ChoiceKind::Thinking { .. } => "Reasoning effort",
             ChoiceKind::Network => "Sandbox network",
@@ -102,7 +110,12 @@ impl Presenter for Choice {
                 },
                 Action {
                     id: "apply".into(),
-                    label: "Allow reading (persistent)".into(),
+                    label: if matches!(self.kind, ChoiceKind::DeleteConfirm(_)) {
+                        "Permanently delete (cannot undo)"
+                    } else {
+                        "Allow reading (persistent)"
+                    }
+                    .into(),
                     enabled: self.loaded,
                     ..Default::default()
                 },
@@ -112,6 +125,7 @@ impl Presenter for Choice {
                 id: "apply".into(),
                 label: match self.kind {
                     ChoiceKind::Archive => "Archive selected session",
+                    ChoiceKind::Delete => "Delete selected session…",
                     ChoiceKind::Fork => "Fork before this prompt",
                     _ => "Use selected",
                 }
@@ -135,6 +149,13 @@ impl Presenter for Choice {
             title: title.into(),
             rows: self.rows.clone(),
             document: match &self.kind {
+                ChoiceKind::DeleteConfirm(path) => format!(
+                    "Permanently delete session {} ({path}) and all transcripts and queued state? This cannot be undone.",
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ),
                 ChoiceKind::Allow(path) => format!(
                     "Permanently allow reading: {path}\nSaved to read_paths; commands remain sandboxed."
                 ),
@@ -161,10 +182,12 @@ impl Presenter for Choice {
             }
             _ => return Transition::Stay,
         };
-        if !matches!(self.kind, ChoiceKind::Allow(_))
-            && selected
-                .as_ref()
-                .is_none_or(|id| !self.rows.iter().any(|row| &row.id == id))
+        if !matches!(
+            self.kind,
+            ChoiceKind::Allow(_) | ChoiceKind::DeleteConfirm(_)
+        ) && selected
+            .as_ref()
+            .is_none_or(|id| !self.rows.iter().any(|row| &row.id == id))
         {
             return Transition::Stay;
         }
@@ -172,6 +195,13 @@ impl Presenter for Choice {
             ChoiceKind::Resume => Command::Resume(selected.unwrap_or_default()),
             ChoiceKind::Fork => Command::Fork(selected.unwrap_or_default()),
             ChoiceKind::Archive => Command::Archive(selected.unwrap_or_default()),
+            ChoiceKind::Delete => {
+                let mut confirm =
+                    Choice::new(ChoiceKind::DeleteConfirm(selected.unwrap_or_default()), "");
+                confirm.loaded = true;
+                return Transition::Push(Box::new(confirm));
+            }
+            ChoiceKind::DeleteConfirm(path) => Command::Delete(path.clone()),
             ChoiceKind::Models => {
                 let current = selected
                     .as_ref()
@@ -236,7 +266,9 @@ impl Presenter for Choice {
     }
     fn refresh(&self) -> Option<Request> {
         match self.kind {
-            ChoiceKind::Resume | ChoiceKind::Archive => Some(Request::Sessions),
+            ChoiceKind::Resume | ChoiceKind::Archive | ChoiceKind::Delete => {
+                Some(Request::Sessions)
+            }
             ChoiceKind::Fork => Some(Request::ForkPoints),
             ChoiceKind::Models => Some(Request::Models),
             ChoiceKind::Allow(ref path) => Some(Request::SandboxPath(path.clone())),

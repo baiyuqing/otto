@@ -54,7 +54,7 @@ impl Runner {
             Redactor::with_completeness(&redaction_values, self.config.redaction_complete);
         let user_message = Message {
             role: Role::User,
-            blocks: vec![Block::text(&redactor.redact_string(&prompt))],
+            blocks: vec![Block::text(redactor.redact_string(&prompt))],
             ..Message::default()
         };
         if let Err(error) = transcript.append(user_message).await {

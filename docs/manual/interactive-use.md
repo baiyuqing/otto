@@ -523,6 +523,38 @@ keeps its own storage root, separate from Pi:
 ~/.otto/sessions/<workspace-key>/<session-id>.jsonl
 ```
 
+### Session credential redaction
+
+New session content is protected by default with local, best-effort credential
+detection in addition to known-value secret replacement. This covers recorded
+user/model text, reasoning, tool arguments/results, compaction summaries and
+selected task/hook records in parent and child transcripts. Pending-input
+mailbox sidecars sanitize the disk copy while keeping the live queue intact.
+
+Recognized forms include common cloud access keys, OAuth client secrets,
+credential/password fields, bearer/basic authorization, private-key blocks,
+credential-bearing connection URLs and DSNs, English BIP-39 wallet phrases
+with valid checksums, and Bitcoin WIF keys. Public wallet addresses and arbitrary
+hashes are not automatically removed. Detection runs offline and adds no
+runtime dependency. See the [rules and provenance](../development/credential-detection.md).
+
+Only recording copies receive this extra scanning; live tool execution keeps
+its existing argument handling. Resuming restores the sanitized text, so
+removed credentials cannot be recovered from history. Calls whose recorded
+arguments contain redaction markers are not automatically replayed after a
+crash. Existing logs are left as they are.
+
+Session JSONL is still plaintext. This is not complete secret detection:
+unknown formats, encoded/transformed values, non-English wallet phrases,
+images/binary wallet files and business-confidential prose may remain.
+Approval content retains its [scanning exception](safety-and-tools.md).
+Streaming terminal/client output, command-output overflow files, reminder
+storage, task databases, generated reports and other tool-created files do not
+gain this additional recording scan. Treat those files and sessions as
+sensitive; `--no-session` keeps the transcript in memory only.
+
+### Session lifecycle
+
 A new session file is created lazily: starting Otto reserves a session, but the
 JSONL file is only written on the first user prompt. Starting and quitting
 without a prompt leaves no session file behind. The first records are written

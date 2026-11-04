@@ -24,7 +24,7 @@ impl Store {
 
         let mut entry = PiEntry::new("compaction", &entry_id, state.leaf_id.clone(), &timestamp);
         entry.compaction = Some(Box::new(PiCompaction {
-            summary: checkpoint.summary.clone(),
+            summary: recording::RECORD_REDACTOR.redact_record_text(&checkpoint.summary),
             first_kept_entry_id: Some(first_kept_entry_id),
             tokens_before: checkpoint.tokens_before,
             usage,
@@ -222,7 +222,9 @@ impl Store {
         }
         let state = self.lock()?;
         Ok(pending.iter().all(|call| {
-            replay_allowed(
+            !call.arguments.as_ref().is_some_and(|arguments| {
+                otto_core::safetext::contains_redaction_marker(arguments.get())
+            }) && replay_allowed(
                 state
                     .operation_ledger
                     .operation_for_tool_call(&call.tool_call_id),

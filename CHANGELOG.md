@@ -7,6 +7,16 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Sessions
+
+- New session content and pending-input mailbox files receive local credential
+  detection by default, covering common cloud keys, OAuth secrets, connection
+  credentials and selected wallet formats. Tool execution keeps its original
+  arguments; masked arguments are not automatically replayed after a crash.
+  Existing logs and the approval-content exception are preserved. See
+  [session credential redaction](docs/manual/interactive-use.md#session-credential-redaction)
+  for coverage and limits.
+
 ### Agents
 
 - Delegate tasks to installed Codex, Claude and Pi ACP adapters using the

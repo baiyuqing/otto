@@ -10,6 +10,8 @@ impl StoreState {
         message
             .validate()
             .map_err(|error| PiError::invalid(error.0))?;
+        let recorded = recording::RECORD_REDACTOR.redact_record_message(message);
+        let message = &recorded;
         state.ensure_file_fatal()?;
 
         let entry_id = state.new_entry_id("session")?;
@@ -50,7 +52,7 @@ impl StoreState {
         let mut entry = PiEntry::new("custom", &entry_id, self.leaf_id.clone(), &timestamp);
         entry.custom = Some(PiCustom {
             custom_type: custom_type.to_owned(),
-            data: Some(raw_value(data.to_owned())?),
+            data: Some(raw_value(recording::custom_data(custom_type, data))?),
         });
         self.append_entry(entry, entry_id)
     }

@@ -10,6 +10,9 @@
 - Never put credentials/auth headers in config, fixtures, sessions, logs, docs,
   tests or skills. Redact errors/examples. Connector logs must not expose chat
   messages or SDK payload/connection URLs containing secrets.
+- New session recording copies use best-effort credential detection in addition
+  to known-value redaction; live tool arguments stay separate. See the
+  [recording boundary and rule provenance](credential-detection.md).
 - File tools reject workspace/skill-directory escapes after canonical-path and
   symlink validation. Reuse pinned filesystem operations.
 - Bash goes through the native sandbox and starts in the selected workspace;

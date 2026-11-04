@@ -56,6 +56,7 @@ mod deferred;
 mod lifecycle;
 mod open;
 mod pi_file;
+mod recording;
 mod session_impl;
 mod state;
 
@@ -543,6 +544,9 @@ impl Store {
     /// [`Session::append_custom`](otto_core::session::Session::append_custom)
     /// override for `Store` calls this.
     pub fn append_custom_entry(&self, custom_type: &str, data: &str) -> Result<(), PiError> {
+        raw_value(data.to_owned())?;
+        let recorded = recording::custom_data(custom_type, data);
+        let data = recorded.as_str();
         if custom_type == OPERATION_CUSTOM_TYPE {
             return match decode_operation_fact(data)
                 .map_err(|error| PiError::invalid(error.to_string()))?

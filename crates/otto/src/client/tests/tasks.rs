@@ -42,6 +42,20 @@ async fn session_tasks_converts_wire_tasks_to_registry_tasks() {
     assert!(task.name.is_empty() && task.prompt.is_empty() && task.context.is_empty());
 }
 
+#[tokio::test]
+async fn observer_snapshot_uses_static_session_route_and_decodes_missing_and_truncation() {
+    let body = json!({ "tasks": [{ "row": sample_row(), "entries": [{
+        "kind": "assistant", "text": "streaming", "tool_name": "", "tool_args": "", "tool_output": "",
+        "tool_done": false, "tool_error": false
+    }], "missing": false }], "truncated": true }).to_string();
+    let (client, seen, _dir) = stub(move |_, _| json_body(StatusCode::OK, &body));
+    let snapshot = client.observer_snapshot("s1").await.expect("observer");
+    assert_eq!(request(&seen, 0).0, "GET /v1/sessions/s1/tasks/observer");
+    assert_eq!(snapshot.tasks[0].entries[0].text, "streaming");
+    assert!(!snapshot.tasks[0].missing);
+    assert!(snapshot.truncated);
+}
+
 fn sample_row() -> TaskRow {
     TaskRow {
         parent_session: "s1".into(),
@@ -63,10 +77,12 @@ async fn tasks_sends_only_the_query_fields_that_are_set() {
     let body = json!({ "tasks": [row], "next_before": "2026-09-30T00:00:00Z" }).to_string();
     let (client, seen, _dir) = stub(move |_, _| json_body(StatusCode::OK, &body));
     let query = ListQuery {
+        parent_session: Some("parent session".into()),
         status: Some("running".into()),
         workspace: None,
         limit: Some(5),
         before: Some("2026-10-01T00:00:00Z".into()),
+        ..Default::default()
     };
     let result = client.tasks(&query).await.unwrap();
     assert_eq!(result.tasks, vec![sample_row()]);
@@ -82,6 +98,7 @@ async fn tasks_sends_only_the_query_fields_that_are_set() {
         [
             "before=2026-10-01T00%3A00%3A00Z",
             "limit=5",
+            "parent_session=parent+session",
             "status=running"
         ]
     );

@@ -14,6 +14,7 @@ fn sample_config_parses_without_diagnostics() {
     assert!(file.diagnostics.is_empty(), "{:?}", file.diagnostics);
     assert_eq!(file.default_model, "chatgpt/gpt-5.6-sol");
     assert_eq!(file.providers["local"].type_, "openai-compatible");
+    assert_eq!(file.ui.observer, super::ui::ObserverBindings::default());
 }
 
 #[test]

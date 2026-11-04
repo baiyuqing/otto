@@ -448,7 +448,13 @@ async fn the_idle_loop_wakes_only_when_a_notification_is_pending() {
     };
     let controller = Arc::new(controller);
     let (result, ()) = tokio::join!(
-        run_app(&mut terminal, &controller, &cancel, &mut keys),
+        run_app(
+            &mut terminal,
+            &controller,
+            &cancel,
+            &mut keys,
+            Default::default()
+        ),
         driver
     );
 
@@ -517,7 +523,13 @@ async fn saved_queued_prompts_run_in_order_when_the_tui_opens_the_session() {
         cancel.cancel();
     };
     let (_, ()) = tokio::join!(
-        run_app(&mut terminal, &controller, &cancel, &mut keys),
+        run_app(
+            &mut terminal,
+            &controller,
+            &cancel,
+            &mut keys,
+            Default::default()
+        ),
         driver
     );
 

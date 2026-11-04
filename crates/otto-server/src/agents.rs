@@ -19,6 +19,7 @@ use otto::subagent::record::{self, TaskRow};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ListFilter {
+    parent_session: Option<String>,
     status: Option<String>,
     workspace: Option<String>,
     limit: Option<u32>,
@@ -103,10 +104,12 @@ fn task_history(row: &TaskRow) -> Option<Vec<Message>> {
 
 pub async fn list(State(server): State<Arc<Server>>, Query(filter): Query<ListFilter>) -> Response {
     let query = record::ListQuery {
+        parent_session: filter.parent_session,
         status: filter.status,
         workspace: filter.workspace,
         limit: filter.limit,
         before: filter.before,
+        ..Default::default()
     };
     match server.factory.tasks_list(&query) {
         Ok(result) => {

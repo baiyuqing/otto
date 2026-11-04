@@ -141,8 +141,13 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
 
     let mut server = start_serve(home.path(), workspace.path(), &socket);
 
+    let client_config = home.path().join("observer-client.toml");
+    std::fs::write(&client_config, "[ui.observer]\ntoggle = \"F8\"\n")
+        .expect("client-local observer configuration");
     let mut attach = otto(home.path());
     attach
+        .arg("--config")
+        .arg(&client_config)
         .args(["--attach", "--socket"])
         .arg(&socket)
         .arg("--cwd")
@@ -151,6 +156,21 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
 
     wait_for_screen_text(&shared, "└");
     wait_for_raw_bytes(&shared, b"\x1b[?1049h");
+
+    master
+        .write_all(b"attach-draft")
+        .expect("type client draft");
+    wait_for_screen_text(&shared, "attach-draft");
+    master
+        .write_all(b"\x1b[19~")
+        .expect("configured F8 observer key");
+    wait_for_screen_text(&shared, "No sub-agents");
+    wait_for_screen_text_gone(&shared, "attach-draft");
+    master
+        .write_all(b"\x1b[19~")
+        .expect("return to attached composer");
+    wait_for_screen_text(&shared, "attach-draft");
+    master.write_all(b"\x15").expect("clear test draft");
 
     // No local echo: the `user_message` frame from serve puts the prompt on
     // screen, followed by the streamed reply.

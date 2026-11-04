@@ -638,6 +638,7 @@ impl ChildProgress {
     }
 
     fn handle(&mut self, event: Event) {
+        self.tasks.observe(&self.task_id, &event);
         match event {
             Event::TextDelta { text } => self.text.push_str(&text),
             Event::ProviderRetry {

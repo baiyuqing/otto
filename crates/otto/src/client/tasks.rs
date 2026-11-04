@@ -3,6 +3,20 @@
 use super::*;
 
 impl Client {
+    /// Bounded cumulative read-only child output for one admitted session.
+    pub async fn observer_snapshot(
+        &self,
+        session: &str,
+    ) -> Result<crate::app::tasks::ObserverSnapshot, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session}/tasks/observer")),
+            )
+            .await?;
+        decode(response).await
+    }
+
     /// `GET /v1/sessions/{id}/tasks`: the open session's sub-agent tasks.
     /// `prompt` and `context` are empty; the wire omits them.
     pub async fn session_tasks(
@@ -31,6 +45,9 @@ impl Client {
     /// are sent.
     pub async fn tasks(&self, query: &ListQuery) -> Result<ListResult, Error> {
         let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(parent_session) = &query.parent_session {
+            params.push(("parent_session", parent_session.clone()));
+        }
         if let Some(status) = &query.status {
             params.push(("status", status.clone()));
         }

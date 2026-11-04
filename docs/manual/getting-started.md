@@ -263,6 +263,10 @@ configuration. A shadowed value stays shadowed: inspect `explain` after edits.
 Other management commands write their user source. Restart affected runtimes
 for ordinary configuration changes.
 
+The terminal's sub-agent observer shortcuts are configured under
+`[ui.observer]`; see [observer keys and examples](interactive-use.md#sub-agent-observer).
+They are client-local user/managed preferences, also when using `--attach`.
+
 ### Project executable trust
 
 Workspace admission (`otto trust DIR`) does **not** authorize project MCP,

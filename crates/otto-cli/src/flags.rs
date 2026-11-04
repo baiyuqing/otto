@@ -45,6 +45,9 @@ pub struct CliOptions {
     pub continue_last: bool,
     pub resume_path: String,
     pub archive_path: String,
+    /// Exact session ID or name for the top-level permanent deletion command.
+    pub delete_target: Option<String>,
+    pub delete_force: bool,
     pub socket: String,
     pub listen: String,
     pub acp_listen: String,
@@ -112,6 +115,29 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
         cwd: ".".to_string(),
         ..CliOptions::default()
     };
+    if args.first().is_some_and(|argument| argument == "delete") {
+        if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
+            print_usage(stdout);
+            return Ok(Parsed::Help);
+        }
+        let mut target = None;
+        let mut force = false;
+        for argument in &args[1..] {
+            if argument == "--force" && !force {
+                force = true;
+            } else if !argument.starts_with('-') && !argument.is_empty() && target.is_none() {
+                target = Some(argument.clone());
+            } else {
+                return Err(reject("otto: usage: otto delete <SESSION> [--force]"));
+            }
+        }
+        if target.is_none() {
+            return Err(reject("otto: usage: otto delete <SESSION> [--force]"));
+        }
+        options.delete_target = target;
+        options.delete_force = force;
+        return Ok(Parsed::Options(Box::new(options)));
+    }
     let mut rest = args;
     if rest.first().is_some_and(|first| first == "serve") {
         options.serve = true;
@@ -310,6 +336,8 @@ const USAGE: &str = r"Usage: otto [options]
        otto acp [options]      Agent Client Protocol server on stdin/stdout
        otto acp --attach [--socket PATH]   relay Agent Client Protocol to a running otto serve
        otto --attach [--socket PATH] [--resume ID | --continue]   terminal UI on a running otto serve
+       otto delete <SESSION> [--force]   permanently delete by exact ID or unique exact name
+                                          (active and archived; --force requires an ID)
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto storage transfer <source-home> <destination-root> <migration-id>

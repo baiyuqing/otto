@@ -2,6 +2,8 @@
 
 mod fork;
 mod list;
+mod list_for_delete;
+mod permanent_delete;
 pub(crate) mod prepared;
 pub(super) mod store;
 
@@ -64,6 +66,10 @@ impl SessionHandle for Store {
     fn close(&self) -> Result<(), String> {
         Store::close(self).map_err(|error| error.to_string())
     }
+    fn permanent_delete(&self, root: &Path, workspace: &str) -> Result<(), String> {
+        self.delete_permanently(root, workspace)
+            .map_err(|error| error.to_string())
+    }
     fn archive(&self, root: &Path, workspace: &str) -> Result<ArchiveResult, String> {
         Store::archive(self, root, workspace).map_err(|error| error.to_string())
     }
@@ -110,6 +116,30 @@ impl PosixSessionRepository {
 }
 
 impl SessionRepository for PosixSessionRepository {
+    fn list_for_delete(
+        &self,
+        root: &Path,
+        workspace: &str,
+    ) -> Result<Vec<crate::session::DeleteCandidate>, String> {
+        list_for_delete::list_for_delete(root, workspace).map_err(|error| error.to_string())
+    }
+
+    fn permanent_delete(
+        &self,
+        root: &Path,
+        workspace: &str,
+        reference: &str,
+    ) -> Result<(), String> {
+        Prepared::prepare_delete(
+            root,
+            workspace,
+            Path::new(reference),
+            self.driver.clone(),
+            self.keeper.clone(),
+        )
+        .and_then(|prepared| prepared.delete_permanently(root, workspace))
+        .map_err(|error| error.to_string())
+    }
     fn custom_data_for(
         &self,
         root: &Path,

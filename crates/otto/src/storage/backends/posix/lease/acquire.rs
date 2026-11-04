@@ -18,6 +18,23 @@ pub(crate) fn acquire_with(
     clock: &dyn Clock,
     keeper: &Arc<Keeper>,
 ) -> Result<(Arc<Lease>, Acquired), AcquireError> {
+    acquire_with_mode(session_path, clock, keeper, false)
+}
+
+/// Deletion never waits for, fences or takes over an unreleased holder.
+pub(crate) fn acquire_for_delete(
+    session_path: &Path,
+    keeper: &Arc<Keeper>,
+) -> Result<(Arc<Lease>, Acquired), AcquireError> {
+    acquire_with_mode(session_path, &RealClock, keeper, true)
+}
+
+fn acquire_with_mode(
+    session_path: &Path,
+    clock: &dyn Clock,
+    keeper: &Arc<Keeper>,
+    deleting: bool,
+) -> Result<(Arc<Lease>, Acquired), AcquireError> {
     let dir_path = lease_dir(session_path);
     let dir = fsops::open_dir_no_follow(&dir_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -64,6 +81,13 @@ pub(crate) fn acquire_with(
         pid: h.pid,
     });
 
+    if should_wait && deleting {
+        return Err(AcquireError::Held(prior_holder.unwrap_or(Holder {
+            epoch: highest,
+            host: "unknown".into(),
+            pid: 0,
+        })));
+    }
     if should_wait {
         let initial = read_heartbeat_bytes_lenient(&dir)?;
         let deadline = clock.now() + (l * 7 / 6);

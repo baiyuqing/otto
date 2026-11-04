@@ -20,6 +20,35 @@ fn rejection(args: &[&str]) -> String {
 }
 
 #[test]
+fn delete_command_has_a_separate_strict_grammar() {
+    let parsed = options(&["delete", "session-id", "--force"]);
+    assert_eq!(parsed.delete_target.as_deref(), Some("session-id"));
+    assert!(parsed.delete_force);
+    assert_eq!(
+        options(&["delete", "exact name"]).delete_target.as_deref(),
+        Some("exact name")
+    );
+    assert!(options(&["delete", "--force", "session-id"]).delete_force);
+    for args in [
+        vec!["delete"],
+        vec!["delete", "--force"],
+        vec!["delete", ""],
+        vec!["delete", "one", "two"],
+        vec!["delete", "one", "--force", "--force"],
+        vec!["delete", "one", "--archive", "path"],
+        vec!["delete", "one", "--prompt", "yes"],
+    ] {
+        assert!(rejection(&args).contains("otto delete <SESSION> [--force]"));
+    }
+    assert!(matches!(
+        parse(&["--delete", "path"]),
+        Err(ParseFailure::Unsafe)
+    ));
+    assert!(matches!(parse(&["--force"]), Err(ParseFailure::Unsafe)));
+    assert!(matches!(parse(&["delete", "--help"]), Ok(Parsed::Help)));
+}
+
+#[test]
 fn acp_tcp_listener_requires_serve() {
     let got = options(&["serve", "--acp-listen", "127.0.0.1:9001"]);
     assert_eq!(got.acp_listen, "127.0.0.1:9001");

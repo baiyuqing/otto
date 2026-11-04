@@ -9,8 +9,10 @@ pub(super) async fn run_loop<B: TerminalBackend>(
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
     deliveries: &mut mpsc::Receiver<String>,
+    bindings: super::super::observer::bindings::Bindings,
 ) -> Result<(), ReplError> {
     let mut app = App::new(&Backend::Attach(remote));
+    app.observer.bindings = bindings;
     app.enable_program_status();
     app.driver = Some(super::super::backend::Driver::new(
         super::super::backend::Connection::Attach(Arc::clone(remote)),
@@ -145,6 +147,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                 ui.app.poll_steering();
             }
             Ev::Tick => {
+                ui.app.poll_observer();
                 // Idle frames need no redraw unless something on screen moves.
                 if !render::needs_animation(&ui.app) {
                     continue;

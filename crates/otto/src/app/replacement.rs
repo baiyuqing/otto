@@ -157,6 +157,7 @@ impl Controller {
             bell: std::sync::atomic::AtomicBool::new(false),
             herdr: std::sync::RwLock::new(None),
             trace_cache: trace::TraceCache::default(),
+            observer_cache: task_observer::ObserverCache::default(),
         };
         controller.notify_memory_state();
         controller

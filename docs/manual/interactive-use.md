@@ -172,6 +172,66 @@ capability.
   are counted separately.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
+### Sub-agent observer
+
+By default, `F6` toggles the read-only **Sub-agents** page and `Esc` returns
+to the main conversation. On a Mac, a function key may require `fn`; Control-arrow
+shortcuts are not bound by default because macOS uses them to switch desktops.
+The main composer draft, cursor and conversation scroll position are preserved;
+switching pages does not pause the parent or its children.
+
+Customize these actions in your user configuration (including a file selected
+with `--config`):
+
+```toml
+[ui.observer]
+toggle = "Alt+o"
+open = ""             # empty disables this binding
+back = "Esc"
+```
+
+For the original directional layout, set `open = "Ctrl+Left"` and
+`back = "Ctrl+Right"` after resolving the operating-system shortcut conflict.
+Omitted settings retain their defaults; binding names are case-insensitive.
+Use function keys (`F1`–`F12`) or supported modified keys such as `Alt+o` and
+`Ctrl+Left`. Terminal control aliases and reserved application controls (such as
+`Ctrl+C` and `Ctrl+End`) cannot replace observer bindings. Keep at least one
+entry and one return action enabled. Invalid or conflicting bindings produce
+an error before raw mode starts. The help and observer header show the configured keys. These are local client
+preferences, including for `--attach`: project configuration cannot replace
+them, and editing them requires restarting the TUI.
+
+Use `Tab` / `Shift+Tab` to focus the next/previous task; when the terminal is
+short, focus moves between pages automatically. `PgUp` / `PgDn` scroll the
+focused pane, `Home` shows its oldest retained output and `End` resumes following
+new output. Mouse wheel scrolling and clicking a visible pane change its scroll
+or focus without editing the main conversation.
+
+Each child has a horizontally separated, vertically stacked pane with its task
+name, status, visible messages and tool activity. Completed children remain
+available. The observer has no composer: typing, Enter and pasted text cannot
+submit prompts or steer a child. Approval panels still use the existing
+approval flow and take precedence over the observer; observing a task never
+grants permission or changes its sandbox.
+
+The observer uses bounded, redacted runtime snapshots rather than model-driven
+status queries. Native child text and tool activity can update before the child
+finishes; internal reasoning is omitted. Long transcripts retain a bounded recent
+tail, and the page explicitly indicates when only recent tasks are shown; use
+`/agents` on the main page to inspect older tasks. The attached TUI uses the same
+server snapshot contract. Stored child history is used when reopening a parent
+session; missing history and disconnected/query failures are shown explicitly rather than
+as an empty successful transcript. External ACP adapters currently show reported
+tool titles/status and completed reply text, not streaming reply text or full
+tool output; their panes explicitly identify this limitation.
+
+No feature flag, additional credentials or permissions are required. Build and
+install through the normal `make install` path. After upgrading, stop and restart
+Otto, including `otto serve` for attached sessions, so both ends understand the
+observer endpoint. If an attached query fails, check that serve is reachable and
+up to date; the last successful pane contents are not evidence that a child is
+still running.
+
 ### TUI keys
 
 | Key | Action |
@@ -182,6 +242,7 @@ capability.
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle a tool call between its folded summary and full arguments/output |
+| `F6` (configurable) | Toggle the read-only sub-agent observer; `[ui.observer]` customizes toggle/open/back bindings |
 | Left-button drag | Select visible text and copy it to the clipboard on release |
 | Mouse wheel, `PgUp` / `PgDn` | Navigate the focused screen control, or scroll the transcript |
 | `Home` / `End` | Move the cursor to the start or end of the composer |

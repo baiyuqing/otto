@@ -174,7 +174,9 @@ pub async fn run(
         .shared
         .parent_tool_factory
         .install(Arc::new(DeliveryToolFactory::new(Arc::clone(&delivery))));
-    let workflows =
+    let workflows = if runtime.model.is_empty() {
+        None
+    } else {
         match super::workflow::build_controller(Arc::clone(&builder), &runtime, stderr).await {
             Ok(controller) => Some(controller),
             Err(error) => {
@@ -184,7 +186,8 @@ pub async fn run(
                 }
                 None
             }
-        };
+        }
+    };
     let info = builder.runtime_info(&runtime);
     let models = otto::config::configured_model_selectors(&builder.config);
     let workspace_path = builder.workspace_path.clone();

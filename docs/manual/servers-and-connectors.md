@@ -39,6 +39,32 @@ single request, ends the whole `otto serve` process with SIGABRT (exit status
 started. Run a long-lived server under a supervisor that restarts it, such as
 [`scripts/otto-tcp.sh run`](#the-acp-tcp-stack-script). Debug and test builds unwind.
 
+### First-run configuration
+
+After installing Otto with `make install` (see [installation](../../README.md#install-from-source)),
+clients may launch `otto serve --listen 127.0.0.1:0 --cwd /absolute/workspace`
+with an empty HOME and no selected model. The normal authenticated server is
+available for setup; no provider is selected implicitly. Read
+`GET /v1/config/providers` for provider tables and their configured models.
+`GET /v1/config/models?provider=NAME` queries that provider's live catalog and
+still requires its connection and credentials; ChatGPT does not support catalog
+listing. API keys remain environment variables, never config values.
+
+Review changes with `POST /v1/config/changes`, then confirm each returned `id`
+with `POST /v1/config/changes/{id}`. Configure a provider, model and default
+model. Confirmation returns `saved_restart_required`: stop and restart the
+server with the same HOME/workspace and the required API-key environment (or
+use `otto login` for ChatGPT). Until that restart, session creation returns
+HTTP `503` with error code `configuration_required` and setup instructions.
+`otto setup` followed by restart is also supported. Other frontends still
+require a model at startup. Existing listener authentication and workspace
+permissions also apply during setup; do not expose an unauthenticated proxy.
+
+To verify setup after restarting, create a session with `POST /v1/sessions`;
+missing credentials or an invalid configured model must be corrected rather
+than silently falling back. Upgrades use the same stop/reinstall/restart
+procedure described in the installation guide.
+
 ### Listener
 
 With both `--socket` and `--listen` on the command line, Otto opens both

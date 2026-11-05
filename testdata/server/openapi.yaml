@@ -1497,6 +1497,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: configuration_required when no model is configured; configure a provider and default model, then restart the server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: Internal error
           content:

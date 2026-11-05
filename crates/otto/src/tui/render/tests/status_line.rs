@@ -2,6 +2,104 @@
 
 use super::*;
 
+#[tokio::test]
+async fn observer_hint_uses_the_configured_entry_key_not_the_back_key() {
+    use crate::tui::observer::bindings::Bindings;
+    use otto_core::config::ui::ObserverBindings;
+
+    let (_workspace, _sessions, mut app) = app_fixture().await;
+    app.tasks = vec![running_task("t1", "review", "check the diff")];
+    for (toggle, open, back, expected) in [
+        ("F6", "", "Esc", "F6"),
+        (" Alt+o ", "F7", "Esc", "Alt+o"),
+        ("", "Ctrl+Left", "Ctrl+Right", "Ctrl+Left"),
+    ] {
+        app.observer.bindings = Bindings::parse(&ObserverBindings {
+            toggle: toggle.into(),
+            open: open.into(),
+            back: back.into(),
+        })
+        .expect("valid observer bindings");
+        let footer = footer_text(&app);
+        assert!(
+            footer.starts_with(&format!("Press {expected} to view sub-agent observer | ")),
+            "{footer}"
+        );
+        assert!(!footer.contains(back), "{footer}");
+    }
+}
+
+#[tokio::test]
+async fn observer_hint_follows_task_lifecycle_and_is_absent_in_the_observer() {
+    let (_workspace, _sessions, mut app) = app_fixture().await;
+    assert!(!footer_text(&app).contains("sub-agent observer"));
+    for status in [TaskStatus::Queued, TaskStatus::Running] {
+        app.tasks = vec![Task {
+            status,
+            ..Task::default()
+        }];
+        assert!(footer_text(&app).contains("Press F6 to view sub-agent observer"));
+    }
+    app.observer.active = true;
+    assert!(!footer_text(&app).contains("sub-agent observer"));
+    assert!(!rendered(&app, 160, 20).contains("Press F6 to view sub-agent observer"));
+    app.observer.active = false;
+    app.tasks = vec![
+        Task {
+            status: TaskStatus::Succeeded,
+            ..Task::default()
+        },
+        Task {
+            status: TaskStatus::Failed,
+            ..Task::default()
+        },
+        Task {
+            status: TaskStatus::Canceled,
+            ..Task::default()
+        },
+    ];
+    assert!(!footer_text(&app).contains("sub-agent observer"));
+}
+
+#[tokio::test]
+async fn many_tasks_show_one_footer_hint_without_transcript_messages() {
+    let (_workspace, _sessions, mut app) = app_fixture().await;
+    app.tasks = (0..5)
+        .map(|index| running_task(&format!("t{index}"), "review", "check the diff"))
+        .collect();
+    let entries_before = app.entries.len();
+    for _ in 0..2 {
+        let rows = screen_rows(&app, 180, 20);
+        let hint = "Press F6 to view sub-agent observer";
+        assert_eq!(rows.join("\n").matches(hint).count(), 1);
+        assert!(rows.last().expect("footer").contains(hint));
+        assert!(!above_status_line(&rows).contains(hint));
+    }
+    assert_eq!(app.entries.len(), entries_before);
+}
+
+#[tokio::test]
+async fn observer_hint_keeps_status_first_and_clips_without_adding_rows() {
+    let (_workspace, _sessions, mut app) = app_fixture().await;
+    app.tasks = vec![running_task("t1", "review", "check the diff")];
+    app.status = Some("Disconnected".into());
+    let footer = footer_text(&app);
+    assert!(footer.starts_with("Disconnected | Press F6 to view sub-agent observer | "));
+    assert!(footer.contains("gpt-alpha"));
+    assert!(footer.contains("tokens 0/0"));
+    for width in [MIN_TERMINAL_WIDTH, 80, 180] {
+        let rows = screen_rows(&app, width, MIN_TERMINAL_HEIGHT);
+        assert_eq!(rows.len(), MIN_TERMINAL_HEIGHT as usize);
+        let status_row = rows.last().expect("footer");
+        assert!(
+            status_row.starts_with("Disconnected | Press F6"),
+            "{status_row}"
+        );
+        assert!(rows[rows.len() - 2].contains("t1"), "{rows:?}");
+        assert!(rows[rows.len() - 3].contains('─'), "{rows:?}");
+    }
+}
+
 /// The model id is the longest field of the footer's fixed prefix, so the
 /// token and cache totals used to sit past the right edge of any terminal
 /// that a long id like `deepseek-v4-flash` did not leave room on, where

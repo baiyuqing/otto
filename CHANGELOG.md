@@ -38,7 +38,9 @@ commit ledger; Git and release tags retain the full history. See the
 - Observe sub-agent progress in a read-only TUI page with stacked task panes;
   `F6` toggles it and `Esc` returns by default; `[ui.observer]` customizes the
   toggle/open/back bindings without occupying macOS Control-arrow shortcuts.
-  The main draft is preserved. Local and attached sessions share bounded live
+  While children are queued/running, one main-footer hint advertises the configured
+  entry key (`Press F6 to view sub-agent observer` by default); status notices stay
+  first. The main draft is preserved. Local and attached sessions share bounded live
   snapshots, with stored child history after restart. Upgrade and restart both
   Otto and `otto serve` before using the attached observer. See
   [the observer guide](docs/manual/interactive-use.md#sub-agent-observer).

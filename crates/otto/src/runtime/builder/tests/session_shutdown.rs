@@ -525,6 +525,7 @@ async fn closing_a_session_cancels_the_owned_startup_hook_after_build_waiter_dro
             ],
             timeout: "10s".into(),
             matcher: Vec::new(),
+            lua: None,
         });
     let session = SharedSession::memory(Header::default());
     let policy = runtime();

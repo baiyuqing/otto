@@ -113,7 +113,11 @@ mod tests {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hook {
+    #[serde(default)]
     pub command: Vec<String>,
+    /// Package-relative UTF-8 Lua source; mutually exclusive with command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lua: Option<String>,
     #[serde(default)]
     pub timeout: String,
     #[serde(default)]
@@ -166,7 +170,11 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(default)]
     pub command: Vec<String>,
+    /// Package-relative UTF-8 Lua source; mutually exclusive with command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lua: Option<String>,
     #[serde(default)]
     pub timeout: String,
 }

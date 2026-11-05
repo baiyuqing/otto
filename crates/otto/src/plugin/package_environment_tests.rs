@@ -204,6 +204,7 @@ async fn package_commands_receive_plugin_root_and_data_but_standalone_hooks_do_n
             command: vec!["/bin/sh".into(), "-c".into(), LOCATIONS_SCRIPT.into()],
             timeout: "5s".into(),
             matcher: Vec::new(),
+            lua: None,
         }],
         ..Default::default()
     };

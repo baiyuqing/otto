@@ -81,9 +81,8 @@ const HELP: &str = concat!(
     "/new      start a new session\n",
     "/clear    start a new session\n",
     "/rename <name> rename current session\n",
-    "/delete   permanently delete current session; /delete confirm is irreversible
-",
     "/archive  archive current session and start a new one\n",
+    "/delete   permanently delete current session; /delete confirm is irreversible\n",
     "/session  show session details\n",
     "\n",
     "Exit\n",

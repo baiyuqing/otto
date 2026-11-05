@@ -109,7 +109,6 @@ pub async fn list(State(server): State<Arc<Server>>, Query(filter): Query<ListFi
         workspace: filter.workspace,
         limit: filter.limit,
         before: filter.before,
-        ..Default::default()
     };
     match server.factory.tasks_list(&query) {
         Ok(result) => {

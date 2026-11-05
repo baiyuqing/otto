@@ -118,7 +118,7 @@ fn list_for_delete_fails_closed_for_unreadable_files_and_directories() {
             }
         };
         let original = fs::metadata(&denied).unwrap().permissions();
-        fs::set_permissions(&denied, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o0)).unwrap();
         let result = discover(&root, &workspace);
         fs::set_permissions(&denied, original).unwrap();
         assert!(result.is_err(), "unreadable {target} must fail closed");

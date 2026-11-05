@@ -82,7 +82,6 @@ async fn tasks_sends_only_the_query_fields_that_are_set() {
         workspace: None,
         limit: Some(5),
         before: Some("2026-10-01T00:00:00Z".into()),
-        ..Default::default()
     };
     let result = client.tasks(&query).await.unwrap();
     assert_eq!(result.tasks, vec![sample_row()]);

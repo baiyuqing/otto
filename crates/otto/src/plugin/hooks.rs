@@ -96,7 +96,7 @@ pub(super) fn validate_components(name: &str, components: &Components) -> Result
     }
     for (event, hooks) in components.hooks.entries() {
         for hook in hooks {
-            validate_command(&hook.command, &hook.timeout)?;
+            lua_handler::validate(&hook.command, hook.lua.as_deref(), &hook.timeout)?;
             validate_matcher(event, hook)?;
         }
     }
@@ -115,7 +115,7 @@ pub(super) fn validate_components(name: &str, components: &Components) -> Result
         {
             return Err("invalid or duplicate extension tool".into());
         }
-        validate_command(&tool.command, &tool.timeout)?;
+        lua_handler::validate(&tool.command, tool.lua.as_deref(), &tool.timeout)?;
         schema(&tool.input_schema, None)?;
     }
     if let Some(memory) = &components.memory {
@@ -178,6 +178,8 @@ struct Invocation<'a> {
 
 #[derive(Clone)]
 pub struct Runtime {
+    #[cfg(test)]
+    lua_observer: Arc<std::sync::Mutex<Option<Arc<lua_handler_tests::Observer>>>>,
     packages: Vec<Package>,
     hooks: Vec<HookEntry>,
     execution: Execution,
@@ -221,6 +223,11 @@ impl Runtime {
         let mut hooks = Vec::new();
         for (event, entries) in configured.entries() {
             for hook in entries {
+                if hook.lua.is_some() {
+                    return Err(
+                        "Lua hooks require an installed package, not standalone TOML".into(),
+                    );
+                }
                 validate_command(&hook.command, &hook.timeout)?;
                 validate_matcher(event, hook)?;
                 hooks.push(HookEntry::Otto {
@@ -268,6 +275,8 @@ impl Runtime {
             .map(|path| fingerprint_file(&execution.workspace, &path).map(|digest| (path, digest)))
             .collect::<Result<_, _>>()?;
         Ok(Arc::new(Self {
+            #[cfg(test)]
+            lua_observer: Default::default(),
             sources,
             packages,
             hooks,
@@ -322,12 +331,17 @@ impl Runtime {
     async fn command(
         &self,
         command: &[String],
+        lua: Option<&str>,
         timeout: &str,
         package: Option<&Package>,
         data: Value,
         control: &dyn OperationControl,
         guard: Option<&Arc<SessionGuard>>,
     ) -> Result<String, CommandError> {
+        lua_handler::validate(command, lua, timeout).map_err(CommandError::from)?;
+        if let Some(path) = lua {
+            return self.lua(path, timeout, package, data, control, guard).await;
+        }
         let event = data.get("event").and_then(Value::as_str).unwrap_or("tool");
         let timeout = validate_command(command, timeout).map_err(CommandError::from)?;
         let mut argv = command.to_vec();
@@ -599,9 +613,13 @@ impl crate::tool::Tool for CommandTool {
             version: self.package.installed.digest.clone(),
             title: format!("Run {}", self.definition().name),
             details:
-                json!({"tool":self.definition().name,"arguments":value,"command":self.spec.command})
+                json!({"tool":self.definition().name,"arguments":value,"command":self.spec.command,"lua":self.spec.lua})
                     .to_string(),
-            reason: "Execute a plugin command in the current sandbox".into(),
+            reason: if self.spec.lua.is_some() {
+                "Run a pure-computation Lua plugin handler (no host access)".into()
+            } else {
+                "Execute a plugin command in the current sandbox".into()
+            },
             persistent: false,
         }))
     }
@@ -656,6 +674,7 @@ impl CommandTool {
             .runtime
             .command(
                 &self.spec.command,
+                self.spec.lua.as_deref(),
                 &self.spec.timeout,
                 Some(&self.package),
                 json!({
@@ -715,6 +734,8 @@ fn schema(spec: &Value, value: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
+mod lua_engine;
+pub(crate) mod lua_handler;
 mod memory_source;
 pub use memory_source::PluginMemoryService;
 
@@ -726,5 +747,7 @@ mod claude_binding_tests;
 mod memory_source_tests;
 pub use binding::SessionBinding;
 
+#[cfg(test)]
+mod lua_handler_tests;
 #[cfg(test)]
 pub(super) mod tests;

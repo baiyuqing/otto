@@ -309,7 +309,7 @@ impl Tasks {
                     agent: bounded(&task.agent),
                     description: bounded(&task.description),
                     model: bounded(&task.model),
-                    model_source: task.model_source.clone(),
+                    model_source: task.model_source,
                     status: task.status.as_str().to_string(),
                     created_at: task
                         .created_at
@@ -323,8 +323,8 @@ impl Tasks {
                         .finished_at
                         .map(|time| time.to_rfc3339())
                         .unwrap_or_default(),
-                    steps: task.steps as i64,
-                    tool_calls: task.tool_calls as i64,
+                    steps: task.steps,
+                    tool_calls: task.tool_calls,
                     last_tool: bounded(&task.last_tool),
                     input_tokens: task.usage.input_tokens,
                     output_tokens: task.usage.output_tokens,

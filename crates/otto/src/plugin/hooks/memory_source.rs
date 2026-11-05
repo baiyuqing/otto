@@ -108,9 +108,11 @@ async fn run_command<Res: DeserializeOwned>(
     }
     let output = runtime
         .command(
-            &memory_command.command,
-            None,
-            &memory_command.timeout,
+            super::Handler {
+                command: &memory_command.command,
+                lua: None,
+                timeout: &memory_command.timeout,
+            },
             Some(package),
             input,
             control,

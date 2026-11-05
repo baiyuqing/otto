@@ -2,8 +2,6 @@
 
 Previous: [Memory and extensions](memory-and-extensions.md) · [Documentation index](../README.md)
 
-## Troubleshooting
-
 Restart the process actually doing work after changing configuration,
 credentials or installed extensions, including `otto serve`/ACP rather than
 only its attaching client. A timeout or lost response does **not** prove an
@@ -35,10 +33,12 @@ A server/container may need a different hostname than the attaching terminal
 
 Check SSE support, streaming enablement, proxy buffering/rewriting and idle
 connection limits. Transient transport failures and model output idle
-timeouts retry up to three times (1, 2, 4 s) within the turn deadline, before
+timeouts retry up to three times with jittered backoff (upper bounds 1, 2,
+4 s) within the turn deadline, before
 or after a text/reasoning/tool delta; a retry after a delta discards the
 partial output and repeats the generation, which the endpoint bills again.
-HTTP 429 and 503 retry the same way before any delta. Other HTTP errors and
+HTTP 429 and 503 retry before any delta; a numeric `Retry-After` replaces
+backoff, capped at 30 s and bounded by the remaining deadline. Other HTTP errors and
 malformed events are not retried. A sent request may have started remotely
 even if no output arrived; inspect effects before resubmitting.
 

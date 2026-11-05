@@ -267,3 +267,29 @@ fn observer_terminal_input_dispatch_ignores_paste_and_does_not_select_main_text(
     assert_eq!(app.scroll, Some(9));
     assert!(app.selection.is_none());
 }
+
+#[tokio::test]
+async fn observer_accepts_controller_snapshot_rows_without_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller = crate::fixtures::controller(workspace.path(), sessions.path()).await;
+    let registry = controller.subagent_tasks().expect("registry");
+    let task = registry
+        .add(crate::subagent::tasks::Task::default(), None, None)
+        .expect("add task");
+    registry.mark_running(&task.id, chrono::Utc::now());
+    registry.observe(
+        &task.id,
+        &otto_core::agent::Event::TextDelta {
+            text: "live partial".into(),
+        },
+    );
+    let snapshot = controller.observer_snapshot().expect("snapshot");
+    let info = controller.info();
+    let mut observer = Observer::default();
+    observer.reset_scope(&info.workspace, &info.session_id);
+    observer.active = true;
+    observer.snapshot(snapshot);
+    assert_eq!(observer.panes.len(), 1);
+    assert!(screen(&observer, 12).contains("live partial"));
+}

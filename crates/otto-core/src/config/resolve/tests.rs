@@ -1,4 +1,6 @@
 use super::*;
+
+mod server_bootstrap;
 use crate::agent::progress::{DEFAULT_CONSECUTIVE_FAILURES, DEFAULT_REPEATED_CALLS};
 use crate::config::{
     Agent, CompactionConfig as Compaction, LegacyProfile, convert_legacy_profiles,

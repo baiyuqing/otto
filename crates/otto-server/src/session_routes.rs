@@ -241,7 +241,7 @@ pub(super) async fn create_session(State(server): State<Arc<Server>>, body: Byte
                 StatusCode::CREATED,
                 &server.session_wire(&server.register(ctrl)),
             ),
-            Err(error) => internal_error(&server.log, &error),
+            Err(error) => session_configuration_error(&server, &error),
         };
     }
 
@@ -258,8 +258,20 @@ pub(super) async fn create_session(State(server): State<Arc<Server>>, body: Byte
             json_response(status, &server.session_wire(&session))
         }
         Err(error) if error == SESSION_NOT_FOUND => not_found("session not found"),
-        Err(error) => internal_error(&server.log, &error),
+        Err(error) => session_configuration_error(&server, &error),
     }
+}
+
+/// Only this known, value-free configuration failure is safe to expose.
+fn session_configuration_error(server: &Server, error: &str) -> Response {
+    if error.starts_with("missing model:") {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "configuration_required",
+            "No model configured. Configure a provider and default model through /v1/config/changes or run otto setup, then restart otto serve.",
+        );
+    }
+    internal_error(&server.log, error)
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -344,6 +344,7 @@ async fn plugin_argument_rewrites_obey_child_owned_path_policy() {
             ],
             timeout:"1s".into(),
             matcher:vec!["write".into()],
+            lua:None,
         }],
         ..Default::default()
     };

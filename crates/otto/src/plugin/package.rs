@@ -156,6 +156,7 @@ pub fn discover(path: &Path) -> Result<Package, String> {
         package.otto =
             serde_json::from_value(value.clone()).map_err(|_| "invalid dev.otto extension")?;
         super::hooks::validate_components(&package.name, &package.otto)?;
+        super::hooks::lua_handler::validate_sources(path, &package.otto)?;
     }
     if portable {
         for key in object.keys() {

@@ -24,6 +24,8 @@ all = { level = "warn", priority = -1 }
 # every dependency it takes is default-features = false unless a feature is
 # required by name.
 [workspace.dependencies]
+# Native plugin computation only; Lua 5.4 is statically vendored (MIT).
+mlua = { version = "=0.12.2", default-features = false, features = ["lua54", "vendored", "serialize", "send"] }
 async-trait = "=0.1.92"
 chrono = { version = "=0.4.45", default-features = false, features = ["alloc", "serde"] }
 serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }

@@ -162,6 +162,13 @@ Apply to every feature, fix and refactor:
   take precedence. Wrappers preserve the declaration, custom executors default
   off, and output text never controls scheduling.
 
+### Lua plugin execution
+
+Installed hook/tool Lua handlers follow the [Lua security contract](lua-plugin-security.md):
+trusted code still has no host capabilities; limits and cancellation are cooperative,
+not OS isolation. Engine/library exposure changes require security review and
+adversarial regression coverage.
+
 ### Capability descriptions
 
 The model learns capabilities from tool descriptions/schema fields, conditional

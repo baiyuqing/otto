@@ -105,6 +105,9 @@ pub struct Tasks {
     updates: Arc<Updates>,
     updates_receiver: watch::Receiver<u64>,
     recorder: Option<(Arc<dyn Recorder>, TaskContext)>,
+    /// Reads the parent session path at every record; see
+    /// [`Tasks::with_parent_session_path_resolver`].
+    parent_session_path_resolver: Option<Arc<dyn Fn() -> String + Send + Sync>>,
     /// Permits for running children, shared by every sub-agent runner built
     /// on this registry; see [`Tasks::child_slots`].
     child_slots: OnceLock<Arc<Semaphore>>,
@@ -180,8 +183,21 @@ impl Tasks {
             updates,
             updates_receiver: receiver,
             recorder,
+            parent_session_path_resolver: None,
             child_slots: OnceLock::new(),
         }
+    }
+
+    /// Sets a function that returns the parent session path at every record.
+    /// A lazy session store has no path before its first write, so the path
+    /// captured in `TaskContext` at construction can be empty; a non-empty
+    /// resolver result replaces it in the recorded row.
+    pub fn with_parent_session_path_resolver(
+        mut self,
+        resolver: Arc<dyn Fn() -> String + Send + Sync>,
+    ) -> Self {
+        self.parent_session_path_resolver = Some(resolver);
+        self
     }
 
     /// The semaphore that caps how many children of this registry run at
@@ -202,8 +218,21 @@ impl Tasks {
         let Some((recorder, context)) = &self.recorder else {
             return;
         };
-        if let Some(task) = self.get(id) {
-            recorder.upsert(context, &task);
+        let Some(task) = self.get(id) else {
+            return;
+        };
+        let resolved_path = self
+            .parent_session_path_resolver
+            .as_ref()
+            .map(|resolver| resolver())
+            .filter(|path| !path.is_empty());
+        match resolved_path {
+            Some(parent_session_path) => {
+                let mut resolved_context = context.clone();
+                resolved_context.parent_session_path = parent_session_path;
+                recorder.upsert(&resolved_context, &task);
+            }
+            None => recorder.upsert(context, &task),
         }
     }
 

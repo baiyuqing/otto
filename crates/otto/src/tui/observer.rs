@@ -59,7 +59,7 @@ impl Observer {
 
     pub fn rows(&mut self, rows: Vec<TaskRow>) {
         for row in rows {
-            if row.parent_session != self.scope.1 || row.workspace != self.scope.0 {
+            if row.parent_session != self.scope.1 {
                 continue;
             }
             if let Some(pane) = self
@@ -84,10 +84,15 @@ impl Observer {
         self.error = None;
     }
 
+    /// Applies a controller snapshot. The controller removes `workspace` from
+    /// observer rows (`sanitize_row`), so rows are compared by parent session
+    /// id only. The session scope is enforced by the backend ticket check
+    /// (`check_scope` in tui/backend/local.rs) and by the generation check in
+    /// `complete_observer` (tui/app/observer.rs).
     pub fn snapshot(&mut self, snapshot: ObserverSnapshot) {
         self.truncated = snapshot.truncated;
         for task in snapshot.tasks {
-            if task.row.workspace != self.scope.0 || task.row.parent_session != self.scope.1 {
+            if task.row.parent_session != self.scope.1 {
                 continue;
             }
             let id = task.row.task_id.clone();

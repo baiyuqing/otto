@@ -47,7 +47,14 @@ impl Controller {
             ..Default::default()
         })?;
         truncated |= !page.next_before.is_empty();
-        for row in page.tasks {
+        for mut row in page.tasks {
+            // Rows recorded by a registry built on a lazy store before its
+            // first write have no parent path; the current session path stands
+            // in, and `history::read` still requires the child transcript to
+            // lie in that parent's child directory.
+            if row.parent_session_path.is_empty() {
+                row.parent_session_path = parent_path.clone();
+            }
             if row.parent_session != parent
                 || row.parent_session_path != parent_path
                 || row.workspace != workspace

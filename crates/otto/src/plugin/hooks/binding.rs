@@ -85,9 +85,11 @@ impl Bound {
         let output = self
             .runtime
             .command(
-                &hook.command,
-                hook.lua.as_deref(),
-                &hook.timeout,
+                super::Handler {
+                    command: &hook.command,
+                    lua: hook.lua.as_deref(),
+                    timeout: &hook.timeout,
+                },
                 package,
                 json!({
                     "version":1,

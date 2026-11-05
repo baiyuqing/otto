@@ -1,26 +1,13 @@
 # Otto documentation
 
-## Use Otto
+| Goal | Start here |
+| --- | --- |
+| Install and try Otto | [Root README](../README.md) · [简体中文](../README.zh-CN.md) |
+| Use and configure Otto | [User manual](user-manual.md) |
+| Find code and understand crate boundaries | [Code organization](code-organization.md) |
+| Contribute or embed Otto | [Development guide](development.md) |
+| Review notable changes and upgrade requirements | [Changelog](../CHANGELOG.md) |
 
-Start with the [root README](../README.md) for installation and first use, then
-choose a topic in the [user manual](user-manual.md):
-
-- [Getting started and configuration](manual/getting-started.md)
-- [Interactive use and sessions](manual/interactive-use.md)
-- [Safety, approvals and tools](manual/safety-and-tools.md)
-- [Servers and connectors](manual/servers-and-connectors.md)
-- [Automation](manual/automation.md)
-- [Memory and extensions](manual/memory-and-extensions.md)
-- [Troubleshooting](manual/troubleshooting.md)
-
-## Develop and integrate
-
-- [Code organization](code-organization.md)
-- [Development guide](development.md)
-- [Architecture diagram](architecture/otto-architecture.svg)
-- [Changelog](../CHANGELOG.md)
-
-Current behavior belongs in the user manual; current contributor contracts belong
-in the development guide. Retained [design notes](specs/) explain selected
-architectural decisions, not an independent feature inventory. Superseded designs
-and detailed change history are available in Git, not maintained as parallel docs.
+The manual and development guide describe current behavior and contracts.
+Retained [design notes](specs/) explain selected decisions, not a second feature
+reference. Git preserves superseded designs and detailed change history.

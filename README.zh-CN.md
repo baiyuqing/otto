@@ -38,7 +38,9 @@ skills 安装到 `~/.otto/skills/`。请将 `~/.local/bin` 加入 `PATH`。
 
 ## 首次使用
 
-`otto setup` 创建配置，不保存 API key。请选择你的账号或服务实际可用的模型。
+`otto setup` 写入默认模型和包含一个模型条目的 provider 配置，不保存 API key。
+请选择你的账号或服务实际可用的模型。模型使用 `<provider>/<model_id>` 格式，详见
+[provider 与模型配置](docs/manual/getting-started.md#providers-and-models)。
 
 使用 ChatGPT：
 
@@ -48,7 +50,7 @@ otto
 ```
 
 使用 Claude 或 OpenAI-compatible 服务：在 setup 中选择模型和 API-key 环境变量名；
-OpenAI-compatible profile 还需选择接口地址。启动前在进程环境中私下设置该变量。
+OpenAI-compatible provider 还需选择接口地址。启动前在进程环境中私下设置该变量。
 不要将密钥写进配置文件或提示词。
 
 可以先让 Otto 解释一个仓库、查证一个问题，或完成一个小改动。
@@ -98,4 +100,4 @@ OpenAI-compatible profile 还需选择接口地址。启动前在进程环境中
 [开发指南](docs/development.md)。使用独立分支与 worktree，安装 Gitleaks 和 Node 后运行
 `make setup-git-hooks`，并执行覆盖改动的检查。仓库没有 CI，PR 必须列出本地验证结果。
 
-[架构图](docs/architecture/otto-architecture.svg) · [许可证](LICENSE)
+[架构与 crate 边界](docs/code-organization.md#rust-layers) · [许可证](LICENSE)

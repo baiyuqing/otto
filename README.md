@@ -110,5 +110,5 @@ install the pre-commit hook with `make setup-git-hooks` (requires Gitleaks and N
 and run the checks for the code you change. The repository has no CI; PRs must
 report local verification.
 
-[Architecture diagram](docs/architecture/otto-architecture.svg) ·
+[Architecture and crate boundaries](docs/code-organization.md#rust-layers) ·
 [License](LICENSE)

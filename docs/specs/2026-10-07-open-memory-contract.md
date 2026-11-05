@@ -1,7 +1,7 @@
 # Open Memory service contract
 
-Status: Rust service contracts and runtime injection were implemented on
-2026-10-07. This document specifies the independent memory-service protocol,
+Status: retained Rust service contract and rationale; runtime injection is
+implemented. This document specifies the independent memory-service port,
 not a user-facing Otto reflection feature or model-callable capability. External
 transports and a semantic-search upgrade are not included. The original
 comparative research records are available in Git history; examples below
@@ -226,15 +226,15 @@ already occurred. Deleting a source does not automatically mean shared
 summaries, graph state, profiles, backups or model parameters were erased.
 Otto must not infer stronger guarantees from a successful HTTP response.
 
-## Real-consumer mapping and acceptance
+## Consumer rationale and offline acceptance
 
 | Consumer | Natural mapping | Guarantee that must not be invented |
 | --- | --- | --- |
-| Current Otto | Recall; explicit writes; candidate preparation/review; inspection | Existing service/repository APIs are not yet this port |
-| Mem0 Platform V3 | Learning ingestion; direct content intent; retrieval; events | Input approval is not final-change approval; Dream is ongoing |
-| Zep/Graphiti | Episodes; graph queries; explicit graph changes; batch processing | Source deletion does not rebuild every shared summary |
-| Letta | Standing context plus on-demand file/archival access | Current SDK and legacy blocks are different contracts |
-| LangGraph/LangMem | Store inspection/direct writes; extraction; reflection execution | A submission Future does not prove background completion |
+| Built-in file memory | Recall; explicit writes; candidate preparation/review; inspection | The projection declares only implemented capabilities; repositories are not the service port |
+| Mem0 Platform V3 (design comparison, not an integration) | Learning ingestion; direct content intent; retrieval; events | Input approval is not final-change approval; Dream is ongoing |
+| Zep/Graphiti (design comparison, not an integration) | Episodes; graph queries; explicit graph changes; batch processing | Source deletion does not rebuild every shared summary |
+| Letta (design comparison, not an integration) | Standing context plus on-demand file/archival access | Current SDK and legacy blocks are different contracts |
+| LangGraph/LangMem (design comparison, not an integration) | Store inspection/direct writes; extraction; reflection execution | A submission Future does not prove background completion |
 
 The acceptance suite uses offline fakes and the built-in adapter, with no
 credentials or live provider calls. It covers:

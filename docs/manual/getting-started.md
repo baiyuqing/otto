@@ -420,35 +420,9 @@ equivalent new TOML. A file that mixes legacy and new tables is an error, as are
 two profiles that convert to the same selector with different settings. Otto
 does not rewrite the file.
 
-Before:
-
-```toml
-default_profile = "luna"
-
-[profiles.luna]
-provider = "chatgpt"
-model = "gpt-5.6-luna"
-
-[profiles.terra]
-provider = "chatgpt"
-model = "gpt-5.6-terra"
-
-[profiles.sol]
-provider = "chatgpt"
-model = "gpt-5.6-sol"
-```
-
-After:
-
-```toml
-default_model = "chatgpt/gpt-5.6-luna"
-
-[providers.chatgpt]
-type = "chatgpt"
-models."gpt-5.6-luna" = {}
-models."gpt-5.6-terra" = {}
-models."gpt-5.6-sol" = {}
-```
+Use the equivalent TOML from `otto config explain` when updating an older
+file, and follow the current [provider/model format](#providers-and-models)
+for new configuration.
 
 A managed policy that forces `default_profile` or `profiles.*` fails to load
 with an error naming the replacement keys (`default_model`,

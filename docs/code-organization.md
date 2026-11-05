@@ -23,7 +23,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories and logical migration ports | `runtime/storage.rs` composition and route registry |
-| `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
+| `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-tcp.sh` supervises the ACP TCP pair (`otto serve --acp-listen` plus `otto-connect`) | `Makefile` |
 
@@ -328,9 +328,9 @@ guards these dependency directions.
   services or browser UI code.
 - Keep HTTP/SSE DTOs in `crates/otto-server/src` separate from internal types;
   share only the wire types that genuinely cross frontend boundaries.
-- Treat `docs/specs/` as design rationale unless a document says otherwise.
-  Current behavior belongs in the README and user manual; implementation
-  contracts belong in the development guide.
+- `docs/specs/` retains only still-useful contracts, rationale and decision gates;
+  each note states its status. Current use and contributor workflows belong in
+  the manual and development guide, not historical implementation plans.
 - When moving a module or changing ownership, update this map, `AGENTS.md`,
   and the relevant detailed contract together.
 

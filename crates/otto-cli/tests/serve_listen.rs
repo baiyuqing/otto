@@ -12,6 +12,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 mod binary_harness;
+#[path = "serve_listen/bootstrap_tests.rs"]
+mod bootstrap_tests;
 use otto::fixtures::scripted_provider::{Script, serve, text_reply, tool_call_reply};
 
 /// Wait for one ACP frame. Session creation takes about 0.9 s alone and about
@@ -92,6 +94,9 @@ fn arguments(fixture: &Fixture, extra: &[&str]) -> Vec<String> {
         "--cwd".to_string(),
         fixture.workspace.clone(),
     ];
+    if fixture.config.is_empty() {
+        args.drain(1..3);
+    }
     args.extend(extra.iter().map(|value| value.to_string()));
     args
 }

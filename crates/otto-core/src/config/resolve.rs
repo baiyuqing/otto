@@ -23,6 +23,9 @@ use model_selection::{known_provider, select_model};
 mod compaction;
 mod deadlines;
 mod model_selection;
+mod server_bootstrap;
+
+pub use server_bootstrap::resolve_server_bootstrap;
 
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);

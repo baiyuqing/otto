@@ -238,6 +238,130 @@ async fn observer_missing_history_is_unavailable_not_truncated() {
     );
 }
 
+#[tokio::test]
+async fn observer_recorder_resolves_parent_session_path_after_first_write() {
+    use crate::subagent::record::Store;
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open_in_memory().unwrap());
+    let mut builder = crate::fixtures::builder(workspace.path(), sessions.path());
+    builder.shared_mut().task_recorder = Some(store.clone());
+    let runtime = crate::fixtures::initial_runtime(&builder);
+    let session = builder.create_session(&runtime).unwrap();
+    let runner = builder.build_runner(&session, &runtime).await.unwrap();
+    assert!(
+        session.path().is_empty(),
+        "the fixture session must be lazy: no path before the first write"
+    );
+    session
+        .append(Message {
+            role: Role::User,
+            created_at: chrono::Utc::now(),
+            blocks: vec![Block::text("first prompt")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(!session.path().is_empty());
+    let registry = runner.tasks().expect("registry");
+    let task = registry
+        .add(crate::subagent::tasks::Task::default(), None, None)
+        .unwrap();
+    let row = store
+        .get(&session.header().id, &task.id)
+        .unwrap()
+        .expect("recorded row");
+    assert_eq!(row.parent_session_path, session.path());
+}
+
+#[tokio::test]
+async fn observer_includes_stored_rows_recorded_without_parent_session_path() {
+    use crate::subagent::record::{Recorder, Store, TaskContext};
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open_in_memory().unwrap());
+    let mut builder = crate::fixtures::builder(workspace.path(), sessions.path());
+    builder.shared_mut().task_recorder = Some(store.clone());
+    let runtime = crate::fixtures::initial_runtime(&builder);
+    let session = builder.create_session(&runtime).unwrap();
+    let runner = builder.build_runner(&session, &runtime).await.unwrap();
+    session
+        .append(Message {
+            role: Role::User,
+            created_at: chrono::Utc::now(),
+            blocks: vec![Block::text("parent prompt")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let info = builder.runtime_info(&runtime);
+    let controller = Controller::new(builder, true, session, runner, info);
+    let (parent, parent_path, workspace) = {
+        let state = controller.lock();
+        let current = state.current.as_ref().unwrap();
+        (
+            current.session.header().id,
+            current.path(),
+            current.workspace.clone(),
+        )
+    };
+    assert!(!parent_path.is_empty());
+    let child_store = crate::session::Store::create_child_lazy(
+        std::path::Path::new(&parent_path),
+        "t1-child",
+        Header {
+            id: "child".into(),
+            workspace: workspace.clone(),
+            provider: "openai-compatible".into(),
+            model: "fixture".into(),
+            created_at: chrono::Utc::now(),
+            ..Default::default()
+        },
+    )
+    .expect("child store");
+    let child_session =
+        crate::runtime::builder::SharedSession::new(std::sync::Arc::new(child_store));
+    child_session
+        .append(Message {
+            role: Role::User,
+            created_at: chrono::DateTime::from_timestamp(1_793_750_400, 0).unwrap(),
+            blocks: vec![Block::text("private prompt")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    child_session
+        .append(Message {
+            role: Role::Assistant,
+            created_at: chrono::DateTime::from_timestamp(1_793_750_401, 0).unwrap(),
+            finish_reason: Some(FinishReason::Stop),
+            blocks: vec![Block::text("retained answer")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let child_path = child_session.path();
+    child_session.close().unwrap();
+    store.upsert(
+        &TaskContext {
+            parent_session: parent,
+            parent_session_path: String::new(),
+            workspace,
+            ..Default::default()
+        },
+        &crate::subagent::tasks::Task {
+            id: "t1".into(),
+            status: crate::subagent::tasks::TaskStatus::Succeeded,
+            session_path: child_path,
+            ..Default::default()
+        },
+    );
+    let snapshot = controller.observer_snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 1);
+    assert!(!snapshot.tasks[0].missing);
+    assert_eq!(snapshot.tasks[0].entries[0].text, "retained answer");
+}
+
 #[test]
 fn observer_metadata_excludes_prompts_paths_and_full_result() {
     let mut row = TaskRow {

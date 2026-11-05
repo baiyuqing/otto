@@ -81,6 +81,7 @@ impl Builder {
                 } else {
                     session.header().id
                 };
+                let session_handle = session.downgrade();
                 Tasks::with_recorder_from(
                     Arc::clone(store) as Arc<dyn subagent::record::Recorder>,
                     subagent::record::TaskContext {
@@ -92,6 +93,12 @@ impl Builder {
                     },
                     starting_counter,
                 )
+                .with_parent_session_path_resolver(Arc::new(move || {
+                    session_handle
+                        .upgrade()
+                        .map(|session| session.path())
+                        .unwrap_or_default()
+                }))
             }
             None => Tasks::new_from(starting_counter),
         }

@@ -180,6 +180,13 @@ shortcuts are not bound by default because macOS uses them to switch desktops.
 The main composer draft, cursor and conversation scroll position are preserved;
 switching pages does not pause the parent or its children.
 
+While any sub-agent is queued or running, the main footer shows one contextual
+hint: `Press F6 to view sub-agent observer` by default. It uses your configured
+`toggle` key, or `open` when toggle is disabled, in both local and attached TUIs.
+The hint disappears when no children are queued/running or the observer is open;
+it does not add conversation messages. Status notices stay first, and narrow
+terminals clip the footer's tail without adding a row.
+
 Customize these actions in your user configuration (including a file selected
 with `--config`):
 

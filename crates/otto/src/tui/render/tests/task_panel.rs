@@ -114,10 +114,12 @@ async fn the_minimum_size_keeps_the_transcript_row_and_the_status_line() {
     assert!(rows[5].contains("t2"), "{rows:?}");
     assert!(rows[6].contains("t3"), "{rows:?}");
     assert!(!above_status_line(&rows).contains("t4"), "{rows:?}");
-    // The footer text is longer than this width, but it still starts
-    // with the model field, confirming the status line landed on the
-    // frame's last row rather than being pushed off it.
-    assert!(rows[7].contains("gpt-alpha"), "{rows:?}");
+    // The contextual hint leads the clipped footer, confirming the status
+    // line landed on the last row rather than being pushed off the frame.
+    assert!(
+        rows[7].starts_with("Press F6 to view sub-agent observer"),
+        "{rows:?}"
+    );
 }
 
 /// An unnamed task is labeled by its agent, and by `default` when it has

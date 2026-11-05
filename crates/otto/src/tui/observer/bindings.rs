@@ -11,6 +11,7 @@ pub(crate) struct Bindings {
     back: Option<KeyEvent>,
     pub label: String,
     pub back_label: String,
+    pub entry_label: String,
 }
 
 impl Default for Bindings {
@@ -84,6 +85,11 @@ impl Bindings {
         .map(|(key, action)| format!("{}: {action}", escape_single_line_text(key.trim())))
         .collect::<Vec<_>>()
         .join(" · ");
+        let entry_label = escape_single_line_text(if toggle.is_some() {
+            bindings.toggle.trim()
+        } else {
+            bindings.open.trim()
+        });
         let back_label = escape_single_line_text(if toggle.is_some() {
             bindings.toggle.trim()
         } else {
@@ -95,6 +101,7 @@ impl Bindings {
             back,
             label: labels,
             back_label,
+            entry_label,
         })
     }
 

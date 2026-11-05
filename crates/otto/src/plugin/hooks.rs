@@ -168,6 +168,13 @@ struct CommandOutput {
     stderr: String,
 }
 
+/// The configured command or Lua handler and its execution timeout.
+struct Handler<'a> {
+    command: &'a [String],
+    lua: Option<&'a str>,
+    timeout: &'a str,
+}
+
 /// The expanded argv, full environment and validated timeout of one hook or tool process.
 struct Invocation<'a> {
     argv: Vec<String>,
@@ -330,14 +337,17 @@ impl Runtime {
     /// stdout on success. A nonzero exit is `plugin command failed`.
     async fn command(
         &self,
-        command: &[String],
-        lua: Option<&str>,
-        timeout: &str,
+        handler: Handler<'_>,
         package: Option<&Package>,
         data: Value,
         control: &dyn OperationControl,
         guard: Option<&Arc<SessionGuard>>,
     ) -> Result<String, CommandError> {
+        let Handler {
+            command,
+            lua,
+            timeout,
+        } = handler;
         lua_handler::validate(command, lua, timeout).map_err(CommandError::from)?;
         if let Some(path) = lua {
             return self.lua(path, timeout, package, data, control, guard).await;
@@ -673,9 +683,11 @@ impl CommandTool {
         match self
             .runtime
             .command(
-                &self.spec.command,
-                self.spec.lua.as_deref(),
-                &self.spec.timeout,
+                Handler {
+                    command: &self.spec.command,
+                    lua: self.spec.lua.as_deref(),
+                    timeout: &self.spec.timeout,
+                },
                 Some(&self.package),
                 json!({
                     "version":1,

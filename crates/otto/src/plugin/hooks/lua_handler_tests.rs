@@ -77,9 +77,11 @@ async fn trusted_package_hook_tool_schema_snapshot_and_revoke_without_executor()
     );
     let hook = runtime
         .command(
-            &[],
-            Some("handler.lua"),
-            "",
+            super::Handler {
+                command: &[],
+                lua: Some("handler.lua"),
+                timeout: "",
+            },
             runtime.packages.first(),
             json!({"event":"before_prompt"}),
             &CancellationToken::new(),
@@ -102,9 +104,11 @@ async fn trusted_package_hook_tool_schema_snapshot_and_revoke_without_executor()
     assert!(
         runtime
             .command(
-                &[],
-                Some("handler.lua"),
-                "",
+                super::Handler {
+                    command: &[],
+                    lua: Some("handler.lua"),
+                    timeout: "",
+                },
                 runtime.packages.first(),
                 json!({}),
                 &CancellationToken::new(),
@@ -243,9 +247,11 @@ async fn revoke_during_an_invocation_never_delivers_a_result() {
     let runtime = runtime(&fixture);
     let token = CancellationToken::new();
     let future = runtime.command(
-        &[],
-        Some("handler.lua"),
-        "10s",
+        super::Handler {
+            command: &[],
+            lua: Some("handler.lua"),
+            timeout: "10s",
+        },
         runtime.packages.first(),
         json!({}),
         &token,
@@ -269,9 +275,11 @@ async fn cancelled_and_tiny_deadline_handlers_terminate_and_return_errors() {
     let token = CancellationToken::new();
     let cancel = token.clone();
     let future = runtime.command(
-        &[],
-        Some("handler.lua"),
-        "10s",
+        super::Handler {
+            command: &[],
+            lua: Some("handler.lua"),
+            timeout: "10s",
+        },
         runtime.packages.first(),
         json!({}),
         &token,
@@ -286,9 +294,11 @@ async fn cancelled_and_tiny_deadline_handlers_terminate_and_return_errors() {
     assert!(
         runtime
             .command(
-                &[],
-                Some("handler.lua"),
-                "1ns",
+                super::Handler {
+                    command: &[],
+                    lua: Some("handler.lua"),
+                    timeout: "1ns",
+                },
                 runtime.packages.first(),
                 json!({}),
                 &CancellationToken::new(),

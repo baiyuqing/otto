@@ -45,6 +45,7 @@ fn hook(script: &str) -> Hook {
         command: vec!["/bin/sh".into(), "-c".into(), script.into()],
         timeout: "1s".into(),
         matcher: Vec::new(),
+        lua: None,
     }
 }
 #[tokio::test]

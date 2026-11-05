@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "lua-demo",
+  "version": "1.0.0",
+  "description": "Pure-computation Lua hook and custom tool; no host access.",
+  "extensions": {
+    "dev.otto": {
+      "version": 1,
+      "hooks": {
+        "before_tool": [{
+          "matcher": ["plugin__lua-demo__calculate"],
+          "lua": "calculate.lua",
+          "timeout": "1s"
+        }]
+      },
+      "tools": [{
+        "name": "calculate",
+        "description": "Double an integer using pure computation and return the result as text. Negative inputs are rejected by the example hook.",
+        "lua": "calculate.lua",
+        "timeout": "1s",
+        "input_schema": {
+          "type": "object",
+          "properties": {"number": {"type": "integer", "minimum": -1000000, "maximum": 1000000}},
+          "required": ["number"],
+          "additionalProperties": false
+        }
+      }]
+    }
+  }
+}

@@ -7,6 +7,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Server
+
+- `otto serve` can start before a model is configured so first-run clients can
+  use the authenticated provider/model configuration API. Session creation
+  returns actionable `503 configuration_required` until setup is saved and
+  the server is restarted. Other frontends still require a model at startup.
+
 ### Extensions
 
 - Installed plugin hooks and custom tools can use built-in Lua 5.4 handlers with

@@ -10,9 +10,6 @@ TokenEconomizer itself is not modified or vendored.
 - Python 3.10 or later on `PATH`, for `bridge.py` and for TokenEconomizer.
 - A local TokenEconomizer checkout. The bridge runs `plugin/scripts/te-hook`
   from it.
-- An Otto build whose hook protocol v1 carries `session.history_path` and
-  `headless`, accepts the `notice` response field and sets `PLUGIN_ROOT` and
-  `PLUGIN_DATA` for package hook commands (added 2026-11-01).
 
 ## Install
 
@@ -63,23 +60,21 @@ Export the checkout's `plugin` directory before starting Otto:
 export TE_PLUGIN_ROOT=/path/to/TokenEconomizer/plugin
 ```
 
-Add the binding and the sandbox read paths to the Otto configuration file:
+Add the binding to the Otto configuration file:
 
 ```toml
 [plugins.bindings.tokeneconomizer]
 env = { TE_PLUGIN_ROOT = "${TE_PLUGIN_ROOT}" }
-
-[sandbox]
-read_paths = ["/path/to/TokenEconomizer", "~/.otto/sessions"]
 ```
 
 - A binding value may also be a literal path
   (`TE_PLUGIN_ROOT = "/path/to/TokenEconomizer/plugin"`); only values that
   look like credentials are rejected.
-- `read_paths` accepts absolute paths and `~/...` paths
-  ([safety and tools](../../../docs/manual/safety-and-tools.md)). Without
-  these entries `te-hook` cannot import its package and the session-end fold
-  cannot read the session file. An entry that does not exist is skipped.
+- The default sandbox read denylist does not block an ordinary checkout or
+  `~/.otto/sessions`; neither needs a blanket `read_paths` grant. If your
+  checkout or configured session-storage route is under an additional denied
+  path, diagnose the actual refusal and grant only the required directory
+  ([sandbox policy](../../../docs/manual/safety-and-tools.md#bash-sandbox-policy)).
 - Restart Otto after changing the configuration, then start a new session.
 
 ## What runs on each event

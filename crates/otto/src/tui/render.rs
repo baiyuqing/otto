@@ -313,7 +313,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// The footer's fields, most important first. The footer is one row and
+/// Status and contextual observer discovery precede the session fields.
+/// The footer is one row and
 /// ratatui clips whatever does not fit, so the fields a reader cannot do
 /// without come first and the ones that describe the environment come last:
 /// the model id identifies the session, the approval mode and the token
@@ -369,6 +370,17 @@ fn footer_text(app: &App) -> String {
     if !app.info.session_id.is_empty() {
         text.push_str(" | ");
         text.push_str(&escape_single_line_text(&app.info.session_id));
+    }
+    if !app.observer.active
+        && app
+            .tasks
+            .iter()
+            .any(|task| matches!(task.status, TaskStatus::Queued | TaskStatus::Running))
+    {
+        text = format!(
+            "Press {} to view sub-agent observer | {text}",
+            app.observer.bindings.entry_label
+        );
     }
     match &app.status {
         Some(status) => format!("{} | {text}", escape_single_line_text(status)),

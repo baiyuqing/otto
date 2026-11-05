@@ -86,6 +86,7 @@ impl Bound {
             .runtime
             .command(
                 &hook.command,
+                hook.lua.as_deref(),
                 &hook.timeout,
                 package,
                 json!({

@@ -61,11 +61,11 @@ capability.
   refreshes retain notices observed by this TUI, but restarting/resuming a session
   does not reconstruct structured notices from stored messages; approval discovery
   and decisions are unchanged.
-- Runs inline and preserves the terminal scrollback; completed transcript rows remain
-  available through normal terminal scrolling.
+- Runs in the terminal's alternate screen. Use the TUI's transcript scrolling
+  to review earlier rows; the normal terminal scrollback is not the transcript.
 - Transcript markers distinguish submitted prompts (`❯`), replies/tool calls
   (`⏺`), indented results (`⎿`) and system notices/checkpoints (`✻`). Failed
-  tools are red; prompts are shaded. Normal terminal scrollback remains usable.
+  tools are red; prompts are shaded.
 - While a turn is running, an animated status line is shown under the
   transcript, and the composer title reads `Working — Enter queues for this
   turn · Esc cancels turn`. Once input is queued, a yellow `◆ QUEUED …` banner
@@ -996,8 +996,10 @@ read the prompt from a file (bounded to 1 MiB).
 ./otto --prompt "explain main.go" --thinking max --continue
 ```
 
-`--prompt` cannot be combined with `--ui tui` or `--archive`, and composes with
-`--continue`, `--resume`, and `--no-session`.
+`--prompt` cannot be combined with `--ui tui` or `--archive`. It can use
+`--continue` or `--resume` to reopen history, or `--no-session` to keep history
+in memory only. `--continue` and `--resume` are mutually exclusive, and neither
+can be combined with `--no-session`.
 
 Every turn of a `--prompt` run, including the wake turns that deliver
 background task results, stops after

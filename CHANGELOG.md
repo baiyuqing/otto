@@ -7,6 +7,15 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Extensions
+
+- Installed plugin hooks and custom tools can use built-in Lua 5.4 handlers with
+  no external interpreter. Lua is restricted to pure computation with fresh VMs,
+  bounded resources and cooperative cancellation/revocation; package trust and
+  tool approvals remain required. Command handlers keep their existing behavior.
+  Remove Lua packages before downgrading to older Otto binaries. See
+  [Lua handlers](docs/manual/memory-and-extensions.md#lua-handlers).
+
 ### Sessions
 
 - Permanently delete sessions through the TUI, `/delete`, `otto delete <SESSION>`,

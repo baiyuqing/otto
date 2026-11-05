@@ -470,8 +470,9 @@ otto plugin revoke my-plugin
 otto plugin remove my-plugin
 ```
 
-Install interpreters/dependencies yourself; installation never runs npm/pip
-scripts. Git sources require full commit IDs, not tags/branches. Installer
+Command handlers require their interpreters/dependencies; built-in Lua handlers
+need no external interpreter. Installation never runs npm/pip scripts. Git sources
+require full commit IDs, not tags/branches. Installer
 subprocesses exclude hooks, submodules, global/system filters/config and injected
 Git config overrides; SSH agent/configured askpass authentication is available.
 URLs with passwords, HTTPS usernames, query or fragment are rejected.
@@ -721,12 +722,70 @@ redacted both ways. Cancellation/timeout kills and reaps the process group.
 Running package commands recheck authorization/resources every 500 ms. Hooked
 calls and unknown effects are never automatically replayed after process loss.
 
+### Lua handlers
+
+Otto includes Lua 5.4 by default, including in source/install builds. An installed
+package's `dev.otto` hook or custom tool may use `"lua": "scripts/handler.lua"`
+instead of `command`. Choose exactly one handler: a nonempty `command` argv or a
+package-relative `.lua` source path (no absolute paths or `..`). Existing command
+packages keep working; their serialized registry entries omit the new `lua` field.
+Unknown fields are rejected. Older Otto binaries cannot read packages that use
+the new Lua field: remove those packages before downgrading. Standalone TOML hooks
+and memory backends do not accept Lua handlers.
+
+See the installable [Lua example](../../examples/plugins/lua-demo/README.md).
+Install, inspect and explicitly trust its exact digest, then start a new session
+or restart long-lived runtimes. Lua tools are discovered as `plugin__<package>__<tool>`
+through the same parent/child registry as command tools, with the declared input
+schema and normal tool approval. Hook responses may deny, never grant approval.
+Editing the original source does not change installed snapshots. To update,
+remove/reinstall, inspect/retrust the new digest and restart affected runtimes.
+Revoke/remove blocks existing runners and cooperatively stops running Lua calls;
+disable only changes subsequent runner builds.
+
+A Lua chunk receives the existing protocol object as its first argument:
+
+```lua
+local input = ...
+return {content = tostring(input.arguments.number * 2), is_error = false}
+```
+
+Return a Lua value matching the existing hook/tool JSON response protocol; no
+stdin/stdout parsing is needed. JSON objects map to string-keyed tables, arrays
+to consecutive integer-keyed tables and `null` to `json.null`. Use `json.array({})`
+for an empty array (an ordinary empty table returns `{}`). Cycles/shared tables,
+sparse/mixed keys, functions, non-finite numbers and invalid UTF-8 fail the call.
+
+Each call uses a fresh VM with only restricted base functions and `math` plus
+`json.null`/`json.array`. No `io`, `os`, environment, files, processes, network,
+package/module manager, `require`, debug/FFI, dynamic code loading, metatable
+mutation, protected calls, coroutine, string or table libraries, or Otto tool
+calls are available. Package credential environment bindings are not passed to
+Lua. Pure Lua spawns no process and does not need `--sandbox off`; command
+handlers retain the existing shell sandbox path.
+
+Limits: source text 256 KiB (UTF-8 only, no bytecode); redacted input 1 MiB;
+input/output depth 64 and 8192 nodes; encoded output 64 KiB; Lua allocations
+16 MiB; 2 million Lua instructions. `timeout` uses the existing default 10s and
+maximum 300s, additionally bounded by the operation deadline. Cancellation,
+revocation and deadlines are **cooperative**, checked during Lua instructions
+and at phase boundaries. Parsing, setup/destruction and bounded host conversion
+are not hard-preemptible. This is an in-process capability-restricted VM, **not
+OS isolation**; native engine vulnerabilities remain a risk. See the
+[security contract](../development/lua-plugin-security.md).
+
+Missing/escaping/oversized/binary sources and conflicting handlers fail install.
+Syntax/runtime/resource-limit errors fail calls using bounded, non-echoing error
+categories. Check source syntax, available functions, response fields and limits;
+fix and reinstall/retrust/restart. Do not disable security to recover. Existing
+error policies still determine whether hook failure blocks the operation.
+
 ### Custom tools
 
 The example registers `plugin__demo__inspect` (complete name ≤64 chars; package
 dots become underscores). JSON Schema validates before launch; local references
 work, external file/HTTP references do not. Authorization binds exact args,
-command and package version. Custom tools are never replayable.
+command/Lua handler and package digest. Custom tools are never replayable.
 
 Stdin is `{version: 1, event: "tool", workspace, tool, arguments, metadata}`;
 metadata includes tool-call/operation IDs, attempt and authorized native scope.

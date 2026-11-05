@@ -1,7 +1,7 @@
 # Hook and custom tool example
 
-Requires an Otto build containing PR #358 and Python 3 on `PATH`. No Python
-packages or service credentials are needed.
+Requires Python 3 on `PATH`. No Python packages or service credentials are
+needed.
 
 From the repository root:
 
@@ -11,8 +11,8 @@ otto plugin inspect hook-demo
 otto plugin trust hook-demo
 ```
 
-Restart Otto so the installed snapshot is included in the sandbox's read paths,
-then start a new session in any workspace. Use your usual configured provider.
+Restart affected Otto runtimes to load the installed package, then start a new
+session in any workspace. Use your usual configured provider.
 
 Ask Otto:
 

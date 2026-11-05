@@ -152,18 +152,58 @@ every implementation and wrapper, with reopen support for durable state.
   uncertain effectful operations require reconciliation.
 - Inputs flow through the mailbox port. Keep admission, ordering, cancellation,
   steering and wake behavior shared across frontends. Durable inboxes and
-  session wrappers must retain the same conformance guarantees.
+  session wrappers must retain the same conformance guarantees. A step interrupt
+  with queued guidance continues the same turn, not a new turn; pending approval
+  refuses interruption. Failed partial provider fragments do not become history,
+  and stopped tools retain their real effect certainty rather than becoming
+  safe to replay.
 
 The executable contracts and tests beside `agent`, `session`, `mailbox` and
 native `operation` own detailed record shapes and state machines. Changes to
 those contracts update codecs, compatibility tests and consumers together.
 
+## Provider retry boundary
+
+`retry.rs` owns budget/backoff arithmetic; provider adapters own transient-error
+classification and retry safety. The current native adapters deliberately retry
+some dispatched requests even when provider work or billing may repeat. This
+is not an exactly-once guarantee and does not authorize replay of Otto tools.
+
+- OpenAI-compatible uses at most four attempts, with jittered delays bounded by
+  1/2/4 seconds and a numeric `Retry-After` capped at 30 seconds. Connection failures, selected
+  transient transport interruptions and model-output idle timeouts can retry;
+  transport interruptions and idle timeouts may retry after partial output.
+  HTTP 429/503 retries require no visible model output.
+- ChatGPT uses at most seven attempts with delays capped at 30 seconds. Its
+  owned transient HTTP/stream/transport classes can retry after partial output.
+- Failed fragments never enter assistant history or authorize tool execution.
+  Retry events reset pending stream presentation. Deadlines/cancellation still
+  bound the logical call, and lost transport does not prove no provider effect.
+
+See `provider/{openaicompat,chatgpt}.rs` and their adjacent retry tests for exact
+classifiers; do not generalize one adapter's policy to another endpoint.
+
+Provider/MCP **keyed idempotency remains a separate design approval gate**.
+Before implementing it, approve the concrete trusted adapter/extension schema,
+receiver deduplication and retention semantics, request/key binding, and unknown
+outcome reconciliation. Without a supported receiver contract, retain
+`NonIdempotent` behavior rather than inventing an external capability.
+
 ## Lifecycle and frontend contracts
 
 Lifecycle and task/authentication capabilities belong in `app`, not UI code.
 Session replacement must preserve shared state and admitted work; avoid
-frontend-specific execution paths. Keep append-only history and recoverable
-operation facts separate from transient presentation.
+frontend-specific execution paths. `runtime/session_resources.rs` owns one
+session's inbox, tasks, timers, output leases, MCP connections and workflow
+notification binding. Runner replacement for model/thinking changes or a
+background MCP swap borrows these resources; it must not close them or cancel
+existing children. Children retain their original executor, while new calls
+use the replacement. The child concurrency semaphore belongs to the shared
+task registry, so replacement cannot multiply the session's parallelism limit.
+
+`SharedSession::close`/`close_resources` own teardown. Closing only a runner is
+not closing its session. Keep append-only history and recoverable operation
+facts separate from transient presentation.
 
 Approval presentation is not authority: use the shared decision service and
 exact request/version checks described in [contracts](contracts.md#unified-approval-contract).

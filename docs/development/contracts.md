@@ -134,6 +134,9 @@ crash replay even for an otherwise read-only tool. Session hook state survives
 runner replacement. Async graceful close awaits session-end hooks; synchronous
 close starts bounded cleanup; crashes promise no delivery. See
 [hooks and custom tools](../manual/memory-and-extensions.md#hooks-and-custom-tools).
+Plugin memory adds a versioned command/serde compatibility surface and a
+registry downgrade constraint; see the retained
+[protocol decisions](../specs/2026-10-20-memory-provider-plugin.md).
 
 ## Agent implementation contracts
 

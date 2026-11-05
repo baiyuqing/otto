@@ -338,7 +338,17 @@ pub async fn run_with_extensions(
         prepared_initial = Some(prepared);
     }
 
-    let resolved = match startup::initial_runtime(&builder, metadata.as_ref()) {
+    let initial_runtime = if options.serve {
+        otto_core::config::resolve::resolve_server_bootstrap(
+            &builder.config,
+            &builder.environment,
+            &builder.overrides,
+        )
+        .map_err(|error| builder.redact_error(&error.to_string(), None))
+    } else {
+        startup::initial_runtime(&builder, metadata.as_ref())
+    };
+    let resolved = match initial_runtime {
         Ok(runtime) => runtime,
         Err(message) => return fail(stderr, &message),
     };

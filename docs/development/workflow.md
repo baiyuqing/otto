@@ -20,8 +20,8 @@ After merge, remove the worktree and its local branch.
 
 ## Rust workflow
 
-Use the pinned `rust-toolchain.toml` toolchain (currently 1.99.1) and its
-`wasm32-unknown-unknown` target. Workspace dependencies are exact-pinned in
+Use the toolchain and `wasm32-unknown-unknown` target pinned in
+[`rust-toolchain.toml`](../../rust-toolchain.toml). Workspace dependencies are exact-pinned in
 `Cargo.toml`. Keep platform-specific code behind `cfg`.
 
 Full sandbox acceptance requires macOS 26+ and standalone Command Line Tools
@@ -45,9 +45,9 @@ Canonical targets (see root `Makefile`):
 | `make scripts-test` | Offline Node tests beside scripts |
 | `make license-check` | Rust non-dev dependency license policy |
 | `make code-limits` | File length, line length and file-name limits |
-| `make check` | macOS: formatting, lint and `check-tests` |
+| `make check` | macOS: code limits, formatting, lint and `check-tests` |
 | `make check-tests` | Native, connector, WASM and script tests; diff whitespace check |
-| `make check-linux` | Formatting, lint, native/connector tests, WASM check, script/license checks |
+| `make check-linux` | Code limits, formatting, lint, native/connector tests, WASM check, script/license checks |
 | `make check-fast` | Manual path-selected checks since merge-base with `origin/main` |
 
 The gates do not build a release binary or browser frontend. Keep Cargo feature
@@ -136,7 +136,7 @@ contracts in Otto and client implementation/tests in the frontend repository.
 
 ## Secret scanning
 
-Install Gitleaks (`brew install gitleaks` on macOS), then run
+Install Gitleaks (`brew install gitleaks` on macOS) and Node.js, then run
 `make setup-git-hooks` once per clone. The shared worktree pre-commit hook scans
 staged changes with Gitleaks and then applies the [code limits](#code-limits)
 to them; it fails on findings, violations or scanner errors, and refuses to

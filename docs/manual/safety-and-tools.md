@@ -7,8 +7,7 @@ feedback are not secret-scanned, including credential-shaped text, redaction
 markers and configured exact secret values. This content may be displayed and
 persisted: **do not include actual secrets**. Approval policy, permissions and
 human checkpoints still apply; model redaction and memory secret
-protections are unchanged. This behavior needs no configuration; existing
-installations require the normal rebuild/upgrade and restart to use it.
+protections still apply. No extra configuration is needed.
 
 ## Unified approvals
 
@@ -794,8 +793,9 @@ directory. The private per-session `home` directory does not exist. A write
 under `~` outside the writable set fails with a write denial, and `TMPDIR` is
 the writable scratch location.
 Otto keeps generated sandbox profile files in a separate private `profiles` directory
-that the sandboxed child cannot read. Otto does not treat the workspace as protected: source,
-`.git`, tests, and generated files remain writable.
+that the sandboxed child cannot read. Source, tests and generated files remain
+writable. Git program settings/hooks and workspace identity are protected;
+see [Git metadata restrictions](#git-metadata-is-read-only-in-the-seatbelt-sandbox).
 
 When the selected workspace is a Git worktree, Otto also admits the other
 worktrees of that repository. Candidates come from `git worktree list
@@ -814,7 +814,7 @@ selected-workspace boundary. Otto rediscovers this set at startup and
 `/sandbox reload`.
 
 `network = "allow"` is the default and permits ordinary IP networking and local
-IP binds. `network = "deny"` blocks IP networking and local binds. Phase 1 has
+IP binds. `network = "deny"` blocks IP networking and local binds. There is
 no domain allowlist. Unix sockets stay blocked in both modes, except for the
 exact `/private/var/run/mDNSResponder` path, which `network = "allow"` permits
 because `getaddrinfo` connects it directly to resolve hostnames. Docker/Podman

@@ -130,5 +130,5 @@ on Mac is the documented deployment. Check build, first-run setup, authenticated
 API access, persistent config/sessions and restart behavior when changing that
 path. Use disposable workspace/volume data and no live provider credentials for
 default verification. Docker does not establish native macOS Seatbelt behavior.
-See [installation](../manual/getting-started.md) for user-facing setup and the
-root README for Compose commands.
+See the [setup guide](../manual/getting-started.md) for user-facing Docker and
+Compose commands.

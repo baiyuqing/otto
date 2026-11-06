@@ -8,7 +8,7 @@ impl BashTool {
     /// version, so a changed script/build recipe invalidates authorization.
     pub(super) fn review_facts(&self, command: &str) -> serde_json::Value {
         let parsed = shell::parse(command);
-        let (cwd, segments) = match self.review_command_target(&parsed.command) {
+        let (cwd, segments) = match self.review_command_target(&parsed) {
             Ok(target) => target,
             Err(()) => return json!({"operation_unavailable":true,"complex_shell":true,"files":[]}),
         };
@@ -128,15 +128,18 @@ impl BashTool {
     /// Directory and remaining commands for the review facts. A first
     /// `cd <dir>` sets the directory; any other `cd`, `pushd` or `popd`, or a
     /// `cd` whose arguments are not all static, makes the target unavailable.
+    /// After a leading `cd`, static `NAME=value` prefixes on simple commands
+    /// are accepted (`Parsed::complete_with_command_env`).
     fn review_command_target(
         &self,
-        analysis: &otto_core::approval::ShellCommand,
+        parsed: &shell::Parsed,
     ) -> Result<(PathBuf, Vec<Vec<String>>), ()> {
+        let analysis = &parsed.command;
         let mut cwd = self.workspace_root.clone();
         let mut segments = analysis.segments.as_slice();
         let first = segments.first().ok_or(())?;
         if shell::is_program(&first[0], "cd") {
-            if !analysis.complete || first.len() != 2 {
+            if !parsed.complete_with_command_env || first.len() != 2 {
                 return Err(());
             }
             cwd = cwd.join(&first[1]);
@@ -188,7 +191,7 @@ impl BashTool {
         if parsed.assigns_variables {
             return Err(());
         }
-        let (cwd, segments) = self.review_command_target(&parsed.command)?;
+        let (cwd, segments) = self.review_command_target(&parsed)?;
         if !shell::is_program(&segments[0][0], "git") {
             return Ok(None);
         }

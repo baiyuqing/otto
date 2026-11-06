@@ -151,6 +151,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Sandbox
 
+- A `bash` approval request whose command starts with `cd <dir>` and has static
+  `NAME=value` prefixes on later commands (`cd sub && CARGO_TARGET_DIR=/x cargo
+  test`) now goes to the review model instead of always to a person. A prefix
+  on `cd` itself, a standalone assignment, `export`, a subscripted name or a
+  non-static value still requires a person.
 - A sandboxed `bash` command reads every host path except a denylist, instead of
   only an allowlist of system directories, `PATH` directories and `read_paths`.
   The built-in denylist covers credential, shell-history and personal-data

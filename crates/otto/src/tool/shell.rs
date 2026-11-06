@@ -58,6 +58,11 @@ pub struct Parsed {
     /// `A=1;`, `export A=1`). Such a command can redirect `git` through
     /// `GIT_DIR` or `GIT_WORK_TREE`.
     pub assigns_variables: bool,
+    /// Same as `command.complete`, except that a `NAME=value` prefix
+    /// assignment with a static value on a simple command whose program is not
+    /// `cd`, `pushd` or `popd` is accepted; such a prefix sets only that
+    /// command's environment and does not change the shell's working directory.
+    pub complete_with_command_env: bool,
 }
 
 pub fn analyze(command: &str) -> ShellCommand {
@@ -84,6 +89,7 @@ pub fn parse(command: &str) -> Parsed {
     let source = command.as_bytes();
     let mut parsed = Parsed::default();
     let mut complete = !root.has_error();
+    let mut complete_with_command_env = complete;
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -93,7 +99,10 @@ pub fn parse(command: &str) -> Parsed {
             ACCEPTED_TOKENS.contains(&kind)
         };
         complete &= accepted;
-        let mut descend = true;
+        let command_env_assignment =
+            kind == "variable_assignment" && command_env_assignment(node, source);
+        complete_with_command_env &= accepted || command_env_assignment;
+        let mut descend = !command_env_assignment;
         match kind {
             "variable_assignment" => parsed.assigns_variables = true,
             "command" => {
@@ -103,7 +112,10 @@ pub fn parse(command: &str) -> Parsed {
                     .take_while(|(_, is_static)| *is_static)
                     .map(|(word, _)| word.clone())
                     .collect();
-                complete &= separated && leading.len() == words.len() && program_allowed(&leading);
+                let words_accepted =
+                    separated && leading.len() == words.len() && program_allowed(&leading);
+                complete &= words_accepted;
+                complete_with_command_env &= words_accepted;
                 if !leading.is_empty() {
                     parsed.command.segments.push(leading);
                 }
@@ -129,6 +141,7 @@ pub fn parse(command: &str) -> Parsed {
                     descend = false;
                 } else {
                     complete = false;
+                    complete_with_command_env = false;
                 }
             }
             _ => {}
@@ -143,13 +156,38 @@ pub fn parse(command: &str) -> Parsed {
                 .any(|pair| continued(source, pair[0].end_byte(), pair[1].start_byte()))
         {
             complete = false;
+            complete_with_command_env = false;
         }
         if descend {
             stack.extend(children.into_iter().rev());
         }
     }
     parsed.command.complete = complete;
+    parsed.complete_with_command_env = complete_with_command_env;
     parsed
+}
+
+/// True for a `NAME=value` prefix of a simple command that is not `cd`,
+/// `pushd` or `popd`, whose name is a plain variable name (no subscript) and
+/// whose value is static (a missing value is empty).
+fn command_env_assignment(node: Node, source: &[u8]) -> bool {
+    let Some(parent) = node.parent().filter(|parent| parent.kind() == "command") else {
+        return false;
+    };
+    let name_is_plain = node
+        .child_by_field_name("name")
+        .is_some_and(|name| name.kind() == "variable_name");
+    let value_is_static = node
+        .child_by_field_name("value")
+        .is_none_or(|value| word_value(value, source, true).is_some());
+    let (words, _) = command_words(parent, source);
+    name_is_plain
+        && value_is_static
+        && words.first().is_some_and(|(program, _)| {
+            ["cd", "pushd", "popd"]
+                .iter()
+                .all(|name| !is_program(program, name))
+        })
 }
 
 /// Words of a `command` node, each with whether it is static: a static word

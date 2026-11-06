@@ -1,6 +1,7 @@
 mod candidate_archive;
 mod history;
 mod lifecycle;
+mod lifecycle_candidates;
 
 use std::fs;
 use std::time::Duration;
@@ -11,7 +12,8 @@ use super::*;
 use crate::memory::{
     CandidateAction, CandidateListRequest, CandidateRef, CandidateState, ListRequest,
     NAMESPACE_WORKSPACE, Origin, Provenance, RecordKey, RecordRef, RetrievalRequest,
-    RetrievalResult, ReviewDecision, StoreForgetRequest, StoreReviewRequest, UpsertRequest,
+    RetrievalResult, ReviewDecision, StoreForgetRequest, StoreReviewRequest, StoreSetStateRequest,
+    UpsertRequest,
 };
 
 fn user(store: &FileStore) -> Scope {
@@ -484,7 +486,7 @@ fn proposal(
         origin: Some(Origin::Model),
         ..Provenance::default()
     };
-    let proposed = if action == CandidateAction::Forget {
+    let proposed = if !action.carries_content() {
         Record {
             scope: scope.clone(),
             source,

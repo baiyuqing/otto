@@ -340,6 +340,53 @@ explicitly inventories all stored workspaces. Pass returned `next_cursor` as
 `/remember` and `/memory forget <id>` apply immediately. Model writes create
 candidates; `/memory review <id> accept|reject` decides pending human reviews.
 
+A candidate has one action. Accepting it with `/memory review <id> accept`
+does the following:
+
+| Action | Effect of accepting |
+| --- | --- |
+| `create` | Writes the proposed record as a new record. |
+| `update` | Replaces the text of the target record as a new revision. |
+| `forget` | Forgets the target record, as `/memory forget` does. |
+| `retract` | Sets the target record to `retracted` with the candidate reason as the state reason. |
+| `supersede` | Creates the proposed replacement record and sets the target record to `superseded`, with `superseded_by` naming the replacement. |
+| `correct` | Creates the replacement record with the metadata entry `otto.corrects` naming the target, and sets the target record to `retracted`. |
+| `needs_review` | Sets the target record to `needs_review`. |
+
+Rejecting a candidate changes no record.
+
+`/memory propose <id> <evidence text>` asks the model whether the evidence
+supports a change to one existing record and queues the result as a pending
+candidate. The words after the id are joined with single spaces and form one
+evidence item with user trust. The command runs two typed rounds. In round one
+the model chooses one action from the permitted set (`no_change`,
+`needs_review`, `retract`, `correct`, `supersede`, `forget`) and marks, for
+each evidence item, whether it supports the change. In round two, when the
+action is not `no_change`, the model writes an explanation and, for
+`supersede` and `correct`, the replacement text. The model cannot name a scope,
+a record id or an evidence id; Otto assigns those.
+
+Before anything is written, Otto applies these checks:
+
+- Every change needs at least one supporting evidence item.
+- Evidence from an external source cannot authorize `forget`.
+- The explanation of a `forget` or `retract` must not repeat the text of the
+  record.
+- A replacement must differ from the text of the record.
+
+The command prints one of four results: a pending candidate to decide with
+`/memory review`, `no change proposed`, `proposal rejected` when a check
+fails (nothing is written), or `proposal unavailable` when the model times out
+or answers out of form. Each exchange is stored in the advice audit log
+`~/.otto/memory-advice.db` with the prompt version (`memory-proposal/1`). The
+model explanation is shown to the reviewer as the candidate reason and is
+never put into a model request as an instruction.
+
+With the auxiliary model (`TYPESAFE_API_KEY`), the model cannot write free
+text, so it supplies no explanation or replacement. A `supersede` or `correct`
+proposal then becomes a `needs_review` candidate. The command is not available
+for an external memory source.
+
 Every update that replaces a record moves its former revision to
 `history/<id>/<revision>.md`. Revision 1 of a record that was never updated has
 no history file. Three commands read and use the history, as

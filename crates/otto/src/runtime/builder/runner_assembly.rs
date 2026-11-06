@@ -88,6 +88,7 @@ impl Builder {
         let memory_client = self
             .runner_memory_client(&plugins, &extensions, runtime, warnings)
             .await?;
+        let mut memory_proposals = None;
         if self.memory_usable()
             && !self.memory.external()
             && self.boundary_allows_dynamic(Some(runtime))
@@ -106,27 +107,35 @@ impl Builder {
                 &self.workspace_path,
             )
             .map_err(|e| e.to_string())?;
-            let advice_agent = Agent::with_redactor(
-                client.clone(),
-                Registry::new(Vec::new()).map_err(|error| format!("advice registry: {error}"))?,
-                SharedSession::memory(session.header()),
-                Options {
-                    diagnostics: self.logger.diagnostic_scope(
-                        &session.header().id,
-                        "",
-                        self.boundary_redactor(Some(runtime)),
-                    ),
-                    model: runtime.model.clone(),
-                    provider_name: runtime.provider_type.clone(),
-                    thinking: runtime.thinking.clone(),
-                    now: Box::new(Utc::now),
-                    new_operation_id: Box::new(new_operation_id),
-                    ..Options::default()
-                },
-                self.boundary_redactor(Some(runtime)),
-            );
+            let new_advice_agent = || -> Result<_, String> {
+                Ok(Agent::with_redactor(
+                    client.clone(),
+                    Registry::new(Vec::new())
+                        .map_err(|error| format!("advice registry: {error}"))?,
+                    SharedSession::memory(session.header()),
+                    Options {
+                        diagnostics: self.logger.diagnostic_scope(
+                            &session.header().id,
+                            "",
+                            self.boundary_redactor(Some(runtime)),
+                        ),
+                        model: runtime.model.clone(),
+                        provider_name: runtime.provider_type.clone(),
+                        thinking: runtime.thinking.clone(),
+                        now: Box::new(Utc::now),
+                        new_operation_id: Box::new(new_operation_id),
+                        ..Options::default()
+                    },
+                    self.boundary_redactor(Some(runtime)),
+                ))
+            };
             let advisor = self.advisor(
-                advice_agent,
+                new_advice_agent()?,
+                &runtime.model,
+                self.usage_collector(session, runtime),
+            );
+            memory_proposals = self.proposal_generator(
+                new_advice_agent()?,
                 &runtime.model,
                 self.usage_collector(session, runtime),
             );
@@ -676,6 +685,7 @@ impl Builder {
             connecting_mcp,
             task_control,
             memory_client,
+            memory_proposals,
             schedule_origin,
             presentation_origin,
         };

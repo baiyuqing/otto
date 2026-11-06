@@ -275,12 +275,13 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
     {
         return Err(invalid_request("proposal source origin or decision"));
     }
-    if request.action == CandidateAction::Forget {
+    if !request.action.carries_content() {
+        // Forget, retract and needs_review name a target and carry no content.
         validate_scope(&request.scope)?;
         if !valid_opaque_id(&request.target_id, MAX_ID_BYTES)
             || !valid_revision(request.base_revision)
         {
-            return Err(invalid_request("forget proposal target"));
+            return Err(invalid_request("proposal target without content"));
         }
         let route_only = presentation_route_only(&request.metadata);
         if !request.kind.is_empty()
@@ -291,7 +292,9 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
             || request.confidence != 0.0
             || request.expires_at.is_some()
         {
-            return Err(invalid_request("forget proposal content"));
+            return Err(invalid_request(
+                "proposal content of an action without content",
+            ));
         }
         return validate_provenance(&request.source, false, false);
     }
@@ -314,14 +317,16 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
             }
             require_standing_key(&request.scope, &request.kind, &request.key)?;
         }
-        CandidateAction::Update => {
+        CandidateAction::Update | CandidateAction::Supersede | CandidateAction::Correct => {
             if !valid_opaque_id(&request.target_id, MAX_ID_BYTES)
                 || !valid_revision(request.base_revision)
             {
                 return Err(invalid_request("update proposal target"));
             }
         }
-        CandidateAction::Forget => unreachable!("handled above"),
+        CandidateAction::Forget | CandidateAction::Retract | CandidateAction::NeedsReview => {
+            unreachable!("handled above")
+        }
     }
     Ok(())
 }
@@ -506,8 +511,10 @@ pub fn validate_store_review_request(
         }
         return Ok(());
     }
-    if candidate.action == CandidateAction::Forget && request.edited.is_some() {
-        return Err(invalid_request("forget edit"));
+    if !candidate.action.carries_content() && request.edited.is_some() {
+        return Err(invalid_request(
+            "review edit of a candidate without content",
+        ));
     }
     if candidate.action == CandidateAction::Create {
         if !valid_opaque_id(&request.result_record_id, MAX_ID_BYTES)
@@ -516,8 +523,13 @@ pub fn validate_store_review_request(
             return Err(invalid_request("accepted create fields"));
         }
     } else {
-        if !request.result_record_id.is_empty() {
+        // A supersede or correct writes a replacement record and so needs its ID.
+        let writes_replacement = action_writes_new_record(candidate.action);
+        if writes_replacement != !request.result_record_id.is_empty() {
             return Err(invalid_request("accepted target result ID"));
+        }
+        if writes_replacement && !valid_opaque_id(&request.result_record_id, MAX_ID_BYTES) {
+            return Err(invalid_request("accepted replacement result ID"));
         }
         let target = request.target_revision.unwrap_or(candidate.base_revision);
         if candidate.action == CandidateAction::Update
@@ -528,7 +540,7 @@ pub fn validate_store_review_request(
         }
     }
     if let Some(edited) = &request.edited {
-        if candidate.action == CandidateAction::Forget || edited.scope != candidate.proposed.scope {
+        if !candidate.action.carries_content() || edited.scope != candidate.proposed.scope {
             return Err(invalid_request("review edit scope"));
         }
         validate_proposed_record(edited, candidate.action)?;

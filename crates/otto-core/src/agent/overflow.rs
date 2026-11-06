@@ -66,6 +66,15 @@ pub struct RunDispatchState {
     /// The text-free references of the records `memory_context` renders,
     /// persisted once per turn as the `otto.memory_recall` entry.
     pub memory_records: Vec<crate::session::MemoryRecordRef>,
+    /// The records recall returned this turn, before the per-step lifecycle
+    /// filter; the filter re-renders `memory_context` from them.
+    pub recalled: Vec<super::memory::Record>,
+    /// The ids of recalled records that at least one request of this turn
+    /// carried; a later retirement of one of them yields a notice.
+    pub sent_record_ids: std::collections::BTreeSet<String>,
+    /// The rendered retraction notices for the next request; empty when
+    /// no referenced record left the active state.
+    pub retraction_context: String,
     /// The full redacted tool-result text, keyed by tool-call id, for results
     /// whose stored text is a placeholder. It is substituted into provider
     /// requests only, never into the session.

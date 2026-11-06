@@ -4,6 +4,10 @@
 //! message, and never persists that message. It persists the ids and
 //! revisions of the rendered records, without text, as the turn's
 //! `otto.memory_recall` session entry (see [`crate::session::memory_recall`]).
+//! Before every provider step it asks the binding for the lifecycle status of
+//! the records the conversation still refers to, drops recalled records that
+//! are no longer active, and renders retraction notices
+//! ([`super::memory_retraction`]) for records that left the active state.
 //!
 //! Ownership: the agent borrows a [`MemoryRecall`] implementation through
 //! `Options`. It does not own the backing store and closes it only through
@@ -81,6 +85,36 @@ pub struct RecallResult {
 #[error("{0}")]
 pub struct MemoryError(pub String);
 
+/// The lifecycle status of one record as the store reports it now. Only ids,
+/// revisions and the replacement id travel here: no record text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordStatus {
+    /// Valid evidence at the reported revision.
+    Active,
+    NeedsReview,
+    /// Replaced by the record `replacement_id`.
+    Superseded {
+        replacement_id: String,
+    },
+    Retracted,
+    /// Past its expiry; no longer recalled.
+    Expired,
+    /// Forgotten; only a tombstone remains.
+    Forgotten,
+    /// The store could not say: the id is not in the binding's scopes, or
+    /// the store has no lifecycle states.
+    Unknown,
+}
+
+/// The lifecycle of one record the conversation refers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordLifecycle {
+    pub id: String,
+    /// The record's current revision when the store reports one.
+    pub revision: Option<String>,
+    pub status: RecordStatus,
+}
+
 /// The long-term memory binding the agent consults once per turn.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -92,6 +126,25 @@ pub trait MemoryRecall {
         request: &RecallRequest,
         cancel: &CancellationToken,
     ) -> Result<RecallResult, MemoryError>;
+
+    /// The current lifecycle status of each record id, in any order. Called
+    /// before every provider step for the records the conversation still
+    /// refers to. The default answers [`RecordStatus::Unknown`] for every id,
+    /// which selects no notice and filters nothing.
+    async fn lifecycle(
+        &self,
+        ids: &[String],
+        _cancel: &CancellationToken,
+    ) -> Result<Vec<RecordLifecycle>, MemoryError> {
+        Ok(ids
+            .iter()
+            .map(|id| RecordLifecycle {
+                id: id.clone(),
+                revision: None,
+                status: RecordStatus::Unknown,
+            })
+            .collect())
+    }
 
     /// Whether [`MemoryRecall::observe_turn`] sends anything. The agent records
     /// the messages of a turn only when hooks or this returns true.
@@ -154,7 +207,7 @@ pub fn render_memory_context(records: &[Record]) -> String {
 }
 
 /// Always produces a closed quoted token.
-fn quote(value: &str) -> String {
+pub(super) fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("a string always encodes")
 }
 

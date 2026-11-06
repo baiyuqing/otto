@@ -531,3 +531,116 @@ async fn remember_with_an_advisor_returns_context_canceled_when_canceled_during_
     assert!(result.is_error);
     assert_eq!(result.content, CONTEXT_CANCELED);
 }
+
+fn set_record_state(
+    service: &Service,
+    id: &str,
+    revision: u64,
+    state: crate::memory::RecordState,
+    superseded_by: &str,
+) -> crate::memory::Record {
+    service
+        .set_state(&crate::memory::SetStateRequest {
+            reference: RecordRef {
+                scope: scope(),
+                id: id.into(),
+            },
+            expected_revision: revision,
+            state,
+            superseded_by: superseded_by.into(),
+            reason: String::new(),
+        })
+        .expect("the state change is accepted")
+}
+
+#[test]
+fn search_definition_states_active_only_search_and_state_in_id_lookup() {
+    let definition = memory_search_definition();
+    assert!(
+        definition.description.contains("active records only"),
+        "{}",
+        definition.description
+    );
+    assert!(
+        definition.description.contains("any state")
+            && definition.description.contains("shows state"),
+        "{}",
+        definition.description
+    );
+}
+
+#[tokio::test]
+async fn search_output_line_carries_active_state() {
+    let (_directory, service) = service();
+    remember_record(&service, "editor", "prefers vim");
+    let tool = MemorySearchTool::new(service, vec![scope()], MAX_OUTPUT_BYTES);
+
+    let result = run(&tool, r#"{"query":"vim"}"#).await;
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.content.contains(" state=active "), "{result:?}");
+    assert!(!result.content.contains("superseded_by="), "{result:?}");
+}
+
+// Needs the store implementation of `set_state`.
+#[tokio::test]
+async fn id_lookup_returns_non_active_records_with_state_and_replacement() {
+    let (_directory, service) = service();
+    let old = remember_record(&service, "editor", "prefers vim");
+    let new = remember_record(&service, "editor-new", "prefers helix");
+    set_record_state(
+        &service,
+        &old,
+        1,
+        crate::memory::RecordState::Superseded,
+        &new,
+    );
+    let flagged = remember_record(&service, "shell", "prefers fish");
+    set_record_state(
+        &service,
+        &flagged,
+        1,
+        crate::memory::RecordState::NeedsReview,
+        "",
+    );
+    let tool = MemorySearchTool::new(service, vec![scope()], MAX_OUTPUT_BYTES);
+
+    let superseded = run(&tool, &format!(r#"{{"id":"{old}"}}"#)).await;
+    assert!(!superseded.is_error, "{superseded:?}");
+    assert!(
+        superseded.content.contains(" state=superseded "),
+        "{superseded:?}"
+    );
+    assert!(
+        superseded
+            .content
+            .contains(&format!(" superseded_by={new} ")),
+        "{superseded:?}"
+    );
+    let review = run(&tool, &format!(r#"{{"id":"{flagged}"}}"#)).await;
+    assert!(
+        review.content.contains(" state=needs_review "),
+        "{review:?}"
+    );
+    assert!(!review.content.contains("superseded_by="), "{review:?}");
+}
+
+// Needs the store implementation of recall exclusion.
+#[tokio::test]
+async fn term_search_returns_only_active_records() {
+    let (_directory, service) = service();
+    let kept = remember_record(&service, "editor", "prefers vim");
+    let old = remember_record(&service, "editor-old", "prefers vi");
+    set_record_state(
+        &service,
+        &old,
+        1,
+        crate::memory::RecordState::NeedsReview,
+        "",
+    );
+    let tool = MemorySearchTool::new(service, vec![scope()], MAX_OUTPUT_BYTES);
+
+    let result = run(&tool, r#"{"query":"prefers"}"#).await;
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.content.contains(&kept), "{result:?}");
+    assert!(!result.content.contains(&old), "{result:?}");
+}

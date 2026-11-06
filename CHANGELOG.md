@@ -82,6 +82,14 @@ commit ledger; Git and release tags retain the full history. See the
   for the summarizer and record them in the checkpoint's `memoryRetracted`, so
   the mark stops. The rebuild uses the previous summary and the messages since
   the checkpoint; `/new` is the complete recovery path (#591).
+- Memory candidates can now carry the actions `retract`, `supersede`, `correct`
+  and `needs_review` besides `create`, `update` and `forget`; accepting one sets
+  the target record's state or creates the replacement record. `/memory propose`
+  with an id and evidence text asks the model for a validated, evidence-backed
+  candidate for one record and queues it for `/memory review`; the exchange is
+  stored in the advice audit log. See
+  [local memory use](docs/manual/memory-and-extensions.md#local-memory-use)
+  (#591).
 
 ### Sessions
 

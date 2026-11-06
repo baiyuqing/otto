@@ -101,7 +101,8 @@ pub fn validate_compaction_details(details: &CompactionDetails) -> Result<(), Pi
         }
         path_bytes += path.len();
     }
-    validate_compaction_memory_records(&details.memory_records)
+    validate_compaction_memory_records(&details.memory_records)?;
+    validate_compaction_memory_records(&details.memory_retracted)
 }
 
 /// Rejects memory references that are too many, malformed, or repeated.
@@ -224,6 +225,7 @@ pub fn compaction_details_present(details: &CompactionDetails) -> bool {
         || details.omitted_read_files != 0
         || details.omitted_modified_files != 0
         || !details.memory_records.is_empty()
+        || !details.memory_retracted.is_empty()
         || !details.memory_coverage.is_unknown()
 }
 
@@ -406,11 +408,13 @@ pub fn decode_compaction_details(raw: Option<&RawValue>) -> CompactionDetails {
             return CompactionDetails::default();
         }
     }
-    if let Some(value) = object.get("memoryRecords")
-        && (!value.get().trim_start().starts_with('[')
-            || serde_json::from_str::<Vec<MemoryRecordRef>>(value.get()).is_err())
-    {
-        return CompactionDetails::default();
+    for field in ["memoryRecords", "memoryRetracted"] {
+        if let Some(value) = object.get(field)
+            && (!value.get().trim_start().starts_with('[')
+                || serde_json::from_str::<Vec<MemoryRecordRef>>(value.get()).is_err())
+        {
+            return CompactionDetails::default();
+        }
     }
     if let Some(value) = object.get("memoryCoverage")
         && (!value.get().trim_start().starts_with('"')
@@ -475,6 +479,9 @@ pub fn sanitize_compaction_details(details: &CompactionDetails) -> CompactionDet
         MemoryReferenceCoverage::Unknown
     };
     result.memory_records = memory_records;
+    let mut memory_retracted = normalize_memory_records(&details.memory_retracted);
+    memory_retracted.truncate(MEMORY_RECALL_MAXIMUM_RECORDS);
+    result.memory_retracted = memory_retracted;
     result
 }
 

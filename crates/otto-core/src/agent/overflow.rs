@@ -75,6 +75,9 @@ pub struct RunDispatchState {
     /// The rendered retraction notices for the next request; empty when
     /// no referenced record left the active state.
     pub retraction_context: String,
+    /// Whether this turn already warned that the compaction summary in force
+    /// is affected by retired records; the warning is emitted once per turn.
+    pub summary_warning_sent: bool,
     /// The full redacted tool-result text, keyed by tool-call id, for results
     /// whose stored text is a placeholder. It is substituted into provider
     /// requests only, never into the session.

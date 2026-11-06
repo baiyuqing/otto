@@ -7,6 +7,7 @@ use super::*;
 pub(super) fn one_record() -> Vec<Record> {
     vec![Record {
         id: "rec-1".into(),
+        revision: Some("3".into()),
         scope: Scope {
             namespace: "user".into(),
             id: "u1".into(),

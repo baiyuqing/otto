@@ -25,6 +25,10 @@ impl TurnRecordingSession {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Session for TurnRecordingSession {
+    fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
+        self.inner.memory_references()
+    }
+
     fn messages(&self) -> Vec<Message> {
         self.inner.messages()
     }

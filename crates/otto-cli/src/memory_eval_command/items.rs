@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::answer_checks::contains_term;
+
 /// Repository path of the item file, embedded at build time.
 pub const ITEMS_PATH: &str = "testdata/memory-eval/retraction/items.jsonl";
 /// The version of the item format.
@@ -114,8 +116,206 @@ pub struct Item {
 
 /// Parses every non-empty line, then checks the file's consistency. The error names the line
 /// or the item and the rule.
-pub fn parse_items(_jsonl: &str) -> Result<Vec<Item>, String> {
-    Err("not implemented".into())
+pub fn parse_items(jsonl: &str) -> Result<Vec<Item>, String> {
+    let mut items: Vec<Item> = Vec::new();
+    for (index, line) in jsonl.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let item: Item = serde_json::from_str(line)
+            .map_err(|error| format!("items line {}: {error}", index + 1))?;
+        items.push(item);
+    }
+    if items.is_empty() {
+        return Err("items file holds no item".into());
+    }
+    for (index, item) in items.iter().enumerate() {
+        check_item(item).map_err(|rule| format!("item {:?}: {rule}", item.name))?;
+        for earlier in &items[..index] {
+            if earlier.name == item.name {
+                return Err(format!("item {:?}: duplicate name", item.name));
+            }
+            if earlier.record.marker == item.record.marker {
+                return Err(format!(
+                    "item {:?}: marker {:?} is already used by item {:?}",
+                    item.name, item.record.marker, earlier.name
+                ));
+            }
+        }
+    }
+    Ok(items)
+}
+
+/// Whether `marker` is `m-NN-xxxx`: two digits and four lowercase ASCII letters.
+fn marker_is_well_formed(marker: &str) -> bool {
+    let bytes = marker.as_bytes();
+    bytes.len() == 9
+        && bytes.starts_with(b"m-")
+        && bytes[2..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..].iter().all(u8::is_ascii_lowercase)
+}
+
+/// The terms of `terms` that are empty or not lowercase.
+fn check_terms(field: &str, terms: &[String]) -> Result<(), String> {
+    for term in terms {
+        if term.is_empty() {
+            return Err(format!("{field} holds an empty term"));
+        }
+        if *term != term.to_lowercase() {
+            return Err(format!("{field} term {term:?} is not lowercase"));
+        }
+    }
+    Ok(())
+}
+
+fn require_text(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field} is empty"));
+    }
+    Ok(())
+}
+
+/// The consistency rules of one item. The error is the rule that failed.
+fn check_item(item: &Item) -> Result<(), String> {
+    require_text("name", &item.name)?;
+    let record = &item.record;
+    for (field, value) in [
+        ("record.id", &record.id),
+        ("record.revision", &record.revision),
+        ("record.kind", &record.kind),
+        ("record.key", &record.key),
+        ("record.scope_id", &record.scope_id),
+        ("task", &item.task),
+        ("control.task", &item.control.task),
+        ("control.record.id", &item.control.record.id),
+        ("control.record.revision", &item.control.record.revision),
+        ("control.record.scope_id", &item.control.record.scope_id),
+        ("control.record.text", &item.control.record.text),
+        ("prior.user", &item.prior.user),
+        ("prior.assistant_neutral", &item.prior.assistant_neutral),
+        ("prior.tool_input", &item.prior.tool_input),
+    ] {
+        require_text(field, value)?;
+    }
+    if !marker_is_well_formed(&record.marker) {
+        return Err(format!(
+            "record.marker {:?} is not of the form m-NN-xxxx",
+            record.marker
+        ));
+    }
+    if !record.text.contains(&record.marker) {
+        return Err("record.text does not hold record.marker".into());
+    }
+    check_replacement(item)?;
+    check_terms("obsolete_terms", &item.obsolete_terms)?;
+    check_terms("checks.must_contain_any", &item.checks.must_contain_any)?;
+    check_terms("control.must_contain_any", &item.control.must_contain_any)?;
+    check_terms("control.must_not_contain", &item.control.must_not_contain)?;
+    if item.obsolete_terms.is_empty() {
+        return Err("obsolete_terms is empty".into());
+    }
+    if item.control.must_contain_any.is_empty() {
+        return Err("control.must_contain_any is empty".into());
+    }
+    if item.checks.must_contain_any.is_empty() == item.replacement.is_some() {
+        return Err(if item.replacement.is_some() {
+            "checks.must_contain_any is empty although a replacement exists"
+        } else {
+            "checks.must_contain_any is not empty although no replacement exists"
+        }
+        .into());
+    }
+    if item.control.record.id == record.id
+        || item
+            .replacement
+            .as_ref()
+            .is_some_and(|replacement| replacement.id == item.control.record.id)
+    {
+        return Err("control.record.id equals the record or replacement id".into());
+    }
+    if item.control.record.scope_id == record.scope_id {
+        return Err("control.record.scope_id equals record.scope_id".into());
+    }
+    check_prior(item)
+}
+
+fn check_replacement(item: &Item) -> Result<(), String> {
+    match (&item.retirement, &item.replacement) {
+        (Retirement::Superseded, None) => Err("a superseded item needs a replacement".into()),
+        (Retirement::Retracted | Retirement::Forgotten, Some(_)) => {
+            Err("only a superseded item may have a replacement".into())
+        }
+        (_, Some(replacement)) => {
+            require_text("replacement.id", &replacement.id)?;
+            require_text("replacement.revision", &replacement.revision)?;
+            require_text("replacement.text", &replacement.text)?;
+            if replacement.id == item.record.id {
+                return Err("replacement.id equals record.id".into());
+            }
+            if replacement.text.contains(&item.record.marker) {
+                return Err("replacement.text holds record.marker".into());
+            }
+            if let Some(term) = holds_obsolete_term(item, &replacement.text) {
+                return Err(format!("replacement.text holds the obsolete term {term:?}"));
+            }
+            Ok(())
+        }
+        (_, None) => Ok(()),
+    }
+}
+
+/// The first obsolete term of `item` that `text` holds.
+fn holds_obsolete_term<'a>(item: &'a Item, text: &str) -> Option<&'a str> {
+    item.obsolete_terms
+        .iter()
+        .map(String::as_str)
+        .find(|term| contains_term(text, term))
+}
+
+/// The rules on the prior turn: the neutral copy is clean, the claim copies hold an obsolete
+/// term, and no copy holds the marker.
+fn check_prior(item: &Item) -> Result<(), String> {
+    let prior = &item.prior;
+    for (field, text) in [
+        ("prior.user", &prior.user),
+        ("prior.assistant_neutral", &prior.assistant_neutral),
+        ("prior.assistant", &prior.assistant),
+        ("prior.tool_input", &prior.tool_input),
+        ("prior.tool_output", &prior.tool_output),
+        ("prior.summary", &prior.summary),
+        ("task", &item.task),
+        ("control.task", &item.control.task),
+    ] {
+        if text.contains(&item.record.marker) {
+            return Err(format!("{field} holds record.marker"));
+        }
+    }
+    for (field, text) in [
+        ("prior.user", &prior.user),
+        ("prior.assistant_neutral", &prior.assistant_neutral),
+        ("task", &item.task),
+    ] {
+        if let Some(term) = holds_obsolete_term(item, text) {
+            return Err(format!("{field} holds the obsolete term {term:?}"));
+        }
+    }
+    for (field, text) in [
+        ("prior.assistant", &prior.assistant),
+        ("prior.tool_output", &prior.tool_output),
+        ("prior.summary", &prior.summary),
+    ] {
+        if holds_obsolete_term(item, text).is_none() {
+            return Err(format!("{field} holds no obsolete term"));
+        }
+    }
+    if prior.tool_name != "bash" {
+        return Err(format!(
+            "prior.tool_name is {:?}, not \"bash\"",
+            prior.tool_name
+        ));
+    }
+    Ok(())
 }
 
 /// The embedded items.

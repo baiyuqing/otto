@@ -22,6 +22,7 @@ pub mod codec;
 pub mod compaction;
 pub mod context;
 pub mod fork;
+pub mod memory_recall;
 pub mod operation;
 pub mod pi;
 pub mod plan;
@@ -43,6 +44,11 @@ pub use fork::{
     FORK_CUSTOM_TYPE, FORK_SCHEMA_VERSION, ForkError, ForkPlan, ForkPoint, ForkPromptError,
     ForkRecord, decode_fork_record, encode_fork_record, fork_origin, fork_point_by_prompt,
     fork_points, plan_fork,
+};
+pub use memory_recall::{
+    MEMORY_RECALL_CUSTOM_TYPE, MEMORY_RECALL_MAXIMUM_RECORDS, MEMORY_RECALL_SCHEMA_VERSION,
+    MemoryRecallRecord, MemoryRecordRef, MemoryReferenceCoverage, TurnMemoryReferences,
+    decode_memory_recall, encode_memory_recall, normalize_memory_records,
 };
 pub use operation::{
     DecodedOperationFact, OPERATION_CUSTOM_TYPE, OPERATION_SCHEMA_VERSION, OperationFact,
@@ -314,6 +320,13 @@ pub trait Session: SessionBounds {
     /// default body, like [`Self::observed_capabilities`].
     fn plan(&self) -> Vec<PlanStep>;
 
+    /// The `otto.memory_recall` records on the active path, oldest first,
+    /// each anchored to the nearest preceding `Role::User` message, including
+    /// records of turns a compaction checkpoint has since summarized. Empty
+    /// for a session written before the record existed. No default body,
+    /// like [`Self::observed_capabilities`].
+    fn memory_references(&self) -> Vec<TurnMemoryReferences>;
+
     /// Appends `message` as the delivery of input `input_id` unless a message
     /// with that input id is already on the active path. The check and the
     /// append run under one lock; a file-backed store persists before it
@@ -362,6 +375,8 @@ struct State {
     /// Input ids of every appended message, for
     /// [`Session::append_input_if_absent`].
     seen_inputs: HashSet<String>,
+    /// Every `otto.memory_recall` record, anchored when it was appended.
+    memory_references: Vec<TurnMemoryReferences>,
 }
 
 impl State {
@@ -688,7 +703,34 @@ impl Session for MemorySession {
         self.state.lock().expect("session mutex").plan.clone()
     }
 
+    fn memory_references(&self) -> Vec<TurnMemoryReferences> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .memory_references
+            .clone()
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        if custom_type == MEMORY_RECALL_CUSTOM_TYPE {
+            let record = decode_memory_recall(data)
+                .ok_or_else(|| SessionError::Persist("malformed otto.memory_recall data".into()))?;
+            let mut state = self.state.lock().expect("session mutex");
+            let user_message_id = state
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::User)
+                .map(|message| message.id.clone())
+                .ok_or(SessionError::Sequence(
+                    "memory recall record has no preceding user message",
+                ))?;
+            state.memory_references.push(TurnMemoryReferences {
+                user_message_id,
+                records: record.records,
+            });
+            return Ok(());
+        }
         if custom_type == TURN_CUSTOM_TYPE {
             let record = decode_turn_record(data)
                 .ok_or_else(|| SessionError::Persist("malformed otto.turn data".into()))?;

@@ -130,6 +130,7 @@ fn previous_paths_are_carried_forward_and_normalized() {
             modified_files: vec!["dir/../kept.txt".into()],
             omitted_read_files: 2,
             omitted_modified_files: -5,
+            ..CompactionDetails::default()
         },
     );
     assert_eq!(details.read_files, ["old.txt"]);

@@ -239,8 +239,10 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
                 agent::Record {
                     id: item
                         .reference
-                        .map(|reference| reference.id)
+                        .as_ref()
+                        .map(|reference| reference.id.clone())
                         .unwrap_or_default(),
+                    revision: item.reference.and_then(|reference| reference.revision),
                     scope: agent::Scope {
                         namespace: scope.namespace,
                         id: scope.id,

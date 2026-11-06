@@ -1,12 +1,14 @@
 //! Run-loop tests: memory recall, per-run system context, and the tool-result overlay.
 
 use super::*;
+use crate::session::{MemoryRecordRef, TurnMemoryReferences};
 
 // -- memory ----------------------------------------------------------------
 
 pub(super) fn one_record() -> Vec<Record> {
     vec![Record {
         id: "rec-1".into(),
+        revision: Some("3".into()),
         scope: Scope {
             namespace: "user".into(),
             id: "u1".into(),
@@ -45,6 +47,29 @@ async fn the_rendered_memory_context_is_prepended_without_being_persisted() {
             "the memory block was persisted"
         );
     }
+    let user_message_id = agent
+        .session()
+        .messages()
+        .iter()
+        .find(|message| message.role == Role::User && message.text() == "hello")
+        .expect("the persisted user message")
+        .id
+        .clone();
+    let references = agent.session().memory_references();
+    assert_eq!(
+        references,
+        vec![TurnMemoryReferences {
+            user_message_id,
+            records: vec![MemoryRecordRef {
+                id: "rec-1".into(),
+                revision: Some("3".into()),
+            }],
+        }]
+    );
+    assert!(
+        !format!("{references:?}").contains("prefers vim"),
+        "the record text reached the memory references"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

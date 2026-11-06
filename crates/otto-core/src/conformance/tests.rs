@@ -21,11 +21,19 @@ struct Forgets(MemorySession, Forgotten);
 enum Forgotten {
     Inputs,
     Plan,
+    MemoryReferences,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Session for Forgets {
+    fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
+        if self.1 == Forgotten::MemoryReferences {
+            return Vec::new();
+        }
+        self.0.memory_references()
+    }
+
     fn messages(&self) -> Vec<Message> {
         self.0.messages()
     }
@@ -94,6 +102,7 @@ async fn a_wrapper_that_drops_a_guarantee_fails_the_named_check() {
     for (forgotten, check) in [
         (Forgotten::Inputs, "session.input_id"),
         (Forgotten::Plan, "session.plan"),
+        (Forgotten::MemoryReferences, "session.memory_references"),
     ] {
         let failure = session(&|| Forgets(MemorySession::new(), forgotten), None)
             .await

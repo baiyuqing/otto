@@ -404,6 +404,7 @@ fn assert_warning_contains(warnings: &[Warning], text: &str) {
 
 mod context_edits;
 mod history_messages;
+mod memory_references;
 mod operations_pairing;
 mod path_checkpoints;
 mod usage_repair;

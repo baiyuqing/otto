@@ -46,6 +46,7 @@ use super::{
     Agent, AgentError, CompactionMode, CompactionPlan, CompactionReason, CompactionResult,
     CompactionSettings, Event, EventSink, Options,
 };
+use memory_references::summarized_memory_references;
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// Creates a manual checkpoint.
@@ -274,6 +275,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 combine_compaction_usage(usage, usage_present, turn_usage, turn_usage_present);
             details = turn_prepared.details;
         }
+        (details.memory_records, details.memory_coverage) = summarized_memory_references(
+            latest.as_ref().map(|latest| &latest.details),
+            selection
+                .historical_source
+                .iter()
+                .chain(&selection.turn_prefix_source),
+            &self.session.memory_references(),
+        );
         let user_messages = carry_user_messages(
             &prepared_selection.previous_user_messages,
             prepared_selection
@@ -498,6 +507,7 @@ impl OperationControl for SummaryControl<'_> {
     }
 }
 
+mod memory_references;
 mod remote;
 mod summary_requests;
 

@@ -62,6 +62,12 @@ impl MemoryStore for AlternateStore {
     fn restore(&self, _: &StoreRestoreRequest) -> Result<Record> {
         unsupported()
     }
+    fn set_state(&self, _: &crate::memory::StoreSetStateRequest) -> Result<Record> {
+        unsupported()
+    }
+    fn verify(&self, _: &crate::memory::StoreVerifyRequest) -> Result<Record> {
+        unsupported()
+    }
     fn review_within_standing_budget(&self, _: &StoreReviewRequest) -> Result<ReviewResult> {
         unsupported()
     }

@@ -215,7 +215,7 @@ fn forget_proposals_carry_no_content() {
             .expect_err("content")
             .detail
             .as_deref(),
-        Some("forget proposal content")
+        Some("proposal content of an action without content")
     );
 }
 
@@ -282,4 +282,87 @@ fn restore_requests_reject_an_invalid_record_id() {
     validate_restore_request(&request).expect_err("empty ID");
     request.reference.id = "has space".into();
     validate_restore_request(&request).expect_err("ID outside the opaque alphabet");
+}
+
+fn accepted_candidate(action: CandidateAction, result_record_id: &str) -> Candidate {
+    Candidate {
+        id: "c1".into(),
+        proposed: Record {
+            scope: Scope::new(NAMESPACE_USER, "install"),
+            ..Record::default()
+        },
+        action,
+        target_id: "a1".into(),
+        base_revision: 1,
+        reason: String::new(),
+        state: CandidateState::Accepted,
+        created_at: now(),
+        decided_at: Some(now()),
+        decision_source: Some(Origin::Human),
+        result_record_id: result_record_id.into(),
+        result_revision: 2,
+    }
+}
+
+#[test]
+fn an_accepted_candidate_names_a_result_record_only_for_actions_that_write_one() {
+    for action in [CandidateAction::Supersede, CandidateAction::Correct] {
+        validate_candidate(&accepted_candidate(action, "r1")).expect("replacement named");
+        assert!(
+            validate_candidate(&accepted_candidate(action, "")).is_err(),
+            "{action:?}"
+        );
+    }
+    for action in [
+        CandidateAction::Update,
+        CandidateAction::Forget,
+        CandidateAction::Retract,
+        CandidateAction::NeedsReview,
+    ] {
+        validate_candidate(&accepted_candidate(action, "")).expect("no result record");
+        assert!(
+            validate_candidate(&accepted_candidate(action, "r1")).is_err(),
+            "{action:?}"
+        );
+    }
+}
+
+#[test]
+fn retract_and_needs_review_proposals_carry_no_content_and_replacements_need_text() {
+    let proposal = |action: CandidateAction, text: &str| ProposeRequest {
+        action,
+        scope: Scope::new(NAMESPACE_USER, "install"),
+        kind: if text.is_empty() {
+            String::new()
+        } else {
+            "preference".into()
+        },
+        key: if text.is_empty() {
+            String::new()
+        } else {
+            "editor".into()
+        },
+        text: text.into(),
+        target_id: "a1".into(),
+        base_revision: 1,
+        source: Provenance {
+            origin: Some(Origin::Model),
+            ..Provenance::default()
+        },
+        ..ProposeRequest::default()
+    };
+    for action in [CandidateAction::Retract, CandidateAction::NeedsReview] {
+        validate_propose_request(&proposal(action, "")).expect("target only");
+        assert!(
+            validate_propose_request(&proposal(action, "leftover")).is_err(),
+            "{action:?}"
+        );
+    }
+    for action in [CandidateAction::Supersede, CandidateAction::Correct] {
+        validate_propose_request(&proposal(action, "prefers tabs")).expect("replacement text");
+        assert!(
+            validate_propose_request(&proposal(action, "")).is_err(),
+            "{action:?}"
+        );
+    }
 }

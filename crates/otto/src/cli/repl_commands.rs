@@ -53,6 +53,7 @@ pub(crate) const MEMORY_USAGE: &str = "usage: /memory list [--scope current|user
     /memory state <id> active|needs-review|retracted [--reason TEXT] | \
     /memory state <id> superseded <replacement-id> [--reason TEXT] | \
     /memory verify <id> [--review-in AGE] | \
+    /memory propose <id> <evidence text> | \
     /memory review <id> accept|reject";
 #[cfg(test)]
 pub(crate) const REMEMBER_USAGE: &str =
@@ -142,6 +143,22 @@ pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> 
                 text.push_str(&format!(" reason={}", record.state_reason));
             }
             text
+        }
+        Reply::MemoryProposed(outcome) => {
+            use crate::memory::proposals::Outcome;
+            match outcome {
+                Outcome::NoChange { explanation } => format!("no change proposed: {explanation}"),
+                Outcome::Proposed(candidate) => format!(
+                    "proposed {} of {} as candidate {} (review with /memory review {} accept|reject): {}",
+                    candidate.action.as_str(),
+                    candidate.target_id,
+                    candidate.id,
+                    candidate.id,
+                    candidate.reason
+                ),
+                Outcome::Rejected(reason) => format!("proposal rejected: {reason}"),
+                Outcome::Unavailable(reason) => format!("proposal unavailable: {reason}"),
+            }
         }
         Reply::MemoryVerified(record) => format!(
             "verified {} (revision {}) verified_at={} review_at={}",
@@ -454,6 +471,7 @@ pub(crate) fn repl_memory_command(
             crate::app::management::Request::MemoryRestore { .. } => "/memory restore",
             crate::app::management::Request::MemoryState { .. } => "/memory state",
             crate::app::management::Request::MemoryVerify { .. } => "/memory verify",
+            crate::app::management::Request::MemoryPropose { .. } => "/memory propose",
             crate::app::management::Request::MemoryReviewList
             | crate::app::management::Request::MemoryReview { .. } => "/memory review",
             _ => "/memory",

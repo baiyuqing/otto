@@ -494,6 +494,7 @@ fn management(name: &str, args: &str) -> Result<Transition, String> {
             | M::MemoryRestore { .. }
             | M::MemoryState { .. }
             | M::MemoryVerify { .. }
+            | M::MemoryPropose { .. }
             | M::MemoryReview { .. }
             | M::Remember { .. }
             | M::SkillSet { .. }

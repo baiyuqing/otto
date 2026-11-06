@@ -25,31 +25,34 @@ impl Jev {
     }
 }
 
-fn wire(questions: &[Question]) -> Map<String, Value> {
-    questions
-        .iter()
-        .map(|question| {
-            let (kind, criteria) = match &question.kind {
-                Kind::Choice(options) => (
-                    "choice",
-                    options
-                        .iter()
-                        .map(|(id, meaning)| (id.clone(), Value::from(meaning.as_str())))
-                        .collect(),
-                ),
-                Kind::YesNo { yes, no } => ("noul", json!({"true": yes, "false": no})),
-            };
-            let wire = WireQuestion {
-                r#type: kind,
-                instructions: &question.instructions,
-                criteria,
-            };
-            (
-                question.id.to_owned(),
-                serde_json::to_value(wire).expect("WireQuestion serializes"),
-            )
-        })
-        .collect()
+/// The auxiliary model answers choice and yes/no questions only.
+const TEXT_UNSUPPORTED: &str = "the auxiliary model answers choice and yes/no questions only";
+
+fn wire(questions: &[Question]) -> Result<Map<String, Value>, Failure> {
+    let mut wired = Map::new();
+    for question in questions {
+        let (kind, criteria) = match &question.kind {
+            Kind::Choice(options) => (
+                "choice",
+                options
+                    .iter()
+                    .map(|(id, meaning)| (id.clone(), Value::from(meaning.as_str())))
+                    .collect(),
+            ),
+            Kind::YesNo { yes, no } => ("noul", json!({"true": yes, "false": no})),
+            Kind::Text { .. } => return Err(Failure::Error(TEXT_UNSUPPORTED.to_owned())),
+        };
+        let wire = WireQuestion {
+            r#type: kind,
+            instructions: &question.instructions,
+            criteria,
+        };
+        wired.insert(
+            question.id.to_owned(),
+            serde_json::to_value(wire).expect("WireQuestion serializes"),
+        );
+    }
+    Ok(wired)
 }
 
 fn probability(value: &Value) -> Option<f64> {
@@ -125,7 +128,17 @@ impl Backend for Jev {
     }
 
     async fn ask(&self, state: &str, questions: &[Question], limit: Duration) -> Exchange {
-        let payload = typesafe::request_body(state, &wire(questions));
+        let wired = match wire(questions) {
+            Ok(wired) => wired,
+            Err(failure) => {
+                return Exchange {
+                    request: String::new(),
+                    response: None,
+                    result: Err(failure),
+                };
+            }
+        };
+        let payload = typesafe::request_body(state, &wired);
         let sent = tokio::time::timeout(limit, self.client.post(&payload)).await;
         let (response, result) = match sent {
             Err(_) => (None, Err(Failure::Timeout)),
@@ -192,5 +205,37 @@ mod tests {
             decode(&no_confidence, &questions).unwrap()["timing"].probability,
             None
         );
+    }
+
+    fn text_question(max_bytes: usize) -> Question {
+        Question {
+            id: "explanation",
+            instructions: "Explain.".into(),
+            kind: Kind::Text { max_bytes },
+        }
+    }
+
+    fn choice_question() -> Question {
+        Question {
+            id: "action",
+            instructions: "Pick.".into(),
+            kind: Kind::Choice(vec![("defer".into(), "retain".into())]),
+        }
+    }
+
+    #[test]
+    fn wire_refuses_a_question_set_with_a_text_question() {
+        for questions in [
+            vec![text_question(16)],
+            vec![choice_question(), text_question(16)],
+            vec![text_question(16), choice_question()],
+        ] {
+            let failure = wire(&questions).expect_err("text is unsupported");
+            match failure {
+                Failure::Error(reason) => assert!(reason.contains("choice and yes/no"), "{reason}"),
+                other => panic!("expected Failure::Error, got {other:?}"),
+            }
+        }
+        assert!(wire(&[choice_question()]).is_ok());
     }
 }

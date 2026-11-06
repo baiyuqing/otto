@@ -9,6 +9,7 @@ pub mod files;
 pub mod guard;
 pub mod history;
 pub mod json;
+pub mod proposals;
 pub mod proposed;
 pub mod repository;
 pub mod scope;

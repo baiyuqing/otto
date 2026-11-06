@@ -553,6 +553,7 @@ impl Runner {
             connecting_mcp: None,
             task_control,
             memory_client: None,
+            memory_proposals: None,
             schedule_origin: Default::default(),
             presentation_origin: Default::default(),
         }

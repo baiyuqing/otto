@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Usage, zero_time};
 
+use super::memory_recall::{MemoryRecordRef, MemoryReferenceCoverage};
+
 /// The session format version this build reads and writes.
 pub const CURRENT_VERSION: i64 = super::pi::PI_SESSION_VERSION;
 
@@ -24,7 +26,8 @@ pub struct RuntimeMetadata {
     pub model: String,
 }
 
-/// File paths a compaction checkpoint carried forward.
+/// File paths and memory record references a compaction checkpoint carried
+/// forward.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompactionDetails {
@@ -36,6 +39,19 @@ pub struct CompactionDetails {
     pub omitted_read_files: i64,
     #[serde(rename = "omittedModifiedFiles", skip_serializing_if = "is_zero")]
     pub omitted_modified_files: i64,
+    /// The text-free references of every memory record rendered into the
+    /// turns this checkpoint summarizes, including those an earlier checkpoint
+    /// already carried. Sorted and unique.
+    #[serde(rename = "memoryRecords", skip_serializing_if = "Vec::is_empty")]
+    pub memory_records: Vec<MemoryRecordRef>,
+    /// Whether `memory_records` names every record those turns rendered.
+    /// Absent on checkpoints written before the field existed, which reads
+    /// as unknown.
+    #[serde(
+        rename = "memoryCoverage",
+        skip_serializing_if = "MemoryReferenceCoverage::is_unknown"
+    )]
+    pub memory_coverage: MemoryReferenceCoverage,
 }
 
 fn is_zero(value: &i64) -> bool {

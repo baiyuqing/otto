@@ -20,6 +20,10 @@ pub(super) struct SharedTranscript(pub(super) Transcript);
 
 #[async_trait::async_trait]
 impl Session for SharedTranscript {
+    fn memory_references(&self) -> Vec<otto_core::session::TurnMemoryReferences> {
+        self.0.memory_references()
+    }
+
     fn messages(&self) -> Vec<Message> {
         self.0.messages()
     }

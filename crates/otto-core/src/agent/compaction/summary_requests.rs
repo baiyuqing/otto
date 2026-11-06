@@ -70,11 +70,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .map(|path| self.redactor.redact_string(path))
                 .collect()
         };
+        // Record ids and revisions are opaque tokens, not text; they pass
+        // through unchanged.
         CompactionDetails {
             read_files: redact_all(&details.read_files),
             modified_files: redact_all(&details.modified_files),
             omitted_read_files: details.omitted_read_files,
             omitted_modified_files: details.omitted_modified_files,
+            memory_records: details.memory_records.clone(),
+            memory_coverage: details.memory_coverage,
         }
     }
 

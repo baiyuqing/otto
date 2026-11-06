@@ -62,6 +62,75 @@ fn context() -> port::MemoryContext {
     }
 }
 
+struct RevisionedRecall;
+
+#[async_trait::async_trait]
+impl port::MemoryService for RevisionedRecall {
+    fn describe(&self) -> port::ServiceDescription {
+        let mut description = port::ServiceDescription::new("independent-service".into());
+        description
+            .capabilities
+            .push(port::Capability::new(port::Operation::Recall));
+        description
+    }
+    async fn recall(
+        &self,
+        request: &port::RecallRequest,
+        _: &dyn OperationControl,
+    ) -> port::Result<port::RecallResult> {
+        let item = |reference: Option<port::MemoryRef>, text: &str| port::RecallItem {
+            reference,
+            content: port::Content::Text(text.into()),
+            sources: vec![],
+            effective_at: None,
+            metadata: Default::default(),
+        };
+        let referenced = port::MemoryRef {
+            organization_id: None,
+            service: "independent-service".into(),
+            scope: request.context.scopes[0].clone(),
+            id: "item-with-revision".into(),
+            revision: Some("5".into()),
+        };
+        Ok(port::RecallResult {
+            items: vec![
+                item(Some(referenced), "referenced text"),
+                item(None, "unreferenced text"),
+            ],
+            used_tokens: None,
+            coverage: port::Coverage::Complete,
+        })
+    }
+}
+
+#[tokio::test]
+async fn recalled_items_carry_the_service_revision_or_none_without_a_reference() {
+    let client = Arc::new(crate::memory::client::Client::new(Arc::new(RevisionedRecall)).unwrap());
+    let binding = ServiceBinding {
+        client,
+        context: context(),
+        observes: false,
+        closed: AtomicBool::new(false),
+    };
+    let result = binding
+        .recall(
+            &otto_core::agent::memory::RecallRequest {
+                query: "context".into(),
+                limit: 4,
+                token_budget: 1000,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let revisions: Vec<(&str, Option<&str>)> = result
+        .records
+        .iter()
+        .map(|record| (record.id.as_str(), record.revision.as_deref()))
+        .collect();
+    assert_eq!(revisions, [("item-with-revision", Some("5")), ("", None)]);
+}
+
 #[tokio::test]
 async fn selected_readonly_service_recalls_without_granting_standing_authority() {
     let provider = Arc::new(RecallOnly::default());

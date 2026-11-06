@@ -317,6 +317,11 @@ mod tests {
             cursor: String::new(),
             now: DateTime::UNIX_EPOCH,
             include_expired: false,
+            states: Vec::new(),
+            updated_after: None,
+            verified_after: None,
+            unverified_only: false,
+            review_due_only: false,
         }
     }
 

@@ -369,6 +369,11 @@ async fn review_lists_accepts_and_rejects_pending_candidates() {
             cursor: String::new(),
             now: Utc::now(),
             include_expired: false,
+            states: Vec::new(),
+            updated_after: None,
+            verified_after: None,
+            unverified_only: false,
+            review_due_only: false,
         })
         .unwrap()
         .records;

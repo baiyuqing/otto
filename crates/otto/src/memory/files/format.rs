@@ -182,6 +182,7 @@ pub(super) fn parse_record(id: &str, content: &str) -> std::result::Result<Recor
         created_at: parse_time(&created_at)?,
         updated_at: parse_time(&updated_at)?,
         expires_at: expires_at.as_deref().map(parse_time).transpose()?,
+        ..Record::default()
     };
     if !crate::memory::codec::valid_stored_float(record.confidence) {
         return Err("confidence outside [0, 1]".into());

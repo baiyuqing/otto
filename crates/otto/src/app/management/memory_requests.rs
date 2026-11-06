@@ -16,6 +16,7 @@ impl Controller {
                 scope,
                 limit,
                 cursor,
+                filters,
             } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
                     return Err("memory is not available".into());
@@ -31,15 +32,55 @@ impl Controller {
                         .list(&ListRequest {
                             all_scopes,
                             scopes,
-                            kinds: vec![],
-                            labels: vec![],
+                            kinds: filters.kinds,
+                            labels: filters.labels,
                             limit,
                             cursor,
                             now: Utc::now(),
                             include_expired: true,
+                            states: filters.states,
+                            updated_after: filters.updated_after,
+                            verified_after: filters.verified_after,
+                            unverified_only: filters.unverified_only,
+                            review_due_only: filters.review_due_only,
                         })
                         .map_err(|e| e.to_string())?,
                 ))
+            }
+            MemoryState {
+                id,
+                state,
+                superseded_by,
+                reason,
+            } => {
+                let Some((service, user, workspace)) = self.memory_manager() else {
+                    return Err("memory is not available".into());
+                };
+                let (reference, current) = current_record(&service, [user, workspace], &id)?;
+                service
+                    .set_state(&memory::SetStateRequest {
+                        reference,
+                        expected_revision: current.revision,
+                        state,
+                        superseded_by,
+                        reason,
+                    })
+                    .map(Reply::MemoryStateChanged)
+                    .map_err(|error| error.to_string())
+            }
+            MemoryVerify { id, review_at } => {
+                let Some((service, user, workspace)) = self.memory_manager() else {
+                    return Err("memory is not available".into());
+                };
+                let (reference, current) = current_record(&service, [user, workspace], &id)?;
+                service
+                    .verify(&memory::VerifyRequest {
+                        reference,
+                        expected_revision: current.revision,
+                        review_at,
+                    })
+                    .map(Reply::MemoryVerified)
+                    .map_err(|error| error.to_string())
             }
             MemoryShow { id } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
@@ -226,6 +267,31 @@ impl Controller {
             _ => unreachable!("not a memory request"),
         }
     }
+}
+
+/// The active record `id` in the first of `scopes` that holds it, with its
+/// reference, for a write that names the current revision.
+fn current_record(
+    service: &memory::Service,
+    scopes: [memory::Scope; 2],
+    id: &str,
+) -> Result<(RecordRef, memory::Record), String> {
+    let mut last = None;
+    for scope in scopes {
+        let reference = RecordRef {
+            scope,
+            id: id.to_owned(),
+        };
+        match service.get(&reference) {
+            Ok(record) => return Ok((reference, record)),
+            Err(error) if error.kind == memory::ErrorKind::NotFound => last = Some(error),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err(format!(
+        "record {id} not found{}",
+        last.map(|error| format!(": {error}")).unwrap_or_default()
+    ))
 }
 
 /// The history of record `id` in the first of `scopes` that holds it.

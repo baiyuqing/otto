@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::app::Controller;
 use crate::memory::{self, RememberRequest, ReviewDecision, Scope, SearchResult, Service};
 use crate::skill;
+use chrono::Utc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillManager {
@@ -37,12 +38,70 @@ pub enum ScopeSelector {
     All,
 }
 
+/// The `/memory list` filters beyond scope and paging. Empty `states` lists
+/// active records only.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ListFilters {
+    pub states: Vec<memory::RecordState>,
+    pub kinds: Vec<String>,
+    pub labels: Vec<String>,
+    pub updated_after: Option<chrono::DateTime<Utc>>,
+    pub verified_after: Option<chrono::DateTime<Utc>>,
+    pub unverified_only: bool,
+    pub review_due_only: bool,
+}
+
+/// A review deadline `AGE` (`30d`, `12h`, `45m`) counted forward from now.
+pub fn review_deadline(age: &str) -> Option<chrono::DateTime<Utc>> {
+    let now = Utc::now();
+    let past = parse_time_or_age(age, now)?;
+    if past >= now {
+        // An absolute time is not an age.
+        return None;
+    }
+    now.checked_add_signed(now - past)
+}
+
+/// An absolute RFC 3339 time, or an age such as `30d`, `12h` or `45m`
+/// counted back from `now`.
+pub fn parse_time_or_age(value: &str, now: chrono::DateTime<Utc>) -> Option<chrono::DateTime<Utc>> {
+    if let Ok(time) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(time.with_timezone(&Utc));
+    }
+    let (digits, unit) = value.split_at(value.len().checked_sub(1)?);
+    let count: i64 = digits.parse().ok()?;
+    if count <= 0 {
+        return None;
+    }
+    let age = match unit {
+        "d" => chrono::Duration::days(count),
+        "h" => chrono::Duration::hours(count),
+        "m" => chrono::Duration::minutes(count),
+        _ => return None,
+    };
+    now.checked_sub_signed(age)
+}
+
 #[derive(Debug, Clone)]
 pub enum Request {
     MemoryList {
         scope: ScopeSelector,
         limit: usize,
         cursor: String,
+        filters: ListFilters,
+    },
+    /// Moves a record to a lifecycle state; `superseded_by` is the
+    /// replacement for `Superseded` and empty otherwise.
+    MemoryState {
+        id: String,
+        state: memory::RecordState,
+        superseded_by: String,
+        reason: String,
+    },
+    /// Records a human verification with an optional next review deadline.
+    MemoryVerify {
+        id: String,
+        review_at: Option<chrono::DateTime<Utc>>,
     },
     MemoryShow {
         id: String,
@@ -76,6 +135,7 @@ pub enum Request {
         kind: String,
         key: String,
         text: String,
+        review_at: Option<chrono::DateTime<Utc>>,
     },
     Skills,
     SkillManager,
@@ -110,6 +170,8 @@ pub enum Reply {
         to: Box<memory::Record>,
     },
     MemoryRestored(memory::Record),
+    MemoryStateChanged(memory::Record),
+    MemoryVerified(memory::Record),
     MemoryReviewed(ReviewDecision, Box<memory::ReviewResult>),
     Remembered(memory::Record),
     Skills(skill::Catalog),
@@ -137,12 +199,21 @@ impl Request {
         let usage = match command {
             "memory" => {
                 "usage: /memory list [--scope current|user|workspace|all] [--limit N] \
-                    [--cursor CURSOR] | /memory show <id> | /memory search <query> | \
+                    [--cursor CURSOR] [--state active|needs-review|superseded|retracted|all] \
+                    [--kind K] [--label L] [--updated-after TIME|AGE] \
+                    [--verified-after TIME|AGE] [--unverified] [--review-due] | \
+                    /memory show <id> | /memory search <query> | \
                     /memory forget <id> | /memory history <id> | \
                     /memory diff <id> <from> [<to>] | /memory restore <id> <revision> | \
+                    /memory state <id> active|needs-review|retracted [--reason TEXT] | \
+                    /memory state <id> superseded <replacement-id> [--reason TEXT] | \
+                    /memory verify <id> [--review-in AGE] | \
                     /memory review <id> accept|reject"
             }
-            "remember" => "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>",
+            "remember" => {
+                "usage: /remember [--scope user|workspace] [--kind K] [--key K] \
+                    [--review-in AGE] <text>"
+            }
             "skill" => "usage: /skill | /skill <name> | /skill set <name> enabled|disabled",
             "mcp" => "usage: /mcp",
             "timers" => "usage: /timers [cancel <id>]",
@@ -157,27 +228,61 @@ impl Request {
                     let mut scope = ScopeSelector::Current;
                     let mut limit = 20;
                     let mut cursor = String::new();
+                    let mut filters = ListFilters::default();
+                    let now = Utc::now();
                     let mut i = 0;
                     while i < rest.len() {
+                        let value = |i: usize| rest.get(i + 1).copied().ok_or_else(invalid);
                         match rest[i] {
-                            "--scope" if i + 1 < rest.len() => {
-                                i += 1;
-                                match rest[i] {
-                                    "current" => scope = ScopeSelector::Current,
-                                    "all" => scope = ScopeSelector::All,
-                                    "user" => scope = ScopeSelector::User,
-                                    "workspace" => scope = ScopeSelector::Workspace,
+                            "--scope" => {
+                                scope = match value(i)? {
+                                    "current" => ScopeSelector::Current,
+                                    "all" => ScopeSelector::All,
+                                    "user" => ScopeSelector::User,
+                                    "workspace" => ScopeSelector::Workspace,
                                     _ => return Err(invalid()),
+                                };
+                                i += 1;
+                            }
+                            "--limit" => {
+                                limit = value(i)?.parse().map_err(|_| invalid())?;
+                                i += 1;
+                            }
+                            "--cursor" => {
+                                cursor = value(i)?.to_owned();
+                                i += 1;
+                            }
+                            "--state" => {
+                                let state = value(i)?;
+                                if state == "all" {
+                                    filters.states = memory::RecordState::ALL.to_vec();
+                                } else {
+                                    filters.states.push(
+                                        memory::RecordState::parse(state).ok_or_else(invalid)?,
+                                    );
                                 }
-                            }
-                            "--limit" if i + 1 < rest.len() => {
                                 i += 1;
-                                limit = rest[i].parse().map_err(|_| invalid())?;
                             }
-                            "--cursor" if i + 1 < rest.len() => {
+                            "--kind" => {
+                                filters.kinds.push(value(i)?.to_owned());
                                 i += 1;
-                                cursor = rest[i].to_owned();
                             }
+                            "--label" => {
+                                filters.labels.push(value(i)?.to_owned());
+                                i += 1;
+                            }
+                            "--updated-after" => {
+                                filters.updated_after =
+                                    Some(parse_time_or_age(value(i)?, now).ok_or_else(invalid)?);
+                                i += 1;
+                            }
+                            "--verified-after" => {
+                                filters.verified_after =
+                                    Some(parse_time_or_age(value(i)?, now).ok_or_else(invalid)?);
+                                i += 1;
+                            }
+                            "--unverified" => filters.unverified_only = true,
+                            "--review-due" => filters.review_due_only = true,
                             _ => return Err(invalid()),
                         }
                         i += 1;
@@ -186,8 +291,41 @@ impl Request {
                         scope,
                         limit,
                         cursor,
+                        filters,
                     }
                 }
+                ["state", id, state, rest @ ..] => {
+                    let state = memory::RecordState::parse(state).ok_or_else(invalid)?;
+                    let mut rest = rest;
+                    let mut superseded_by = String::new();
+                    if state == memory::RecordState::Superseded {
+                        let (replacement, tail) = rest.split_first().ok_or_else(invalid)?;
+                        if replacement.starts_with("--") {
+                            return Err(invalid());
+                        }
+                        superseded_by = (*replacement).to_owned();
+                        rest = tail;
+                    }
+                    let reason = match rest {
+                        [] => String::new(),
+                        ["--reason", words @ ..] if !words.is_empty() => words.join(" "),
+                        _ => return Err(invalid()),
+                    };
+                    Request::MemoryState {
+                        id: (*id).into(),
+                        state,
+                        superseded_by,
+                        reason,
+                    }
+                }
+                ["verify", id] => Request::MemoryVerify {
+                    id: (*id).into(),
+                    review_at: None,
+                },
+                ["verify", id, "--review-in", age] => Request::MemoryVerify {
+                    id: (*id).into(),
+                    review_at: Some(review_deadline(age).ok_or_else(invalid)?),
+                },
                 ["show", id] => Request::MemoryShow { id: (*id).into() },
                 ["search", rest @ ..] if !rest.is_empty() => Request::MemorySearch {
                     query: rest.join(" "),
@@ -218,6 +356,7 @@ impl Request {
             "remember" => {
                 let (mut scope, mut kind, mut key) =
                     (String::new(), "note".to_string(), String::new());
+                let mut review_at = None;
                 let mut remaining = args;
                 loop {
                     let trimmed = remaining.trim();
@@ -226,7 +365,7 @@ impl Request {
                         break;
                     };
                     let Some(value_and_rest) = (match flag {
-                        "--scope" | "--kind" | "--key" => Some(rest.trim_start()),
+                        "--scope" | "--kind" | "--key" | "--review-in" => Some(rest.trim_start()),
                         _ => None,
                     }) else {
                         remaining = trimmed;
@@ -239,6 +378,9 @@ impl Request {
                         "--scope" => scope = value.to_string(),
                         "--kind" => kind = value.to_string(),
                         "--key" => key = value.to_string(),
+                        "--review-in" => {
+                            review_at = Some(review_deadline(value).ok_or_else(invalid)?)
+                        }
                         _ => unreachable!(),
                     }
                     remaining = tail.trim_start();
@@ -256,6 +398,7 @@ impl Request {
                     kind,
                     key,
                     text: text.to_string(),
+                    review_at,
                 }
             }
             "skill" => match fields.as_slice() {
@@ -438,6 +581,8 @@ impl Controller {
                 kind,
                 key,
                 text,
+                // A plugin store has no review deadline field.
+                review_at: _,
             } = request
             {
                 return self.remember_with_service(&scope, kind, key, text);
@@ -451,6 +596,8 @@ impl Controller {
                     | MemoryHistory { .. }
                     | MemoryDiff { .. }
                     | MemoryRestore { .. }
+                    | MemoryState { .. }
+                    | MemoryVerify { .. }
                     | MemoryReviewList
                     | MemoryReview { .. }
             ) {
@@ -471,6 +618,8 @@ impl Controller {
             | MemoryHistory { .. }
             | MemoryDiff { .. }
             | MemoryRestore { .. }
+            | MemoryState { .. }
+            | MemoryVerify { .. }
             | MemoryReviewList
             | MemoryReview { .. }) => self.memory_request(request),
             Remember {
@@ -478,6 +627,7 @@ impl Controller {
                 kind,
                 key,
                 text,
+                review_at,
             } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
                     return Err("memory is not available".into());
@@ -498,6 +648,7 @@ impl Controller {
                             kind,
                             key,
                             text,
+                            review_at,
                             ..Default::default()
                         })
                         .map_err(|e| e.to_string())?,

@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 
 use super::FileStore;
 use super::cursor::{decode_record_cursor, encode_record_cursor, fingerprint_candidates};
+use super::lifecycle::state_revision;
 use super::records::Mutation;
 use crate::memory::codec::{format_timestamp, parse_timestamp};
 use crate::memory::guard::{guard_candidate, guard_record};
@@ -18,10 +19,11 @@ use crate::memory::validate::{
     validate_proposal_batch, validate_record, validate_store_review_request, validate_tombstone,
 };
 use crate::memory::{
-    Candidate, CandidateAction, CandidateListRequest, CandidatePage, CandidateRef, CandidateState,
-    Error, ErrorKind, MAX_CANDIDATE_BATCH, MAX_CANDIDATE_BATCH_BYTES, MAX_LABELS,
-    MAX_METADATA_ENTRIES, MAX_PROVENANCE_MESSAGE_IDS, Origin, Record, RecordRef, Result,
-    ReviewDecision, ReviewResult, Scope, StoreReviewRequest, Tombstone, invalid_request,
+    CORRECTS_METADATA, Candidate, CandidateAction, CandidateListRequest, CandidatePage,
+    CandidateRef, CandidateState, Error, ErrorKind, MAX_CANDIDATE_BATCH, MAX_CANDIDATE_BATCH_BYTES,
+    MAX_LABELS, MAX_METADATA_ENTRIES, MAX_PROVENANCE_MESSAGE_IDS, Origin, Record, RecordRef,
+    RecordState, Result, ReviewDecision, ReviewResult, Scope, StoreReviewRequest, Tombstone,
+    invalid_request,
 };
 
 fn corrupt() -> Error {
@@ -316,14 +318,58 @@ impl FileStore {
 
             let mut desired_record: Option<Record> = None;
             let mut desired_tombstone: Option<Tombstone> = None;
+            // The target's new revision when this review retires or flags it.
+            let mut desired_target: Option<Record> = None;
             if request.decision == ReviewDecision::Accept {
                 decided.state = CandidateState::Accepted;
                 match candidate.action {
-                    CandidateAction::Retract
-                    | CandidateAction::Supersede
-                    | CandidateAction::Correct
-                    | CandidateAction::NeedsReview => {
-                        return Err(Error::new(ErrorKind::Unsupported));
+                    CandidateAction::Retract | CandidateAction::NeedsReview => {
+                        let target = target.as_ref().expect("state change reads its target");
+                        let state = if candidate.action == CandidateAction::Retract {
+                            RecordState::Retracted
+                        } else {
+                            RecordState::NeedsReview
+                        };
+                        if request.decided_at < target.created_at {
+                            return Err(invalid_request("review decision time"));
+                        }
+                        let desired = state_revision(target, state, "", &candidate.reason)?;
+                        validate_record(&desired)?;
+                        guard_record(self.guard(), &desired)?;
+                        decided.result_revision = desired.revision;
+                        desired_record = Some(desired);
+                    }
+                    CandidateAction::Supersede | CandidateAction::Correct => {
+                        let target = target.as_ref().expect("replacement reads its target");
+                        if request.decided_at < target.created_at {
+                            return Err(invalid_request("review decision time"));
+                        }
+                        let mut replacement = accepted_record_content(&candidate, request);
+                        replacement.id = request.result_record_id.clone();
+                        replacement.revision = 1;
+                        replacement.created_at = request.decided_at;
+                        replacement.updated_at = request.decided_at;
+                        let retired = if candidate.action == CandidateAction::Supersede {
+                            state_revision(
+                                target,
+                                RecordState::Superseded,
+                                &replacement.id,
+                                &candidate.reason,
+                            )?
+                        } else {
+                            replacement
+                                .metadata
+                                .insert(CORRECTS_METADATA.to_string(), target.id.clone());
+                            state_revision(target, RecordState::Retracted, "", &candidate.reason)?
+                        };
+                        validate_record(&replacement)?;
+                        guard_record(self.guard(), &replacement)?;
+                        validate_record(&retired)?;
+                        guard_record(self.guard(), &retired)?;
+                        decided.result_record_id = replacement.id.clone();
+                        decided.result_revision = replacement.revision;
+                        desired_record = Some(replacement);
+                        desired_target = Some(retired);
                     }
                     CandidateAction::Create => {
                         let mut desired = accepted_record_content(&candidate, request);
@@ -381,11 +427,31 @@ impl FileStore {
             guard_candidate(self.guard(), &decided)?;
 
             if let Some(record) = &desired_record {
-                if candidate.action == CandidateAction::Create {
-                    self.insert_new(snapshot, record, enforce_standing)?;
-                } else {
-                    self.replace_record(snapshot, record, enforce_standing)?;
+                match candidate.action {
+                    CandidateAction::Create => {
+                        self.insert_new(snapshot, record, enforce_standing)?;
+                    }
+                    CandidateAction::Supersede | CandidateAction::Correct => {
+                        self.insert_replacement(
+                            snapshot,
+                            record,
+                            enforce_standing,
+                            &candidate.target_id,
+                        )?;
+                    }
+                    CandidateAction::Retract | CandidateAction::NeedsReview => {
+                        // A state change leaves the standing set's content unchanged.
+                        self.replace_record(snapshot, record, false)?;
+                    }
+                    CandidateAction::Update | CandidateAction::Forget => {
+                        self.replace_record(snapshot, record, enforce_standing)?;
+                    }
                 }
+            }
+            // The replacement is written first: an interrupted review leaves a
+            // replacement beside an unchanged target, never a dangling link.
+            if let Some(retired) = &desired_target {
+                self.replace_record(snapshot, retired, false)?;
             }
             if let Some(tombstone) = &desired_tombstone {
                 self.tombstone_record(tombstone)?;

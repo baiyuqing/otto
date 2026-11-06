@@ -1,6 +1,8 @@
 use super::*;
 use crate::memory::files::testsupport::open_temp;
-use crate::memory::{CandidateRef, NAMESPACE_USER, NAMESPACE_WORKSPACE, Provenance};
+use crate::memory::{
+    CandidateAction, CandidateRef, NAMESPACE_USER, NAMESPACE_WORKSPACE, Provenance,
+};
 
 fn service() -> (tempfile::TempDir, Arc<Service>) {
     let (directory, store) = open_temp();

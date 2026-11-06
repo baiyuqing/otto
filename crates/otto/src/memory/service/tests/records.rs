@@ -292,3 +292,59 @@ fn core_record_reports_the_store_revision_as_a_decimal_string() {
     );
     assert_eq!(core_record(record, true).revision.as_deref(), Some("7"));
 }
+
+#[test]
+fn reviewing_a_supersede_or_correct_mints_the_replacement_id_and_retires_the_target() {
+    for (action, retired_state) in [
+        (
+            CandidateAction::Supersede,
+            crate::memory::RecordState::Superseded,
+        ),
+        (
+            CandidateAction::Correct,
+            crate::memory::RecordState::Retracted,
+        ),
+    ] {
+        let (_directory, service) = service();
+        let scope = user_scope();
+        let target = service
+            .remember(&remember(&scope, "editor", "vim"))
+            .expect("target");
+        let queued = service
+            .propose(&ProposeRequest {
+                action,
+                target_id: target.id.clone(),
+                base_revision: target.revision,
+                ..model_proposal(&scope, "editor", "neovim")
+            })
+            .expect("propose");
+        let reviewed = service
+            .review(&ReviewRequest {
+                reference: CandidateRef {
+                    scope: scope.clone(),
+                    id: queued[0].id.clone(),
+                },
+                decision: ReviewDecision::Accept,
+                edited: None,
+                target_revision: None,
+            })
+            .expect("accept");
+
+        let replacement = reviewed
+            .record
+            .expect("an accepted replacement writes a record");
+        assert!(!replacement.id.is_empty(), "{action:?}");
+        assert_ne!(replacement.id, target.id, "{action:?}");
+        assert_eq!(replacement.text, "neovim");
+        assert_eq!(reviewed.candidate.result_record_id, replacement.id);
+        assert_eq!(reviewed.candidate.result_revision, 1);
+        let retired = service
+            .get(&RecordRef {
+                scope: scope.clone(),
+                id: target.id.clone(),
+            })
+            .expect("target stays readable");
+        assert_eq!(retired.state, retired_state, "{action:?}");
+        assert_eq!(retired.revision, target.revision + 1);
+    }
+}

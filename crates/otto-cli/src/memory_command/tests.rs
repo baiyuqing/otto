@@ -3,18 +3,18 @@ use otto::memory::RememberRequest;
 use std::collections::HashMap;
 
 /// Writes a config file enabling memory and returns its path.
-fn memory_config(directory: &Path) -> String {
+pub(super) fn memory_config(directory: &Path) -> String {
     let path = directory.join("otto.toml");
     std::fs::write(&path, "[memory]\nenabled = true\n").expect("write config");
     path.to_string_lossy().into_owned()
 }
 
-fn store_dir(home: &Path) -> std::path::PathBuf {
+pub(super) fn store_dir(home: &Path) -> std::path::PathBuf {
     home.join(".otto").join("memory")
 }
 
 /// The runtime that `memory_config` resolves to under `home`.
-fn runtime(home: &Path) -> MemoryRuntime {
+pub(super) fn runtime(home: &Path) -> MemoryRuntime {
     MemoryRuntime {
         enabled: true,
         backend: "files".into(),
@@ -28,7 +28,7 @@ fn lookup(home: &Path) -> HashMap<String, String> {
 }
 
 /// Runs `otto memory ...` and returns its exit code, stdout and stderr.
-fn memory(args: &[&str], home: &Path) -> (i32, String, String) {
+pub(super) fn memory(args: &[&str], home: &Path) -> (i32, String, String) {
     let arguments: Vec<String> = args.iter().map(|value| value.to_string()).collect();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -334,7 +334,10 @@ fn no_subcommand_reports_usage() {
     assert_eq!(code, 1);
     assert_eq!(
         stderr,
-        "otto: usage: otto memory status|list|show <id>|forget <id> [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]\n"
+        concat!(
+            "otto: usage: otto memory status|list|show <id>|forget <id>|history <id>|diff <id> <from> [<to>]|restore <id> <revision> ",
+            "[--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]\n"
+        )
     );
 }
 

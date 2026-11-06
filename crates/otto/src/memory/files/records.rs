@@ -12,8 +12,8 @@ use crate::memory::validate::{
 };
 use crate::memory::{
     Error, ErrorKind, ForgetOutcome, GuardField, GuardInput, ListRequest, MAX_STANDING_TOKENS,
-    NAMESPACE_USER, Record, RecordKey, RecordPage, RecordRef, Result, Scope, StandingUsage,
-    StoreForgetRequest, Tombstone, UpsertRequest, invalid_request,
+    NAMESPACE_USER, Record, RecordKey, RecordPage, RecordRef, RecordState, Result, Scope,
+    StandingUsage, StoreForgetRequest, Tombstone, UpsertRequest, invalid_request,
 };
 
 fn corrupt() -> Error {
@@ -36,7 +36,7 @@ fn standing_eligible(record: &Record, now: DateTime<Utc>) -> bool {
     record.scope.namespace == NAMESPACE_USER
         && !record.key.is_empty()
         && matches!(record.kind.as_str(), "preference" | "instruction")
-        && record.expires_at.is_none_or(|expires| expires > now)
+        && record.effective(now)
 }
 
 /// The standing set of `user` that passes the request filters, oldest first.
@@ -55,7 +55,9 @@ pub(super) fn standing_set(
                 && !record.key.is_empty()
                 && matches!(record.kind.as_str(), "preference" | "instruction")
                 && (kinds.is_empty() || kinds.contains(&record.kind))
-                && (include_expired || record.expires_at.is_none_or(|expires| expires > now))
+                && record.state == RecordState::Active
+                && !record.review_due(now)
+                && (include_expired || !record.expired(now))
         })
         .cloned()
         .collect();
@@ -91,6 +93,25 @@ pub(super) fn check_standing_budget(snapshot: &Snapshot, record: &Record) -> Res
         ));
     }
     Ok(())
+}
+
+/// The lifecycle filters of a list request: state (default `Active`), content
+/// update time, verification time and review deadline.
+fn list_lifecycle_matches(record: &Record, request: &ListRequest) -> bool {
+    let state_listed = if request.states.is_empty() {
+        record.state == RecordState::Active
+    } else {
+        request.states.contains(&record.state)
+    };
+    state_listed
+        && request
+            .updated_after
+            .is_none_or(|after| record.updated_at >= after)
+        && request
+            .verified_after
+            .is_none_or(|after| record.verified_at.is_some_and(|verified| verified >= after))
+        && (!request.unverified_only || record.verified_at.is_none())
+        && (!request.review_due_only || record.review_due(request.now))
 }
 
 impl FileStore {
@@ -188,10 +209,8 @@ impl FileStore {
                         .labels
                         .iter()
                         .all(|label| record.labels.contains(label))
-                    && (request.include_expired
-                        || record
-                            .expires_at
-                            .is_none_or(|expires| expires > request.now))
+                    && (request.include_expired || !record.expired(request.now))
+                    && list_lifecycle_matches(record, request)
             })
             .collect();
         records.sort_by(|left, right| {

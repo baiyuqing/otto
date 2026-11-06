@@ -92,11 +92,11 @@ const EVERY_ACTION: &[Action] = &[Action::Build, Action::Probes, Action::Run, Ac
 /// Parses the arguments after `eval`.
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let Some(target) = args.first() else {
-        return Err("otto: eval requires a target; the only target is view-tree".into());
+        return Err("otto: eval requires a target: view-tree or memory-retraction".into());
     };
     if target != "view-tree" {
         return Err(format!(
-            "otto: unknown eval target {target:?}; the only target is view-tree"
+            "otto: unknown eval target {target:?}; the targets are view-tree and memory-retraction"
         ));
     }
     let action = match args.get(1).map(String::as_str) {

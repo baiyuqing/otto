@@ -52,6 +52,12 @@ pub struct CompactionDetails {
         skip_serializing_if = "MemoryReferenceCoverage::is_unknown"
     )]
     pub memory_coverage: MemoryReferenceCoverage,
+    /// The references among `memory_records` whose retirement this summary
+    /// already accounts for: the compaction that wrote the checkpoint received
+    /// their retraction notices. A retired reference outside this list marks
+    /// the summary as affected. Sorted and unique.
+    #[serde(rename = "memoryRetracted", skip_serializing_if = "Vec::is_empty")]
+    pub memory_retracted: Vec<MemoryRecordRef>,
 }
 
 fn is_zero(value: &i64) -> bool {

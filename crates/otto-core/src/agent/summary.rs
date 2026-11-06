@@ -123,6 +123,7 @@ pub fn build_summary_request(
     options: &Options,
     selection: &CompactionSelection,
     focus: &str,
+    retraction_instructions: &str,
     previous_details: &CompactionDetails,
 ) -> Result<SummaryRequest, String> {
     let normalized_focus = normalize_compaction_focus(focus)?;
@@ -144,6 +145,10 @@ pub fn build_summary_request(
     if !normalized_focus.is_empty() {
         system_prompt.push_str("\n\nAdditional focus:\n");
         system_prompt.push_str(&normalized_focus);
+    }
+    if !retraction_instructions.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(retraction_instructions);
     }
     let request = Request {
         cache_key: String::new(),

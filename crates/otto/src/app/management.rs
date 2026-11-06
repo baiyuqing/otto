@@ -103,6 +103,12 @@ pub enum Request {
         id: String,
         review_at: Option<chrono::DateTime<Utc>>,
     },
+    /// Asks the proposal generator for the narrowest lifecycle change of a
+    /// record that `evidence` supports; the result is a pending candidate.
+    MemoryPropose {
+        id: String,
+        evidence: String,
+    },
     MemoryShow {
         id: String,
     },
@@ -172,6 +178,7 @@ pub enum Reply {
     MemoryRestored(memory::Record),
     MemoryStateChanged(memory::Record),
     MemoryVerified(memory::Record),
+    MemoryProposed(memory::proposals::Outcome),
     MemoryReviewed(ReviewDecision, Box<memory::ReviewResult>),
     Remembered(memory::Record),
     Skills(skill::Catalog),
@@ -208,6 +215,7 @@ impl Request {
                     /memory state <id> active|needs-review|retracted [--reason TEXT] | \
                     /memory state <id> superseded <replacement-id> [--reason TEXT] | \
                     /memory verify <id> [--review-in AGE] | \
+                    /memory propose <id> <evidence text> | \
                     /memory review <id> accept|reject"
             }
             "remember" => {
@@ -325,6 +333,10 @@ impl Request {
                 ["verify", id, "--review-in", age] => Request::MemoryVerify {
                     id: (*id).into(),
                     review_at: Some(review_deadline(age).ok_or_else(invalid)?),
+                },
+                ["propose", id, words @ ..] if !words.is_empty() => Request::MemoryPropose {
+                    id: (*id).into(),
+                    evidence: words.join(" "),
                 },
                 ["show", id] => Request::MemoryShow { id: (*id).into() },
                 ["search", rest @ ..] if !rest.is_empty() => Request::MemorySearch {
@@ -598,6 +610,7 @@ impl Controller {
                     | MemoryRestore { .. }
                     | MemoryState { .. }
                     | MemoryVerify { .. }
+                    | MemoryPropose { .. }
                     | MemoryReviewList
                     | MemoryReview { .. }
             ) {
@@ -620,6 +633,7 @@ impl Controller {
             | MemoryRestore { .. }
             | MemoryState { .. }
             | MemoryVerify { .. }
+            | MemoryPropose { .. }
             | MemoryReviewList
             | MemoryReview { .. }) => self.memory_request(request),
             Remember {

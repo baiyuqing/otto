@@ -30,6 +30,9 @@ pub fn user_text(state: &str, questions: &[Question]) -> String {
             Kind::YesNo { yes, no } => {
                 let _ = writeln!(text, "A JSON boolean:\n- true: {yes}\n- false: {no}");
             }
+            Kind::Text { max_bytes } => {
+                let _ = writeln!(text, "A JSON string of at most {max_bytes} bytes.");
+            }
         }
     }
     text
@@ -62,6 +65,11 @@ pub fn parse(text: &str, questions: &[Question]) -> Result<HashMap<String, Answe
             }
             (Kind::YesNo { .. }, serde_json::Value::Bool(answer)) => {
                 (if *answer { YES } else { NO }).to_owned()
+            }
+            (Kind::Text { max_bytes }, serde_json::Value::String(answer))
+                if answer.len() <= *max_bytes =>
+            {
+                answer.clone()
             }
             _ => return Err(invalid("an answer is not one of the allowed values")),
         };

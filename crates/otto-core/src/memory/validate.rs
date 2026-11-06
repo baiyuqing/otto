@@ -463,10 +463,10 @@ impl PreparedChanges {
                 ChangeAction::Create => {
                     require(change.target.is_none() && change.content.is_some())?
                 }
-                ChangeAction::Update => {
+                ChangeAction::Update | ChangeAction::Supersede | ChangeAction::Correct => {
                     require(change.target.is_some() && change.content.is_some())?
                 }
-                ChangeAction::Forget => {
+                ChangeAction::Forget | ChangeAction::Retract | ChangeAction::NeedsReview => {
                     require(change.target.is_some() && change.content.is_none())?
                 }
             }

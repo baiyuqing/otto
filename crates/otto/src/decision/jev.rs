@@ -25,31 +25,34 @@ impl Jev {
     }
 }
 
-fn wire(questions: &[Question]) -> Map<String, Value> {
-    questions
-        .iter()
-        .map(|question| {
-            let (kind, criteria) = match &question.kind {
-                Kind::Choice(options) => (
-                    "choice",
-                    options
-                        .iter()
-                        .map(|(id, meaning)| (id.clone(), Value::from(meaning.as_str())))
-                        .collect(),
-                ),
-                Kind::YesNo { yes, no } => ("noul", json!({"true": yes, "false": no})),
-            };
-            let wire = WireQuestion {
-                r#type: kind,
-                instructions: &question.instructions,
-                criteria,
-            };
-            (
-                question.id.to_owned(),
-                serde_json::to_value(wire).expect("WireQuestion serializes"),
-            )
-        })
-        .collect()
+/// The auxiliary model answers choice and yes/no questions only.
+const TEXT_UNSUPPORTED: &str = "the auxiliary model answers choice and yes/no questions only";
+
+fn wire(questions: &[Question]) -> Result<Map<String, Value>, Failure> {
+    let mut wired = Map::new();
+    for question in questions {
+        let (kind, criteria) = match &question.kind {
+            Kind::Choice(options) => (
+                "choice",
+                options
+                    .iter()
+                    .map(|(id, meaning)| (id.clone(), Value::from(meaning.as_str())))
+                    .collect(),
+            ),
+            Kind::YesNo { yes, no } => ("noul", json!({"true": yes, "false": no})),
+            Kind::Text { .. } => return Err(Failure::Error(TEXT_UNSUPPORTED.to_owned())),
+        };
+        let wire = WireQuestion {
+            r#type: kind,
+            instructions: &question.instructions,
+            criteria,
+        };
+        wired.insert(
+            question.id.to_owned(),
+            serde_json::to_value(wire).expect("WireQuestion serializes"),
+        );
+    }
+    Ok(wired)
 }
 
 fn probability(value: &Value) -> Option<f64> {
@@ -125,7 +128,17 @@ impl Backend for Jev {
     }
 
     async fn ask(&self, state: &str, questions: &[Question], limit: Duration) -> Exchange {
-        let payload = typesafe::request_body(state, &wire(questions));
+        let wired = match wire(questions) {
+            Ok(wired) => wired,
+            Err(failure) => {
+                return Exchange {
+                    request: String::new(),
+                    response: None,
+                    result: Err(failure),
+                };
+            }
+        };
+        let payload = typesafe::request_body(state, &wired);
         let sent = tokio::time::timeout(limit, self.client.post(&payload)).await;
         let (response, result) = match sent {
             Err(_) => (None, Err(Failure::Timeout)),

@@ -1,6 +1,6 @@
 //! The deterministic scorer: one raw proposal against one label.
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::super::{Outcome, Proposal, ProposalAction, validate_proposal};
 use super::labels::{LabeledItem, contains_term, requires_evidence, retires};
@@ -28,7 +28,7 @@ impl Generated {
 }
 
 /// Whether an abstaining proposal matched the label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Abstention {
     /// The proposal did not abstain, or there was no proposal.
@@ -40,7 +40,7 @@ pub enum Abstention {
 }
 
 /// The layer-1 verdict next to the raw score.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerOne {
     Accepted,
@@ -58,12 +58,27 @@ fn serialize_optional_action<S: Serializer>(
     }
 }
 
+fn deserialize_optional_action<'de, D: Deserializer<'de>>(
+    input: D,
+) -> Result<Option<ProposalAction>, D::Error> {
+    use serde::de::Error;
+    match Option::<String>::deserialize(input)? {
+        None => Ok(None),
+        Some(name) => ProposalAction::parse(&name)
+            .map(Some)
+            .ok_or_else(|| D::Error::custom(format!("unknown action {name}"))),
+    }
+}
+
 /// The score of one item.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Score {
     pub name: String,
     pub category: String,
-    #[serde(serialize_with = "serialize_optional_action")]
+    #[serde(
+        serialize_with = "serialize_optional_action",
+        deserialize_with = "deserialize_optional_action"
+    )]
     pub action: Option<ProposalAction>,
     pub unavailable: Option<String>,
     pub layer_one: LayerOne,

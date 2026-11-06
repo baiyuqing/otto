@@ -11,9 +11,9 @@ use crate::memory::validate::{
     validate_upsert_request,
 };
 use crate::memory::{
-    Error, ErrorKind, GuardField, GuardInput, ListRequest, MAX_STANDING_TOKENS, NAMESPACE_USER,
-    Record, RecordKey, RecordPage, RecordRef, Result, Scope, StandingUsage, StoreForgetRequest,
-    Tombstone, UpsertRequest, invalid_request,
+    Error, ErrorKind, ForgetOutcome, GuardField, GuardInput, ListRequest, MAX_STANDING_TOKENS,
+    NAMESPACE_USER, Record, RecordKey, RecordPage, RecordRef, Result, Scope, StandingUsage,
+    StoreForgetRequest, Tombstone, UpsertRequest, invalid_request,
 };
 
 fn corrupt() -> Error {
@@ -309,10 +309,23 @@ impl FileStore {
         record: &Record,
         enforce_standing: bool,
     ) -> Result<()> {
-        self.write_checked(snapshot, record, enforce_standing)
+        self.check_writable(snapshot, record, enforce_standing)?;
+        self.archive_current_revision(snapshot, record)?;
+        self.put_record(record)
     }
 
     fn write_checked(
+        &self,
+        snapshot: &Snapshot,
+        record: &Record,
+        enforce_standing: bool,
+    ) -> Result<()> {
+        self.check_writable(snapshot, record, enforce_standing)?;
+        self.put_record(record)
+    }
+
+    /// Rejects a duplicate non-empty key and, when asked, a standing-budget overrun.
+    fn check_writable(
         &self,
         snapshot: &Snapshot,
         record: &Record,
@@ -331,7 +344,7 @@ impl FileStore {
         if enforce_standing {
             check_standing_budget(snapshot, record)?;
         }
-        self.put_record(record)
+        Ok(())
     }
 
     /// Writes the tombstone, then removes the record file. A crash between
@@ -341,7 +354,10 @@ impl FileStore {
         super::remove_if_present(&self.path("records", &tombstone.id, "md"))
     }
 
-    pub fn forget(&self, request: &StoreForgetRequest) -> Result<Tombstone> {
+    /// Writes the tombstone and removes the record's text copies: the record
+    /// file, its revision history and the text of pending candidates that
+    /// target it. Each copy is reported in the outcome.
+    pub fn forget(&self, request: &StoreForgetRequest) -> Result<ForgetOutcome> {
         validate_store_forget_request(request)?;
         self.write(|snapshot| {
             let existing = match self.lookup(snapshot, &request.reference)? {
@@ -356,7 +372,10 @@ impl FileStore {
                     if request.forgotten_at < value.updated_at {
                         return Err(invalid_request("forget time moved backwards"));
                     }
-                    return Ok(value);
+                    return Ok(ForgetOutcome {
+                        tombstone: value,
+                        cleanup: Vec::new(),
+                    });
                 }
                 Mutation::Active(record) => record,
             };
@@ -382,7 +401,8 @@ impl FileStore {
                 forgotten_at: request.forgotten_at,
             };
             self.tombstone_record(&tombstone)?;
-            Ok(tombstone)
+            let cleanup = self.forget_cleanup(snapshot, &tombstone, request.forgotten_at)?;
+            Ok(ForgetOutcome { tombstone, cleanup })
         })
     }
 

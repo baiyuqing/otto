@@ -3,9 +3,10 @@
 use chrono::{DateTime, Utc};
 
 use super::{
-    Candidate, CandidateListRequest, CandidatePage, CandidateRef, ListRequest, Record, RecordKey,
-    RecordPage, RecordRef, Result, RetrievalRequest, RetrievalResult, Scope, StandingUsage,
-    StoreForgetRequest, StoreReviewRequest, Tombstone, UpsertRequest,
+    Candidate, CandidateListRequest, CandidatePage, CandidateRef, ForgetOutcome, ListRequest,
+    Record, RecordHistory, RecordKey, RecordPage, RecordRef, Result, RetrievalRequest,
+    RetrievalResult, Scope, StandingUsage, StoreForgetRequest, StoreRestoreRequest,
+    StoreReviewRequest, Tombstone, UpsertRequest,
 };
 
 /// Construction inputs owned by the memory domain, independent of a backend.
@@ -41,7 +42,14 @@ pub trait MemoryStore: Send + Sync {
     fn upsert_within_standing_budget(&self, request: &UpsertRequest) -> Result<Record>;
     fn standing_usage(&self, user_scope: &Scope, now: DateTime<Utc>) -> Result<StandingUsage>;
     fn standing_records(&self, user_scope: &Scope, now: DateTime<Utc>) -> Result<Vec<Record>>;
-    fn forget(&self, request: &StoreForgetRequest) -> Result<Tombstone>;
+    /// Writes the tombstone, removes the record's text copies the store holds
+    /// (record file, revision history, pending candidates that target it) and
+    /// reports each copy.
+    fn forget(&self, request: &StoreForgetRequest) -> Result<ForgetOutcome>;
+    /// The revisions of an active record, ascending, the current record last.
+    fn history(&self, reference: &RecordRef) -> Result<RecordHistory>;
+    /// Writes a new revision whose content equals an earlier one.
+    fn restore(&self, request: &StoreRestoreRequest) -> Result<Record>;
     fn review_within_standing_budget(
         &self,
         request: &StoreReviewRequest,

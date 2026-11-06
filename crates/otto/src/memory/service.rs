@@ -30,17 +30,40 @@ use tokio_util::sync::CancellationToken;
 use super::MemoryStore;
 use super::validate::{
     provenance_zero, validate_bind_scopes, validate_forget_request, validate_propose_request,
-    validate_recall_request, validate_remember_request, validate_search_request,
+    validate_recall_request, validate_record_ref, validate_remember_request,
+    validate_restore_request, validate_search_request,
 };
 use super::{
-    BindOptions, Candidate, CandidateAction, CandidateListRequest, CandidateState, Error,
-    ErrorKind, ForgetRequest, ForgetResult, ListRequest, MAX_QUERY_BYTES, MAX_QUERY_TERM_BYTES,
-    MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest, ProposeRequest, RecallRequest,
-    RecallResult, Record, RecordKey, RecordRef, RememberRequest, Result, RetrievalRequest,
-    ReviewDecision, ReviewRequest, ReviewResult, Scope, SearchRequest, SearchResult, StandingUsage,
-    StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone, UpsertRequest,
+    BindOptions, Candidate, CandidateAction, CandidateListRequest, CandidateState, CopyStatus,
+    Error, ErrorKind, ForgetCleanupEntry, ForgetRequest, ForgetResult, ListRequest,
+    MAX_QUERY_BYTES, MAX_QUERY_TERM_BYTES, MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest,
+    ProposeRequest, RecallRequest, RecallResult, Record, RecordHistory, RecordKey, RecordRef,
+    RememberRequest, RestoreRequest, Result, RetrievalRequest, ReviewDecision, ReviewRequest,
+    ReviewResult, Scope, SearchRequest, SearchResult, StandingUsage, StoreForgetRequest,
+    StoreRestoreRequest, StoreReviewRequest, TokenEstimator, Tombstone, UpsertRequest,
     decide_default_policy, new_id,
 };
+
+/// The copies of a forgotten record's text that live outside the store and
+/// that the service does not scan. Reported with every forget.
+fn cleanup_outside_the_store() -> Vec<ForgetCleanupEntry> {
+    vec![
+        ForgetCleanupEntry {
+            copy: "memory advice audit log (~/.otto/memory-advice.db)".into(),
+            status: CopyStatus::Unverified,
+            detail: "rows are keyed by candidate id, not record id, and were not scanned; \
+                     an advice request may hold the record text"
+                .into(),
+        },
+        ForgetCleanupEntry {
+            copy: "session files".into(),
+            status: CopyStatus::Present,
+            detail: "recalled text is never written to a session; user input and tool \
+                     output that repeat it are independent history and are not deleted"
+                .into(),
+        },
+    ]
+}
 
 fn now_utc() -> DateTime<Utc> {
     Utc::now()
@@ -344,20 +367,47 @@ impl Service {
         self.ready()?.standing_records(user_scope, now_utc())
     }
 
-    /// Forgetting writes a tombstone. Purging backups is refused outright:
-    /// this port has no backups to purge.
+    /// Forgetting writes a tombstone and removes the text copies the store
+    /// holds; the result lists every copy with what happened to it, including
+    /// the places outside the store the service does not scan. Purging
+    /// backups is refused outright: this port has no backups to purge.
     pub fn forget(&self, request: &ForgetRequest) -> Result<ForgetResult> {
         let store = self.ready()?;
         validate_forget_request(request)?;
         if request.purge_backups {
             return Err(Error::new(ErrorKind::Unsupported));
         }
-        let tombstone = store.forget(&StoreForgetRequest {
+        let outcome = store.forget(&StoreForgetRequest {
             reference: request.reference.clone(),
             expected_revision: request.expected_revision,
             forgotten_at: now_utc(),
         })?;
-        Ok(ForgetResult { tombstone })
+        let mut cleanup = outcome.cleanup;
+        cleanup.extend(cleanup_outside_the_store());
+        Ok(ForgetResult {
+            tombstone: outcome.tombstone,
+            cleanup,
+        })
+    }
+
+    /// The revisions of an active record, ascending, the current one last.
+    pub fn history(&self, reference: &RecordRef) -> Result<RecordHistory> {
+        let store = self.ready()?;
+        validate_record_ref(reference)?;
+        store.history(reference)
+    }
+
+    /// Restores an earlier revision as a new revision. A restore is a human
+    /// action: it never goes through the candidate queue.
+    pub fn restore(&self, request: &RestoreRequest) -> Result<Record> {
+        let store = self.ready()?;
+        validate_restore_request(request)?;
+        store.restore(&StoreRestoreRequest {
+            reference: request.reference.clone(),
+            revision: request.revision,
+            expected_revision: request.expected_revision,
+            restored_at: now_utc(),
+        })
     }
 
     /// Deciding one pending candidate. A review is always a human decision, so

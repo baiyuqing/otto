@@ -42,7 +42,7 @@ async fn stream_cut_after_a_delta_is_retried_and_only_the_second_attempt_is_retu
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     let response = settlement.result.expect("the second attempt succeeds");
@@ -70,7 +70,7 @@ async fn stream_cut_before_output_reports_no_interrupted_output() {
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     assert!(settlement.result.is_ok());
@@ -96,7 +96,7 @@ async fn interrupted_output_flag_is_per_attempt() {
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     assert_eq!(settlement.result.unwrap().message.text(), "second");
@@ -123,7 +123,7 @@ async fn malformed_chunk_after_a_delta_is_terminal_after_one_request() {
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     settlement
@@ -146,7 +146,7 @@ async fn repeated_stream_cuts_after_a_delta_exhaust_four_attempts_with_unknown_e
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     assert_eq!(settlement.attempts, 4);

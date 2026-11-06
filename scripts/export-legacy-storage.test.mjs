@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const exporter = fileURLToPath(new URL("./export-legacy-storage.py", import.meta.url));
+const hostileText = "'\"; DROP TABLE usage_events; -- /* 雪 */ λ\0tail";
 
 async function withDatabase(tables, check) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "otto-legacy-export-"));
@@ -17,8 +18,8 @@ import json, sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
     for name in json.loads(sys.argv[2]):
         connection.execute('CREATE TABLE "' + name + '" (value TEXT)')
-        connection.execute('INSERT INTO "' + name + '" VALUES (?)', ('retained',))
-`, database, JSON.stringify(tables)], { encoding: "utf8" });
+        connection.execute('INSERT INTO "' + name + '" VALUES (?)', (json.loads(sys.argv[3]),))
+`, database, JSON.stringify(tables), JSON.stringify(hostileText)], { encoding: "utf8" });
     assert.equal(created.status, 0, created.stderr || String(created.error));
     const before = await readFile(database);
     const result = spawnSync("python3", [exporter, database], { encoding: "utf8" });
@@ -49,7 +50,8 @@ test("continues to export ordinary usage stores read-only", async () => {
     assert.equal(records[0].family, "usage");
     assert.deepEqual(records[0].counts, { usage_events: 1 });
     assert.equal(records[1].table, "usage_events");
-    assert.deepEqual(records[1].values, [{ type: "text", value: "retained" }]);
+    assert.deepEqual(records[1].values, [{ type: "text", value: hostileText }]);
+    assert.ok(records[0].schema.every((sql) => typeof sql === "string"), "schema is comparison metadata");
     assert.equal(records.length, 2);
     assert.equal(records[1].type, "row");
   });

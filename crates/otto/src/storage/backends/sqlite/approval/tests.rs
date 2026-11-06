@@ -28,6 +28,33 @@ fn fixture_proposal() -> Proposal {
     }
 }
 #[test]
+fn backup_rejects_unrecognized_source_schema_without_publishing() {
+    for alteration in [
+        "ALTER TABLE approvals ADD COLUMN surprise TEXT DEFAULT (lower('UNTRUSTED'))",
+        "CREATE INDEX unexpected ON approvals(lower(body))",
+        "CREATE TRIGGER unexpected AFTER INSERT ON approvals BEGIN DELETE FROM approvals; END",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("approvals.db");
+        let service = Service::open(&path).unwrap();
+        drop(service);
+        let mut connection = Connection::open(&path).unwrap();
+        connection.execute_batch(alteration).unwrap();
+        connection.execute_batch("PRAGMA user_version=3").unwrap();
+        let transaction = connection.transaction().unwrap();
+        assert!(backup_before_v4(&SqliteDriver, &path, &transaction, 3).is_err());
+        assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("pre-v4")
+        }));
+        drop(transaction);
+    }
+}
+
+#[test]
 fn backup_and_migration_share_the_same_source_writer_fence() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("approvals.db");

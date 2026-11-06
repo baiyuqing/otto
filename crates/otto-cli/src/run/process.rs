@@ -120,7 +120,16 @@ pub async fn run_with_extensions(
             "ACP listener override is prohibited by managed server policy",
         );
     }
-    let configured = startup::configure(&mut loaded, &host_entries, &lookup, &mut *stderr);
+    let configured = match startup::configure(
+        &mut loaded,
+        &host_entries,
+        &lookup,
+        &overrides_from(&options),
+        &mut *stderr,
+    ) {
+        Ok(configured) => configured,
+        Err(message) => return fail(stderr, &message),
+    };
 
     if (!options.archive_path.is_empty()
         || options.delete_target.is_some()

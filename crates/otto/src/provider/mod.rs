@@ -8,4 +8,5 @@ pub mod catalog;
 mod catalog_cache;
 pub mod chatgpt;
 pub mod claude;
+mod endpoint_dns;
 pub mod openaicompat;

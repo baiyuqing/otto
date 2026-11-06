@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use url::Url;
-
 use super::{
     CompactionConfig, ConfigError, File, ModelSelector, ProviderConnection,
     duration::parse_go_duration, model_limits::resolve_model_limits,
@@ -139,6 +137,8 @@ pub struct Runtime {
     /// The API type of the provider: `claude`, `openai-compatible` or `chatgpt`.
     pub provider_type: String,
     pub base_url: String,
+    /// Authorized endpoint; absent for fixed-backend ChatGPT.
+    pub endpoint: Option<super::endpoint::TrustedEndpoint>,
     /// The model ID the provider API receives.
     pub model: String,
     /// Models configured for child tasks on this exact provider connection.
@@ -295,6 +295,13 @@ fn resolve_impl(
         }
         base_url = normalize_base_url(&base_url)
             .map_err(|err| ConfigError::new(format!("invalid base_url: {err}")))?;
+        super::endpoint::TrustedEndpoint::authorize(
+            &base_url,
+            &provider,
+            &provider_entry.trusted_origins,
+            &provider_entry.allow_http_origins,
+        )
+        .map_err(ConfigError::new)?;
     } else {
         // The chatgpt provider uses a fixed backend URL and OAuth credentials
         // from the credential file, not a configured base_url or API key.
@@ -373,6 +380,19 @@ fn resolve_impl(
     let mut runtime = Runtime {
         provider_name: selector.provider.clone(),
         model_selector: selector,
+        endpoint: if base_url.is_empty() {
+            None
+        } else {
+            Some(
+                super::endpoint::TrustedEndpoint::authorize(
+                    &base_url,
+                    &provider,
+                    &provider_entry.trusted_origins,
+                    &provider_entry.allow_http_origins,
+                )
+                .map_err(ConfigError::new)?,
+            )
+        },
         provider_type: provider,
         base_url,
         model,
@@ -457,45 +477,7 @@ fn resolve_api_key(
 /// depend on the native `otto` crate that owns it. The tests below pin every
 /// accepted and rejected form, so the two implementations stay in sync.
 pub(super) fn normalize_base_url(base_url: &str) -> Result<String, &'static str> {
-    const INVALID: &str = "invalid OpenAI-compatible base URL";
-    let mut parsed = Url::parse(base_url).map_err(|_| INVALID)?;
-    let scheme_ok = parsed.scheme() == "http" || parsed.scheme() == "https";
-    let host_ok = parsed.host_str().is_some_and(|host| !host.is_empty());
-    if !scheme_ok
-        || !host_ok
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || go_authority_is_empty(base_url)
-    {
-        return Err(INVALID);
-    }
-    let trimmed_path = parsed.path().trim_end_matches('/').to_string();
-    parsed.set_path(&trimmed_path);
-    Ok(parsed.to_string())
-}
-
-/// Reports whether Go's `net/url.Parse` would give an empty `Host` for
-/// `raw`, i.e. whether the text right after the first `"://"` is empty or
-/// starts with `/`, `?`, or `#`.
-///
-/// ponytail: needed because Rust's `url` crate (a WHATWG-spec parser) is
-/// stricter about slash-runs than Go's parser: for `"http:///v1"`, Go's
-/// lenient authority scan sees nothing between the second and third slash
-/// and sets `Host == ""` (rejected by `NormalizeBaseURL`), while `url`
-/// folds the leftover slash into the path and reads `"v1"` as the host
-/// instead of rejecting it. Checking the raw text directly, rather than
-/// the already-parsed `Url`, reproduces Go's rule for this one divergence.
-fn go_authority_is_empty(raw: &str) -> bool {
-    match raw.find("://") {
-        Some(index) => match raw.as_bytes().get(index + 3) {
-            None => true,
-            Some(b'/' | b'?' | b'#') => true,
-            Some(_) => false,
-        },
-        None => false,
-    }
+    super::endpoint::normalize_base_url(base_url)
 }
 
 #[cfg(test)]

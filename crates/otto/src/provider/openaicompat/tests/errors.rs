@@ -23,7 +23,7 @@ async fn blocks_cross_origin_redirect() {
     })
     .await;
 
-    let client = Client::new(&source.url, "secret");
+    let client = trusted_test_client(&source.url, "secret");
     let error = complete(&client, &model_request())
         .await
         .expect_err("a cross-origin redirect is rejected");
@@ -34,7 +34,7 @@ async fn blocks_cross_origin_redirect() {
 }
 
 #[tokio::test]
-async fn follows_same_origin_redirect_preserving_authorization() {
+async fn rejects_same_origin_redirect_without_forwarding_authorization() {
     let authorization = Arc::new(Mutex::new(String::new()));
     let seen = Arc::clone(&authorization);
     let server = spawn_server(move |head, _body| {
@@ -49,13 +49,15 @@ async fn follows_same_origin_redirect_preserving_authorization() {
     })
     .await;
 
-    let client = Client::new(&format!("{}/redirect", server.url), "secret");
+    let client = trusted_test_client(&format!("{}/redirect", server.url), "secret");
     complete(&client, &model_request())
         .await
-        .expect("the redirect is followed");
-    assert_eq!(
-        *authorization.lock().expect("header log is not poisoned"),
-        "Bearer secret"
+        .expect_err("redirects must not be followed");
+    assert!(
+        authorization
+            .lock()
+            .expect("header log is not poisoned")
+            .is_empty()
     );
 }
 
@@ -77,7 +79,7 @@ async fn does_not_retry_unauthorized_and_redacts_bounded_error() {
     })
     .await;
 
-    let client = Client::new(&server.url, KEY);
+    let client = trusted_test_client(&server.url, KEY);
     let message = complete(&client, &model_request())
         .await
         .expect_err("401 is an error")
@@ -109,7 +111,7 @@ async fn redacts_api_key_before_context_overflow_classification() {
     })
     .await;
 
-    let client = Client::new(&server.url, KEY);
+    let client = trusted_test_client(&server.url, KEY);
     let error = complete(&client, &model_request())
         .await
         .expect_err("400 is an error");
@@ -137,7 +139,7 @@ async fn returns_typed_context_overflow_without_retry() {
         })
         .await;
 
-    let client = Client::new(&server.url, "secret");
+    let client = trusted_test_client(&server.url, "secret");
     let error = complete(&client, &model_request())
         .await
         .expect_err("400 is an error");
@@ -167,7 +169,7 @@ async fn typed_context_overflow_redacts_api_key_and_body_secrets() {
         })
         .await;
 
-    let client = Client::new(&server.url, KEY);
+    let client = trusted_test_client(&server.url, KEY);
     let error = complete(&client, &model_request())
         .await
         .expect_err("413 is an error");
@@ -200,7 +202,7 @@ async fn does_not_classify_context_overflow_past_the_error_body_limit() {
     })
     .await;
 
-    let client = Client::new(&server.url, "key");
+    let client = trusted_test_client(&server.url, "key");
     let error = complete(&client, &model_request())
         .await
         .expect_err("400 is an error");
@@ -239,12 +241,12 @@ fn rejects_invalid_base_urls() {
 #[tokio::test]
 async fn an_invalid_base_url_fails_the_first_complete() {
     let error = complete(
-        &Client::new("ftp://example.test/v1", "key"),
+        &trusted_test_client("ftp://example.test/v1", "key"),
         &model_request(),
     )
     .await
     .expect_err("an invalid base URL is an error");
-    assert_eq!(error.to_string(), "invalid OpenAI-compatible base URL");
+    assert!(error.to_string().contains("invalid provider endpoint"));
 }
 
 #[test]

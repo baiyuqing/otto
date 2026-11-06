@@ -120,3 +120,22 @@ The remote memory backend no longer exists. Delete `[memory.remote]` and
 `backend = "remote"` from `config.toml`. To use an external memory service,
 install it as a plugin package and set `backend = "plugin:<package>"`; see
 [plugin memory source](memory-and-extensions.md#plugin-memory-source).
+
+## Provider endpoint is not trusted
+
+This is a local policy error, not a provider/API-key failure. No rejected request
+is sent. Existing custom endpoints are not grandfathered after an upgrade.
+Independently verify the service and add its exact origin to the relevant
+provider's `trusted_origins` in **user or managed** configuration; HTTP also
+needs `allow_http_origins`. Project/model settings and `--base-url` cannot grant
+trust. Follow [endpoint trust](getting-started.md#endpoint-trust), preserve model
+entries, then restart Otto. Do not paste credentials into a URL, grant, or prompt.
+If setup rejects a custom URL, configure the provider and model manually using
+that guide; setup never converts URL input into trust. For redirects, use the
+verified final endpoint directly. Metadata/link-local targets cannot be enabled.
+
+Provider requests deliberately ignore environment/system proxy settings to keep
+DNS endpoint checks enforceable. If a provider is reachable only through a proxy,
+use a directly reachable independently trusted endpoint instead; proxy injection
+is not supported. DNS answer sets containing metadata/link-local addresses fail
+closed even when other answers are allowed.

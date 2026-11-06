@@ -136,6 +136,64 @@ pub(super) fn backup_before_v4(
         .collect::<crate::storage::Result<Vec<_>>>()
         .map_err(storage_error)?;
     drop(schemas);
+    // Match source table definitions as data, then reconstruct with trusted SQL.
+    // The pre-v4 backup does not replay any source DDL or expressions.
+    let canonical = Connection::open_in_memory().map_err(storage_error)?;
+    canonical.execute_batch(SCHEMA).map_err(storage_error)?;
+    let mut trusted_indexes = Vec::new();
+    let mut source_objects = tx.prepare(
+        "SELECT sql FROM sqlite_schema WHERE type<>'table' AND sql IS NOT NULL AND tbl_name LIKE 'approval%'",
+    ).map_err(storage_error)?;
+    for source_sql in source_objects
+        .query_map((), |row| row.get::<String>(0))
+        .map_err(storage_error)?
+    {
+        let source_sql = source_sql.map_err(storage_error)?;
+        let expected: String = canonical
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='index' AND name='approvals_scope'",
+                (),
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        super::super::migration::legacy::validate_objects(
+            &[source_sql],
+            std::slice::from_ref(&expected),
+        )
+        .map_err(|_| Error::Invalid("unsupported approval backup object"))?;
+        trusted_indexes.push(expected);
+    }
+    drop(source_objects);
+    let mut trusted_tables = Vec::new();
+    for (name, source_sql) in &tables {
+        let expected: String = canonical
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?",
+                [name.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let variants = [
+            expected.clone(),
+            expected.replace(
+                "mode TEXT NOT NULL CHECK(mode IN ('manual','auto','yolo'))",
+                "automatic INTEGER NOT NULL CHECK(automatic IN (0,1))",
+            ),
+            expected.replace(", recovery TEXT NOT NULL DEFAULT 'domain'", ""),
+            expected.replace("DEFAULT 'domain'", "DEFAULT 'native'"),
+        ];
+        let trusted = variants
+            .into_iter()
+            .find(|candidate| {
+                super::super::migration::legacy::validate_objects(
+                    std::slice::from_ref(source_sql),
+                    std::slice::from_ref(candidate),
+                )
+                .is_ok()
+            })
+            .ok_or(Error::Invalid("unsupported approval backup schema"))?;
+        trusted_tables.push(trusted);
+    }
     let filename = format!(
         "{}.pre-v4-{}.db",
         path.file_name()
@@ -163,11 +221,8 @@ pub(super) fn backup_before_v4(
     )
     .map_err(storage_error)?;
     let destination = backup.transaction().map_err(storage_error)?;
-    for (name, schema) in &tables {
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(Error::Invalid("invalid approval backup table"));
-        }
-        destination.execute_batch(schema).map_err(storage_error)?;
+    for schema in trusted_tables.into_iter().chain(trusted_indexes) {
+        destination.execute_batch(&schema).map_err(storage_error)?;
     }
     let mut tables = tables;
     tables.sort_by_key(|(name, _)| usize::from(name != "approvals"));

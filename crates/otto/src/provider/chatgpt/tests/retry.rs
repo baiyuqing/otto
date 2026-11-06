@@ -46,7 +46,7 @@ async fn policy_capacity_http_error_is_typed_fixed_and_not_retried() {
         )
     })
     .await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &Request::default()).await;
     assert!(matches!(
         settlement.result,
@@ -72,7 +72,7 @@ async fn non_transient_http_statuses_are_not_retried() {
             testserver::status_response(status, "provider body is not exposed")
         })
         .await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
 
         let (settlement, events) = complete(&client, &Request::default()).await;
         let expected = if status == 401 {
@@ -90,7 +90,7 @@ async fn non_transient_http_statuses_are_not_retried() {
 /// Real time keeps socket failures distinct from artificial read timeouts.
 #[tokio::test]
 async fn a_transport_failure_stops_after_six_retries() {
-    let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "acct-1");
+    let client = trusted_test_client("http://127.0.0.1:1", static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &Request::default()).await;
     assert_eq!(settlement.attempts, 7);
     assert_eq!(
@@ -162,7 +162,7 @@ async fn a_transport_retry_recovers_with_the_same_request() {
         }
     })
     .await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert!(settlement.result.is_ok());
     assert_eq!(settlement.attempts, 2);
@@ -197,7 +197,7 @@ async fn an_overload_dispatched_at_clean_eof_is_retried() {
         }
     })
     .await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert!(settlement.result.is_ok());
     assert_eq!(settlement.attempts, 2);
@@ -215,7 +215,7 @@ async fn a_clean_eof_without_output_is_retried() {
         }
     })
     .await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert!(settlement.result.is_ok());
     assert_eq!(settlement.attempts, 2);
@@ -242,7 +242,7 @@ async fn interrupted_text_reasoning_and_tool_streams_are_retried() {
             }
         })
         .await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &model_request()).await;
         assert!(settlement.result.is_ok(), "{events:?}");
         assert_eq!(settlement.attempts, 2);
@@ -283,7 +283,7 @@ async fn a_reported_overload_is_retried_with_the_same_request() {
         }
     })
     .await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert!(settlement.result.is_ok());
     assert_eq!(settlement.attempts, 2);
@@ -312,7 +312,7 @@ async fn policy_capacity_stream_errors_are_fixed_and_not_retried() {
     ] {
         let body = body.to_owned();
         let server = testserver::spawn(move |_| sse_response(&body)).await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &model_request()).await;
         assert_eq!(settlement.attempts, 1);
         assert!(retry_reasons(&events).is_empty());
@@ -352,7 +352,7 @@ async fn response_error_variants_are_retried() {
             }
         })
         .await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &model_request()).await;
         assert!(settlement.result.is_ok(), "variant: {failed}");
         assert_eq!(
@@ -370,7 +370,7 @@ async fn other_reported_codes_are_not_retried() {
             "event: error\ndata: {{\"type\":\"error\",\"code\":\"{code}\",\"message\":\"m\"}}\n\n"
         );
         let server = testserver::spawn(move |_| sse_response(&body)).await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &model_request()).await;
         assert!(settlement.result.is_err());
         assert_eq!(server.count(), 1, "code {code:?}");
@@ -397,7 +397,7 @@ async fn a_reported_overload_after_streamed_output_recovers() {
         }
     })
     .await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert!(settlement.result.is_ok());
     assert_eq!(server.count(), 2);
@@ -452,7 +452,7 @@ async fn a_retry_after_a_tool_result_does_not_execute_the_tool_again() {
     .await;
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = otto_core::agent::Agent::new(
-        Client::with_base_url(&server.url, static_tokens("token"), "acct-1"),
+        trusted_test_client(&server.url, static_tokens("token"), "acct-1"),
         CountingTool(calls.clone()),
         otto_core::session::MemorySession::new(),
         otto_core::agent::Options {
@@ -496,7 +496,7 @@ async fn stopping_during_backoff_prevents_another_request() {
             testserver::truncated_sse_response(prefix, prefix.len() + 4096)
         })
         .await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
         let control = crate::deadline::Control::new(crate::deadline::Deadline::unlimited());
         let mut retries = 0;
         let settlement = client
@@ -539,7 +539,7 @@ async fn stopping_during_backoff_prevents_another_request() {
 #[tokio::test]
 async fn insufficient_deadline_budget_skips_backoff() {
     let server = testserver::spawn(|_| testserver::truncated_sse_response("", 4096)).await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let control = crate::deadline::Control::new(crate::deadline::Deadline::after(
         Duration::from_millis(1500),
     ));
@@ -563,10 +563,16 @@ async fn insufficient_deadline_budget_skips_backoff() {
 
 #[tokio::test]
 async fn a_permanent_request_error_is_not_retried() {
-    let client = Client::with_base_url("invalid-url", static_tokens("token"), "acct-1");
+    let client = trusted_test_client("invalid-url", static_tokens("token"), "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
-    assert_eq!(settlement.attempts, 1);
-    assert_eq!(settlement.result.unwrap_err().to_string(), REQUEST_FAILED);
+    assert_eq!(settlement.attempts, 0);
+    assert!(
+        settlement
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid provider endpoint")
+    );
     assert!(events.is_empty());
 }
 
@@ -578,7 +584,7 @@ async fn a_body_cut_short_reports_a_fixed_request_failure() {
     let server =
         testserver::spawn(move |_| testserver::truncated_sse_response(prefix, prefix.len() + 4096))
             .await;
-    let client = Client::with_base_url(
+    let client = trusted_test_client(
         &server.url,
         static_tokens("stream-token-secret"),
         "stream-account-secret",
@@ -616,7 +622,7 @@ async fn a_body_cut_short_reports_a_fixed_request_failure() {
 #[tokio::test]
 async fn a_protocol_failure_is_not_retried() {
     let server = testserver::spawn(|_| sse_response("data: {invalid}\n\n")).await;
-    let client = Client::with_base_url(&server.url, static_tokens("secret"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("secret"), "acct-1");
     let (settlement, events) = complete(&client, &Request::default()).await;
     assert!(settlement.result.is_err());
     assert_eq!(server.count(), 1);
@@ -626,7 +632,7 @@ async fn a_protocol_failure_is_not_retried() {
 #[tokio::test]
 async fn a_deadline_stopped_call_reports_deadline_exceeded() {
     let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let mut sink = |_: StreamEvent| panic!("no event is emitted after deadline");
     let settlement = client
         .complete(&Request::default(), &mut sink, &StoppedControl::deadline())
@@ -649,7 +655,7 @@ async fn a_deadline_stopped_call_reports_deadline_exceeded() {
 #[tokio::test]
 async fn a_cancelled_call_reports_cancellation() {
     let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
     let cancel = CancellationToken::new();
     cancel.cancel();
     let mut sink = |_: StreamEvent| panic!("no event is emitted after cancellation");

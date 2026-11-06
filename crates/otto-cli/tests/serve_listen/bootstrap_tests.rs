@@ -91,6 +91,20 @@ async fn empty_home_serves_config_and_requires_setup_before_sessions() {
     assert_eq!(session.status().as_u16(), 503);
     stop_bootstrap(handle).await;
 
+    // Typed edits cannot mint endpoint authority. Simulate the user's explicit
+    // origin grants in the user config before restarting this local HTTP setup.
+    let config_path = fixture._home.path().join(".config/otto/config.toml");
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    let provider = config["providers"]["local"].as_table_mut().unwrap();
+    for field in ["trusted_origins", "allow_http_origins"] {
+        provider.insert(
+            field.into(),
+            toml::Value::Array(vec![toml::Value::String("http://127.0.0.1:1".into())]),
+        );
+    }
+    std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+
     // Restart with the configured selector and an offline dummy key; no turn/provider request.
     fixture
         .environment

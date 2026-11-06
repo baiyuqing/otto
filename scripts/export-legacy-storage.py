@@ -49,6 +49,8 @@ def main():
         raise ValueError("unexpected legacy schema object")
     counts = {name: connection.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
               for name in tables}
+    # Schema strings are comparison metadata only. The importer validates every
+    # object against trusted canonical definitions and never executes this SQL.
     schema = [sql for kind, _, table, sql in objects
               if table in tables and table != "memory_records_fts"]
     # Memory has a new canonical manifest; the importer supplies its schema.

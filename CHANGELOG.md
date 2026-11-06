@@ -7,6 +7,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Fixed
+
+- Unix terminal users can suspend the TUI with `Ctrl+Z` and resume with `fg`:
+  Otto restores the shell terminal before suspending, then redraws the same
+  session and draft on resume. Attached clients leave the server session running.
+
 ### Development
 
 - Restore `make check` coverage after endpoint-trust and memory-lifecycle changes:

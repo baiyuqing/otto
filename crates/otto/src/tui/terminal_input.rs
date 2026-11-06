@@ -13,8 +13,8 @@ const TERMINAL_INPUT_MODES_RESET: &[u8] = b"\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1
 
 #[derive(Default)]
 pub(super) struct TerminalInput {
-    mouse_active: bool,
-    paste_active: bool,
+    pub(super) mouse_active: bool,
+    pub(super) paste_active: bool,
 }
 
 impl TerminalInput {
@@ -165,6 +165,9 @@ pub(super) enum TuiEvent {
         row: u16,
     },
     Redraw,
+    /// Dropping this acknowledgement releases the reader after terminal handoff.
+    #[cfg(unix)]
+    Suspend(std::sync::mpsc::Sender<()>),
 }
 
 pub(super) fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
@@ -191,6 +194,12 @@ pub(super) fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
     }
 }
 
+#[cfg(unix)]
+pub(super) fn is_suspend_key(key: KeyEvent) -> bool {
+    key.code == crossterm::event::KeyCode::Char('z')
+        && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+}
+
 /// Reads terminal events on a blocking OS thread. Unlike `cli::repl`'s
 /// `spawn_reader`, this deliberately uses a plain [`std::thread::spawn`]
 /// rather than `tokio::task::spawn_blocking`: `crossterm::event::read()` only
@@ -214,10 +223,29 @@ pub(super) fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
             let Some(forwarded) = map_terminal_event(event) else {
                 continue;
             };
-            if sender.blocking_send(forwarded).is_err() {
+            if !forward_event(&sender, forwarded) {
                 break;
             }
         }
     });
     receiver
 }
+
+pub(super) fn forward_event(sender: &mpsc::Sender<TuiEvent>, event: TuiEvent) -> bool {
+    #[cfg(unix)]
+    if matches!(&event, TuiEvent::Key(key) if is_suspend_key(*key)) {
+        let (resume, parked) = std::sync::mpsc::channel();
+        if sender.blocking_send(TuiEvent::Suspend(resume)).is_err() {
+            return false;
+        }
+        // No further terminal reads until the UI finishes the handoff. Drop
+        // on errors or session exit also releases the waiting reader.
+        let _ = parked.recv();
+        return true;
+    }
+    sender.blocking_send(event).is_ok()
+}
+
+#[cfg(all(test, unix))]
+#[path = "terminal_input_tests.rs"]
+mod tests;

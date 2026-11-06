@@ -6,6 +6,8 @@
 #![allow(dead_code)]
 
 #[cfg(unix)]
+pub mod job_control;
+#[cfg(unix)]
 pub mod pty;
 
 /// A displayed ACP tool call must close exactly once, including on failure.

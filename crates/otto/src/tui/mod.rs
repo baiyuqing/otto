@@ -20,6 +20,8 @@ mod features;
 pub(crate) mod gutter;
 mod input;
 mod interaction;
+#[cfg(unix)]
+mod job_control;
 mod layout;
 mod markdown;
 mod render;
@@ -346,6 +348,11 @@ fn apply_input<B: Backend>(
     backend: &app::Backend<'_>,
 ) -> Result<Option<Action>, ReplError> {
     match event {
+        #[cfg(unix)]
+        TuiEvent::Suspend(_reader_parked) => {
+            job_control::suspend(terminal)?;
+            Ok(None)
+        }
         TuiEvent::Key(key) => {
             app.selection = None;
             Ok(app.handle_key(key, backend, cancel))

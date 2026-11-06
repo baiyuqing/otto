@@ -56,7 +56,7 @@ pub(crate) const MEMORY_USAGE: &str = "usage: /memory list [--scope current|user
     /memory review <id> accept|reject";
 #[cfg(test)]
 pub(crate) const REMEMBER_USAGE: &str =
-    "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>";
+    "usage: /remember [--scope user|workspace] [--kind K] [--key K] [--review-in AGE] <text>";
 #[cfg(test)]
 pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
 /// The message printed when no runner carries a registry.

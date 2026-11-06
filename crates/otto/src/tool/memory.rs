@@ -65,7 +65,9 @@ pub fn memory_search_definition() -> ToolDefinition {
         "Search remembered facts and preferences for the current user and \
             workspace. Query terms match as case-insensitive substrings of record \
             text, kind, key and labels; an empty query lists recently updated \
-            records. Previous turns retain only record IDs; use id to read the \
+            records. A search returns active records only. An id lookup returns the \
+            record in any state and shows state, and superseded_by when set. \
+            Previous turns retain only record IDs; use id to read the \
             current scope and revision before proposing an update or forget.",
         json!({
             "type": "object",
@@ -73,11 +75,11 @@ pub fn memory_search_definition() -> ToolDefinition {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Space-separated terms matched as case-insensitive substrings of text, kind, key and labels; empty lists recently updated records"
+                    "description": "Space-separated terms matched as case-insensitive substrings of text, kind, key and labels; empty lists recently updated active records"
                 },
                 "id": {
                     "type": "string",
-                    "description": "Exact record ID to look up in this session's scopes; omit query when using id"
+                    "description": "Exact record ID to look up in this session's scopes in any state; the output shows the record state; omit query when using id"
                 }
             }
         }),
@@ -150,15 +152,22 @@ impl Tool for MemorySearchTool {
         let mut ids = Vec::with_capacity(records.len());
         for record in &records {
             ids.push(record.id.as_str());
+            let superseded_by = if record.superseded_by.is_empty() {
+                String::new()
+            } else {
+                format!(" superseded_by={}", record.superseded_by)
+            };
             let _ = writeln!(
                 content,
-                "id={} scope={}/{} kind={} key={} revision={} text={}",
+                "id={} scope={}/{} kind={} key={} revision={} state={}{} text={}",
                 record.id,
                 record.scope.namespace,
                 record.scope.id,
                 record.kind,
                 record.key,
                 record.revision,
+                record.state.as_str(),
+                superseded_by,
                 record.text
             );
         }

@@ -90,6 +90,14 @@ commit ledger; Git and release tags retain the full history. See the
   stored in the advice audit log. See
   [local memory use](docs/manual/memory-and-extensions.md#local-memory-use)
   (#591).
+- A labeled offline dataset for memory proposals
+  (`testdata/memory-eval/proposals/labeled.jsonl`) and a deterministic scorer
+  measure action choice, evidence support, unsupported inversion, erroneous
+  retirement, scope violations, preserved claims, abstention and leakage of a
+  generated proposal, separately from the layer-1 checks. No default test or
+  command calls a model over it. See
+  [the dataset](docs/development/testing.md#memory-proposal-evaluation-dataset)
+  (#591).
 
 ### Sessions
 

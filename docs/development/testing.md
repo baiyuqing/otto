@@ -60,6 +60,71 @@ calls grows with the number of session messages; run `--dry-run` first. Use
 flags; it is not a measured bill. `report.md` prints pass or fail for the spec's
 acceptance criteria.
 
+## Memory proposal evaluation dataset
+
+The layer-2 semantic evaluation of memory proposals (issue #591 §10) has a
+labeled offline dataset and a deterministic scorer in
+`crates/otto/src/memory/proposals/evaluation.rs`. The dataset is
+`testdata/memory-eval/proposals/labeled.jsonl` (version
+`memory-proposal-labels/1`), one JSON object per line: the existing record
+(`text`, `kind`, `key`, `marker`), the evidence items (`id`, `text`, `trust`
+`local` or `external`, `source`), the permitted actions and the human label.
+No default test or command calls a model over it; the command that runs a live
+generator and an LLM judge over the dataset belongs to the memory-retraction
+evaluation (§11 of the issue). Until then the dataset is exercised by the
+offline tests under `proposals/evaluation/tests/`.
+
+Every record text carries a unique marker token (`m-NN-xxxx`); every leakage
+check searches for the marker, never for the whole text. A label holds:
+
+| Field | Meaning |
+| --- | --- |
+| `expected_actions` | The acceptable actions, a non-empty subset of the permitted ones |
+| `supporting_evidence` | The evidence ids that support the expected change |
+| `replacement_must_contain` | Lowercase terms a `supersede`/`correct` replacement must keep (valid claims) |
+| `replacement_must_not_contain` | Lowercase terms whose presence widens the record beyond the evidence |
+| `inversion_terms` | Lowercase terms that turn a withdrawal into the opposite claim |
+| `reference_replacement` | The labeler's replacement text, present exactly for `supersede`/`correct` |
+| `rationale` | The labeler's reason, one or two sentences |
+
+`parse_labeled_items` rejects an inconsistent file: duplicate names or
+markers, a marker absent from the text, unknown evidence ids, an expected
+action outside the permitted set, a missing or rule-breaking reference
+replacement. The test
+`reference_proposals_score_clean_through_layer_one` builds the
+reference proposal of each item and requires it to pass `validate_proposal`
+with a clean score, so a label that layer 1 would reject cannot be added.
+
+The scorer (`score`) takes the raw proposal returned by `Generator::generate`,
+before the layer-1 checks, and records the layer-1 verdict next to the
+semantic results so a report separates what the model chose from what the
+native checks let through. Retiring actions are `retract`, `supersede`,
+`correct` and `forget`; abstaining actions are `no_change` and `needs_review`.
+
+| Score field | Rule |
+| --- | --- |
+| `action_correct` | The proposed action is in `expected_actions` |
+| `abstention` | An abstaining proposal is `Appropriate` when an expected action abstains, else `Excessive` |
+| `erroneous_retirement` | No expected action retires and the proposal retires |
+| `unsupported_inversion` | A `supersede`/`correct` replacement contains an `inversion_terms` entry |
+| `scope_violation` | The replacement contains a `replacement_must_not_contain` entry |
+| `claims_preserved` | A `supersede`/`correct` replacement contains every `replacement_must_contain` entry; absent for other actions |
+| `cited_unsupporting` | `evidence_refs` is not a subset of `supporting_evidence` |
+| `missed_supporting` | The action needs evidence and `supporting_evidence` is not a subset of `evidence_refs` |
+| `leakage` | A `forget`/`retract` explanation or replacement contains the marker |
+| `layer_one` | `Accepted`, `Rejected(reason)` or `NotRun` for an unavailable generation |
+
+Term matching is case-insensitive substring matching. `Metrics::from_scores`
+counts each field over a run and per category; `Metrics::render` prints
+`<metric>: <count>/<items>` lines. The counts are evidence for one dataset and
+one model; no threshold is fixed in advance.
+
+To add an item: pick an unused marker, write the record and evidence, choose
+the category from the issue's list (`distinction`, `validity`, `override`,
+`partial`, `scope`, `conflict`, `ambiguity`, `duplicate`, `adversarial`,
+`valid`), label it, and run
+`cargo test -p otto --lib -- memory::proposals::evaluation`.
+
 ## Fault injection
 
 `otto::faults` provides deterministic seams, compiled only for tests or the

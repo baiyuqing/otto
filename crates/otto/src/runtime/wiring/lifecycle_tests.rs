@@ -5,10 +5,12 @@ use super::*;
 use otto_core::agent::memory::{MemoryRecall, RecordStatus};
 use otto_core::{memory as port, operation::OperationControl};
 
+type InspectRecord = (String, String, String, Vec<(String, String)>);
+
 /// Answers `inspect` Get from a table of (scope id, record id) to
 /// (revision, metadata), `Conflict` for an absent record, and counts calls.
 struct InspectTable {
-    records: Vec<(String, String, String, Vec<(String, String)>)>,
+    records: Vec<InspectRecord>,
     failing_id: Option<String>,
     calls: std::sync::atomic::AtomicUsize,
 }
@@ -93,7 +95,7 @@ fn binding_over(table: InspectTable) -> (Arc<InspectTable>, ServiceBinding) {
     (table, binding)
 }
 
-fn table(records: Vec<(String, String, String, Vec<(String, String)>)>) -> InspectTable {
+fn table(records: Vec<InspectRecord>) -> InspectTable {
     InspectTable {
         records,
         failing_id: None,

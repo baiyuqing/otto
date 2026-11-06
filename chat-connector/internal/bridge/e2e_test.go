@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,8 +175,13 @@ func ottoHome(t *testing.T, providerURL string) string {
 			t.Fatal(err)
 		}
 	}
+	endpoint, err := url.Parse(providerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := endpoint.Scheme + "://" + endpoint.Host
 	cfg := "default_model = \"test/gpt-test\"\n\n[providers.test]\ntype = \"openai-compatible\"\nbase_url = \"" + providerURL +
-		"\"\napi_key_env = \"OTTO_API_KEY\"\n\n[providers.test.models.\"gpt-test\"]\n"
+		"\"\napi_key_env = \"OTTO_API_KEY\"\ntrusted_origins = [\"" + origin + "\"]\nallow_http_origins = [\"" + origin + "\"]\n\n[providers.test.models.\"gpt-test\"]\n"
 	if err := os.WriteFile(filepath.Join(home, ".config/otto/config.toml"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

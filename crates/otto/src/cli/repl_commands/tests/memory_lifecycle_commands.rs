@@ -187,7 +187,7 @@ fn proposed_reply_renders_each_outcome_variant() {
         "no change proposed: evidence does not apply"
     );
     assert_eq!(
-        render(Outcome::Proposed(proposed_candidate())),
+        render(Outcome::Proposed(Box::new(proposed_candidate()))),
         "proposed retract of r1 as candidate c1 (review with /memory review c1 accept|reject): the source was withdrawn"
     );
     assert_eq!(

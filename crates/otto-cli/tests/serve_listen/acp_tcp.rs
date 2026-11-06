@@ -255,7 +255,7 @@ async fn acp_tcp_clients_select_admitted_workspaces_without_crossing_history_or_
     std::fs::create_dir(other_path.join(".otto")).unwrap();
     std::fs::write(
         other_path.join(".otto/config.toml"),
-        "[profiles.test]\nmodel='workspace-b-model'\n",
+        "default_model = \"test/workspace-b-model\"\n[providers.test.models.workspace-b-model]\n",
     )
     .unwrap();
     let cancel = CancellationToken::new();

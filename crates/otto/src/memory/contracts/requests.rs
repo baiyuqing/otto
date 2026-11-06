@@ -183,9 +183,87 @@ pub struct ForgetRequest {
     pub confirm_purge: bool,
 }
 
+/// What forget did about one copy of the record's text, in the four classes
+/// of #591 §6: removed, only suppressed, still present, could not be verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyStatus {
+    Removed,
+    Suppressed,
+    Present,
+    Unverified,
+}
+
+impl CopyStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CopyStatus::Removed => "removed",
+            CopyStatus::Suppressed => "suppressed",
+            CopyStatus::Present => "present",
+            CopyStatus::Unverified => "unverified",
+        }
+    }
+}
+
+/// One copy of a forgotten record's text that forget looked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgetCleanupEntry {
+    /// The copy: a path relative to the store root, or a description of a
+    /// place outside the store.
+    pub copy: String,
+    pub status: CopyStatus,
+    /// What was done, or why the status is not `Removed`. Never record text.
+    pub detail: String,
+}
+
+/// What the store did for one forget: the tombstone and the copies it handled.
+#[derive(Debug, Clone)]
+pub struct ForgetOutcome {
+    pub tombstone: Tombstone,
+    pub cleanup: Vec<ForgetCleanupEntry>,
+}
+
+/// The service's forget result: the store's outcome plus the copies the
+/// store cannot see (advice audit rows, session files).
 #[derive(Debug, Clone)]
 pub struct ForgetResult {
     pub tombstone: Tombstone,
+    pub cleanup: Vec<ForgetCleanupEntry>,
+}
+
+/// Restores `revision` of a record as a new revision; `expected_revision` is
+/// the current revision the caller read.
+#[derive(Debug, Clone)]
+pub struct RestoreRequest {
+    pub reference: RecordRef,
+    pub revision: u64,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreRestoreRequest {
+    pub reference: RecordRef,
+    pub revision: u64,
+    pub expected_revision: u64,
+    pub restored_at: DateTime<Utc>,
+}
+
+/// The metadata name a restored revision carries; its value is the decimal
+/// revision number the content was taken from.
+pub const RESTORED_FROM_REVISION_METADATA: &str = "otto.restored_from_revision";
+
+/// A history file the store could not read; `file` is its path relative to
+/// the store root and `reason` names the problem without file content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedRevision {
+    pub file: String,
+    pub reason: String,
+}
+
+/// The revisions of one record, ascending, the current record last.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RecordHistory {
+    pub revisions: Vec<Record>,
+    pub skipped: Vec<SkippedRevision>,
 }
 
 #[derive(Debug, Clone)]

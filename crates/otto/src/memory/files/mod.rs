@@ -16,6 +16,7 @@ mod candidate_archive;
 mod candidates;
 mod cursor;
 mod format;
+mod history;
 mod records;
 mod retrieve;
 #[cfg(test)]
@@ -77,7 +78,13 @@ fn ensure_directory(path: &Path) -> Result<()> {
 fn ensure_layout(root: &Path) -> Result<()> {
     ensure_directory(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).map_err(unavailable)?;
-    for name in ["records", "tombstones", "candidates", "candidates/archive"] {
+    for name in [
+        "records",
+        "tombstones",
+        "candidates",
+        "candidates/archive",
+        "history",
+    ] {
         ensure_directory(&root.join(name))?;
     }
     fsops::open_dir_no_follow(&root.join("candidates/archive")).map_err(unavailable)?;
@@ -262,6 +269,7 @@ impl FileStore {
         for tombstone in &snapshot.tombstones {
             remove_if_present(&store.path("records", &tombstone.id, "md"))?;
         }
+        store.recover_history(&snapshot)?;
         store.archive_decided_candidates(&snapshot)?;
         drop(lock);
         Ok(store)
@@ -566,8 +574,22 @@ impl crate::memory::MemoryStore for FileStore {
         FileStore::standing_records(self, user_scope, now)
     }
 
-    fn forget(&self, request: &crate::memory::StoreForgetRequest) -> Result<Tombstone> {
+    fn forget(
+        &self,
+        request: &crate::memory::StoreForgetRequest,
+    ) -> Result<crate::memory::ForgetOutcome> {
         FileStore::forget(self, request)
+    }
+
+    fn history(
+        &self,
+        reference: &crate::memory::RecordRef,
+    ) -> Result<crate::memory::RecordHistory> {
+        FileStore::history(self, reference)
+    }
+
+    fn restore(&self, request: &crate::memory::StoreRestoreRequest) -> Result<Record> {
+        FileStore::restore(self, request)
     }
 
     fn review_within_standing_budget(

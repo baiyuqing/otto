@@ -201,6 +201,14 @@ impl Screen {
             (true, b'l') if numbers == [1049] => Ok(()),
             // SGR: content-inert (never changes which character occupies a cell).
             (false, b'm') => Ok(()),
+            // Cursor query emitted when the resumed backend clears the screen.
+            (false, b'n') if numbers == [6] => Ok(()),
+            (false, b'J') if numbers == [2] => {
+                for row in &mut self.cells {
+                    row.fill(' ');
+                }
+                Ok(())
+            }
             _ => Err(format!(
                 "unsupported CSI: {}{}{}",
                 if private { "?" } else { "" },
@@ -345,16 +353,17 @@ pub fn spawn(
         .stdin(Stdio::from(slave.try_clone().expect("clone slave")))
         .stdout(Stdio::from(slave.try_clone().expect("clone slave")))
         .stderr(Stdio::from(slave));
-    // crossterm reads the window size from `/dev/tty` before stdout. The
-    // child otherwise keeps the controlling terminal of whatever ran
-    // `cargo test`, so a run from an interactive terminal draws frames sized
-    // to that terminal. A new session has no controlling terminal: opening
-    // `/dev/tty` fails and crossterm falls back to stdout, this PTY.
-    // SAFETY: runs in the forked child before exec; `setsid` is
-    // async-signal-safe.
+    // Give the child this isolated controlling PTY, not the test runner's
+    // terminal. Real job control requires a controlling terminal as well as
+    // a session/process group; crossterm also uses it for window size.
+    // SAFETY: runs in the forked child before exec; these libc calls use only
+    // the already-installed stdin descriptor and scalar arguments.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -369,11 +378,23 @@ pub fn spawn(
     let reader = std::sync::Arc::clone(&shared);
     let mut reader_master = master.try_clone().expect("clone master");
     std::thread::spawn(move || {
+        use std::io::Write as _;
+        let mut query_tail = Vec::new();
         let mut buffer = [0u8; 4096];
         loop {
             match reader_master.read(&mut buffer) {
                 Ok(0) | Err(_) => return,
                 Ok(read) => {
+                    query_tail.extend_from_slice(&buffer[..read]);
+                    let queries = query_tail
+                        .windows(4)
+                        .filter(|window| *window == b"\x1b[6n")
+                        .count();
+                    for _ in 0..queries {
+                        let _ = reader_master.write_all(b"\x1b[1;1R");
+                    }
+                    let keep = query_tail.len().saturating_sub(3);
+                    query_tail.drain(..keep);
                     reader
                         .raw
                         .lock()

@@ -68,6 +68,8 @@ const HELP: &str = concat!(
     "Memory\n",
     "/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n",
     "/memory history <id> | /memory diff <id> <from> [<to>] | /memory restore <id> <revision>\n",
+    "/memory list [--state active|needs-review|superseded|retracted|all] [--kind K] [--label L] [--updated-after TIME|AGE] [--verified-after TIME|AGE] [--unverified] [--review-due]\n",
+    "/memory state <id> active|needs-review|retracted [--reason TEXT] | /memory state <id> superseded <replacement-id> [--reason TEXT] | /memory verify <id> [--review-in AGE]\n",
     "/remember [--scope user|workspace] [--kind K] [--key K] <text>\n",
     "\n",
     "Tasks\n",

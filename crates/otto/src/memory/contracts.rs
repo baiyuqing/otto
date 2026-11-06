@@ -223,6 +223,66 @@ impl Origin {
     }
 }
 
+/// The lifecycle state of a record (#591 §4). A forgotten record is a
+/// tombstone, not a state. Only `Active` records that are not expired and
+/// whose review is not due take part in normal recall and in the standing set.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordState {
+    #[default]
+    Active,
+    /// Uncertain or awaiting a human review; listed with a label, not injected.
+    NeedsReview,
+    /// Replaced by the record named in `Record::superseded_by`.
+    Superseded,
+    /// Withdrawn or established as incorrect; `Record::state_reason` may say why.
+    Retracted,
+}
+
+impl RecordState {
+    pub const ALL: [RecordState; 4] = [
+        RecordState::Active,
+        RecordState::NeedsReview,
+        RecordState::Superseded,
+        RecordState::Retracted,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordState::Active => "active",
+            RecordState::NeedsReview => "needs_review",
+            RecordState::Superseded => "superseded",
+            RecordState::Retracted => "retracted",
+        }
+    }
+
+    /// Accepts the stored name and its hyphenated command-line form.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(RecordState::Active),
+            "needs_review" | "needs-review" => Some(RecordState::NeedsReview),
+            "superseded" => Some(RecordState::Superseded),
+            "retracted" => Some(RecordState::Retracted),
+            _ => None,
+        }
+    }
+}
+
+/// Longest `state_reason`, in bytes.
+pub const MAX_STATE_REASON_BYTES: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateAction {
     Create,
@@ -366,8 +426,21 @@ pub struct Record {
     pub confidence: f64,
     pub revision: u64,
     pub created_at: DateTime<Utc>,
+    /// The last content update. A lifecycle write (state, verification) is a
+    /// new revision but leaves this time unchanged.
     pub updated_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub state: RecordState,
+    /// The last explicit verification by a human or an evidence-backed
+    /// action. Reading, recall and listing never set it.
+    pub verified_at: Option<DateTime<Utc>>,
+    /// The next review deadline. Once passed, the record leaves normal recall
+    /// until it is verified.
+    pub review_at: Option<DateTime<Utc>>,
+    /// The replacement record id when `state` is `Superseded`, else "".
+    pub superseded_by: String,
+    /// Why the record left the active state, else "".
+    pub state_reason: String,
 }
 
 impl Default for Record {
@@ -386,7 +459,30 @@ impl Default for Record {
             created_at: DateTime::UNIX_EPOCH,
             updated_at: DateTime::UNIX_EPOCH,
             expires_at: None,
+            state: RecordState::Active,
+            verified_at: None,
+            review_at: None,
+            superseded_by: String::new(),
+            state_reason: String::new(),
         }
+    }
+}
+
+impl Record {
+    /// Whether the review deadline has passed at `now`.
+    pub fn review_due(&self, now: DateTime<Utc>) -> bool {
+        self.review_at.is_some_and(|review_at| review_at <= now)
+    }
+
+    /// Whether the record is expired at `now`.
+    pub fn expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+    }
+
+    /// Whether normal recall and the standing set may use the record at
+    /// `now`: active, not expired, review not due.
+    pub fn effective(&self, now: DateTime<Utc>) -> bool {
+        self.state == RecordState::Active && !self.expired(now) && !self.review_due(now)
     }
 }
 

@@ -6,7 +6,7 @@ use super::{
     Candidate, CandidateListRequest, CandidatePage, CandidateRef, ForgetOutcome, ListRequest,
     Record, RecordHistory, RecordKey, RecordPage, RecordRef, Result, RetrievalRequest,
     RetrievalResult, Scope, StandingUsage, StoreForgetRequest, StoreRestoreRequest,
-    StoreReviewRequest, Tombstone, UpsertRequest,
+    StoreReviewRequest, StoreSetStateRequest, StoreVerifyRequest, Tombstone, UpsertRequest,
 };
 
 /// Construction inputs owned by the memory domain, independent of a backend.
@@ -50,6 +50,12 @@ pub trait MemoryStore: Send + Sync {
     fn history(&self, reference: &RecordRef) -> Result<RecordHistory>;
     /// Writes a new revision whose content equals an earlier one.
     fn restore(&self, request: &StoreRestoreRequest) -> Result<Record>;
+    /// Writes a new revision with the requested lifecycle state; the content
+    /// fields and `updated_at` are unchanged.
+    fn set_state(&self, request: &StoreSetStateRequest) -> Result<Record>;
+    /// Writes a new revision that records a verification; the content fields
+    /// and `updated_at` are unchanged.
+    fn verify(&self, request: &StoreVerifyRequest) -> Result<Record>;
     fn review_within_standing_budget(
         &self,
         request: &StoreReviewRequest,

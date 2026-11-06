@@ -9,13 +9,14 @@ use std::collections::BTreeSet;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::memory::codec::{format_timestamp, parse_timestamp};
 use crate::memory::json::encode_string;
 use crate::memory::{
     CandidateListRequest, Error, ErrorKind, ListRequest, MAX_CURSOR_BYTES, MAX_ID_BYTES,
-    MAX_RETRIEVAL_CANDIDATES, Result, RetrievalRequest, Scope,
+    MAX_RETRIEVAL_CANDIDATES, RecordState, Result, RetrievalRequest, Scope,
 };
 
 const RECORD_CURSOR_VERSION: i64 = 1;
@@ -101,8 +102,49 @@ pub(super) fn fingerprint_list(request: &ListRequest) -> String {
         canonical.push_str(",\"now\":");
         encode_string(&format_timestamp(request.now), &mut canonical);
     }
+    // An empty state list lists active records only, so both forms are one filter.
+    let states: BTreeSet<&'static str> = if request.states.is_empty() {
+        BTreeSet::from([RecordState::Active.as_str()])
+    } else {
+        request.states.iter().map(|state| state.as_str()).collect()
+    };
+    canonical.push_str(",\"states\":[");
+    for (index, state) in states.iter().enumerate() {
+        if index > 0 {
+            canonical.push(',');
+        }
+        encode_string(state, &mut canonical);
+    }
+    canonical.push_str("],\"updated_after\":");
+    push_optional_timestamp(request.updated_after, &mut canonical);
+    canonical.push_str(",\"verified_after\":");
+    push_optional_timestamp(request.verified_after, &mut canonical);
+    canonical.push_str(",\"unverified_only\":");
+    canonical.push_str(if request.unverified_only {
+        "true"
+    } else {
+        "false"
+    });
+    canonical.push_str(",\"review_due_only\":");
+    canonical.push_str(if request.review_due_only {
+        "true"
+    } else {
+        "false"
+    });
+    if request.review_due_only && request.include_expired {
+        // `now` decides which records are due, even when expiry ignores it.
+        canonical.push_str(",\"due_now\":");
+        encode_string(&format_timestamp(request.now), &mut canonical);
+    }
     canonical.push('}');
     digest(&canonical)
+}
+
+fn push_optional_timestamp(time: Option<DateTime<Utc>>, out: &mut String) {
+    match time {
+        Some(time) => encode_string(&format_timestamp(time), out),
+        None => out.push_str("null"),
+    }
 }
 
 pub(super) fn fingerprint_candidates(request: &CandidateListRequest) -> String {
@@ -317,6 +359,11 @@ mod tests {
             cursor: String::new(),
             now: DateTime::UNIX_EPOCH,
             include_expired: false,
+            states: Vec::new(),
+            updated_after: None,
+            verified_after: None,
+            unverified_only: false,
+            review_due_only: false,
         }
     }
 

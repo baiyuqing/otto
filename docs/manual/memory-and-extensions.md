@@ -40,8 +40,12 @@ lists still read archived receipts for approval history and retry confirmation.
 Archiving does not delete history or reduce the total file count. Older Otto
 versions do not look in the archive for receipts.
 
-Record frontmatter uses one `name: <JSON value>` per line. All eleven names
-below are required exactly once; unknown fields and multiline bodies are invalid.
+Record frontmatter uses one `name: <JSON value>` per line. All sixteen names
+below may appear exactly once; the first eleven are required and the five after
+`metadata` (`state`, `verified_at`, `review_at`, `superseded_by`,
+`state_reason`) are optional on read. A file without them reads as `active`
+with no verification or review time. Unknown fields and multiline bodies are
+invalid.
 
 ```markdown
 ---
@@ -56,6 +60,11 @@ updated_at: "2026-10-16T10:25:41.052684000Z"
 expires_at: null
 source: {"origin":"human"}
 metadata: {}
+state: "active"
+verified_at: "2026-10-16T10:30:00.000000000Z"
+review_at: null
+superseded_by: ""
+state_reason: ""
 ---
 Reply to technical questions in Chinese.
 ```
@@ -323,12 +332,13 @@ user/workspace records are untrusted reference material, bounded by
 `max_results`/`recall_tokens`. Workspace records replace same-kind/key user
 records and identical text is deduplicated. Recall is not a complete inventory.
 
-Use `/memory list` or `otto memory list` to page active records (current user/
-workspace by default); `--scope user|workspace|all` narrows or explicitly
-inventories all stored workspaces. Pass returned `next_cursor` as `--cursor`.
-`show` reads an exact record in the selected scopes. Human `/remember` and
-`/memory forget <id>` apply immediately. Model writes create candidates;
-`/memory review <id> accept|reject` decides pending human reviews.
+Use `/memory list` or `otto memory list` to page active records (see
+[record states](#record-states-and-times)); the current user and workspace
+scopes are listed by default, and `--scope user|workspace|all` narrows or
+explicitly inventories all stored workspaces. Pass returned `next_cursor` as
+`--cursor`. `show` reads an exact record in the selected scopes. Human
+`/remember` and `/memory forget <id>` apply immediately. Model writes create
+candidates; `/memory review <id> accept|reject` decides pending human reviews.
 
 Every update that replaces a record moves its former revision to
 `history/<id>/<revision>.md`. Revision 1 of a record that was never updated has
@@ -381,6 +391,54 @@ counts, which can differ from actionable human approvals. Local startup notices
 and connector post-turn cards expose pending reviews; attached clients use
 their own refresh paths. ACP snapshot-cursor conflicts require restarting the
 page request with an empty cursor, not skipping changed candidates.
+
+### Record states and times
+
+A record has one lifecycle state. A forgotten record is a tombstone, not a
+state.
+
+| State | Meaning | Normal recall |
+| --- | --- | --- |
+| `active` | The record is current | Injected |
+| `needs_review` | The record is uncertain or awaits a human decision | Not injected; listed with its state |
+| `superseded` | Another active record in the same scope replaces it; `superseded_by` holds that id | Not injected |
+| `retracted` | The record was withdrawn or found incorrect; `state_reason` may say why | Not injected |
+
+A record has five times. `created_at` is set once. `updated_at` changes only
+when the content changes. `verified_at` is the last explicit human
+verification; reading, recall and listing never set it. `review_at` is the next
+review deadline: once it has passed, the record leaves normal recall until
+`verify` runs. `expires_at` is the existing expiry. A standing preference needs
+no deadline; a temporary fact suits `review_at` or `expires_at`.
+
+Two commands change them, as `otto memory ...` and as `/memory ...`:
+
+- `state <id> active|needs-review|retracted [--reason TEXT]` and
+  `state <id> superseded <replacement-id> [--reason TEXT]` set the state. The
+  replacement must be an active record in the same scope.
+- `verify <id> [--review-in AGE]` sets `verified_at` to now, returns a
+  `needs_review` record to `active`, and sets `review_at` to now plus `AGE`
+  (`30d`, `12h` or `45m`). Without `--review-in` it clears `review_at`. An
+  absolute time is not accepted.
+
+`/remember --review-in AGE <text>` sets the deadline when a record is written.
+A state change or verification is a new revision with a history file and keeps
+`updated_at`. `list` shows only `active` records by default and takes these
+filters, which combine:
+
+| Flag | Selects |
+| --- | --- |
+| `--state active\|needs-review\|superseded\|retracted\|all` | Records in that state; repeatable |
+| `--kind K`, `--label L` | Records of that kind or with that label |
+| `--updated-after TIME\|AGE` | Content updated at or after the time |
+| `--verified-after TIME\|AGE` | Verified at or after the time |
+| `--unverified` | Records never verified; not combinable with `--verified-after` |
+| `--review-due` | Records whose `review_at` has passed |
+
+`TIME` is an RFC 3339 time and `AGE` counts back from now. The list line prints
+`state=`, `superseded_by=` and `state_reason=` when set, then `verified_at=` and
+`review_at=`. `memory_search` with a term query returns active records; an id
+lookup returns the record with its state.
 
 ### Standing preferences
 

@@ -1,4 +1,4 @@
-//! The standalone `otto memory status|list|show|forget|history|diff|restore` CLI.
+//! The standalone `otto memory status|list|show|forget|history|diff|restore|state|verify` CLI.
 //!
 //! It is dispatched before the main flag set is parsed, because its argument
 //! grammar is its own, and it builds only the memory service: no provider,
@@ -17,6 +17,10 @@ use otto_core::config::resolve_memory;
 
 use super::run::fail;
 use history::{HistoryCommand, HistoryInput, parse_revision, run_history};
+use lifecycle::{
+    LifecycleFlags, LifecycleInput, ListFilters, parse_lifecycle_command, render_record_line,
+    run_lifecycle,
+};
 use otto::memory::{ForgetRequest, ListRequest, MAX_PAGE_SIZE, RecordRef, Scope, Service};
 use otto::runtime::boundary::{self, BoundaryInputs};
 
@@ -36,11 +40,13 @@ struct Flags {
     scope: String,
     limit: usize,
     cursor: String,
+    lifecycle: LifecycleFlags,
 }
 
-/// Parses `--config PATH` and `--cwd PATH` in either `--name value` or
-/// `--name=value` form.
-fn parse_flags(args: &[String]) -> Result<Flags, ()> {
+/// Parses `--config PATH`, `--cwd PATH` and the other flags in either
+/// `--name value` or `--name=value` form. The error is the diagnostic to
+/// print; an empty one exits with code 2 and prints nothing.
+fn parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut flags = Flags {
         config_path: String::new(),
         explicit_config: false,
@@ -48,6 +54,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
         scope: "current".into(),
         limit: 20,
         cursor: String::new(),
+        lifecycle: LifecycleFlags::default(),
     };
     let mut index = 0;
     while index < args.len() {
@@ -57,30 +64,39 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
             None => (argument, None),
         };
         let name = name.trim_start_matches('-');
-        if !matches!(name, "config" | "cwd" | "scope" | "limit" | "cursor") {
-            return Err(());
+        if LifecycleFlags::is_switch(name) && inline.is_none() {
+            flags.lifecycle.set_switch(name);
+            index += 1;
+            continue;
+        }
+        if !matches!(name, "config" | "cwd" | "scope" | "limit" | "cursor")
+            && !LifecycleFlags::takes_value(name)
+        {
+            return Err(String::new());
         }
         let value = match inline {
             Some(value) => value,
             None => {
                 index += 1;
-                args.get(index).cloned().ok_or(())?
+                args.get(index).cloned().ok_or_else(String::new)?
             }
         };
-        if name == "config" {
+        if LifecycleFlags::takes_value(name) {
+            flags.lifecycle.set_value(name, value)?;
+        } else if name == "config" {
             flags.explicit_config = !value.is_empty();
             flags.config_path = value;
         } else if name == "cwd" {
             flags.cwd = value;
         } else if name == "scope" {
             if !matches!(value.as_str(), "current" | "user" | "workspace" | "all") {
-                return Err(());
+                return Err(String::new());
             }
             flags.scope = value;
         } else if name == "limit" {
-            flags.limit = value.parse().map_err(|_| ())?;
+            flags.limit = value.parse().map_err(|_| String::new())?;
             if !(1..=MAX_PAGE_SIZE).contains(&flags.limit) {
-                return Err(());
+                return Err(String::new());
             }
         } else {
             flags.cursor = value;
@@ -93,9 +109,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
 /// The most positional arguments a subcommand takes before its flags.
 fn positional_limit(subcommand: &str) -> usize {
     match subcommand {
-        "forget" | "show" | "history" => 1,
+        "forget" | "show" | "history" | "verify" => 1,
         "restore" => 2,
-        "diff" => 3,
+        "diff" | "state" => 3,
         _ => 0,
     }
 }
@@ -119,7 +135,7 @@ pub(crate) fn startup_configuration(
     let (command, mut rest) = args.split_first().ok_or(())?;
     let (_, flag_arguments) = split_positionals(command, rest);
     rest = flag_arguments;
-    let flags = parse_flags(rest)?;
+    let flags = parse_flags(rest).map_err(|_| ())?;
     super::run::load_config_for(&flags.config_path, flags.explicit_config, home)
         .map(|(_, file)| file)
         .map_err(|_| ())
@@ -166,7 +182,8 @@ pub fn run_with_storage(
         return fail(
             stderr,
             concat!(
-                "usage: otto memory status|list|show <id>|forget <id>|history <id>|diff <id> <from> [<to>]|restore <id> <revision> ",
+                "usage: otto memory status|list|show <id>|forget <id>|history <id>|diff <id> <from> [<to>]|restore <id> <revision>|",
+                "state <id> <state> [<replacement>]|verify <id> ",
                 "[--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]"
             ),
         );
@@ -177,6 +194,10 @@ pub fn run_with_storage(
         Ok(command) => command,
         Err(usage) => return fail(stderr, usage),
     };
+    let lifecycle_command = match parse_lifecycle_command(&subcommand, positionals) {
+        Ok(command) => command,
+        Err(usage) => return fail(stderr, &usage),
+    };
     if matches!(subcommand.as_str(), "forget" | "show") && positionals.is_empty() {
         return fail(
             stderr,
@@ -185,8 +206,10 @@ pub fn run_with_storage(
             ),
         );
     }
-    let Ok(flags) = parse_flags(rest) else {
-        return 2;
+    let flags = match parse_flags(rest) {
+        Ok(flags) => flags,
+        Err(message) if message.is_empty() => return 2,
+        Err(message) => return fail(stderr, &message),
     };
 
     let home = match super::run::resolve_home_for(lookup) {
@@ -249,6 +272,7 @@ pub fn run_with_storage(
             scope: &flags.scope,
             limit: flags.limit,
             cursor: &flags.cursor,
+            filters: flags.lifecycle.filters,
             stdout,
             stderr,
         }),
@@ -287,6 +311,24 @@ pub fn run_with_storage(
                     cwd: &flags.cwd,
                     scope: &flags.scope,
                     id: &record_id,
+                    command,
+                },
+                stdout,
+                stderr,
+            ),
+            None => fail(stderr, COMMAND_UNAVAILABLE),
+        },
+        "state" | "verify" => match lifecycle_command {
+            Some(command) => run_lifecycle(
+                LifecycleInput {
+                    storage,
+                    config: &memory_config,
+                    secret_values: &secret_values,
+                    cwd: &flags.cwd,
+                    scope: &flags.scope,
+                    id: &record_id,
+                    reason: &flags.lifecycle.reason,
+                    review_in: flags.lifecycle.review_in,
                     command,
                 },
                 stdout,
@@ -408,6 +450,7 @@ struct ListInput<'a> {
     scope: &'a str,
     limit: usize,
     cursor: &'a str,
+    filters: ListFilters,
     stdout: &'a mut (dyn Write + Send),
     stderr: &'a mut (dyn Write + Send),
 }
@@ -421,6 +464,7 @@ fn list(input: ListInput<'_>) -> i32 {
         scope,
         limit,
         cursor,
+        filters,
         stdout,
         stderr,
     } = input;
@@ -458,30 +502,23 @@ fn list(input: ListInput<'_>) -> i32 {
     let result = service.list(&ListRequest {
         all_scopes,
         scopes,
-        kinds: Vec::new(),
-        labels: Vec::new(),
+        kinds: filters.kinds,
+        labels: filters.labels,
         limit,
         cursor: cursor.to_string(),
         now: chrono::Utc::now(),
         include_expired: true,
+        states: filters.states,
+        updated_after: filters.updated_after,
+        verified_after: filters.verified_after,
+        unverified_only: filters.unverified_only,
+        review_due_only: filters.review_due_only,
     });
     let _ = service.close();
     match result {
         Ok(page) => {
             for record in page.records {
-                let _ = writeln!(
-                    stdout,
-                    "id={} scope={}/{} kind={} key={} revision={} created_at={} updated_at={} text={}",
-                    record.id,
-                    record.scope.namespace,
-                    record.scope.id,
-                    record.kind,
-                    record.key,
-                    record.revision,
-                    record.created_at,
-                    record.updated_at,
-                    record.text
-                );
+                let _ = writeln!(stdout, "{}", render_record_line(&record));
             }
             if !page.next_cursor.is_empty() {
                 let _ = writeln!(stdout, "next_cursor={}", page.next_cursor);
@@ -544,19 +581,7 @@ fn show(
     let _ = service.close();
     match record {
         Some(record) => {
-            let _ = writeln!(
-                stdout,
-                "id={} scope={}/{} kind={} key={} revision={} created_at={} updated_at={} text={}",
-                record.id,
-                record.scope.namespace,
-                record.scope.id,
-                record.kind,
-                record.key,
-                record.revision,
-                record.created_at,
-                record.updated_at,
-                record.text
-            );
+            let _ = writeln!(stdout, "{}", render_record_line(&record));
             0
         }
         None => fail(stderr, &format!("record {id} not found")),
@@ -659,8 +684,11 @@ fn forget_record(
 }
 
 mod history;
+mod lifecycle;
 
 #[cfg(test)]
 mod history_tests;
+#[cfg(test)]
+mod state_tests;
 #[cfg(test)]
 mod tests;

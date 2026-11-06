@@ -13,15 +13,19 @@ pub fn render_history(history: &RecordHistory) -> String {
         .iter()
         .map(|record| {
             let mut line = format!(
-                "revision={} updated_at={} origin={}",
+                "revision={} updated_at={} origin={} state={}",
                 record.revision,
                 record.updated_at,
                 record
                     .source
                     .origin
                     .map(|origin| origin.as_str())
-                    .unwrap_or("")
+                    .unwrap_or(""),
+                record.state.as_str()
             );
+            if !record.superseded_by.is_empty() {
+                line.push_str(&format!(" superseded_by={}", record.superseded_by));
+            }
             if let Some(from) = record.metadata.get(RESTORED_FROM_REVISION_METADATA) {
                 line.push_str(&format!(" restored_from={from}"));
             }
@@ -111,6 +115,39 @@ pub fn field_changes(from: &Record, to: &Record) -> Vec<FieldChange> {
         "metadata",
         format!("{:?}", from.metadata),
         format!("{:?}", to.metadata),
+    );
+    compare(
+        "state",
+        from.state.as_str().to_string(),
+        to.state.as_str().to_string(),
+    );
+    compare(
+        "superseded_by",
+        from.superseded_by.clone(),
+        to.superseded_by.clone(),
+    );
+    compare(
+        "state_reason",
+        from.state_reason.clone(),
+        to.state_reason.clone(),
+    );
+    compare(
+        "verified_at",
+        from.verified_at
+            .map(|time| time.to_string())
+            .unwrap_or_default(),
+        to.verified_at
+            .map(|time| time.to_string())
+            .unwrap_or_default(),
+    );
+    compare(
+        "review_at",
+        from.review_at
+            .map(|time| time.to_string())
+            .unwrap_or_default(),
+        to.review_at
+            .map(|time| time.to_string())
+            .unwrap_or_default(),
     );
     changes
 }

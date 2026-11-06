@@ -2,6 +2,7 @@
 
 use super::step_control::StepControl;
 use super::*;
+use crate::session::{MEMORY_RECALL_CUSTOM_TYPE, MemoryRecordRef, encode_memory_recall};
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// Runs one turn: appends `user_text`, then alternates provider calls and
@@ -466,11 +467,36 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                             .iter()
                             .map(|record| record.id.clone())
                             .collect();
+                        state.memory_records = result
+                            .records
+                            .iter()
+                            .map(|record| MemoryRecordRef {
+                                id: record.id.clone(),
+                                revision: record.revision.clone(),
+                            })
+                            .collect();
                     }
                     Err(error) => emit(Event::MemoryWarning {
                         message: error.to_string(),
                     }),
                 }
+            }
+            if !followup
+                && let Err(source) = self
+                    .session
+                    .append_custom(
+                        MEMORY_RECALL_CUSTOM_TYPE,
+                        &encode_memory_recall(&state.memory_records),
+                    )
+                    .await
+            {
+                return Err(self.fail(
+                    emit,
+                    AgentError::Persist {
+                        kind: "memory recall record".into(),
+                        source,
+                    },
+                ));
             }
             *self
                 .last_memory_context

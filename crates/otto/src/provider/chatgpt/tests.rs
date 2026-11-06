@@ -149,8 +149,8 @@ const HOSTED_SEARCH_STREAM: &str = concat!(
 #[tokio::test]
 async fn hosted_web_search_is_advertised_only_when_enabled_and_its_items_are_ignored() {
     let server = testserver::spawn(|_| sse_response(HOSTED_SEARCH_STREAM)).await;
-    let off = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
-    let on = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1")
+    let off = trusted_test_client(&server.url, static_tokens("test-token"), "acct-1");
+    let on = trusted_test_client(&server.url, static_tokens("test-token"), "acct-1")
         .with_hosted_web_search(true);
 
     let (settlement, _) = complete(&off, &model_request()).await;
@@ -192,4 +192,21 @@ fn redaction_marker(values: &[String]) -> String {
         assert!(collector.add(value));
     }
     otto_core::safetext::dynamic_redaction_marker(&collector.values()).unwrap()
+}
+
+// Mock endpoints receive explicit test-owned origin grants, never production bypasses.
+fn trusted_test_client(base_url: &str, tokens: TokenSource, account_id: &str) -> Client {
+    let origin = url::Url::parse(base_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_default();
+    match otto_core::config::endpoint::TrustedEndpoint::authorize(
+        base_url,
+        "chatgpt",
+        &[origin.clone()],
+        &[origin],
+    ) {
+        Ok(endpoint) => Client::new_trusted(&endpoint, tokens, account_id),
+        Err(_) => Client::with_base_url(base_url, tokens, account_id),
+    }
 }

@@ -19,7 +19,7 @@ fn serialized_request_size_matches_the_exact_wire_payload() {
         request_remote_compaction: false,
     };
     let payload = serde_json::to_vec(&build_request(&request)).expect("the request encodes");
-    let client = Client::new("https://example.test/v1", "key");
+    let client = trusted_test_client("https://example.test/v1", "key");
     assert_eq!(
         client
             .serialized_request_size(&request)
@@ -38,7 +38,7 @@ async fn sends_the_expected_request_line_headers_and_body() {
     })
     .await;
 
-    let client = Client::new(&format!("{}/gateway/v1/", server.url), "secret");
+    let client = trusted_test_client(&format!("{}/gateway/v1/", server.url), "secret");
     complete(&client, &model_request())
         .await
         .expect("the request succeeds");
@@ -69,7 +69,7 @@ async fn catalog_preserves_compat_metadata_and_auth_without_required_metadata() 
         ))
     })
     .await;
-    let client = Client::new(&server.url, "catalog-compat-secret");
+    let client = trusted_test_client(&server.url, "catalog-compat-secret");
     let catalog = client.catalog(&CancellationToken::new()).await.unwrap();
     assert_eq!(catalog.models.len(), 2);
     assert_eq!(catalog.models[0].metadata["description"], "[REDACTED]");
@@ -94,7 +94,7 @@ async fn list_models_gets_the_models_path_and_returns_sorted_unique_ids() {
         })
         .await;
 
-    let client = Client::new(&format!("{}/gateway/v1/", server.url), "secret");
+    let client = trusted_test_client(&format!("{}/gateway/v1/", server.url), "secret");
     let ids = client
         .list_models(&CancellationToken::new())
         .await
@@ -123,7 +123,7 @@ async fn list_models_reports_a_redacted_http_error_without_retrying() {
     })
     .await;
 
-    let client = Client::new(&server.url, "sk-secret-value-123");
+    let client = trusted_test_client(&server.url, "sk-secret-value-123");
     let error = client
         .list_models(&CancellationToken::new())
         .await
@@ -140,7 +140,7 @@ async fn list_models_reports_a_redacted_http_error_without_retrying() {
 async fn list_models_rejects_a_body_without_a_data_list() {
     let server = spawn_server(|_head, _body| http_response(200, &[], r#"{"models":[]}"#)).await;
 
-    let client = Client::new(&server.url, "key");
+    let client = trusted_test_client(&server.url, "key");
     let error = client
         .list_models(&CancellationToken::new())
         .await

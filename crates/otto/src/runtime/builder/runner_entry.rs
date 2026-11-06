@@ -180,8 +180,11 @@ impl Builder {
             ProviderClient::Unavailable
         } else if runtime.provider_type == otto_core::config::PROVIDER_CLAUDE {
             ProviderClient::Claude {
-                client: Arc::new(crate::provider::claude::Client::new(
-                    &runtime.base_url,
+                client: Arc::new(crate::provider::claude::Client::new_trusted(
+                    runtime
+                        .endpoint
+                        .as_ref()
+                        .ok_or_else(|| "missing trusted provider endpoint".to_string())?,
                     &runtime.api_key,
                     &runtime.api_version,
                     &runtime.workspace_id,
@@ -207,7 +210,13 @@ impl Builder {
             }
         } else {
             ProviderClient::Compat {
-                client: Arc::new(Client::new(&runtime.base_url, &runtime.api_key)),
+                client: Arc::new(Client::new_trusted(
+                    runtime
+                        .endpoint
+                        .as_ref()
+                        .ok_or_else(|| "missing trusted provider endpoint".to_string())?,
+                    &runtime.api_key,
+                )),
                 timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
             }

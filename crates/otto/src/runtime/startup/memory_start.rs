@@ -152,7 +152,13 @@ pub async fn start(
         &crate::runtime::storage::BackendRegistry::default(),
     )
     .await?;
-    let configured = configure(&mut loaded, &host_entries, &lookup, &mut *stderr);
+    let configured = configure(
+        &mut loaded,
+        &host_entries,
+        &lookup,
+        &options.overrides,
+        &mut *stderr,
+    )?;
     // After the boundary and the credential capture, so the redaction set
     // does not depend on the disabled components.
     options.disabled.apply(&mut loaded.config);

@@ -1113,3 +1113,27 @@ Override them with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
 ---
 
 Previous: [Interactive use](interactive-use.md) · [Documentation index](../README.md) · Next: [Servers and connectors](servers-and-connectors.md)
+
+## Provider endpoint trust
+
+Provider origin authorization is separate from endpoint syntax and API keys.
+Custom Claude/OpenAI-compatible endpoints require independent user/managed
+origin grants before credential lookup or network access. Local/private
+origins require the same explicit grant; plaintext HTTP needs an additional
+acknowledgement. Literal metadata/link-local targets are rejected and provider
+redirects are disabled, including when callers try to inject HTTP clients.
+See [endpoint trust and recovery](getting-started.md#endpoint-trust).
+
+This does not detect every malicious HTTPS service or pin DNS. Grants authorize
+the entire origin, including every path. User/managed config is trusted;
+approved shell access that can modify it remains a security-sensitive authority.
+Project configuration, model changes and URL overrides cannot grant trust.
+
+Provider transports check every DNS answer before connecting. A result set with
+any metadata/link-local address is rejected in full, including mapped IPv4 and
+well-known NAT64 forms; DNS cannot silently fall back to another resolver.
+Private/local addresses remain usable only behind the independent origin grant.
+Owned provider completion and catalog clients disable environment/system proxies
+(including `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`) because a proxy could
+resolve the destination outside this policy. Transparent OS/network routing is
+outside Otto's resolver boundary; grants are still not service certification.

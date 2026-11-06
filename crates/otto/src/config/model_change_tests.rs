@@ -45,7 +45,7 @@ fn create_initial_config_writes_a_default_model_and_only_non_secret_fields() {
         &path,
         PROVIDER_OPENAI_COMPATIBLE,
         "cheap-model",
-        "https://api.example/v1",
+        "https://api.openai.com/v1",
         "EXAMPLE_KEY",
     )
     .expect("create");
@@ -62,7 +62,7 @@ fn create_initial_config_writes_a_default_model_and_only_non_secret_fields() {
     assert!(!content.contains("profile"), "{content}");
     let parsed = otto_core::config::parse(&content).expect("parse");
     let provider = &parsed.providers["openai-compatible"];
-    assert_eq!(provider.base_url, "https://api.example/v1");
+    assert_eq!(provider.base_url, "https://api.openai.com/v1");
     assert!(provider.models.contains_key("cheap-model"));
 }
 
@@ -570,12 +570,26 @@ fn initial_config_names_the_provider_and_writes_the_model_as_an_inline_entry() {
         initial_config_content(
             PROVIDER_OPENAI_COMPATIBLE,
             "m",
-            "https://api.example/v1",
+            "https://api.openai.com/v1",
             "K"
         )
         .expect("openai-compatible"),
         "default_model = \"openai-compatible/m\"\n\n[providers.openai-compatible]\n\
-         type = \"openai-compatible\"\nbase_url = \"https://api.example/v1\"\n\
+         type = \"openai-compatible\"\nbase_url = \"https://api.openai.com/v1\"\n\
          api_key_env = \"K\"\nmodels.\"m\" = {}\n"
     );
+}
+
+#[test]
+fn endpoint_setup_custom_origin_requires_independent_user_configuration() {
+    let error = initial_config_content(
+        PROVIDER_OPENAI_COMPATIBLE,
+        "fixture-model",
+        "https://custom.example/v1",
+        "FIXTURE_KEY",
+    )
+    .unwrap_err();
+    assert!(error.contains("trusted_origins"));
+    assert!(error.contains("getting-started.md#endpoint-trust"));
+    assert!(!error.contains("custom.example"));
 }

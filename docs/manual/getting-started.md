@@ -352,6 +352,7 @@ models."gpt-5.6-sol" = {}
 [providers.gateway]
 type = "openai-compatible"
 base_url = "https://llm.example.com/v1"
+trusted_origins = ["https://llm.example.com"]
 api_key_env = "LLM_GATEWAY_API_KEY"
 models."model-a" = { thinking = "high", context_window = 128000, compaction_window = 100000 }
 ```
@@ -362,6 +363,8 @@ models."model-a" = { thinking = "high", context_window = 128000, compaction_wind
 | --- | --- |
 | `type` | `claude`, `openai-compatible` or `chatgpt`. Required unless the name is a built-in provider. |
 | `base_url` | Endpoint. Required for `openai-compatible`; Claude default `https://api.anthropic.com`; rejected for `chatgpt`. |
+| `trusted_origins` | Independent user/managed grants for custom endpoint origins; no paths. See [endpoint trust](#endpoint-trust). |
+| `allow_http_origins` | Additional explicit plaintext HTTP acknowledgement for each granted HTTP origin. |
 | `api_key_env` | Environment variable holding the key; Claude default `ANTHROPIC_API_KEY`; rejected for `chatgpt`. |
 | `api_version` | Claude only. |
 | `workspace_id_env` | Claude only; environment variable holding the workspace ID. |
@@ -457,3 +460,68 @@ contain sensitive connection information. To recover, stop affected runtimes,
 inspect the desired backup, restore only the intended user source, run
 `otto config explain --json`, then restart. Never replace a project source with
 a merged dump or restore old credentials into source control.
+
+### Endpoint trust
+
+Before reading provider credentials or sending a request, Otto independently
+checks the selected endpoint against user/managed provider origin grants.
+The built-in HTTPS origins `api.anthropic.com` (Claude), `api.openai.com`
+(OpenAI-compatible), and `chatgpt.com` (ChatGPT) are trusted for their respective
+types. An origin is the scheme, normalized host and effective port, not a path.
+Lookalike domains, different ports, and HTTP are not official origins.
+
+Custom endpoints **fail closed**, including existing configurations after an
+upgrade, `--base-url` overrides, setup input, model catalogs and background agents.
+Setup does not silently trust a URL. For a custom endpoint, manually add an
+explicit grant to the matching provider table in your user configuration
+(`~/.config/otto/config.toml`, or the trusted user file selected by `--config`), or ask
+your administrator to add it in managed configuration:
+
+```toml
+[providers.gateway]
+type = "openai-compatible"
+base_url = "https://llm.example.com/v1"
+api_key_env = "GATEWAY_API_KEY"
+trusted_origins = ["https://llm.example.com"]
+```
+
+Keep your existing model entries and selected model. Grants contain origins
+only: no path beyond `/`, userinfo, query, fragment, or secrets. A custom local
+endpoint needs its own exact-origin grant. Plaintext HTTP additionally requires
+a separate acknowledgement of unencrypted prompts and credentials:
+
+```toml
+trusted_origins = ["http://127.0.0.1:8080"]
+allow_http_origins = ["http://127.0.0.1:8080"]
+```
+
+Put those fields in the relevant provider table, not a model or project table.
+They do not follow `--base-url`: a changed origin needs a new independent grant.
+Metadata and link-local literal addresses are forbidden even with grants.
+Redirects are never followed; configure the final endpoint directly. Restart
+running Otto processes after editing configuration. To revoke access, remove
+the origin grant and restart. No credential value belongs in these files.
+
+A grant is **not a safety certification**: arbitrary HTTPS hosts can still be
+malicious, and trusted hosts/DNS can change. Grant only services you control or
+have independently verified. User/managed configuration is trusted authority;
+an agent with approved unrestricted shell writes to that config could change
+it. Existing shell approval and filesystem confinement are the protection, not
+a claim that a user config file is tamper-proof. No model-callable trust grant
+or provider-mediated approval is offered.
+
+Library integrations should use `TrustedEndpoint::authorize` with policy from
+trusted application authority and each provider's `Client::new_trusted`.
+Legacy constructors allow official origins only. Injected `reqwest::Client`
+constructors fail closed because their redirect policy cannot be inspected;
+migrate to the owned, no-redirect transport. Library callers supplying policy
+are themselves trusted; never derive grants from model output or a URL override.
+
+Provider transports check every DNS answer before connecting. A result set with
+any metadata/link-local address is rejected in full, including mapped IPv4 and
+well-known NAT64 forms; DNS cannot silently fall back to another resolver.
+Private/local addresses remain usable only behind the independent origin grant.
+Owned provider completion and catalog clients disable environment/system proxies
+(including `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`) because a proxy could
+resolve the destination outside this policy. Transparent OS/network routing is
+outside Otto's resolver boundary; grants are still not service certification.

@@ -187,8 +187,11 @@ struct ServiceBinding {
     closed: AtomicBool,
 }
 
+mod lifecycle;
 mod turn_observation;
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod plugin_memory_tests;
 #[cfg(test)]
@@ -198,6 +201,15 @@ mod turn_observation_tests;
 
 #[async_trait::async_trait]
 impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
+    async fn lifecycle(
+        &self,
+        ids: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<otto_core::agent::memory::RecordLifecycle>, otto_core::agent::memory::MemoryError>
+    {
+        self.record_lifecycles(ids, cancel).await
+    }
+
     async fn recall(
         &self,
         request: &otto_core::agent::memory::RecallRequest,

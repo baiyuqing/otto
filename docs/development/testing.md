@@ -135,6 +135,58 @@ the category from the issue's list (`distinction`, `validity`, `override`,
 `valid`), label it, and run
 `cargo test -p otto --lib -- memory::proposals::evaluation`.
 
+## Memory retraction evaluation
+
+`otto eval memory-retraction` is an opt-in live-provider evaluation of memory
+retraction (issue #591 section 10) in
+[the spec](../specs/2026-11-06-memory-retraction-eval.md). It runs the product
+agent loop over synthetic transcripts with an evaluation-only memory binding;
+it reads no session, changes no session and registers no product tool or
+binding. Every provider call goes through the agent's secret redaction and PII
+egress guard, and every file it writes holds redacted text.
+
+```sh
+otto eval memory-retraction --dry-run                 # counts and call estimate, no requests
+otto eval memory-retraction                           # layers 2 and 3, all conditions and variants
+otto eval memory-retraction --layer 3 --conditions A,C --variants assistant_paraphrase --repeat 3
+otto eval memory-retraction --out ~/.otto/eval/memory-retraction/<run-id>   # rerun: reuse rows
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--layer 2\|3\|all` | Which layer runs; default `all` |
+| `--conditions A,B,C,D` | Layer-3 conditions; default all four |
+| `--variants LIST` | `native_recall`, `assistant_paraphrase`, `tool_result`, `summary_with_references`, `legacy_summary`; default all |
+| `--items LIST` | Layer-3 item names; default all |
+| `--repeat N` | Repetitions per case, 1 to 20 |
+| `--out DIR` | Output directory; default `~/.otto/eval/memory-retraction/<run-id>/` |
+| `--max-calls N` | Provider call ceiling, default 2000 |
+| `--no-judge` | Skip the LLM judge calls |
+| `--dry-run` | Print the estimate and exit; needs no credentials |
+
+Layer 3 runs every item × variant × condition × repetition twice, once with
+the task and once with the control task, each in its own transcript: two
+answer calls, one judge call for the task answer, and one summarizer call
+under condition D. Layer 2 runs the proposal generator (two rounds) and one
+judge call per labeled item. `--dry-run` prints the totals first.
+
+| Artifact | Content |
+| --- | --- |
+| `items.json` | The embedded layer-3 items as run (`testdata/memory-eval/retraction/items.jsonl`, version `memory-retraction-items/1`) |
+| `transcripts/<item>-<variant>.jsonl` | The constructed prior, one entry per line |
+| `answers.jsonl` | One row per case and role: answer, error, usage, request facts (marker, notice, replacement, summary mark present), the D compaction result, rule checks, judge verdict |
+| `proposals.jsonl` | Layer 2: the raw proposal or the unavailability reason, the score, the judge verdict |
+| `report.json`, `report.md` | Counts with sample sizes per condition and traceability class, rebuild counts, layer-2 metrics, run metadata |
+
+Conditions: A keeps the obsolete record active and recalled; B does not recall
+it and answers `Unknown` for its lifecycle, so nothing is filtered or
+announced while copies in the transcript remain; C reports the retirement, so
+the notice renders and the replacement is recalled where one exists; D is C
+with one `Agent::compact` before the task turn and applies to the two summary
+variants only. Rule checks are term matches defined by the item; the judge
+verdict is stored next to them and never merged. The report defines no
+threshold; see the spec's interpretation limits.
+
 ## Fault injection
 
 `otto::faults` provides deterministic seams, compiled only for tests or the

@@ -5,6 +5,6 @@ mod build_tests;
 mod cost_tests;
 mod redaction_tests;
 mod run_tests;
-mod scripted_provider;
+pub(crate) mod scripted_provider;
 mod session_fixture;
 mod session_loading_tests;

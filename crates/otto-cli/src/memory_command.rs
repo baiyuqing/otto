@@ -1,4 +1,4 @@
-//! The standalone `otto memory status|list|show <id>|forget <id>` CLI.
+//! The standalone `otto memory status|list|show|forget|history|diff|restore` CLI.
 //!
 //! It is dispatched before the main flag set is parsed, because its argument
 //! grammar is its own, and it builds only the memory service: no provider,
@@ -16,6 +16,7 @@ use otto_core::config::memory::MemoryRuntime;
 use otto_core::config::resolve_memory;
 
 use super::run::fail;
+use history::{HistoryCommand, HistoryInput, parse_revision, run_history};
 use otto::memory::{ForgetRequest, ListRequest, MAX_PAGE_SIZE, RecordRef, Scope, Service};
 use otto::runtime::boundary::{self, BoundaryInputs};
 
@@ -89,16 +90,35 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
     Ok(flags)
 }
 
+/// The most positional arguments a subcommand takes before its flags.
+fn positional_limit(subcommand: &str) -> usize {
+    match subcommand {
+        "forget" | "show" | "history" => 1,
+        "restore" => 2,
+        "diff" => 3,
+        _ => 0,
+    }
+}
+
+/// Splits the leading arguments that do not start with `-`, at most
+/// `positional_limit`, from the flags that follow.
+fn split_positionals<'a>(subcommand: &str, args: &'a [String]) -> (&'a [String], &'a [String]) {
+    let count = args
+        .iter()
+        .take(positional_limit(subcommand))
+        .take_while(|argument| !argument.starts_with('-'))
+        .count();
+    args.split_at(count)
+}
+
 /// Runs `otto memory ...` and returns its exit code.
 pub(crate) fn startup_configuration(
     args: &[String],
     home: &str,
 ) -> Result<otto_core::config::File, ()> {
     let (command, mut rest) = args.split_first().ok_or(())?;
-    if matches!(command.as_str(), "forget" | "show") {
-        let (_, flags) = rest.split_first().ok_or(())?;
-        rest = flags;
-    }
+    let (_, flag_arguments) = split_positionals(command, rest);
+    rest = flag_arguments;
     let flags = parse_flags(rest)?;
     super::run::load_config_for(&flags.config_path, flags.explicit_config, home)
         .map(|(_, file)| file)
@@ -145,27 +165,25 @@ pub fn run_with_storage(
     let Some(subcommand) = args.first().cloned() else {
         return fail(
             stderr,
-            "usage: otto memory status|list|show <id>|forget <id> [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]",
+            concat!(
+                "usage: otto memory status|list|show <id>|forget <id>|history <id>|diff <id> <from> [<to>]|restore <id> <revision> ",
+                "[--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]"
+            ),
         );
     };
-    let mut rest = &args[1..];
-
-    let mut record_id = String::new();
-    if matches!(subcommand.as_str(), "forget" | "show") {
-        match rest.first() {
-            Some(first) if !first.starts_with('-') => {
-                record_id = first.clone();
-                rest = &rest[1..];
-            }
-            _ => {
-                return fail(
-                    stderr,
-                    &format!(
-                        "usage: otto memory {subcommand} <id> [--scope current|user|workspace] [--config PATH] [--cwd PATH]"
-                    ),
-                );
-            }
-        }
+    let (positionals, rest) = split_positionals(&subcommand, &args[1..]);
+    let record_id = positionals.first().cloned().unwrap_or_default();
+    let history_command = match parse_history_command(&subcommand, positionals) {
+        Ok(command) => command,
+        Err(usage) => return fail(stderr, usage),
+    };
+    if matches!(subcommand.as_str(), "forget" | "show") && positionals.is_empty() {
+        return fail(
+            stderr,
+            &format!(
+                "usage: otto memory {subcommand} <id> [--scope current|user|workspace] [--config PATH] [--cwd PATH]"
+            ),
+        );
     }
     let Ok(flags) = parse_flags(rest) else {
         return 2;
@@ -260,7 +278,52 @@ pub fn run_with_storage(
                 stderr,
             )
         }
+        "history" | "diff" | "restore" => match history_command {
+            Some(command) => run_history(
+                HistoryInput {
+                    storage,
+                    config: &memory_config,
+                    secret_values: &secret_values,
+                    cwd: &flags.cwd,
+                    scope: &flags.scope,
+                    id: &record_id,
+                    command,
+                },
+                stdout,
+                stderr,
+            ),
+            None => fail(stderr, COMMAND_UNAVAILABLE),
+        },
         other => fail(stderr, &format!("unknown memory subcommand {other:?}")),
+    }
+}
+
+/// Parses the positional arguments of `history`, `diff` and `restore`;
+/// `Ok(None)` for any other subcommand, `Err` carries the usage message.
+fn parse_history_command(
+    subcommand: &str,
+    positionals: &[String],
+) -> Result<Option<HistoryCommand>, &'static str> {
+    const HISTORY_USAGE: &str = "usage: otto memory history <id> [--scope current|user|workspace] [--config PATH] [--cwd PATH]";
+    const DIFF_USAGE: &str = "usage: otto memory diff <id> <from> [<to>] [--scope current|user|workspace] [--config PATH] [--cwd PATH]";
+    const RESTORE_USAGE: &str = "usage: otto memory restore <id> <revision> [--scope current|user|workspace] [--config PATH] [--cwd PATH]";
+    match (subcommand, positionals) {
+        ("history", [_]) => Ok(Some(HistoryCommand::History)),
+        ("history", _) => Err(HISTORY_USAGE),
+        ("diff", [_, from]) => Ok(Some(HistoryCommand::Diff {
+            from: parse_revision(from).ok_or(DIFF_USAGE)?,
+            to: None,
+        })),
+        ("diff", [_, from, to]) => Ok(Some(HistoryCommand::Diff {
+            from: parse_revision(from).ok_or(DIFF_USAGE)?,
+            to: Some(parse_revision(to).ok_or(DIFF_USAGE)?),
+        })),
+        ("diff", _) => Err(DIFF_USAGE),
+        ("restore", [_, revision]) => Ok(Some(HistoryCommand::Restore {
+            revision: parse_revision(revision).ok_or(RESTORE_USAGE)?,
+        })),
+        ("restore", _) => Err(RESTORE_USAGE),
+        _ => Ok(None),
     }
 }
 
@@ -578,6 +641,15 @@ fn forget_record(
             "forgot {} (revision {})",
             result.tombstone.id, record.revision
         );
+        for entry in &result.cleanup {
+            let _ = writeln!(
+                stdout,
+                "  {}: {} ({})",
+                entry.status.as_str(),
+                entry.copy,
+                entry.detail
+            );
+        }
         return 0;
     }
     let reason = last_error
@@ -586,5 +658,9 @@ fn forget_record(
     fail(stderr, &format!("record {id} not found: {reason}"))
 }
 
+mod history;
+
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod tests;

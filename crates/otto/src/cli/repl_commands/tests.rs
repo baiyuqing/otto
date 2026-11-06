@@ -5,6 +5,7 @@ use otto_core::config::memory::MemoryRuntime;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 mod mcp_commands;
+mod memory_history_commands;
 mod skill_commands;
 mod task_commands;
 

@@ -45,7 +45,7 @@ pub async fn run_with_extensions(
         None
     };
     let eval_command = if args.first().is_some_and(|first| first == "eval") {
-        match crate::eval_command::parse(&args[1..]) {
+        match crate::eval_command::parse_command(&args[1..]) {
             Ok(command) => Some(command),
             Err(message) => {
                 let _ = writeln!(stderr, "{message}");
@@ -202,7 +202,7 @@ pub async fn run_with_extensions(
     if let (Some(command), Some(roots)) = (&eval_command, &eval_roots)
         && command.is_dry_run()
     {
-        return crate::eval_command::run_dry(command, roots, stdout, stderr);
+        return crate::eval_command::run_dry_command(command, roots, stdout, stderr);
     }
 
     if let Some(target) = &options.delete_target {
@@ -364,7 +364,7 @@ pub async fn run_with_extensions(
 
     // The evaluation needs the provider and the redactor only: no sandbox and no memory.
     if let (Some(command), Some(roots)) = (&eval_command, &eval_roots) {
-        return crate::eval_command::run(
+        return crate::eval_command::run_command(
             command, &builder, &resolved, roots, stdout, stderr, cancel,
         )
         .await;

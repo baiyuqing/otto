@@ -440,6 +440,45 @@ filters, which combine:
 `review_at=`. `memory_search` with a term query returns active records; an id
 lookup returns the record with its state.
 
+### Retraction notices
+
+A record that an earlier turn rendered into the model's context may later
+leave the active state: superseded, retracted, flagged for review, expired,
+updated to a new revision, or forgotten. Its text is still in the
+conversation, so before every provider request Otto looks up the current state
+of the records the conversation refers to and appends one fixed-template
+notice per retired record to the request-local memory message:
+
+```text
+<memory_retraction id="A" revision="3" current_revision="4" reason="superseded" replacement_id="B"/>
+```
+
+- `id` and `revision` name the record and the highest revision the model saw.
+  `current_revision` is the record's current revision when the store reports
+  one; for a forgotten record it is the tombstone revision.
+- `reason` is one of `needs_review`, `superseded`, `retracted`, `expired`,
+  `forgotten` and `updated` (the record is active at a higher revision than
+  the one the model saw). `replacement_id` is present for `superseded`.
+- The block starts with a fixed preamble: these records are no longer valid
+  evidence, a withdrawn record does not imply its opposite, and a named
+  replacement is to be used.
+- A notice never carries record text, a state reason or a candidate
+  explanation. A forget notice holds the id and the reason only.
+
+Notices are selected from the `otto.memory_recall` references of the turns
+still in the model view and from the latest compaction checkpoint's
+`memoryRecords`, intersected with the current state of those records. They
+are not selected by retrieval, and retired text is never re-injected. The same
+lookup re-filters the records recalled at the start of the turn before every
+provider step, so a forget or a state change inside a tool loop takes effect
+at the next request. A turn or checkpoint written without references (unknown
+coverage) contributes no notices, and neither does a record whose text entered
+the conversation only as a paraphrase, tool output or user text. A plugin
+memory source produces notices only for records it still returns by id; it
+cannot report a forgotten record. Notices are request-local: they are not
+written to the session file, compaction summaries or logs. `/context` shows
+the notices rendered for the previous turn's last request.
+
 ### Standing preferences
 
 For habits that apply in every workspace, use user scope, `preference` or

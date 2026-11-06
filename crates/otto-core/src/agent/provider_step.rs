@@ -37,7 +37,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             );
             return Err(AgentError::Provider(error));
         }
+        // The recalled set is re-filtered and the notices re-selected for
+        // every step, so a forget or retirement inside the tool loop reaches
+        // the next request (#591 §5).
+        self.refresh_memory_context(emit, state, control).await;
         let (mut request, mut estimate) = self.build_normal_provider_request(state, system_context);
+        state
+            .sent_record_ids
+            .extend(state.memory_record_ids.iter().cloned());
         let mut estimate_complete = context_estimate::estimate_complete(&request);
         let triggers = automatic_compaction_triggers(&self.options.compaction);
 
@@ -301,7 +308,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             self.session.model_messages()
         };
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
-        if !state.memory_context.is_empty() {
+        let memory_message = super::memory_retraction::memory_request_text(
+            &state.memory_context,
+            &state.retraction_context,
+        );
+        if !memory_message.is_empty() {
             let current_user = messages
                 .iter()
                 .rposition(|message| message.role == Role::User)
@@ -310,7 +321,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 current_user,
                 Message {
                     role: Role::User,
-                    blocks: vec![Block::text(state.memory_context.clone())],
+                    blocks: vec![Block::text(memory_message)],
                     ..Message::default()
                 },
             );

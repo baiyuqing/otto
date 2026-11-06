@@ -413,3 +413,66 @@ async fn recall_item_carries_otto_state_metadata() {
     let items = list(&adapter, &context).await;
     assert_eq!(items[0].metadata["otto.state"], "active");
 }
+
+/// Fails when a superseded record's item lacks `otto.superseded_by`, or when
+/// an active record's item carries the key.
+#[tokio::test]
+async fn inspect_item_carries_the_replacement_id_of_a_superseded_record() {
+    let (_directory, service, adapter, context) = setup();
+    let scope = service.identity().unwrap().user_scope;
+    let remember = |key: &str, text: &str| super::super::RememberRequest {
+        scope: scope.clone(),
+        kind: "fact".into(),
+        key: key.into(),
+        text: text.into(),
+        ..Default::default()
+    };
+    let old = service.remember(&remember("old", "old fact")).unwrap();
+    let new = service.remember(&remember("new", "new fact")).unwrap();
+    service
+        .set_state(&super::super::SetStateRequest {
+            reference: super::super::RecordRef {
+                scope: scope.clone(),
+                id: old.id.clone(),
+            },
+            expected_revision: old.revision,
+            state: super::super::RecordState::Superseded,
+            superseded_by: new.id.clone(),
+            reason: String::new(),
+        })
+        .unwrap();
+
+    let metadata_of = |id: String| {
+        let adapter = &adapter;
+        let context = context.clone();
+        async move {
+            let item = adapter
+                .inspect(
+                    &port::InspectRequest {
+                        query: port::InspectQuery::Get(port::MemoryRef {
+                            organization_id: None,
+                            service: adapter.identity.clone(),
+                            scope: context.scopes[0].clone(),
+                            id,
+                            revision: None,
+                        }),
+                        context,
+                    },
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .items
+                .remove(0);
+            item.metadata
+        }
+    };
+    let old_metadata = metadata_of(old.id.clone()).await;
+    assert_eq!(old_metadata["otto.state"], "superseded");
+    assert_eq!(old_metadata["otto.superseded_by"], new.id);
+    assert!(
+        !metadata_of(new.id.clone())
+            .await
+            .contains_key("otto.superseded_by")
+    );
+}

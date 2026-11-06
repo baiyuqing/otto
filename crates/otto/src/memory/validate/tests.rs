@@ -227,3 +227,59 @@ fn page_limits_and_budgets_are_bounded() {
     assert!(validate_budget(1, MAX_TOKEN_BUDGET + 1, MAX_PAGE_SIZE).is_err());
     validate_budget(1, 100, MAX_PAGE_SIZE).expect("valid budget");
 }
+
+fn restore_request(revision: u64, expected_revision: u64) -> RestoreRequest {
+    RestoreRequest {
+        reference: RecordRef {
+            scope: Scope::new(NAMESPACE_USER, "install"),
+            id: "a1".into(),
+        },
+        revision,
+        expected_revision,
+    }
+}
+
+#[test]
+fn restore_requests_accept_an_earlier_revision() {
+    validate_restore_request(&restore_request(1, 2)).expect("1 precedes 2");
+    validate_restore_request(&restore_request(4, 9)).expect("4 precedes 9");
+}
+
+#[test]
+fn restore_requests_reject_revision_zero_and_expected_revision_zero() {
+    for (request, detail) in [
+        (restore_request(0, 2), "restore revision"),
+        (restore_request(1, 0), "restore revision"),
+    ] {
+        assert_eq!(
+            validate_restore_request(&request)
+                .expect_err("zero revision")
+                .detail
+                .as_deref(),
+            Some(detail)
+        );
+    }
+}
+
+#[test]
+fn restore_requests_reject_a_revision_that_does_not_precede_the_current_one() {
+    for (revision, expected_revision) in [(2, 2), (3, 2)] {
+        assert_eq!(
+            validate_restore_request(&restore_request(revision, expected_revision))
+                .expect_err("not earlier")
+                .detail
+                .as_deref(),
+            Some("restore revision must precede the current revision"),
+            "revision {revision} expected {expected_revision}"
+        );
+    }
+}
+
+#[test]
+fn restore_requests_reject_an_invalid_record_id() {
+    let mut request = restore_request(1, 2);
+    request.reference.id = String::new();
+    validate_restore_request(&request).expect_err("empty ID");
+    request.reference.id = "has space".into();
+    validate_restore_request(&request).expect_err("ID outside the opaque alphabet");
+}

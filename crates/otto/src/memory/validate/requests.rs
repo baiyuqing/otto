@@ -323,6 +323,21 @@ pub fn validate_record_ref(reference: &RecordRef) -> Result<()> {
     Ok(())
 }
 
+/// A restore names an earlier revision and the current one the caller read;
+/// both are positive, and the restored revision precedes the current one.
+pub fn validate_restore_request(request: &RestoreRequest) -> Result<()> {
+    validate_record_ref(&request.reference)?;
+    if !valid_revision(request.revision) || !valid_revision(request.expected_revision) {
+        return Err(invalid_request("restore revision"));
+    }
+    if request.revision >= request.expected_revision {
+        return Err(invalid_request(
+            "restore revision must precede the current revision",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_candidate_ref(reference: &CandidateRef) -> Result<()> {
     validate_scope(&reference.scope)?;
     if !valid_opaque_id(&reference.id, MAX_ID_BYTES) {

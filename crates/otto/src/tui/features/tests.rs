@@ -724,3 +724,33 @@ fn registered_commands_extend_help_completion_and_dispatch() {
         "custom value"
     );
 }
+
+#[test]
+fn memory_restore_is_a_mutation_and_history_and_diff_are_queries() {
+    use crate::app::management::Request as M;
+    let catalog = Catalog::default();
+    let start = |command: &str| {
+        let Transition::Push(mut presenter) =
+            catalog.open(command, &Info::default(), false).unwrap()
+        else {
+            panic!("{command} should open a surface")
+        };
+        presenter.start().expect("a backend request")
+    };
+    assert!(matches!(
+        start("/memory restore r1 2"),
+        BackendRequest::Command(Command::Management(M::MemoryRestore { revision: 2, .. }))
+    ));
+    assert!(matches!(
+        start("/memory history r1"),
+        BackendRequest::Management(M::MemoryHistory { .. })
+    ));
+    assert!(matches!(
+        start("/memory diff r1 1 2"),
+        BackendRequest::Management(M::MemoryDiff {
+            from: 1,
+            to: Some(2),
+            ..
+        })
+    ));
+}

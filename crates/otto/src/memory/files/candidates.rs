@@ -6,6 +6,8 @@
 //! an interrupted review leaves the candidate pending and the repeated
 //! accept fails on the already-written record instead of writing twice.
 
+use chrono::{DateTime, Utc};
+
 use super::FileStore;
 use super::cursor::{decode_record_cursor, encode_record_cursor, fingerprint_candidates};
 use super::records::Mutation;
@@ -18,8 +20,8 @@ use crate::memory::validate::{
 use crate::memory::{
     Candidate, CandidateAction, CandidateListRequest, CandidatePage, CandidateRef, CandidateState,
     Error, ErrorKind, MAX_CANDIDATE_BATCH, MAX_CANDIDATE_BATCH_BYTES, MAX_LABELS,
-    MAX_METADATA_ENTRIES, MAX_PROVENANCE_MESSAGE_IDS, Record, RecordRef, Result, ReviewDecision,
-    ReviewResult, Scope, StoreReviewRequest, Tombstone, invalid_request,
+    MAX_METADATA_ENTRIES, MAX_PROVENANCE_MESSAGE_IDS, Origin, Record, RecordRef, Result,
+    ReviewDecision, ReviewResult, Scope, StoreReviewRequest, Tombstone, invalid_request,
 };
 
 fn corrupt() -> Error {
@@ -80,6 +82,22 @@ pub(super) fn cleared_proposed(scope: &Scope) -> Record {
         scope: scope.clone(),
         ..Record::default()
     }
+}
+
+/// The rejected receipt of `candidate`: decision recorded, reason and
+/// proposed record text cleared.
+pub(super) fn reject_pending_candidate(
+    candidate: &Candidate,
+    decided_at: DateTime<Utc>,
+    decision_source: Option<Origin>,
+) -> Candidate {
+    let mut decided = candidate.clone();
+    decided.state = CandidateState::Rejected;
+    decided.decided_at = Some(decided_at);
+    decided.decision_source = decision_source;
+    decided.reason = String::new();
+    decided.proposed = cleared_proposed(&candidate.proposed.scope);
+    decided
 }
 
 fn accepted_record_content(candidate: &Candidate, request: &StoreReviewRequest) -> Record {
@@ -293,12 +311,8 @@ impl FileStore {
                 None
             };
 
-            let mut decided = candidate.clone();
-            decided.state = CandidateState::Rejected;
-            decided.decided_at = Some(request.decided_at);
-            decided.decision_source = request.decision_source;
-            decided.reason = String::new();
-            decided.proposed = cleared_proposed(&candidate.proposed.scope);
+            let mut decided =
+                reject_pending_candidate(&candidate, request.decided_at, request.decision_source);
 
             let mut desired_record: Option<Record> = None;
             let mut desired_tombstone: Option<Tombstone> = None;

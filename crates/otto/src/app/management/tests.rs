@@ -171,3 +171,231 @@ fn removed_reflection_commands_are_unavailable() {
     assert!(Request::parse("reflect", "show run-1").is_err());
     assert!(Request::parse("skill", "revert example").is_err());
 }
+
+const MEMORY_USAGE_TEXT: &str = "usage: /memory list";
+
+#[test]
+fn history_diff_and_restore_parse_their_arguments() {
+    assert!(matches!(
+        Request::parse("memory", "history r1"),
+        Ok(Request::MemoryHistory { id }) if id == "r1"
+    ));
+    assert!(matches!(
+        Request::parse("memory", "diff r1 1"),
+        Ok(Request::MemoryDiff { id, from: 1, to: None }) if id == "r1"
+    ));
+    assert!(matches!(
+        Request::parse("memory", "diff r1 1 3"),
+        Ok(Request::MemoryDiff { id, from: 1, to: Some(3) }) if id == "r1"
+    ));
+    assert!(matches!(
+        Request::parse("memory", "restore r1 2"),
+        Ok(Request::MemoryRestore { id, revision: 2 }) if id == "r1"
+    ));
+}
+
+#[test]
+fn history_diff_and_restore_reject_bad_arguments_with_the_usage_text() {
+    for args in [
+        "history",
+        "history r1 extra",
+        "diff",
+        "diff r1",
+        "diff r1 x",
+        "diff r1 1 y",
+        "diff r1 1 2 3",
+        "diff r1 -1",
+        "restore",
+        "restore r1",
+        "restore r1 latest",
+        "restore r1 2 3",
+    ] {
+        let usage = match Request::parse("memory", args) {
+            Err(usage) => usage,
+            Ok(request) => panic!("`{args}` parsed as {request:?}"),
+        };
+        assert!(usage.starts_with(MEMORY_USAGE_TEXT), "{args}: {usage}");
+        for word in [
+            "/memory history <id>",
+            "/memory diff <id>",
+            "/memory restore <id>",
+        ] {
+            assert!(usage.contains(word), "{args}: usage lacks {word}: {usage}");
+        }
+    }
+}
+
+struct MemoryFixture {
+    controller: crate::app::Controller,
+    _directories: [tempfile::TempDir; 3],
+}
+
+async fn memory_fixture() -> MemoryFixture {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let controller = crate::fixtures::controller_with_memory(
+        workspace.path(),
+        sessions.path(),
+        &store.path().join("memory"),
+    )
+    .await;
+    MemoryFixture {
+        controller,
+        _directories: [workspace, sessions, store],
+    }
+}
+
+fn remember_text(controller: &crate::app::Controller, text: &str) -> crate::memory::Record {
+    let request = Request::parse(
+        "remember",
+        &format!("--scope user --kind note --key editor {text}"),
+    )
+    .expect("parse remember");
+    match controller.management(request) {
+        Ok(Reply::Remembered(record)) => record,
+        other => panic!("expected a remembered record, got {:?}", other.map(|_| ())),
+    }
+}
+
+fn run_memory(controller: &crate::app::Controller, args: &str) -> Result<Reply, String> {
+    controller.management(Request::parse("memory", args).expect("parse memory"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_of_a_new_record_has_one_revision() {
+    let fixture = memory_fixture().await;
+    let record = remember_text(&fixture.controller, "vim");
+
+    let Ok(Reply::MemoryHistory(history)) =
+        run_memory(&fixture.controller, &format!("history {}", record.id))
+    else {
+        panic!("expected a history reply")
+    };
+
+    assert_eq!(history.revisions.len(), 1);
+    assert_eq!(history.revisions[0].revision, 1);
+    assert_eq!(history.revisions[0].text, "vim");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_diff_and_restore_report_an_unknown_record() {
+    let fixture = memory_fixture().await;
+    for args in ["history missing", "diff missing 1", "restore missing 1"] {
+        let error = run_memory(&fixture.controller, args)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.contains("not found"), "{args}: {error}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_of_a_single_revision_record_compares_it_with_itself() {
+    let fixture = memory_fixture().await;
+    let record = remember_text(&fixture.controller, "vim");
+
+    let Ok(Reply::MemoryDiff { from, to }) =
+        run_memory(&fixture.controller, &format!("diff {} 1", record.id))
+    else {
+        panic!("expected a diff reply")
+    };
+
+    assert_eq!((from.revision, to.revision), (1, 1));
+    assert_eq!(from.text, to.text);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diff_names_a_revision_the_record_does_not_have() {
+    let fixture = memory_fixture().await;
+    let record = remember_text(&fixture.controller, "vim");
+
+    let error = run_memory(&fixture.controller, &format!("diff {} 5", record.id))
+        .map(|_| ())
+        .unwrap_err();
+
+    assert!(error.contains("has no revision 5"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_of_the_only_revision_is_an_error() {
+    let fixture = memory_fixture().await;
+    let record = remember_text(&fixture.controller, "vim");
+
+    let error = run_memory(&fixture.controller, &format!("restore {} 1", record.id))
+        .map(|_| ())
+        .unwrap_err();
+
+    assert!(
+        error.contains("must precede the current revision"),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_history_diff_restore_and_forget_through_the_management_requests() {
+    let fixture = memory_fixture().await;
+    let controller = &fixture.controller;
+    let created = remember_text(controller, "vim");
+    let updated = remember_text(controller, "emacs");
+    assert_eq!(
+        (updated.id.as_str(), updated.revision),
+        (created.id.as_str(), 2)
+    );
+
+    let Ok(Reply::MemoryHistory(history)) =
+        run_memory(controller, &format!("history {}", created.id))
+    else {
+        panic!("expected a history reply")
+    };
+    let texts: Vec<&str> = history.revisions.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["vim", "emacs"]);
+
+    let Ok(Reply::MemoryDiff { from, to }) =
+        run_memory(controller, &format!("diff {} 1 2", created.id))
+    else {
+        panic!("expected a diff reply")
+    };
+    assert_eq!((from.text.as_str(), to.text.as_str()), ("vim", "emacs"));
+
+    let Ok(Reply::MemoryRestored(restored)) =
+        run_memory(controller, &format!("restore {} 1", created.id))
+    else {
+        panic!("expected a restored reply")
+    };
+    assert_eq!(restored.revision, 3);
+    assert_eq!(restored.text, "vim");
+    assert_eq!(
+        restored
+            .metadata
+            .get(crate::memory::RESTORED_FROM_REVISION_METADATA)
+            .map(String::as_str),
+        Some("1")
+    );
+
+    let Ok(Reply::MemoryForgotten {
+        tombstone,
+        previous_revision,
+        cleanup,
+    }) = run_memory(controller, &format!("forget {}", created.id))
+    else {
+        panic!("expected a forgotten reply")
+    };
+    assert_eq!(
+        (tombstone.id.as_str(), previous_revision),
+        (created.id.as_str(), 3)
+    );
+    use crate::memory::CopyStatus;
+    let store_entries = &cleanup[..cleanup.len() - 2];
+    assert!(
+        !store_entries.is_empty(),
+        "the store reports the copies it handled: {cleanup:?}"
+    );
+    assert!(
+        store_entries
+            .iter()
+            .any(|entry| entry.copy.contains("history")),
+        "{cleanup:?}"
+    );
+    assert_eq!(cleanup[cleanup.len() - 2].status, CopyStatus::Unverified);
+    assert_eq!(cleanup[cleanup.len() - 1].status, CopyStatus::Present);
+}

@@ -219,6 +219,38 @@ pub fn validate_record(record: &Record) -> Result<()> {
     {
         return Err(invalid_record("source decision time"));
     }
+    validate_record_lifecycle(record)
+}
+
+/// The lifecycle fields: the replacement id belongs to `Superseded` only, the
+/// reason is bounded text, and the verification and review times are valid.
+fn validate_record_lifecycle(record: &Record) -> Result<()> {
+    if record.state == RecordState::Superseded {
+        if !valid_opaque_id(&record.superseded_by, MAX_ID_BYTES)
+            || record.superseded_by == record.id
+        {
+            return Err(invalid_record("replacement record ID"));
+        }
+    } else if !record.superseded_by.is_empty() {
+        return Err(invalid_record(
+            "replacement record ID without superseded state",
+        ));
+    }
+    if !record.state_reason.is_empty()
+        && !valid_semantic(&record.state_reason, MAX_STATE_REASON_BYTES, true)
+    {
+        return Err(invalid_record_limit("state reason", MAX_STATE_REASON_BYTES));
+    }
+    if !valid_optional_timestamp(record.verified_at)
+        || record
+            .verified_at
+            .is_some_and(|verified| verified < record.created_at)
+    {
+        return Err(invalid_record("verification time"));
+    }
+    if !valid_optional_timestamp(record.review_at) {
+        return Err(invalid_record("review time"));
+    }
     Ok(())
 }
 

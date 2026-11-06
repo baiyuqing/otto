@@ -335,7 +335,8 @@ fn no_subcommand_reports_usage() {
     assert_eq!(
         stderr,
         concat!(
-            "otto: usage: otto memory status|list|show <id>|forget <id>|history <id>|diff <id> <from> [<to>]|restore <id> <revision> ",
+            "otto: usage: otto memory status|list|show <id>|forget <id>|history <id>|diff <id> <from> [<to>]|restore <id> <revision>|",
+            "state <id> <state> [<replacement>]|verify <id> ",
             "[--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]\n"
         )
     );

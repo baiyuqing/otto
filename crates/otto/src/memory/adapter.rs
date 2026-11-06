@@ -166,6 +166,7 @@ fn item(service: &str, record: Record, standing: bool) -> port::RecallItem {
     metadata.insert("otto.kind".into(), record.kind);
     metadata.insert("otto.key".into(), record.key);
     metadata.insert("otto.standing".into(), standing.to_string());
+    metadata.insert("otto.state".into(), record.state.as_str().into());
     port::RecallItem {
         reference: Some(reference(
             service,
@@ -231,6 +232,39 @@ fn forget(request: &port::ForgetRequest) -> port::Result<super::ForgetRequest> {
         confirm_purge: false,
     })
 }
+/// Maps a `Suppress` or `Invalidate` forget request to the lifecycle state change that implements it.
+fn lifecycle_forget(request: &port::ForgetRequest) -> port::Result<super::SetStateRequest> {
+    let (state, reason) = match request.coverage {
+        port::ForgetLevel::Suppress => (
+            super::RecordState::NeedsReview,
+            "suppressed through the memory service",
+        ),
+        port::ForgetLevel::Invalidate => (
+            super::RecordState::Retracted,
+            "invalidated through the memory service",
+        ),
+        _ => return Err(error(port::ErrorKind::Unsupported)),
+    };
+    let port::ForgetTarget::Item(target) = &request.target else {
+        return Err(error(port::ErrorKind::Unsupported));
+    };
+    let expected_revision = target
+        .revision
+        .as_ref()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| error(port::ErrorKind::InvalidInput))?;
+    Ok(super::SetStateRequest {
+        reference: super::RecordRef {
+            scope: native_scope(&target.scope),
+            id: target.id.clone(),
+        },
+        expected_revision,
+        state,
+        superseded_by: String::new(),
+        reason: reason.into(),
+    })
+}
 fn human(context: &port::MemoryContext) -> port::Result<()> {
     if context.origin == port::Origin::Human {
         Ok(())
@@ -238,7 +272,28 @@ fn human(context: &port::MemoryContext) -> port::Result<()> {
         Err(error(port::ErrorKind::Unauthorized))
     }
 }
+fn forget_remaining(level: port::ForgetLevel) -> Vec<port::ForgetLevel> {
+    use port::ForgetLevel::*;
+    match level {
+        Suppress => vec![Invalidate, DeleteActive, DeleteDerived],
+        Invalidate => vec![DeleteActive, DeleteDerived],
+        DeleteActive => vec![DeleteDerived],
+        DeleteDerived => Vec::new(),
+    }
+}
 fn receipt(request_id: &str, reference: port::MemoryRef, forgotten: bool) -> port::Receipt {
+    forget_receipt(
+        request_id,
+        reference,
+        forgotten.then_some(port::ForgetLevel::DeleteActive),
+    )
+}
+fn forget_receipt(
+    request_id: &str,
+    reference: port::MemoryRef,
+    level: Option<port::ForgetLevel>,
+) -> port::Receipt {
+    let forgotten = level.is_some();
     port::Receipt {
         request_id: request_id.into(),
         operation_ref: None,
@@ -254,9 +309,9 @@ fn receipt(request_id: &str, reference: port::MemoryRef, forgotten: bool) -> por
             state: port::ItemState::Applied,
             reason: None,
         }],
-        forget_coverage: forgotten.then(|| port::ForgetCoverage {
-            achieved: vec![port::ForgetLevel::DeleteActive],
-            remaining: vec![port::ForgetLevel::DeleteDerived],
+        forget_coverage: level.map(|level| port::ForgetCoverage {
+            achieved: vec![level],
+            remaining: forget_remaining(level),
         }),
     }
 }
@@ -296,9 +351,11 @@ impl port::MemoryService for BuiltinAdapter {
             }
             if operation == port::Operation::Forget {
                 capability.forget_targets.push(port::ForgetTargetKind::Item);
-                capability
-                    .forget_levels
-                    .push(port::ForgetLevel::DeleteActive);
+                capability.forget_levels.extend([
+                    port::ForgetLevel::Suppress,
+                    port::ForgetLevel::Invalidate,
+                    port::ForgetLevel::DeleteActive,
+                ]);
             }
             if matches!(
                 operation,
@@ -432,6 +489,11 @@ impl port::MemoryService for BuiltinAdapter {
                                 cursor,
                                 now: Utc::now(),
                                 include_expired: false,
+                                states: Vec::new(),
+                                updated_after: None,
+                                verified_after: None,
+                                unverified_only: false,
+                                review_due_only: false,
                             })
                             .map_err(domain_error)?;
                         result.items = page
@@ -481,6 +543,24 @@ impl port::MemoryService for BuiltinAdapter {
     ) -> port::Result<port::Receipt> {
         request.validate(&self.identity)?;
         human(&request.context)?;
+        if matches!(
+            request.coverage,
+            port::ForgetLevel::Suppress | port::ForgetLevel::Invalidate
+        ) {
+            let native = lifecycle_forget(request)?;
+            let record = self
+                .run(control, move |service| {
+                    service.set_state(&native).map_err(domain_error)
+                })
+                .await?;
+            let result = forget_receipt(
+                &request.request_id,
+                self.reference(&record.scope, record.id, record.revision),
+                Some(request.coverage),
+            );
+            result.validate_forget(request, &self.identity)?;
+            return Ok(result);
+        }
         let native = forget(request)?;
         let forgotten = self
             .run(control, move |service| {

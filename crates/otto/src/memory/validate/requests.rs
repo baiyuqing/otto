@@ -89,7 +89,29 @@ pub fn validate_list_request(request: &ListRequest) -> Result<()> {
     validate_scopes(&request.scopes, true, false)?;
     validate_filters(&request.kinds, &request.labels)?;
     validate_page(request.limit, &request.cursor, MAX_PAGE_SIZE)?;
+    validate_list_states(&request.states)?;
+    if request.unverified_only && request.verified_after.is_some() {
+        return Err(invalid_request("unverified only with verified after"));
+    }
+    if !valid_optional_timestamp(request.updated_after)
+        || !valid_optional_timestamp(request.verified_after)
+    {
+        return Err(invalid_request("list time filter"));
+    }
     validate_now(request.now, request.include_expired)
+}
+
+fn validate_list_states(states: &[RecordState]) -> Result<()> {
+    if states.len() > RecordState::ALL.len() {
+        return Err(invalid_request("record state count"));
+    }
+    let mut seen = BTreeSet::new();
+    for state in states {
+        if !seen.insert(*state) {
+            return Err(invalid_request("duplicate record state"));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_candidate_list_request(request: &CandidateListRequest) -> Result<()> {
@@ -319,6 +341,49 @@ pub fn validate_record_ref(reference: &RecordRef) -> Result<()> {
     validate_scope(&reference.scope)?;
     if !valid_opaque_id(&reference.id, MAX_ID_BYTES) {
         return Err(invalid_request("record ID"));
+    }
+    Ok(())
+}
+
+/// A state change names the current revision; `Superseded` needs a
+/// replacement id other than the record itself, every other state none.
+pub fn validate_set_state_request(request: &SetStateRequest) -> Result<()> {
+    validate_record_ref(&request.reference)?;
+    if !valid_revision(request.expected_revision) {
+        return Err(invalid_request("expected revision"));
+    }
+    match request.state {
+        RecordState::Superseded => {
+            if !valid_opaque_id(&request.superseded_by, MAX_ID_BYTES)
+                || request.superseded_by == request.reference.id
+            {
+                return Err(invalid_request("replacement record ID"));
+            }
+        }
+        _ => {
+            if !request.superseded_by.is_empty() {
+                return Err(invalid_request(
+                    "replacement record ID is only valid for superseded",
+                ));
+            }
+        }
+    }
+    if !request.reason.is_empty() && !valid_semantic(&request.reason, MAX_STATE_REASON_BYTES, true)
+    {
+        return Err(invalid_request("state reason"));
+    }
+    Ok(())
+}
+
+/// A verification names the current revision and an optional next review
+/// deadline.
+pub fn validate_verify_request(request: &VerifyRequest) -> Result<()> {
+    validate_record_ref(&request.reference)?;
+    if !valid_revision(request.expected_revision) {
+        return Err(invalid_request("expected revision"));
+    }
+    if !valid_optional_timestamp(request.review_at) {
+        return Err(invalid_request("review time"));
     }
     Ok(())
 }

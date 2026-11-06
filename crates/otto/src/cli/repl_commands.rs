@@ -44,13 +44,19 @@ const DEFAULT_KIND: &str = "note";
 /// of duplicating the literal.
 #[cfg(test)]
 pub(crate) const MEMORY_USAGE: &str = "usage: /memory list [--scope current|user|workspace|all] [--limit N] \
-    [--cursor CURSOR] | /memory show <id> | /memory search <query> | \
+    [--cursor CURSOR] [--state active|needs-review|superseded|retracted|all] \
+    [--kind K] [--label L] [--updated-after TIME|AGE] \
+    [--verified-after TIME|AGE] [--unverified] [--review-due] | \
+    /memory show <id> | /memory search <query> | \
     /memory forget <id> | /memory history <id> | \
     /memory diff <id> <from> [<to>] | /memory restore <id> <revision> | \
+    /memory state <id> active|needs-review|retracted [--reason TEXT] | \
+    /memory state <id> superseded <replacement-id> [--reason TEXT] | \
+    /memory verify <id> [--review-in AGE] | \
     /memory review <id> accept|reject";
 #[cfg(test)]
 pub(crate) const REMEMBER_USAGE: &str =
-    "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>";
+    "usage: /remember [--scope user|workspace] [--kind K] [--key K] [--review-in AGE] <text>";
 #[cfg(test)]
 pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
 /// The message printed when no runner carries a registry.
@@ -121,6 +127,34 @@ pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> 
                 .get(crate::memory::RESTORED_FROM_REVISION_METADATA)
                 .map(String::as_str)
                 .unwrap_or("?")
+        ),
+        Reply::MemoryStateChanged(record) => {
+            let mut text = format!(
+                "state of {} is now {} (revision {})",
+                record.id,
+                record.state.as_str(),
+                record.revision
+            );
+            if !record.superseded_by.is_empty() {
+                text.push_str(&format!(" superseded_by={}", record.superseded_by));
+            }
+            if !record.state_reason.is_empty() {
+                text.push_str(&format!(" reason={}", record.state_reason));
+            }
+            text
+        }
+        Reply::MemoryVerified(record) => format!(
+            "verified {} (revision {}) verified_at={} review_at={}",
+            record.id,
+            record.revision,
+            record
+                .verified_at
+                .map(|time| time.to_string())
+                .unwrap_or_default(),
+            record
+                .review_at
+                .map(|time| time.to_string())
+                .unwrap_or_else(|| "none".into())
         ),
         Reply::MemoryReviewed(decision, result) => {
             let id = &result.candidate.id;
@@ -320,15 +354,35 @@ fn render_list_result(records: &[crate::memory::Record], next_cursor: &str) -> S
     for record in records {
         let _ = writeln!(
             content,
-            "id={} scope={}/{} kind={} key={} revision={} created_at={} updated_at={} text={}",
+            "id={} scope={}/{} kind={} key={} revision={} state={}{}{} created_at={} updated_at={} \
+             verified_at={} review_at={} text={}",
             record.id,
             record.scope.namespace,
             record.scope.id,
             record.kind,
             record.key,
             record.revision,
+            record.state.as_str(),
+            if record.superseded_by.is_empty() {
+                String::new()
+            } else {
+                format!(" superseded_by={}", record.superseded_by)
+            },
+            if record.state_reason.is_empty() {
+                String::new()
+            } else {
+                format!(" state_reason={}", record.state_reason)
+            },
             record.created_at,
             record.updated_at,
+            record
+                .verified_at
+                .map(|time| time.to_string())
+                .unwrap_or_default(),
+            record
+                .review_at
+                .map(|time| time.to_string())
+                .unwrap_or_default(),
             record.text
         );
     }
@@ -398,6 +452,8 @@ pub(crate) fn repl_memory_command(
             crate::app::management::Request::MemoryHistory { .. } => "/memory history",
             crate::app::management::Request::MemoryDiff { .. } => "/memory diff",
             crate::app::management::Request::MemoryRestore { .. } => "/memory restore",
+            crate::app::management::Request::MemoryState { .. } => "/memory state",
+            crate::app::management::Request::MemoryVerify { .. } => "/memory verify",
             crate::app::management::Request::MemoryReviewList
             | crate::app::management::Request::MemoryReview { .. } => "/memory review",
             _ => "/memory",

@@ -1,5 +1,6 @@
 mod candidate_archive;
 mod history;
+mod lifecycle;
 
 use std::fs;
 use std::time::Duration;
@@ -216,6 +217,11 @@ fn an_invalid_file_is_skipped_and_listed_and_a_write_to_it_is_corrupt() {
             cursor: String::new(),
             now: at(5),
             include_expired: false,
+            states: Vec::new(),
+            updated_after: None,
+            verified_after: None,
+            unverified_only: false,
+            review_due_only: false,
         })
         .unwrap();
     assert_eq!(page.records.len(), 1);

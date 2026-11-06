@@ -17,6 +17,7 @@ mod candidates;
 mod cursor;
 mod format;
 mod history;
+mod lifecycle;
 mod records;
 mod retrieve;
 #[cfg(test)]
@@ -590,6 +591,14 @@ impl crate::memory::MemoryStore for FileStore {
 
     fn restore(&self, request: &crate::memory::StoreRestoreRequest) -> Result<Record> {
         FileStore::restore(self, request)
+    }
+
+    fn set_state(&self, request: &crate::memory::StoreSetStateRequest) -> Result<Record> {
+        FileStore::set_state(self, request)
+    }
+
+    fn verify(&self, request: &crate::memory::StoreVerifyRequest) -> Result<Record> {
+        FileStore::verify(self, request)
     }
 
     fn review_within_standing_budget(

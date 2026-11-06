@@ -17,15 +17,15 @@ use crate::memory::json::{encode_float, encode_string};
 use crate::memory::proposed::{decode_proposed_record, encode_proposed_record};
 use crate::memory::validate::{validate_candidate, validate_record, validate_tombstone};
 use crate::memory::{
-    Candidate, CandidateAction, CandidateState, MAX_ID_BYTES, Origin, Provenance, Record, Result,
-    Scope, Tombstone,
+    Candidate, CandidateAction, CandidateState, MAX_ID_BYTES, Origin, Provenance, Record,
+    RecordState, Result, Scope, Tombstone,
 };
 
 /// Larger files are not read; a record is at most 8 KiB of text.
 pub(super) const MAX_FILE_BYTES: u64 = 128 * 1024;
 
 /// The frontmatter names, in the order the writer emits them.
-const NAMES: [&str; 11] = [
+const NAMES: [&str; 16] = [
     "scope",
     "kind",
     "key",
@@ -37,6 +37,11 @@ const NAMES: [&str; 11] = [
     "expires_at",
     "source",
     "metadata",
+    "state",
+    "verified_at",
+    "review_at",
+    "superseded_by",
+    "state_reason",
 ];
 
 /// A file stem: 1 to 64 characters from `[0-9A-Za-z_-]`.
@@ -87,6 +92,13 @@ fn float_text(value: f64) -> String {
     }
 }
 
+fn push_optional_time(time: Option<DateTime<Utc>>, out: &mut String) {
+    match time {
+        Some(time) => encode_string(&format_timestamp(time), out),
+        None => out.push_str("null"),
+    }
+}
+
 /// The canonical file form of `record`: frontmatter, then the text and one
 /// newline.
 pub(super) fn encode_record_file(record: &Record) -> Result<String> {
@@ -116,6 +128,16 @@ pub(super) fn encode_record_file(record: &Record) -> Result<String> {
     out.push_str(&encoded.source);
     out.push_str("\nmetadata: ");
     out.push_str(&encoded.metadata);
+    out.push_str("\nstate: ");
+    encode_string(record.state.as_str(), &mut out);
+    out.push_str("\nverified_at: ");
+    push_optional_time(record.verified_at, &mut out);
+    out.push_str("\nreview_at: ");
+    push_optional_time(record.review_at, &mut out);
+    out.push_str("\nsuperseded_by: ");
+    encode_string(&record.superseded_by, &mut out);
+    out.push_str("\nstate_reason: ");
+    encode_string(&record.state_reason, &mut out);
     out.push_str("\n---\n");
     out.push_str(&record.text);
     out.push('\n');
@@ -130,6 +152,19 @@ fn field<T: serde::de::DeserializeOwned>(
         .get(name)
         .ok_or_else(|| format!("missing frontmatter name {name}"))?;
     serde_json::from_str(raw).map_err(|_| format!("invalid value for {name}"))
+}
+
+/// Like [`field`], but an absent name yields `default`.
+fn optional_field<T: serde::de::DeserializeOwned>(
+    fields: &BTreeMap<&str, &str>,
+    name: &str,
+    default: T,
+) -> std::result::Result<T, String> {
+    if fields.contains_key(name) {
+        field(fields, name)
+    } else {
+        Ok(default)
+    }
 }
 
 /// Parses a record file. The record id is the file stem; the caller runs the
@@ -161,6 +196,9 @@ pub(super) fn parse_record(id: &str, content: &str) -> std::result::Result<Recor
     let created_at: String = field(&fields, "created_at")?;
     let updated_at: String = field(&fields, "updated_at")?;
     let expires_at: Option<String> = field(&fields, "expires_at")?;
+    let state_name: String = optional_field(&fields, "state", RecordState::Active.as_str().into())?;
+    let verified_at: Option<String> = optional_field(&fields, "verified_at", None)?;
+    let review_at: Option<String> = optional_field(&fields, "review_at", None)?;
     let record = Record {
         id: id.to_string(),
         scope: field(&fields, "scope")?,
@@ -182,6 +220,14 @@ pub(super) fn parse_record(id: &str, content: &str) -> std::result::Result<Recor
         created_at: parse_time(&created_at)?,
         updated_at: parse_time(&updated_at)?,
         expires_at: expires_at.as_deref().map(parse_time).transpose()?,
+        state: RecordState::ALL
+            .into_iter()
+            .find(|state| state.as_str() == state_name)
+            .ok_or("invalid record state")?,
+        verified_at: verified_at.as_deref().map(parse_time).transpose()?,
+        review_at: review_at.as_deref().map(parse_time).transpose()?,
+        superseded_by: optional_field(&fields, "superseded_by", String::new())?,
+        state_reason: optional_field(&fields, "state_reason", String::new())?,
     };
     if !crate::memory::codec::valid_stored_float(record.confidence) {
         return Err("confidence outside [0, 1]".into());
@@ -366,6 +412,80 @@ mod tests {
         assert_eq!(parsed.source.origin, Some(Origin::Human));
         assert_eq!(parsed.updated_at, parsed.created_at);
         assert_eq!(parsed.scope, Scope::new("user", "u1"));
+    }
+
+    fn lifecycle_record() -> Record {
+        let mut record = record();
+        record.state = RecordState::Superseded;
+        record.verified_at = Some(at(4));
+        record.review_at = Some(at(20));
+        record.superseded_by = "rec-2".into();
+        record.state_reason = "replaced by a newer rule".into();
+        record
+    }
+
+    #[test]
+    fn a_record_with_every_lifecycle_field_round_trips_byte_for_byte() {
+        let record = lifecycle_record();
+        let bytes = encode_record_file(&record).expect("encode");
+        assert!(bytes.contains("\nstate: \"superseded\"\n"), "{bytes}");
+        assert!(
+            bytes.contains("\nverified_at: \"2026-03-01T12:00:04.000000000Z\"\n"),
+            "{bytes}"
+        );
+        assert!(
+            bytes.contains("\nreview_at: \"2026-03-01T12:00:20.000000000Z\"\n"),
+            "{bytes}"
+        );
+        assert!(bytes.contains("\nsuperseded_by: \"rec-2\"\n"), "{bytes}");
+        let parsed = parse_record("rec-1", &bytes).expect("parse");
+        assert_eq!(parsed, record);
+        assert_eq!(encode_record_file(&parsed).expect("encode"), bytes);
+    }
+
+    #[test]
+    fn a_legacy_file_without_lifecycle_names_parses_with_the_defaults() {
+        let current = encode_record_file(&record()).expect("encode");
+        let legacy: String = current
+            .lines()
+            .filter(|line| {
+                ![
+                    "state: ",
+                    "verified_at: ",
+                    "review_at: ",
+                    "superseded_by: ",
+                    "state_reason: ",
+                ]
+                .iter()
+                .any(|name| line.starts_with(name))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert!(!legacy.contains("state"), "{legacy}");
+        let parsed = parse_record("rec-1", &legacy).expect("parse");
+        assert_eq!(parsed.state, RecordState::Active);
+        assert_eq!(parsed.verified_at, None);
+        assert_eq!(parsed.review_at, None);
+        assert_eq!(parsed.superseded_by, "");
+        assert_eq!(parsed.state_reason, "");
+        assert_eq!(parsed, record());
+    }
+
+    #[test]
+    fn an_unknown_state_value_or_a_superseded_record_without_replacement_is_an_error() {
+        let good = encode_record_file(&record()).expect("encode");
+        for state in ["forgotten", "Active", "needs-review"] {
+            let bad = good.replacen("state: \"active\"", &format!("state: \"{state}\""), 1);
+            assert!(parse_record("rec-1", &bad).is_err(), "{state}");
+        }
+        let duplicate = good.replacen("kind:", "state: \"active\"\nkind:", 1);
+        assert!(parse_record("rec-1", &duplicate).is_err());
+        let mut no_replacement = record();
+        no_replacement.state = RecordState::Superseded;
+        assert!(validate_record(&no_replacement).is_err());
+        let bytes = encode_record_file(&no_replacement).expect("encode");
+        assert!(parse_record("rec-1", &bytes).is_err());
     }
 
     #[test]

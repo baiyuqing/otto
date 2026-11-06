@@ -45,7 +45,9 @@ const DEFAULT_KIND: &str = "note";
 #[cfg(test)]
 pub(crate) const MEMORY_USAGE: &str = "usage: /memory list [--scope current|user|workspace|all] [--limit N] \
     [--cursor CURSOR] | /memory show <id> | /memory search <query> | \
-    /memory forget <id> | /memory review <id> accept|reject";
+    /memory forget <id> | /memory history <id> | \
+    /memory diff <id> <from> [<to>] | /memory restore <id> <revision> | \
+    /memory review <id> accept|reject";
 #[cfg(test)]
 pub(crate) const REMEMBER_USAGE: &str =
     "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>";
@@ -95,7 +97,31 @@ pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> 
         Reply::MemoryForgotten {
             tombstone,
             previous_revision,
-        } => format!("forgot {} (revision {})", tombstone.id, previous_revision),
+            cleanup,
+        } => {
+            let mut text = format!("forgot {} (revision {})", tombstone.id, previous_revision);
+            for entry in cleanup {
+                text.push_str(&format!(
+                    "\n  {}: {} ({})",
+                    entry.status.as_str(),
+                    entry.copy,
+                    entry.detail
+                ));
+            }
+            text
+        }
+        Reply::MemoryHistory(history) => crate::memory::history::render_history(history),
+        Reply::MemoryDiff { from, to } => crate::memory::history::render_comparison(from, to),
+        Reply::MemoryRestored(record) => format!(
+            "restored {} as revision {} (from revision {})",
+            record.id,
+            record.revision,
+            record
+                .metadata
+                .get(crate::memory::RESTORED_FROM_REVISION_METADATA)
+                .map(String::as_str)
+                .unwrap_or("?")
+        ),
         Reply::MemoryReviewed(decision, result) => {
             let id = &result.candidate.id;
             match (decision, &result.record, &result.tombstone) {
@@ -369,6 +395,9 @@ pub(crate) fn repl_memory_command(
             crate::app::management::Request::MemoryShow { .. } => "/memory show",
             crate::app::management::Request::MemorySearch { .. } => "/memory search",
             crate::app::management::Request::MemoryForget { .. } => "/memory forget",
+            crate::app::management::Request::MemoryHistory { .. } => "/memory history",
+            crate::app::management::Request::MemoryDiff { .. } => "/memory diff",
+            crate::app::management::Request::MemoryRestore { .. } => "/memory restore",
             crate::app::management::Request::MemoryReviewList
             | crate::app::management::Request::MemoryReview { .. } => "/memory review",
             _ => "/memory",

@@ -470,3 +470,105 @@ fn compaction_details_present_is_true_for_memory_only_details() {
         ..CompactionDetails::default()
     }));
 }
+
+#[test]
+fn memory_retracted_round_trips_with_wire_name_and_stays_absent_when_empty() {
+    let details = CompactionDetails {
+        memory_records: vec![memory_reference("rec-a", Some("3"))],
+        memory_retracted: vec![memory_reference("rec-a", Some("3"))],
+        memory_coverage: MemoryReferenceCoverage::Complete,
+        ..CompactionDetails::default()
+    };
+    let encoded = serde_json::to_string(&details).expect("encode details");
+    let value: serde_json::Value = serde_json::from_str(&encoded).expect("details JSON");
+    assert_eq!(
+        value["memoryRetracted"],
+        serde_json::json!([{"id": "rec-a", "revision": "3"}])
+    );
+    assert_eq!(
+        decode_compaction_details(Some(&raw_json(&encoded))),
+        details
+    );
+
+    let without = CompactionDetails {
+        memory_records: vec![memory_reference("rec-a", Some("3"))],
+        ..CompactionDetails::default()
+    };
+    let value = serde_json::to_value(&without).expect("encode details");
+    assert!(
+        value.get("memoryRetracted").is_none(),
+        "empty memoryRetracted stays absent"
+    );
+    let legacy =
+        decode_compaction_details(Some(&raw_json(r#"{"memoryRecords":[{"id":"rec-a"}]}"#)));
+    assert!(legacy.memory_retracted.is_empty());
+}
+
+#[test]
+fn malformed_memory_retracted_yields_default_details() {
+    for text in [
+        r#"{"readFiles":["a.go"],"memoryRetracted":{"id":"rec-a"}}"#,
+        r#"{"readFiles":["a.go"],"memoryRetracted":"rec-a"}"#,
+        r#"{"readFiles":["a.go"],"memoryRetracted":[{"revision":"1"}]}"#,
+        r#"{"readFiles":["a.go"],"memoryRetracted":null}"#,
+    ] {
+        assert_eq!(
+            decode_compaction_details(Some(&raw_json(text))),
+            CompactionDetails::default(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn sanitize_deduplicates_memory_retracted_without_changing_coverage() {
+    let sanitized = sanitize_compaction_details(&CompactionDetails {
+        memory_records: vec![memory_reference("rec-a", None)],
+        memory_retracted: vec![
+            memory_reference("rec-b", None),
+            memory_reference("rec-a", None),
+            memory_reference("rec-a", None),
+            memory_reference("", None),
+        ],
+        memory_coverage: MemoryReferenceCoverage::Complete,
+        ..CompactionDetails::default()
+    });
+    assert_eq!(
+        sanitized.memory_retracted,
+        [
+            memory_reference("rec-a", None),
+            memory_reference("rec-b", None)
+        ]
+    );
+    assert_eq!(sanitized.memory_coverage, MemoryReferenceCoverage::Complete);
+}
+
+#[test]
+fn validate_compaction_checkpoint_rejects_invalid_memory_retracted() {
+    for records in [
+        vec![memory_reference("", None)],
+        vec![
+            memory_reference("rec-a", None),
+            memory_reference("rec-a", None),
+        ],
+    ] {
+        let mut checkpoint = valid_checkpoint();
+        checkpoint.details.memory_retracted = records;
+        let error = validate_compaction_checkpoint(&checkpoint).expect_err("rejected");
+        assert_eq!(error.kind(), PiErrorKind::Invalid);
+    }
+    let mut checkpoint = valid_checkpoint();
+    checkpoint.details.memory_retracted = (0..=MEMORY_RECALL_MAXIMUM_RECORDS)
+        .map(|index| memory_reference(&format!("rec-{index:05}"), None))
+        .collect();
+    let error = validate_compaction_checkpoint(&checkpoint).expect_err("count above bound");
+    assert_eq!(error.kind(), PiErrorKind::EntryTooLarge);
+}
+
+#[test]
+fn compaction_details_present_is_true_for_retracted_only_details() {
+    assert!(compaction_details_present(&CompactionDetails {
+        memory_retracted: vec![memory_reference("rec-a", None)],
+        ..CompactionDetails::default()
+    }));
+}

@@ -20,7 +20,9 @@ api_key_env = "BETA_KEY"
 "#;
 
 fn two_providers() -> File {
-    crate::config::parse(TWO_PROVIDERS).expect("parse")
+    let mut file = crate::config::parse(TWO_PROVIDERS).expect("parse");
+    grant_fixture_endpoints(&mut file);
+    file
 }
 
 fn keys() -> HashMap<String, String> {
@@ -338,6 +340,7 @@ fn otto_api_key_is_the_fallback_when_no_key_variable_is_named() {
 [providers.local]
 type = "openai-compatible"
 base_url = "https://example.com/v1"
+trusted_origins = ["https://example.com"]
 "#,
     )
     .expect("parse");

@@ -22,7 +22,7 @@ CREATE INDEX usage_events_session ON usage_events(session_id, occurred_at);
 CREATE INDEX usage_events_model ON usage_events(provider, model, occurred_at);
 ''')
 db.executemany('INSERT INTO usage_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
- (1, '2026-10-01T00:00:00Z', 'nul\x00workspace', 'session-雪', 'task-λ', 'openai-compatible', 'default', 'model-雪', 'provider', 13, 5, 3, 1),
+ (1, '2026-10-01T00:00:00Z', '\'\"; DROP TABLE usage_events; -- /* 雪 */ nul\x00workspace', 'session-雪', 'task-λ', 'openai-compatible', 'default', 'model-雪', 'provider', 13, 5, 3, 1),
  (2, '2026-10-01T00:01:00Z', 'nul\x00workspace', 'session-雪', '', 'chatgpt', 'default', 'model-雪', 'provider', 8, 2, 0, 1),
 ])
 db.commit()
@@ -67,6 +67,26 @@ fn migrates_usage_data_without_modifying_legacy_file() {
         std::fs::read(&source).unwrap(),
         before,
         "migration must leave the source byte-for-byte unchanged"
+    );
+
+    let connection = otto::storage::Connection::open_read_only(&destination).unwrap();
+    let workspace: String = connection
+        .query_row(
+            "SELECT workspace FROM usage_events WHERE id=?",
+            [1i64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        workspace,
+        "'\"; DROP TABLE usage_events; -- /* 雪 */ nul\0workspace"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM usage_events", (), |row| row
+                .get::<i64>(0))
+            .unwrap(),
+        2
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_otto"))

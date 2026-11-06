@@ -27,7 +27,9 @@ type Locked<'a> = MutexGuard<'a, rusqlite::Connection>;
 /// Prepares `sql`, binds `params` and returns rows that own the statement.
 pub(super) fn query(state: &SharedState, sql: &str, params: Params) -> Result<Box<dyn SqlRows>> {
     check(&state.poisoned)?;
+    super::statement_boundary::validate(sql)?;
     let connection = lock(state)?;
+    check(&state.poisoned)?;
     let statement = prepare_bound(&connection, sql, &params)?;
     drop(connection);
     Ok(Box::new(SqliteRows {
@@ -124,7 +126,7 @@ unsafe fn bind(statement: *mut ffi::sqlite3_stmt, position: c_int, value: &Value
 }
 
 /// The last error of the locked `connection`, mapped to the driver error type.
-fn failure(connection: &Locked<'_>) -> Error {
+pub(super) fn failure(connection: &rusqlite::Connection) -> Error {
     // SAFETY: the connection is locked by the caller, so the handle is valid
     // and its error state is not changed concurrently. The message pointer is
     // copied before any other call on the handle.

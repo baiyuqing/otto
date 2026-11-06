@@ -17,6 +17,7 @@ pub mod agents;
 pub mod approval;
 pub mod duration;
 pub mod edit;
+pub mod endpoint;
 pub mod failover;
 pub mod layered;
 pub mod legacy_profiles;
@@ -616,3 +617,6 @@ future_thing = "x"
         assert_eq!(file.experimental.typesafe_skill_check, Some(true));
     }
 }
+
+#[cfg(test)]
+mod endpoint_tests;

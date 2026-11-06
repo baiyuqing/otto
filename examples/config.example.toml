@@ -59,6 +59,10 @@ models."claude-sonnet-5-5" = {}
 [providers.local]
 type = "openai-compatible"
 base_url = "http://127.0.0.1:8000/v1"
+# Explicit user authority, not implied by base_url or added during upgrades.
+# This grant covers the full origin; HTTP separately acknowledges plaintext.
+trusted_origins = ["http://127.0.0.1:8000"]
+allow_http_origins = ["http://127.0.0.1:8000"]
 api_key_env = "LOCAL_LLM_API_KEY"
 models."local-model" = { context_window = 131072, compaction_window = 100000 }
 

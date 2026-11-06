@@ -199,6 +199,9 @@ impl Client {
         &self,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<super::catalog::ModelCatalog, ProviderError> {
+        if let Err(error) = &self.http {
+            return Err(super::catalog::failure(error));
+        }
         super::catalog::controlled(cancel, async {
             let credentials = self.tokens.token(cancel).await.map_err(|error| {
                 if matches!(error, crate::auth::AuthError::Cancelled) {
@@ -292,16 +295,32 @@ impl Client {
         )
     }
 
-    /// A client for `base_url` on a caller-supplied [`reqwest::Client`]. The
-    /// caller owns the timeouts and the redirect policy of `http`; nothing in
-    /// [`default_http_client`] is reapplied.
+    /// Uses an independently authorized endpoint with an owned no-redirect client.
+    pub fn new_trusted(
+        endpoint: &otto_core::config::endpoint::TrustedEndpoint,
+        tokens: TokenSource,
+        account_id: &str,
+    ) -> Self {
+        let mut client = Self::with_base_url(endpoint.base_url(), tokens, account_id);
+        client.http = if endpoint.provider_type() != "chatgpt" {
+            Err("endpoint capability has wrong provider type".into())
+        } else {
+            default_http_client().map_err(|error| error.to_string())
+        };
+        client
+    }
+
+    /// Fails closed: injected clients cannot establish redirect safety.
     pub fn with_http_client(
         base_url: &str,
         tokens: TokenSource,
         account_id: &str,
         http: reqwest::Client,
     ) -> Self {
-        Self::with_client_result(base_url, tokens, account_id, Ok(http))
+        Self::with_client_result(base_url, tokens, account_id, {
+            let _ = http;
+            Err("injected HTTP clients cannot establish redirect safety".into())
+        })
     }
 
     fn with_client_result(
@@ -310,6 +329,10 @@ impl Client {
         account_id: &str,
         http: Result<reqwest::Client, String>,
     ) -> Self {
+        let http =
+            otto_core::config::endpoint::TrustedEndpoint::authorize(base_url, "chatgpt", &[], &[])
+                .map_err(str::to_string)
+                .and_then(|_| http);
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             tokens,
@@ -695,7 +718,7 @@ async fn await_control<T>(
 /// There is deliberately no overall request timeout: a streaming completion may
 /// run for minutes and is bounded by the caller's cancellation token.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    crate::tls_provider::http_client_builder()
+    super::endpoint_dns::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_keepalive(KEEPALIVE)
         .read_timeout(READ_TIMEOUT)

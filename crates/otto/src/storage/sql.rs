@@ -22,6 +22,8 @@ pub enum Error {
     BusySnapshot(String),
     #[error("storage misuse or closed connection")]
     Misuse(String),
+    #[error("SQL validation limit: {0}")]
+    ValidationLimit(&'static str),
     #[error("storage constraint conflict")]
     Constraint(String),
     #[error("storage is corrupt")]
@@ -234,8 +236,13 @@ pub trait SqlConnection: Send + Sync {
     fn capabilities(&self) -> SqlCapabilities;
     fn busy_timeout(&self, duration: Duration) -> Result<()>;
     fn pragma_update(&self, name: &str, value: &str) -> Result<()>;
+    /// Executes controlled trusted schema/migration scripts. Never pass imported DDL.
     fn execute_batch(&self, sql: &str) -> Result<()>;
+    /// Executes one statement with bound values. SQLite rejects additional
+    /// statements and SQL NUL bytes; literals, comments and trailing separators
+    /// are interpreted by SQLite's parser, not a generic SQL sanitizer.
     fn execute(&self, sql: &str, params: Params) -> Result<usize>;
+    /// Prepares exactly one statement; queries keep values separate from SQL.
     fn prepare(&self, sql: &str) -> Result<Box<dyn SqlStatement>>;
     fn begin(&self) -> Result<()>;
     fn commit(&self) -> Result<()>;

@@ -209,6 +209,8 @@ impl FileStore {
                 created_at: current.created_at,
                 updated_at: request.restored_at,
                 expires_at: restored.expires_at,
+                // Restored content starts active and unverified.
+                ..Record::default()
             };
             validate_record(&desired)?;
             guard_record(self.guard(), &desired)?;

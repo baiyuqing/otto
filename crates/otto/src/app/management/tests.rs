@@ -156,7 +156,7 @@ fn task_parser_unifies_list_detail_and_cancel() {
 fn remember_parser_preserves_text_and_defaults() {
     assert!(matches!(
         Request::parse("remember", "--scope user --kind fact --key name hello  there"),
-        Ok(Request::Remember { scope, kind, key, text })
+        Ok(Request::Remember { scope, kind, key, text, review_at: None })
             if scope == "user" && kind == "fact" && key == "name" && text == "hello  there"
     ));
     assert!(matches!(

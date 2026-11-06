@@ -31,17 +31,19 @@ use super::MemoryStore;
 use super::validate::{
     provenance_zero, validate_bind_scopes, validate_forget_request, validate_propose_request,
     validate_recall_request, validate_record_ref, validate_remember_request,
-    validate_restore_request, validate_search_request,
+    validate_restore_request, validate_search_request, validate_set_state_request,
+    validate_verify_request,
 };
 use super::{
     BindOptions, Candidate, CandidateAction, CandidateListRequest, CandidateState, CopyStatus,
     Error, ErrorKind, ForgetCleanupEntry, ForgetRequest, ForgetResult, ListRequest,
     MAX_QUERY_BYTES, MAX_QUERY_TERM_BYTES, MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest,
     ProposeRequest, RecallRequest, RecallResult, Record, RecordHistory, RecordKey, RecordRef,
-    RememberRequest, RestoreRequest, Result, RetrievalRequest, ReviewDecision, ReviewRequest,
-    ReviewResult, Scope, SearchRequest, SearchResult, StandingUsage, StoreForgetRequest,
-    StoreRestoreRequest, StoreReviewRequest, TokenEstimator, Tombstone, UpsertRequest,
-    decide_default_policy, new_id,
+    RecordState, RememberRequest, RestoreRequest, Result, RetrievalRequest, ReviewDecision,
+    ReviewRequest, ReviewResult, Scope, SearchRequest, SearchResult, SetStateRequest,
+    StandingUsage, StoreForgetRequest, StoreRestoreRequest, StoreReviewRequest,
+    StoreSetStateRequest, StoreVerifyRequest, TokenEstimator, Tombstone, UpsertRequest,
+    VerifyRequest, decide_default_policy, new_id,
 };
 
 /// The copies of a forgotten record's text that live outside the store and
@@ -240,6 +242,11 @@ impl Service {
                 cursor: request.cursor.clone(),
                 now: request.now,
                 include_expired: request.include_expired,
+                states: request.states.clone(),
+                updated_after: None,
+                verified_after: None,
+                unverified_only: false,
+                review_due_only: false,
             })?;
             (page.records, page.next_cursor)
         } else {
@@ -309,6 +316,11 @@ impl Service {
             created_at,
             updated_at: now,
             expires_at: request.expires_at,
+            state: RecordState::Active,
+            verified_at: None,
+            review_at: request.review_at,
+            superseded_by: String::new(),
+            state_reason: String::new(),
         };
 
         let Some(expected) = request.expected_revision else {
@@ -395,6 +407,35 @@ impl Service {
         let store = self.ready()?;
         validate_record_ref(reference)?;
         store.history(reference)
+    }
+
+    /// Moves a record between lifecycle states by a human decision. The
+    /// content fields and `updated_at` are unchanged; the write is a new
+    /// revision.
+    pub fn set_state(&self, request: &SetStateRequest) -> Result<Record> {
+        let store = self.ready()?;
+        validate_set_state_request(request)?;
+        store.set_state(&StoreSetStateRequest {
+            reference: request.reference.clone(),
+            expected_revision: request.expected_revision,
+            state: request.state,
+            superseded_by: request.superseded_by.clone(),
+            reason: request.reason.clone(),
+            changed_at: now_utc(),
+        })
+    }
+
+    /// Records a human verification: `verified_at` becomes now, a record in
+    /// `NeedsReview` returns to `Active`, and `review_at` is replaced.
+    pub fn verify(&self, request: &VerifyRequest) -> Result<Record> {
+        let store = self.ready()?;
+        validate_verify_request(request)?;
+        store.verify(&StoreVerifyRequest {
+            reference: request.reference.clone(),
+            expected_revision: request.expected_revision,
+            review_at: request.review_at,
+            verified_at: now_utc(),
+        })
     }
 
     /// Restores an earlier revision as a new revision. A restore is a human

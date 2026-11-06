@@ -14,6 +14,56 @@ pub struct ListRequest {
     pub cursor: String,
     pub now: DateTime<Utc>,
     pub include_expired: bool,
+    /// The states to list; empty lists `Active` only.
+    pub states: Vec<RecordState>,
+    /// Only records whose content update is at or after this time.
+    pub updated_after: Option<DateTime<Utc>>,
+    /// Only records verified at or after this time.
+    pub verified_after: Option<DateTime<Utc>>,
+    /// Only records that were never verified.
+    pub unverified_only: bool,
+    /// Only records whose review deadline has passed at `now`.
+    pub review_due_only: bool,
+}
+
+/// Moves a record between lifecycle states by a human decision.
+#[derive(Debug, Clone)]
+pub struct SetStateRequest {
+    pub reference: RecordRef,
+    pub expected_revision: u64,
+    pub state: RecordState,
+    /// The replacement record id; required for `Superseded`, empty otherwise.
+    pub superseded_by: String,
+    /// Why the state changes; empty when not given.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreSetStateRequest {
+    pub reference: RecordRef,
+    pub expected_revision: u64,
+    pub state: RecordState,
+    pub superseded_by: String,
+    pub reason: String,
+    pub changed_at: DateTime<Utc>,
+}
+
+/// Records a human verification: `verified_at` is set to now, a
+/// `NeedsReview` record returns to `Active`, and `review_at` is replaced by
+/// `review_at` (cleared when `None`).
+#[derive(Debug, Clone)]
+pub struct VerifyRequest {
+    pub reference: RecordRef,
+    pub expected_revision: u64,
+    pub review_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreVerifyRequest {
+    pub reference: RecordRef,
+    pub expected_revision: u64,
+    pub review_at: Option<DateTime<Utc>>,
+    pub verified_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +165,9 @@ pub struct SearchRequest {
     pub token_budget: usize,
     pub cursor: String,
     pub now: DateTime<Utc>,
+    /// The record states an empty-query listing includes; empty means
+    /// `Active` only. A query search always retrieves active records only.
+    pub states: Vec<RecordState>,
 }
 
 impl Default for SearchRequest {
@@ -131,6 +184,7 @@ impl Default for SearchRequest {
             token_budget: 0,
             cursor: String::new(),
             now: DateTime::UNIX_EPOCH,
+            states: Vec::new(),
         }
     }
 }
@@ -155,6 +209,8 @@ pub struct RememberRequest {
     pub expires_at: Option<DateTime<Utc>>,
     pub expected_revision: Option<u64>,
     pub source: Provenance,
+    /// The next review deadline of the remembered record, if any.
+    pub review_at: Option<DateTime<Utc>>,
 }
 
 impl Default for RememberRequest {
@@ -171,6 +227,7 @@ impl Default for RememberRequest {
             expires_at: None,
             expected_revision: None,
             source: Provenance::default(),
+            review_at: None,
         }
     }
 }

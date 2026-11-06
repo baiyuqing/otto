@@ -16,8 +16,9 @@ use crate::memory::json::encode_string;
 use crate::memory::validate::validate_retrieval_request;
 use crate::memory::{
     Error, ErrorKind, MAX_QUERY_TERM_BYTES, MAX_QUERY_TERMS, MAX_RETRIEVAL_CANDIDATES,
-    MAX_STANDING_TOKENS, NAMESPACE_USER, NAMESPACE_WORKSPACE, Record, Result, RetrievalMatch,
-    RetrievalRequest, RetrievalResult, STANDING_ROW_GUARD, Scope, TokenEstimator, invalid_request,
+    MAX_STANDING_TOKENS, NAMESPACE_USER, NAMESPACE_WORKSPACE, Record, RecordState, Result,
+    RetrievalMatch, RetrievalRequest, RetrievalResult, STANDING_ROW_GUARD, Scope, TokenEstimator,
+    invalid_request,
 };
 
 /// One record in the ranked snapshot. `lexical` is `usize::MAX` minus the
@@ -137,10 +138,9 @@ fn matching_terms(record: &Record, terms: &[String]) -> usize {
 
 fn passes_filters(record: &Record, request: &RetrievalRequest) -> bool {
     (request.kinds.is_empty() || request.kinds.contains(&record.kind))
-        && (request.include_expired
-            || record
-                .expires_at
-                .is_none_or(|expires| expires > request.now))
+        && record.state == RecordState::Active
+        && !record.review_due(request.now)
+        && (request.include_expired || !record.expired(request.now))
 }
 
 fn apply_workspace_replacements(

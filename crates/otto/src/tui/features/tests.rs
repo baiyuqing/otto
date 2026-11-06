@@ -754,3 +754,29 @@ fn memory_restore_is_a_mutation_and_history_and_diff_are_queries() {
         })
     ));
 }
+
+#[test]
+fn memory_state_and_verify_are_mutations_and_list_is_a_query() {
+    use crate::app::management::Request as M;
+    let catalog = Catalog::default();
+    let start = |command: &str| {
+        let Transition::Push(mut presenter) =
+            catalog.open(command, &Info::default(), false).unwrap()
+        else {
+            panic!("{command} should open a surface")
+        };
+        presenter.start().expect("a backend request")
+    };
+    assert!(matches!(
+        start("/memory state r1 needs-review"),
+        BackendRequest::Command(Command::Management(M::MemoryState { .. }))
+    ));
+    assert!(matches!(
+        start("/memory verify r1"),
+        BackendRequest::Command(Command::Management(M::MemoryVerify { .. }))
+    ));
+    assert!(matches!(
+        start("/memory list --state all"),
+        BackendRequest::Management(M::MemoryList { .. })
+    ));
+}

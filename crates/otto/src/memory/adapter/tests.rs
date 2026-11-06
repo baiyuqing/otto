@@ -261,3 +261,155 @@ async fn cancellation_and_resource_content_are_rejected_before_effects() {
     );
     assert!(list(&adapter, &context).await.is_empty());
 }
+
+fn forget_at(
+    context: &port::MemoryContext,
+    target: port::MemoryRef,
+    coverage: port::ForgetLevel,
+) -> port::ForgetRequest {
+    port::ForgetRequest {
+        context: context.clone(),
+        request_id: "forget-level".into(),
+        target: port::ForgetTarget::Item(target),
+        coverage,
+    }
+}
+
+#[tokio::test]
+async fn describe_lists_suppress_invalidate_and_delete_active_forget_levels() {
+    let (_directory, _service, adapter, _context) = setup();
+    let description = adapter.describe();
+    let forget = description
+        .capabilities
+        .iter()
+        .find(|capability| capability.operation == port::Operation::Forget)
+        .unwrap();
+    assert_eq!(
+        forget.forget_levels,
+        vec![
+            port::ForgetLevel::Suppress,
+            port::ForgetLevel::Invalidate,
+            port::ForgetLevel::DeleteActive
+        ]
+    );
+}
+
+// Needs the store implementation of `set_state`.
+#[tokio::test]
+async fn suppress_and_invalidate_set_record_state_and_report_remaining_levels() {
+    use port::ForgetLevel::*;
+    let cases = [
+        (
+            Suppress,
+            super::super::RecordState::NeedsReview,
+            "suppressed through the memory service",
+            vec![Invalidate, DeleteActive, DeleteDerived],
+        ),
+        (
+            Invalidate,
+            super::super::RecordState::Retracted,
+            "invalidated through the memory service",
+            vec![DeleteActive, DeleteDerived],
+        ),
+    ];
+    for (level, state, reason, remaining) in cases {
+        let (_directory, service, adapter, context) = setup();
+        let cancel = CancellationToken::new();
+        let written = adapter
+            .remember(&request(context.clone()), &cancel)
+            .await
+            .unwrap();
+        let target = written.items[0].reference.clone().unwrap();
+        let receipt = adapter
+            .forget(&forget_at(&context, target.clone(), level), &cancel)
+            .await
+            .unwrap();
+        let coverage = receipt.forget_coverage.unwrap();
+        assert_eq!(coverage.achieved, vec![level]);
+        assert_eq!(coverage.remaining, remaining);
+        let record = service
+            .get(&super::super::RecordRef {
+                scope: native_scope(&target.scope),
+                id: target.id.clone(),
+            })
+            .unwrap();
+        assert_eq!(record.state, state);
+        assert_eq!(record.state_reason, reason);
+        assert_eq!(record.revision, 2);
+        assert_eq!(
+            receipt.items[0]
+                .reference
+                .as_ref()
+                .unwrap()
+                .revision
+                .as_deref(),
+            Some("2")
+        );
+        assert!(list(&adapter, &context).await.is_empty());
+    }
+}
+
+// Needs the store implementation of `set_state`.
+#[tokio::test]
+async fn delete_active_receipt_still_reports_only_derived_copies_remaining() {
+    let (_directory, _service, adapter, context) = setup();
+    let cancel = CancellationToken::new();
+    let written = adapter
+        .remember(&request(context.clone()), &cancel)
+        .await
+        .unwrap();
+    let target = written.items[0].reference.clone().unwrap();
+    let receipt = adapter
+        .forget(
+            &forget_at(&context, target, port::ForgetLevel::DeleteActive),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let coverage = receipt.forget_coverage.unwrap();
+    assert_eq!(coverage.achieved, vec![port::ForgetLevel::DeleteActive]);
+    assert_eq!(coverage.remaining, vec![port::ForgetLevel::DeleteDerived]);
+}
+
+#[tokio::test]
+async fn suppress_with_missing_or_non_numeric_revision_is_invalid_input_before_effects() {
+    let (_directory, service, adapter, context) = setup();
+    let cancel = CancellationToken::new();
+    let written = adapter
+        .remember(&request(context.clone()), &cancel)
+        .await
+        .unwrap();
+    let target = written.items[0].reference.clone().unwrap();
+    for revision in [None, Some("abc".to_string()), Some("0".to_string())] {
+        let mut stale = target.clone();
+        stale.revision = revision;
+        let error = adapter
+            .forget(
+                &forget_at(&context, stale, port::ForgetLevel::Suppress),
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, port::ErrorKind::InvalidInput);
+    }
+    let record = service
+        .get(&super::super::RecordRef {
+            scope: native_scope(&target.scope),
+            id: target.id,
+        })
+        .unwrap();
+    assert_eq!(record.revision, 1);
+}
+
+// Needs the store implementation of `set_state` for the state value.
+#[tokio::test]
+async fn recall_item_carries_otto_state_metadata() {
+    let (_directory, _service, adapter, context) = setup();
+    let cancel = CancellationToken::new();
+    adapter
+        .remember(&request(context.clone()), &cancel)
+        .await
+        .unwrap();
+    let items = list(&adapter, &context).await;
+    assert_eq!(items[0].metadata["otto.state"], "active");
+}

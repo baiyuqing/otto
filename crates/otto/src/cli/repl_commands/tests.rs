@@ -6,6 +6,7 @@ use std::path::Path;
 use tokio_util::sync::CancellationToken;
 mod mcp_commands;
 mod memory_history_commands;
+mod memory_lifecycle_commands;
 mod skill_commands;
 mod task_commands;
 
@@ -369,6 +370,11 @@ async fn review_lists_accepts_and_rejects_pending_candidates() {
             cursor: String::new(),
             now: Utc::now(),
             include_expired: false,
+            states: Vec::new(),
+            updated_after: None,
+            verified_after: None,
+            unverified_only: false,
+            review_due_only: false,
         })
         .unwrap()
         .records;

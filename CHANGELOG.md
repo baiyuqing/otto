@@ -57,6 +57,13 @@ commit ledger; Git and release tags retain the full history. See the
   unverified, including the advice audit log and session files. A record file
   deleted by hand while its history exists is tombstoned the next time the store
   opens, and its history is removed (#591).
+- Memory records now have a lifecycle state (`active`, `needs_review`,
+  `superseded`, `retracted`) and the times `verified_at` and `review_at`. Only
+  active records whose review deadline has not passed are recalled. Set them with
+  `otto memory state|verify` and `/memory state|verify`, set a deadline with
+  `/remember --review-in AGE`, and filter `list` by state, kind, label, update
+  and verification time, `--unverified` and `--review-due`. Record files without
+  the new fields read as active (#591).
 
 ### Sessions
 

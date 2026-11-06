@@ -124,5 +124,6 @@ fn model_proposal(scope: &Scope, key: &str, text: &str) -> ProposeRequest {
 
 mod binding;
 mod history;
+mod lifecycle;
 mod recall;
 mod records;

@@ -53,12 +53,12 @@ pub struct ListFilters {
 
 /// A review deadline `AGE` (`30d`, `12h`, `45m`) counted forward from now.
 pub fn review_deadline(age: &str) -> Option<chrono::DateTime<Utc>> {
-    let now = Utc::now();
-    let past = parse_time_or_age(age, now)?;
-    if past >= now {
-        // An absolute time is not an age.
+    if chrono::DateTime::parse_from_rfc3339(age).is_ok() {
+        // An absolute time is not an age, whether it is in the past or the future.
         return None;
     }
+    let now = Utc::now();
+    let past = parse_time_or_age(age, now)?;
     now.checked_add_signed(now - past)
 }
 
@@ -733,5 +733,7 @@ impl Controller {
 
 mod memory_requests;
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod tests;

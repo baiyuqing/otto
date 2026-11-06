@@ -378,7 +378,8 @@ pub fn validate_proposed_record(record: &Record, action: CandidateAction) -> Res
         return Err(invalid_record("proposed source"));
     }
     validate_provenance(&record.source, false, true)?;
-    if action == CandidateAction::Forget {
+    if !action.carries_content() {
+        // Forget, retract and needs_review carry no proposed content.
         if !presentation_route_only(&record.metadata) {
             return Err(invalid_record("forget proposed content"));
         }
@@ -432,7 +433,12 @@ pub fn validate_candidate(candidate: &Candidate) -> Result<()> {
                 return Err(invalid_record("create target"));
             }
         }
-        CandidateAction::Update | CandidateAction::Forget => {
+        CandidateAction::Update
+        | CandidateAction::Forget
+        | CandidateAction::Retract
+        | CandidateAction::Supersede
+        | CandidateAction::Correct
+        | CandidateAction::NeedsReview => {
             if !valid_opaque_id(&candidate.target_id, MAX_ID_BYTES)
                 || !valid_revision(candidate.base_revision)
             {

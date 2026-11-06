@@ -640,6 +640,10 @@ impl port::MemoryService for BuiltinAdapter {
                 CandidateAction::Create => port::ChangeAction::Create,
                 CandidateAction::Update => port::ChangeAction::Update,
                 CandidateAction::Forget => port::ChangeAction::Forget,
+                CandidateAction::Retract => port::ChangeAction::Retract,
+                CandidateAction::Supersede => port::ChangeAction::Supersede,
+                CandidateAction::Correct => port::ChangeAction::Correct,
+                CandidateAction::NeedsReview => port::ChangeAction::NeedsReview,
             },
             target: (candidate.action != CandidateAction::Create).then(|| {
                 self.reference(

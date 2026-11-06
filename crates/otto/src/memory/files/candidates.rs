@@ -319,6 +319,12 @@ impl FileStore {
             if request.decision == ReviewDecision::Accept {
                 decided.state = CandidateState::Accepted;
                 match candidate.action {
+                    CandidateAction::Retract
+                    | CandidateAction::Supersede
+                    | CandidateAction::Correct
+                    | CandidateAction::NeedsReview => {
+                        return Err(Error::new(ErrorKind::Unsupported));
+                    }
                     CandidateAction::Create => {
                         let mut desired = accepted_record_content(&candidate, request);
                         desired.id = request.result_record_id.clone();

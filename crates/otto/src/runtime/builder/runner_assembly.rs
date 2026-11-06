@@ -676,6 +676,7 @@ impl Builder {
             connecting_mcp,
             task_control,
             memory_client,
+            memory_proposals: None,
             schedule_origin,
             presentation_origin,
         };

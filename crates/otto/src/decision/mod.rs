@@ -14,6 +14,9 @@ pub enum Kind {
     Choice(Vec<(String, String)>),
     /// `yes` or `no`, with the meaning of each.
     YesNo { yes: String, no: String },
+    /// Free text of at most `max_bytes` bytes, returned in `Answer::choice`.
+    /// Only the session model answers it; the auxiliary model refuses.
+    Text { max_bytes: usize },
 }
 
 /// One question for a [`Backend`].

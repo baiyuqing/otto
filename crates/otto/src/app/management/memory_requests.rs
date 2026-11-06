@@ -82,6 +82,39 @@ impl Controller {
                     .map(Reply::MemoryVerified)
                     .map_err(|error| error.to_string())
             }
+            MemoryPropose { id, evidence } => {
+                let Some((service, user, workspace)) = self.memory_manager() else {
+                    return Err("memory is not available".into());
+                };
+                let generator = self
+                    .current_runner()
+                    .and_then(|runner| runner.memory_proposals.clone())
+                    .ok_or_else(|| "memory proposals are not available".to_string())?;
+                let (_, target) = current_record(&service, [user, workspace], &id)?;
+                let input = memory::proposals::ProposalInput {
+                    target,
+                    evidence: vec![memory::proposals::EvidenceItem {
+                        id: "e1".into(),
+                        text: evidence,
+                        trust: otto_core::memory::Trust::Local,
+                        source: "user".into(),
+                    }],
+                    permitted: memory::proposals::ProposalAction::ALL.to_vec(),
+                    session_id: String::new(),
+                };
+                // The generator is async; the management path is synchronous,
+                // like the selected-memory `/remember` path above it.
+                let handle = tokio::runtime::Handle::try_current()
+                    .map_err(|_| "memory proposals require an async runtime".to_string())?;
+                if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+                    return Err("memory proposals require a multi-thread runtime".into());
+                }
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let outcome = tokio::task::block_in_place(|| {
+                    handle.block_on(generator.propose(&service, input, &cancel))
+                });
+                Ok(Reply::MemoryProposed(outcome))
+            }
             MemoryShow { id } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
                     return Err("memory is not available".into());

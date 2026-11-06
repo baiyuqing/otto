@@ -28,10 +28,12 @@ use crate::model::{
 use crate::session::operation::OperationFact;
 use crate::session::{
     AppendOutcome, CAPABILITIES_CUSTOM_TYPE, COMPACTION_CONTEXT_TYPE, Capabilities,
-    CompactionCheckpoint, InterruptedTurn, PLAN_CUSTOM_TYPE, PlanStatus, PlanStep, Session,
-    TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, encode_capabilities, encode_plan,
-    encode_turn_record,
+    CompactionCheckpoint, InterruptedTurn, MEMORY_RECALL_CUSTOM_TYPE, MemoryRecordRef,
+    PLAN_CUSTOM_TYPE, PlanStatus, PlanStep, Session, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord,
+    TurnTrigger, encode_capabilities, encode_memory_recall, encode_plan, encode_turn_record,
 };
+
+mod memory_references;
 
 /// One broken guarantee: the stable check name and what was observed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -75,6 +77,7 @@ pub async fn session<S: Session>(
     session_plan(&fresh()).await?;
     session_operations(&fresh()).await?;
     session_compaction(&fresh()).await?;
+    memory_references::session_memory_references(&fresh()).await?;
     if let Some(reopen) = reopen {
         session_reopen(fresh(), reopen).await?;
     }
@@ -522,6 +525,20 @@ async fn session_reopen<S: Session>(
         .append_input_if_absent("in_1", user("question"))
         .await
         .map_err(fail(CHECK, "append"))?;
+    let recalled = vec![MemoryRecordRef {
+        id: "rec-a".into(),
+        revision: Some("1".into()),
+    }];
+    session
+        .append_custom(MEMORY_RECALL_CUSTOM_TYPE, &encode_memory_recall(&recalled))
+        .await
+        .map_err(fail(CHECK, "append otto.memory_recall"))?;
+    let memory_before = session.memory_references();
+    ensure(
+        CHECK,
+        memory_before.len() == 1 && memory_before[0].records == recalled,
+        format!("the recall record is not listed before reopen: {memory_before:?}"),
+    )?;
     session
         .append(assistant("answer"))
         .await
@@ -569,6 +586,14 @@ async fn session_reopen<S: Session>(
         "the capabilities record was lost",
     )?;
     ensure(CHECK, session.plan() == plan, "the plan was lost")?;
+    ensure(
+        CHECK,
+        session.memory_references() == memory_before,
+        format!(
+            "memory references changed: {memory_before:?} -> {:?}",
+            session.memory_references()
+        ),
+    )?;
     let again = session
         .append_input_if_absent("in_1", user("question"))
         .await

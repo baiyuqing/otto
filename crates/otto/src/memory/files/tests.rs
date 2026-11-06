@@ -1,5 +1,6 @@
 mod candidate_archive;
 mod history;
+mod lifecycle;
 
 use std::fs;
 use std::time::Duration;

@@ -391,3 +391,35 @@ fn classify_ranks_external_state_above_destructive() {
         ["git", "push", "origin", "main"]
     );
 }
+
+#[test]
+fn complete_with_command_env_accepts_only_static_prefix_on_simple_command() {
+    for command in [
+        "cd sub && CARGO_TARGET_DIR=/x cargo test --test '*' && CARGO_TARGET_DIR=/x cargo test --doc",
+        "cd sub && A=1 B='two' make",
+        "A=1 cargo test",
+        "A= cargo test",
+    ] {
+        let parsed = parse(command);
+        assert!(!parsed.command.complete, "{command:?}");
+        assert!(parsed.complete_with_command_env, "{command:?}");
+    }
+    for command in ["cargo test", "cd sub && make"] {
+        let parsed = parse(command);
+        assert!(parsed.command.complete, "{command:?}");
+        assert!(parsed.complete_with_command_env, "{command:?}");
+    }
+    for command in [
+        "CDPATH=/tmp; cd sub && make",
+        "CDPATH=/tmp cd sub && make",
+        "cd sub && X=$(pwd) make",
+        "cd sub && X=\"$HOME\" make",
+        "cd sub && A[$(pwd)]=1 make",
+        "cd sub && export A=1 && make",
+        "cd sub && make 2>&1 | $X",
+    ] {
+        let parsed = parse(command);
+        assert!(!parsed.command.complete, "{command:?}");
+        assert!(!parsed.complete_with_command_env, "{command:?}");
+    }
+}

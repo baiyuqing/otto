@@ -140,7 +140,8 @@ async fn a_turn_becomes_one_observation_per_block() {
                 o.source.id.as_str(),
                 o.source.role.as_str(),
                 o.source.trust,
-                text_of(o),
+                serde_json::from_str::<serde_json::Value>(text_of(o))
+                    .unwrap_or_else(|_| serde_json::Value::String(text_of(o).into())),
             )
         })
         .collect();
@@ -152,28 +153,28 @@ async fn a_turn_becomes_one_observation_per_block() {
                 "op_1:0:0:0",
                 "user",
                 port::Trust::Local,
-                "hello"
+                serde_json::json!("hello")
             ),
             (
                 "op_1:1:0:0",
                 "op_1:1:0:0",
                 "tool_call",
                 port::Trust::Local,
-                r#"{"id":"c1","name":"echo","arguments":{"value":1}}"#
+                serde_json::json!({"id":"c1","name":"echo","arguments":{"value":1}})
             ),
             (
                 "op_1:2:0:0",
                 "op_1:2:0:0",
                 "tool_result",
                 port::Trust::External,
-                r#"{"id":"c1","name":"echo","text":"out","is_error":false}"#
+                serde_json::json!({"id":"c1","name":"echo","text":"out","is_error":false})
             ),
             (
                 "op_1:3:0:0",
                 "op_1:3:0:0",
                 "assistant",
                 port::Trust::Local,
-                "done"
+                serde_json::json!("done")
             ),
         ]
     );

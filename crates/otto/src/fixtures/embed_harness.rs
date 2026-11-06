@@ -1,5 +1,5 @@
 //! Scaffolding for tests that drive a whole [`Otto`] composition offline: a
-//! temporary home with one `openai-compatible` profile, a scripted provider
+//! temporary home with one `openai-compatible` provider, a scripted provider
 //! that runners built under that home use, and a diagnostics capture.
 //!
 //! The `embed` tests and the `otto-cli` parity tests share it.
@@ -29,16 +29,16 @@ pub struct Fixture {
     pub workspace: PathBuf,
 }
 
-/// The user configuration of every fixture: one `openai-compatible` profile
-/// whose key comes from `ALPHA_KEY`.
+/// The user configuration of every fixture: one `openai-compatible` provider
+/// whose key comes from `ALPHA_KEY`, with an explicitly trusted test endpoint.
 pub const PROFILE: &str = r#"
-default_profile = "alpha"
+default_model = "alpha/gpt-6-luna"
 
-[profiles.alpha]
-provider = "openai-compatible"
+[providers.alpha]
+type = "openai-compatible"
 base_url = "https://example.com/v1"
-model = "gpt-test"
 api_key_env = "ALPHA_KEY"
+trusted_origins = ["https://example.com"]
 "#;
 
 /// A temp home with a user config of [`PROFILE`], `extra` and

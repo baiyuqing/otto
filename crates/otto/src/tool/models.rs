@@ -185,8 +185,8 @@ mod tests {
             let endpoint = otto_core::config::endpoint::TrustedEndpoint::authorize(
                 base_url,
                 "openai-compatible",
-                &[origin.clone()],
-                &[origin],
+                std::slice::from_ref(&origin),
+                std::slice::from_ref(&origin),
             )
             .unwrap();
             Client::new_trusted(&endpoint, "key")
@@ -238,8 +238,8 @@ mod tests {
         let endpoint = otto_core::config::endpoint::TrustedEndpoint::authorize(
             &base_url,
             "chatgpt",
-            &[origin.clone()],
-            &[origin],
+            std::slice::from_ref(&origin),
+            std::slice::from_ref(&origin),
         )
         .unwrap();
         let client =

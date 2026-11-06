@@ -70,10 +70,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .map(|reference| reference.id.clone())
             .collect();
         ids.extend(state.recalled.iter().map(|record| record.id.clone()));
+        // Unreferenced recall content has no lifecycle identity to inspect.
+        let ids: Vec<String> = ids.into_iter().filter(|id| !id.is_empty()).collect();
         if ids.is_empty() {
             return;
         }
-        let ids: Vec<String> = ids.into_iter().collect();
         let lifecycle = match binding.lifecycle(&ids, control.cancellation_token()).await {
             Ok(lifecycle) => lifecycle,
             Err(error) => {

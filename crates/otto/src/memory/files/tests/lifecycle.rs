@@ -134,14 +134,13 @@ fn set_state_writes_a_new_revision_and_keeps_content_and_update_time() {
     let scope = user(&store);
     let original = put(&store, "rec-1", &scope, "tone", "prefers terse replies");
     put(&store, "rec-2", &scope, "other", "replacement text");
-    let mut expected_revision = 1;
     let mut previous_bytes = fs::read(record_path(&store, "rec-1")).unwrap();
     let steps = [
         (RecordState::NeedsReview, "", "check again"),
         (RecordState::Retracted, "", "outdated"),
         (RecordState::Superseded, "rec-2", ""),
     ];
-    for (state, replacement, reason) in steps {
+    for (expected_revision, (state, replacement, reason)) in (1..).zip(steps) {
         let written = store
             .set_state(&set_state_request(
                 &scope,
@@ -177,7 +176,6 @@ fn set_state_writes_a_new_revision_and_keeps_content_and_update_time() {
         );
         assert_eq!(store.get(&record_ref(&scope, "rec-1")).unwrap(), written);
         previous_bytes = fs::read(record_path(&store, "rec-1")).unwrap();
-        expected_revision += 1;
     }
 }
 

@@ -7,6 +7,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Development
+
+- Restore `make check` coverage after endpoint-trust and memory-lifecycle changes:
+  offline fixtures grant only their test origins, fault transports keep redirect
+  protection, and tool-schema snapshots match the active memory-search contract.
+- Recalled memory content without a record reference no longer triggers an invalid
+  lifecycle lookup or a spurious warning; its content still reaches the model.
+
 ### Security
 
 - Custom provider endpoints now fail closed until their exact origin is explicitly

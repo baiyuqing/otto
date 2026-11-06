@@ -2,6 +2,14 @@
 
 use super::*;
 
+#[tokio::test]
+async fn test_read_timeout_preserves_endpoint_rejection() {
+    let client = Client::new("http://127.0.0.1:1", "test-key")
+        .with_test_read_timeout(Duration::from_millis(200));
+    let error = complete(&client, &model_request()).await.unwrap_err();
+    assert!(error.to_string().contains("not trusted"), "{error}");
+}
+
 // --- redirect --------------------------------------------------------
 
 #[tokio::test]
@@ -23,7 +31,8 @@ async fn blocks_cross_origin_redirect() {
     })
     .await;
 
-    let client = trusted_test_client(&source.url, "secret");
+    let client = trusted_test_client(&source.url, "secret")
+        .with_test_read_timeout(Duration::from_millis(200));
     let error = complete(&client, &model_request())
         .await
         .expect_err("a cross-origin redirect is rejected");

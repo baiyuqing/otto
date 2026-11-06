@@ -106,6 +106,15 @@ commit ledger; Git and release tags retain the full history. See the
   command calls a model over it. See
   [the dataset](docs/development/testing.md#memory-proposal-evaluation-dataset)
   (#591).
+- `otto eval memory-retraction` is an opt-in development evaluation of memory
+  retraction: it runs the agent loop over synthetic transcripts under four
+  context conditions (obsolete record active; filtered without notice; filtered
+  with the retraction notice and replacement; plus a rebuilt summary) and five
+  kinds of copies of the obsolete claim, runs the proposal generator over the
+  labeled dataset, and reports counts per metric with sample sizes next to LLM
+  judge verdicts. `--dry-run` prints the call estimate without credentials. See
+  [the evaluation](docs/development/testing.md#memory-retraction-evaluation)
+  (#591).
 
 ### Sessions
 

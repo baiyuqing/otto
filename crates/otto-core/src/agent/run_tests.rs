@@ -60,6 +60,7 @@ mod memory_context;
 mod memory_observation;
 mod memory_references;
 mod memory_retraction;
+mod memory_summary;
 mod progress_recovery;
 mod provider_tools;
 mod recording;

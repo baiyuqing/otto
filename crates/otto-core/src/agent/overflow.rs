@@ -63,6 +63,9 @@ pub struct RunDispatchState {
     pub memory_context: String,
     /// The ids of the records `memory_context` renders.
     pub memory_record_ids: Vec<String>,
+    /// The text-free references of the records `memory_context` renders,
+    /// persisted once per turn as the `otto.memory_recall` entry.
+    pub memory_records: Vec<crate::session::MemoryRecordRef>,
     /// The full redacted tool-result text, keyed by tool-call id, for results
     /// whose stored text is a placeholder. It is substituted into provider
     /// requests only, never into the session.

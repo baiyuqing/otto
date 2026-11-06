@@ -24,6 +24,7 @@ use crate::model::{
 use super::compaction::{
     compaction_aware_path, compaction_has_retained_tail, safe_context_token_count,
 };
+use super::memory_recall::{MEMORY_RECALL_CUSTOM_TYPE, TurnMemoryReferences, decode_memory_recall};
 use super::operation::{
     DecodedOperationFact, OPERATION_CUSTOM_TYPE, OperationLedger, decode_operation_raw,
 };
@@ -100,6 +101,10 @@ pub struct ResolvedContext {
     /// compaction checkpoint has since summarized away, so an input is
     /// recognised as delivered for as long as its entry is on the path.
     pub input_ids: HashSet<String>,
+    /// Every valid `otto.memory_recall` record on the active path, oldest
+    /// first, anchored to the nearest preceding user message entry; see
+    /// [`crate::session::memory_recall`].
+    pub memory_references: Vec<TurnMemoryReferences>,
 }
 
 impl Default for ResolvedContext {
@@ -119,6 +124,7 @@ impl Default for ResolvedContext {
             interrupted_turn: None,
             plan: Vec::new(),
             input_ids: HashSet::new(),
+            memory_references: Vec::new(),
         }
     }
 }
@@ -201,6 +207,7 @@ pub fn build_context(
     let mut latest_model_change: Option<RuntimeMetadata> = None;
     let mut latest_assistant: Option<RuntimeMetadata> = None;
     let mut remote_compaction_entry_index = None;
+    let mut last_user_message_id: Option<String> = None;
     for entry in &path {
         match entry.type_name.as_str() {
             "message" => {
@@ -208,6 +215,9 @@ pub fn build_context(
                     .message
                     .as_ref()
                     .ok_or_else(|| PiError::invalid("message payload is required"))?;
+                if message.role == "user" {
+                    last_user_message_id = Some(entry.id.clone());
+                }
                 if message.role == "assistant" {
                     latest_assistant = Some(RuntimeMetadata {
                         profile: String::new(),
@@ -328,6 +338,28 @@ pub fn build_context(
                         }
                         Err(_) => collector.add(format!(
                             "ignored malformed {REMOTE_COMPACTION_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        )),
+                    }
+                } else if custom.custom_type == MEMORY_RECALL_CUSTOM_TYPE {
+                    let raw = custom
+                        .data
+                        .as_deref()
+                        .map(RawValue::get)
+                        .unwrap_or_default();
+                    match (decode_memory_recall(raw), last_user_message_id.as_ref()) {
+                        (Some(record), Some(user_message_id)) => {
+                            resolved.memory_references.push(TurnMemoryReferences {
+                                user_message_id: user_message_id.clone(),
+                                records: record.records,
+                            });
+                        }
+                        (None, _) => collector.add(format!(
+                            "ignored malformed {MEMORY_RECALL_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        )),
+                        (Some(_), None) => collector.add(format!(
+                            "ignored {MEMORY_RECALL_CUSTOM_TYPE} entry {} before any user message",
                             entry.id
                         )),
                     }

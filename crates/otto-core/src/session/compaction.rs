@@ -18,6 +18,10 @@ use super::context::{
     active_context_path, format_persisted_timestamp, index_context_entries, model_usage_to_pi,
     optional_pi_usage_to_model,
 };
+use super::memory_recall::{
+    MEMORY_RECALL_MAXIMUM_RECORDS, MemoryRecordRef, MemoryReferenceCoverage,
+    normalize_memory_records,
+};
 use super::pi::{PiCompaction, PiEntry, PiUsage};
 use super::session_types::{CompactionCheckpoint, CompactionDetails, CompactionMetadata};
 use super::{PiError, PiErrorKind};
@@ -96,6 +100,32 @@ pub fn validate_compaction_details(details: &CompactionDetails) -> Result<(), Pi
             ));
         }
         path_bytes += path.len();
+    }
+    validate_compaction_memory_records(&details.memory_records)
+}
+
+/// Rejects memory references that are too many, malformed, or repeated.
+fn validate_compaction_memory_records(records: &[MemoryRecordRef]) -> Result<(), PiError> {
+    if records.len() > MEMORY_RECALL_MAXIMUM_RECORDS {
+        return Err(PiError::new(
+            PiErrorKind::EntryTooLarge,
+            format!(
+                "compaction memory records maximum is {MEMORY_RECALL_MAXIMUM_RECORDS} references"
+            ),
+        ));
+    }
+    let mut seen = HashSet::new();
+    for record in records {
+        if !record.is_valid() {
+            return Err(PiError::invalid(
+                "compaction memory record reference is invalid",
+            ));
+        }
+        if !seen.insert(record) {
+            return Err(PiError::invalid(
+                "compaction memory record references must be unique",
+            ));
+        }
     }
     Ok(())
 }
@@ -193,6 +223,8 @@ pub fn compaction_details_present(details: &CompactionDetails) -> bool {
         || !details.modified_files.is_empty()
         || details.omitted_read_files != 0
         || details.omitted_modified_files != 0
+        || !details.memory_records.is_empty()
+        || !details.memory_coverage.is_unknown()
 }
 
 /// True for the entry types that count as real context on the active path.
@@ -374,6 +406,18 @@ pub fn decode_compaction_details(raw: Option<&RawValue>) -> CompactionDetails {
             return CompactionDetails::default();
         }
     }
+    if let Some(value) = object.get("memoryRecords")
+        && (!value.get().trim_start().starts_with('[')
+            || serde_json::from_str::<Vec<MemoryRecordRef>>(value.get()).is_err())
+    {
+        return CompactionDetails::default();
+    }
+    if let Some(value) = object.get("memoryCoverage")
+        && (!value.get().trim_start().starts_with('"')
+            || serde_json::from_str::<MemoryReferenceCoverage>(value.get()).is_err())
+    {
+        return CompactionDetails::default();
+    }
     let Ok(details) = serde_json::from_str::<CompactionDetails>(text) else {
         return CompactionDetails::default();
     };
@@ -381,7 +425,9 @@ pub fn decode_compaction_details(raw: Option<&RawValue>) -> CompactionDetails {
 }
 
 /// Drops invalid and duplicated paths, prefers modified over read, sorts, and
-/// applies the path and byte caps, counting what it dropped.
+/// applies the path and byte caps, counting what it dropped. Memory references
+/// are normalized and bounded; any dropped reference resets the coverage to
+/// unknown because the list no longer names every record.
 pub fn sanitize_compaction_details(details: &CompactionDetails) -> CompactionDetails {
     let modified: BTreeSet<&str> = details
         .modified_files
@@ -421,6 +467,14 @@ pub fn sanitize_compaction_details(details: &CompactionDetails) -> CompactionDet
         remaining_paths -= 1;
         remaining_bytes -= path.len();
     }
+    let mut memory_records = normalize_memory_records(&details.memory_records);
+    memory_records.truncate(MEMORY_RECALL_MAXIMUM_RECORDS);
+    result.memory_coverage = if memory_records.len() == details.memory_records.len() {
+        details.memory_coverage
+    } else {
+        MemoryReferenceCoverage::Unknown
+    };
+    result.memory_records = memory_records;
     result
 }
 
@@ -484,277 +538,4 @@ impl<'de> Visitor<'de> for UniqueJsonVisitor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::Usage;
-    use serde_json::value::RawValue;
-
-    fn valid_checkpoint() -> CompactionCheckpoint {
-        CompactionCheckpoint {
-            summary: "summary".into(),
-            first_kept_entry_id: "0000000a".into(),
-            tokens_before: 12,
-            usage: None,
-            details: CompactionDetails::default(),
-            created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
-        }
-    }
-
-    fn fixed_width_path(prefix: &str, index: usize) -> String {
-        format!("{prefix}{index:04}-{}", "x".repeat(58))
-    }
-
-    #[test]
-    fn validate_compaction_checkpoint_enforces_bounds() {
-        type Case = (
-            &'static str,
-            Box<dyn Fn(&mut CompactionCheckpoint)>,
-            PiErrorKind,
-        );
-        let cases: Vec<Case> = vec![
-            (
-                "summary above byte bound",
-                Box::new(|checkpoint| {
-                    checkpoint.summary = "s".repeat(COMPACTION_SUMMARY_MAXIMUM_BYTES + 1);
-                }),
-                PiErrorKind::EntryTooLarge,
-            ),
-            (
-                "blank summary",
-                Box::new(|checkpoint| checkpoint.summary = "   ".into()),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "blank first-kept entry id",
-                Box::new(|checkpoint| checkpoint.first_kept_entry_id = " ".into()),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "negative tokens before",
-                Box::new(|checkpoint| checkpoint.tokens_before = -1),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "negative omitted read files",
-                Box::new(|checkpoint| checkpoint.details.omitted_read_files = -1),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "negative omitted modified files",
-                Box::new(|checkpoint| checkpoint.details.omitted_modified_files = -1),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "path count above bound",
-                Box::new(|checkpoint| {
-                    checkpoint.details.read_files = (0..=COMPACTION_DETAILS_MAXIMUM_PATHS)
-                        .map(|index| format!("path-{index}.go"))
-                        .collect();
-                }),
-                PiErrorKind::EntryTooLarge,
-            ),
-            (
-                "path text above bound",
-                Box::new(|checkpoint| {
-                    checkpoint.details.read_files =
-                        vec!["x".repeat(COMPACTION_DETAILS_MAXIMUM_BYTES + 1)];
-                }),
-                PiErrorKind::EntryTooLarge,
-            ),
-            (
-                "empty path",
-                Box::new(|checkpoint| checkpoint.details.read_files = vec![String::new()]),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "C0 control path",
-                Box::new(|checkpoint| checkpoint.details.read_files = vec!["a\u{0}.go".into()]),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "DEL control path",
-                Box::new(|checkpoint| checkpoint.details.read_files = vec!["a\u{7f}.go".into()]),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "C1 control path",
-                Box::new(|checkpoint| checkpoint.details.read_files = vec!["a\u{85}.go".into()]),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "unclean path",
-                Box::new(|checkpoint| {
-                    checkpoint.details.read_files = vec!["dir/../file.go".into()]
-                }),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "duplicate read path",
-                Box::new(|checkpoint| {
-                    checkpoint.details.read_files = vec!["dup.go".into(), "dup.go".into()];
-                }),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "duplicate modified path",
-                Box::new(|checkpoint| {
-                    checkpoint.details.modified_files = vec!["dup.go".into(), "dup.go".into()];
-                }),
-                PiErrorKind::Invalid,
-            ),
-            (
-                "read and modified overlap",
-                Box::new(|checkpoint| {
-                    checkpoint.details.read_files = vec!["both.go".into()];
-                    checkpoint.details.modified_files = vec!["both.go".into()];
-                }),
-                PiErrorKind::Invalid,
-            ),
-        ];
-
-        for (name, mutate, kind) in cases {
-            let mut checkpoint = valid_checkpoint();
-            mutate(&mut checkpoint);
-            let error = validate_compaction_checkpoint(&checkpoint)
-                .expect_err(&format!("{name}: expected rejection"));
-            assert_eq!(error.kind(), kind, "{name}: kind");
-        }
-    }
-
-    #[test]
-    fn validate_compaction_checkpoint_accepts_exact_bounds() {
-        let mut checkpoint = valid_checkpoint();
-        checkpoint.summary = "s".repeat(COMPACTION_SUMMARY_MAXIMUM_BYTES);
-        let mut read_files: Vec<String> = (0..COMPACTION_DETAILS_MAXIMUM_PATHS)
-            .map(|index| format!("path-{index:04}"))
-            .collect();
-        let total: usize = read_files.iter().map(String::len).sum();
-        let last = read_files.len() - 1;
-        read_files[last].push_str(&"x".repeat(COMPACTION_DETAILS_MAXIMUM_BYTES - total));
-        checkpoint.details.read_files = read_files;
-        checkpoint.usage = Some(Usage::default());
-        validate_compaction_checkpoint(&checkpoint).expect("exact bounds must be accepted");
-    }
-
-    #[test]
-    fn decode_compaction_details_is_lenient() {
-        let cases = [
-            r#"{"readFiles":["first.go"],"readFiles":["second.go"]}"#,
-            "[]",
-            r#"{"readFiles":"README.md"}"#,
-            r#"{"readFiles":["README.md",1]}"#,
-            r#"{"modifiedFiles":{}}"#,
-            r#"{"omittedReadFiles":"1"}"#,
-            r#"{"omittedModifiedFiles":9223372036854775808}"#,
-        ];
-        for case in cases {
-            let raw = RawValue::from_string(case.to_string()).expect("fixture must be JSON");
-            assert_eq!(
-                decode_compaction_details(Some(&raw)),
-                CompactionDetails::default(),
-                "{case}",
-            );
-        }
-        assert_eq!(
-            decode_compaction_details(None),
-            CompactionDetails::default(),
-        );
-    }
-
-    #[test]
-    fn decode_compaction_details_sanitizes_paths() {
-        let raw = RawValue::from_string(
-            serde_json::json!({
-                "readFiles": ["z.go", "a.go", "a.go", "dup.go", "", "bad\u{0}.go",
-                              "del\u{7f}.go", "c1\u{85}.go", "dir/../unclean.go",
-                              "./unclean.go", "both.go"],
-                "modifiedFiles": ["m.go", "both.go", "m.go"],
-                "omittedReadFiles": 2,
-                "omittedModifiedFiles": 3,
-                "unknown": {"nested": true},
-            })
-            .to_string(),
-        )
-        .expect("fixture must be JSON");
-        assert_eq!(
-            decode_compaction_details(Some(&raw)),
-            CompactionDetails {
-                read_files: vec!["a.go".into(), "dup.go".into(), "z.go".into()],
-                modified_files: vec!["both.go".into(), "m.go".into()],
-                omitted_read_files: 2,
-                omitted_modified_files: 3,
-            },
-        );
-    }
-
-    #[test]
-    fn decode_compaction_details_bounds_oversized_metadata() {
-        let modified: Vec<String> = (0..1_100)
-            .map(|index| fixed_width_path("m", index))
-            .collect();
-        let read: Vec<String> = (0..20).map(|index| fixed_width_path("r", index)).collect();
-        let raw = RawValue::from_string(
-            serde_json::json!({
-                "readFiles": read,
-                "modifiedFiles": modified,
-                "omittedReadFiles": i64::MAX - 10,
-                "omittedModifiedFiles": i64::MAX - 50,
-            })
-            .to_string(),
-        )
-        .expect("fixture must be JSON");
-        let details = decode_compaction_details(Some(&raw));
-        assert_eq!(
-            details.modified_files.len(),
-            COMPACTION_DETAILS_MAXIMUM_PATHS
-        );
-        assert!(details.read_files.is_empty());
-        let bytes: usize = details
-            .modified_files
-            .iter()
-            .chain(&details.read_files)
-            .map(String::len)
-            .sum();
-        assert_eq!(bytes, COMPACTION_DETAILS_MAXIMUM_BYTES);
-        assert_eq!(details.omitted_read_files, i64::MAX);
-        assert_eq!(details.omitted_modified_files, i64::MAX);
-        let mut sorted = details.modified_files.clone();
-        sorted.sort();
-        assert_eq!(details.modified_files, sorted);
-    }
-
-    #[test]
-    fn clean_path_matches_go_filepath_clean() {
-        for (input, want) in [
-            ("", "."),
-            (".", "."),
-            ("a/b", "a/b"),
-            ("a//b", "a/b"),
-            ("a/./b", "a/b"),
-            ("a/../b", "b"),
-            ("../a", "../a"),
-            ("/../a", "/a"),
-            ("a/b/../..", "."),
-            ("./unclean.go", "unclean.go"),
-            ("/a/b/", "/a/b"),
-        ] {
-            assert_eq!(clean_path(input), want, "{input}");
-        }
-    }
-
-    #[test]
-    fn safe_context_token_count_floors_at_zero() {
-        assert_eq!(safe_context_token_count(-5), 0);
-        assert_eq!(safe_context_token_count(7), 7);
-    }
-
-    #[test]
-    fn compaction_usage_to_pi_keeps_absent_usage_absent() {
-        assert_eq!(compaction_usage_to_pi(None).unwrap(), None);
-        let usage = Usage::default();
-        assert_eq!(
-            compaction_usage_to_pi(Some(&usage)).unwrap(),
-            Some(PiUsage::default()),
-        );
-    }
-}
+mod tests;

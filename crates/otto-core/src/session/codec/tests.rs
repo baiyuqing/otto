@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::pi::PiHeader;
 
-/// The six checked-in Pi v3 fixtures, embedded so the decoder tests run on
+/// The seven checked-in Pi v3 fixtures, embedded so the decoder tests run on
 /// every target including wasm32.
 pub(crate) const FIXTURES: &[(&str, &[u8])] = &[
     (
@@ -19,6 +19,10 @@ pub(crate) const FIXTURES: &[(&str, &[u8])] = &[
     (
         "linear.jsonl",
         include_bytes!("../../../../../testdata/session/pi-v3/linear.jsonl"),
+    ),
+    (
+        "memory-recall.jsonl",
+        include_bytes!("../../../../../testdata/session/pi-v3/memory-recall.jsonl"),
     ),
     (
         "tree.jsonl",
@@ -589,7 +593,7 @@ fn pi_v3_fixtures_are_exact_lf_delimited_json() {
         .filter(|name| name.ends_with(".jsonl"))
         .collect();
     names.sort();
-    assert_eq!(names.len(), 6, "fixture count");
+    assert_eq!(names.len(), 7, "fixture count");
     assert_eq!(
         names,
         FIXTURES

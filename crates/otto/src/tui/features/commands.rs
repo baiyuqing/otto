@@ -277,6 +277,9 @@ fn help_text(entries: &[Entry]) -> String {
         let section = sections.last_mut().expect("heading pushed above");
         section.push_str(&format!("\n{}  {}", entry.name, entry.description));
     }
+    #[cfg(unix)]
+    sections
+        .push("Terminal\nCtrl+Z  suspend Otto; fg resumes this session and unsent input".into());
     sections.join("\n\n")
 }
 fn init(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {

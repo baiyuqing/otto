@@ -7,7 +7,8 @@ use std::collections::BTreeSet;
 
 use super::memory::{RecordLifecycle, RecordStatus, render_memory_context};
 use super::memory_retraction::{
-    memory_request_text, render_retraction_notices, select_retraction_notices,
+    SummaryNotice, memory_request_text, render_retraction_block, select_retraction_notices,
+    select_summary_notices,
 };
 use super::overflow::RunDispatchState;
 use super::{Agent, Event, EventSink};
@@ -22,6 +23,32 @@ fn status_of<'a>(lifecycle: &'a [RecordLifecycle], id: &str) -> Option<&'a Recor
         .iter()
         .find(|entry| entry.id == id)
         .map(|entry| &entry.status)
+}
+
+/// The warning for an affected compaction summary: which checkpoint, which
+/// records or the unknown coverage, and the recovery paths. Ids only.
+fn summary_warning(notices: &[SummaryNotice]) -> String {
+    let checkpoint = notices
+        .first()
+        .map(|notice| notice.checkpoint_id.as_str())
+        .unwrap_or_default();
+    let records: Vec<&str> = notices
+        .iter()
+        .filter_map(|notice| notice.record.as_ref().map(|(id, _)| id.as_str()))
+        .collect();
+    let cause = if records.is_empty() {
+        "has unknown memory coverage, so statements derived from retired records cannot be traced"
+            .to_owned()
+    } else {
+        format!(
+            "was written from turns that used memory records now retired ({})",
+            records.join(", ")
+        )
+    };
+    format!(
+        "compaction summary {checkpoint} {cause}; /compact rebuilds it with the retractions \
+         applied, or start a new session"
+    )
 }
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
@@ -69,9 +96,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         state.memory_context = self.redactor.redact_string(&render_memory_context(&active));
         state.memory_record_ids = active.iter().map(|record| record.id.clone()).collect();
         let notices = select_retraction_notices(&referenced, &lifecycle);
+        let latest = self.session.latest_compaction();
+        let summary_notices = select_summary_notices(
+            latest.as_ref(),
+            self.session.remote_compaction().is_some(),
+            &lifecycle,
+            &notices,
+        );
+        if !summary_notices.is_empty() && !state.summary_warning_sent {
+            state.summary_warning_sent = true;
+            emit(Event::MemoryWarning {
+                message: summary_warning(&summary_notices),
+            });
+        }
         state.retraction_context = self
             .redactor
-            .redact_string(&render_retraction_notices(&notices));
+            .redact_string(&render_retraction_block(&notices, &summary_notices));
         *self
             .last_memory_context
             .lock()

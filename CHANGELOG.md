@@ -7,6 +7,23 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Security
+
+- Custom provider endpoints now fail closed until their exact origin is explicitly
+  trusted in user or managed configuration; existing custom endpoints require this
+  review after upgrading. Plain HTTP needs a separate acknowledgement. Provider
+  requests reject redirects and metadata/link-local destinations, validate DNS
+  answers, and ignore environment/system proxies. Restart all Otto processes after
+  upgrading. Trust grants are not a certification that a service is benign; review
+  the [endpoint trust and recovery guidance](docs/manual/getting-started.md).
+  Embedders must use validated endpoint capabilities for custom origins; injected
+  HTTP clients are no longer accepted.
+- SQLite operations reject stacked statements before touching the live connection,
+  while values remain parameter-bound. Legacy storage imports and approval backups
+  reconstruct recognized canonical schemas rather than executing source schema SQL.
+  Noncanonical legacy databases are rejected without publishing an imported
+  destination; see [storage migration](docs/manual/memory-and-extensions.md).
+
 ### Server
 
 - `otto serve` can start before a model is configured so first-run clients can

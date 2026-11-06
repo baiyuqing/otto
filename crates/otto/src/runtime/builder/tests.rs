@@ -156,6 +156,15 @@ fn runtime() -> Runtime {
         provider_name: "default".to_string(),
         provider_type: "openai-compatible".to_string(),
         base_url: "https://gw.example.com/v1".to_string(),
+        endpoint: Some(
+            otto_core::config::endpoint::TrustedEndpoint::authorize(
+                "https://gw.example.com/v1",
+                "openai-compatible",
+                &["https://gw.example.com".into()],
+                &[],
+            )
+            .unwrap(),
+        ),
         model: "gpt-test".to_string(),
         api_key: "sk-secret-value".to_string(),
         api_key_env: "OTTO_API_KEY".to_string(),

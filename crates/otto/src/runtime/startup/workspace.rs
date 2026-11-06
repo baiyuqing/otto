@@ -1,5 +1,8 @@
 //! Configuration loading, storage and workspace preparation phases.
 
+#[cfg(test)]
+mod tests;
+
 use super::*;
 
 /// Builds a `Builder` for a workspace admitted after startup: `serve.rs`'s
@@ -202,13 +205,63 @@ pub struct Configured {
 
 /// Prints the configuration diagnostics to `stderr`, builds the configuration
 /// environment, completes the redaction boundary and captures the ChatGPT
-/// credentials. Infallible.
+/// credentials, after checking the active endpoint without credential lookup.
 pub fn configure(
     loaded: &mut Loaded,
     host_entries: &[Vec<u8>],
     lookup: &EnvironmentLookup,
+    overrides: &Overrides,
     stderr: &mut (dyn Write + Send),
-) -> Configured {
+) -> Result<Configured, String> {
+    configure_with_readers(
+        loaded,
+        host_entries,
+        lookup,
+        overrides,
+        stderr,
+        config_environment,
+        capture_auth_credentials,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_with_readers(
+    loaded: &mut Loaded,
+    host_entries: &[Vec<u8>],
+    lookup: &EnvironmentLookup,
+    overrides: &Overrides,
+    stderr: &mut (dyn Write + Send),
+    read_environment: impl FnOnce(&File, &EnvironmentLookup) -> HashMap<String, String>,
+    read_auth: impl FnOnce(&Path) -> CapturedAuth,
+) -> Result<Configured, String> {
+    // These are selection inputs, not provider credential bindings. Do not build
+    // the configuration environment or capture auth even for redaction until
+    // the active endpoint is authorized. Session history does not select it.
+    let selection = ["OTTO_MODEL", "OTTO_PROVIDER", "OTTO_PROFILE"]
+        .into_iter()
+        .filter_map(|name| {
+            lookup
+                .get(name)
+                .map(|value| (name.to_string(), value.clone()))
+        })
+        .collect();
+    if let Err(error) = otto_core::config::resolve::resolve_without_credentials(
+        &loaded.config,
+        &selection,
+        &Default::default(),
+        overrides,
+    ) {
+        // No selection is valid for server first-run configuration. Other
+        // frontends retain their existing actionable missing-model error.
+        if !error.to_string().starts_with("missing model:") {
+            // Config/selection text may itself contain arbitrary secrets. The
+            // configured redactor is deliberately not available yet.
+            return Err(concat!(
+                "startup model configuration rejected before credential lookup; ",
+                "check the selected model and endpoint origin grants in user or managed configuration"
+            ).to_string());
+        }
+    }
     let config_file = &loaded.config;
     let home = &loaded.home;
     let startup = &mut loaded.boundary;
@@ -219,7 +272,7 @@ pub fn configure(
             diagnostic.key, diagnostic.source, diagnostic.reason
         );
     }
-    let mut environment = config_environment(config_file, lookup);
+    let mut environment = read_environment(config_file, lookup);
     environment.insert("HOME".to_string(), home.clone());
 
     let configured_snapshot = environment_snapshot(
@@ -235,15 +288,15 @@ pub fn configure(
     startup.sandbox_secrets = merged;
     startup.complete =
         startup.complete && configured_snapshot.redactions_complete() && merged_complete;
-    let captured_auth = capture_auth_credentials(&crate::auth::path_for_home(Path::new(home)));
+    let captured_auth = read_auth(&crate::auth::path_for_home(Path::new(home)));
     let (merged, merged_complete) =
         merge_redactions(&startup.sandbox_secrets, &captured_auth.redaction_values);
     startup.sandbox_secrets = merged;
     startup.complete = startup.complete && captured_auth.complete && merged_complete;
-    Configured {
+    Ok(Configured {
         environment,
         auth: captured_auth,
-    }
+    })
 }
 
 /// The canonical workspace directory. The error is already redacted.

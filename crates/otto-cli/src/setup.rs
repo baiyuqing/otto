@@ -290,7 +290,7 @@ mod tests {
         .unwrap();
         assert_eq!(runtime.provider_type, "claude");
         assert_eq!(runtime.model, "fixture-claude");
-        assert_eq!(runtime.base_url, "https://api.anthropic.com/");
+        assert_eq!(runtime.base_url, "https://api.anthropic.com");
     }
 
     #[test]
@@ -329,7 +329,7 @@ mod tests {
     fn scripted_save_confirms_after_preview_without_child_model_prompt() {
         for text in [
             "\nparent\nsave\n",
-            "openai-compatible\nparent\nhttps://api.example/v1\nWORK_KEY\nsave\n",
+            "openai-compatible\nparent\nhttps://api.openai.com/v1\nWORK_KEY\nsave\n",
         ] {
             let home = tempfile::tempdir().unwrap();
             let mut input = Cursor::new(text.as_bytes());
@@ -368,7 +368,7 @@ mod tests {
     fn creates_an_openai_compatible_provider_and_model() {
         let home = tempfile::tempdir().unwrap();
         let mut input = Cursor::new(
-            b"openai-compatible\ncheap-model\nhttps://api.example/v1\nWORK_KEY\nsave\n".to_vec(),
+            b"openai-compatible\ncheap-model\nhttps://api.openai.com/v1\nWORK_KEY\nsave\n".to_vec(),
         );
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -391,7 +391,7 @@ mod tests {
         assert!(config.contains("api_key_env = \"WORK_KEY\""), "{config}");
         assert!(!config.contains("subagent_models"), "{config}");
         assert!(
-            config.contains("base_url = \"https://api.example/v1\""),
+            config.contains("base_url = \"https://api.openai.com/v1\""),
             "{config}"
         );
     }
@@ -458,5 +458,28 @@ mod tests {
         );
         assert!(!home.path().join(".config/otto/config.toml").exists());
         assert!(String::from_utf8_lossy(&stdout).contains("Cancelled"));
+    }
+    #[test]
+    fn endpoint_setup_rejects_custom_url_without_creating_config() {
+        let home = tempfile::tempdir().unwrap();
+        let mut input = Cursor::new(
+            b"openai-compatible\nfixture-model\nhttps://custom.example/v1\nFIXTURE_KEY\nsave\n"
+                .to_vec(),
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_ne!(
+            run(
+                &[],
+                &mut input,
+                &mut stdout,
+                &mut stderr,
+                &lookup(home.path())
+            ),
+            0
+        );
+        let error = String::from_utf8(stderr).unwrap();
+        assert!(error.contains("trusted_origins"), "{error}");
+        assert!(!home.path().join(".config/otto/config.toml").exists());
     }
 }

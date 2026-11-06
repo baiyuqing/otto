@@ -11,7 +11,7 @@ async fn catalog_uses_subscription_auth_and_official_models_shape() {
         ))
     })
     .await;
-    let client = Client::with_base_url(
+    let client = trusted_test_client(
         &server.url,
         static_tokens("catalog-access-secret"),
         "catalog-account-secret",
@@ -40,7 +40,7 @@ async fn catalog_cache_survives_client_restart_and_rejects_stale_or_other_accoun
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cache/models.json");
     let client = |account: &str| {
-        Client::with_base_url(&server.url, static_tokens("access"), account)
+        trusted_test_client(&server.url, static_tokens("access"), account)
             .with_catalog_cache(path.clone())
     };
     assert_eq!(
@@ -81,7 +81,7 @@ async fn empty_catalog_is_not_persisted_and_rejection_invalidates_cache() {
     let empty = testserver::spawn(|_| testserver::json_response(r#"{"models":[]}"#)).await;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cache/models.json");
-    let client = Client::with_base_url(&empty.url, static_tokens("access"), "account")
+    let client = trusted_test_client(&empty.url, static_tokens("access"), "account")
         .with_catalog_cache(path.clone());
     client.catalog(&CancellationToken::new()).await.unwrap();
     client.catalog(&CancellationToken::new()).await.unwrap();
@@ -96,7 +96,7 @@ async fn empty_catalog_is_not_persisted_and_rejection_invalidates_cache() {
         }
     })
     .await;
-    let client = Client::with_base_url(&server.url, static_tokens("access"), "account")
+    let client = trusted_test_client(&server.url, static_tokens("access"), "account")
         .with_catalog_cache(path.clone());
     client.catalog(&CancellationToken::new()).await.unwrap();
     assert!(path.exists());
@@ -108,7 +108,7 @@ async fn empty_catalog_is_not_persisted_and_rejection_invalidates_cache() {
 
 #[tokio::test]
 async fn catalog_missing_auth_and_pre_cancel_are_safe() {
-    let client = Client::with_base_url("http://127.0.0.1:1", static_tokens(""), "acct");
+    let client = trusted_test_client("http://127.0.0.1:1", static_tokens(""), "acct");
     assert!(
         client
             .catalog(&CancellationToken::new())

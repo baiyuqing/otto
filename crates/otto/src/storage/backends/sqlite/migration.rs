@@ -1,4 +1,5 @@
 //! Native isolated SQL staging. Domain codecs export logical records, never SQL dumps.
+pub mod legacy;
 pub mod memory_advice;
 mod named;
 pub mod schedule;

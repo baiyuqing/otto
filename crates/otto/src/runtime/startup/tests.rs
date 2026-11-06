@@ -16,8 +16,8 @@ async fn start_honors_the_disabled_components() {
 default_profile = "alpha"
 
 [profiles.alpha]
-provider = "openai-compatible"
-base_url = "https://example.com/v1"
+provider = "claude"
+base_url = "https://api.anthropic.com"
 model = "gpt-test"
 api_key_env = "ALPHA_KEY"
 

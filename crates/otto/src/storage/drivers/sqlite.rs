@@ -20,6 +20,9 @@ use std::time::Duration;
 mod row_stream;
 #[cfg(test)]
 mod row_stream_tests;
+mod statement_boundary;
+#[cfg(test)]
+mod statement_boundary_tests;
 
 /// SQLITE_BUSY_SNAPSHOT, SQLITE_CONSTRAINT_PRIMARYKEY and SQLITE_CONSTRAINT_UNIQUE.
 const BUSY_SNAPSHOT: i32 = 517;
@@ -163,6 +166,8 @@ impl SqlConnection for SqliteConnection {
         self.guard()?.execute_batch(sql).map_err(map_error)
     }
     fn execute(&self, sql: &str, params: Params) -> Result<usize> {
+        check(&self.state.poisoned)?;
+        statement_boundary::validate(sql)?;
         let connection = self.guard()?;
         let mut statement = connection.prepare_cached(sql).map_err(map_error)?;
         statement
@@ -170,8 +175,12 @@ impl SqlConnection for SqliteConnection {
             .map_err(map_error)
     }
     fn prepare(&self, sql: &str) -> Result<Box<dyn SqlStatement>> {
-        // Compile once now so syntax errors surface at prepare time.
-        drop(self.guard()?.prepare_cached(sql).map_err(map_error)?);
+        check(&self.state.poisoned)?;
+        statement_boundary::validate(sql)?;
+        // Compile once now so syntax errors surface at prepare time, but only
+        // after scratch validation has rejected scripts without live effects.
+        let connection = self.guard()?;
+        connection.prepare(sql).map_err(map_error)?;
         Ok(Box::new(SqliteStatement {
             state: self.state.clone(),
             sql: sql.to_string(),

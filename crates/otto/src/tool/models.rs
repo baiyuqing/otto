@@ -180,7 +180,20 @@ mod tests {
     }
 
     fn tool(base_url: &str) -> ListModelsTool {
-        ListModelsTool::new(Arc::new(Client::new(base_url, "key")), MAX_OUTPUT_BYTES)
+        let client = if let Ok(url) = url::Url::parse(base_url) {
+            let origin = url.origin().ascii_serialization();
+            let endpoint = otto_core::config::endpoint::TrustedEndpoint::authorize(
+                base_url,
+                "openai-compatible",
+                &[origin.clone()],
+                &[origin],
+            )
+            .unwrap();
+            Client::new_trusted(&endpoint, "key")
+        } else {
+            Client::new(base_url, "key")
+        };
+        ListModelsTool::new(Arc::new(client), MAX_OUTPUT_BYTES)
     }
 
     #[tokio::test]
@@ -218,8 +231,19 @@ mod tests {
             std::path::PathBuf::from("/nonexistent/catalog-credentials.json"),
             CancellationToken::new(),
         );
+        let origin = url::Url::parse(&base_url)
+            .unwrap()
+            .origin()
+            .ascii_serialization();
+        let endpoint = otto_core::config::endpoint::TrustedEndpoint::authorize(
+            &base_url,
+            "chatgpt",
+            &[origin.clone()],
+            &[origin],
+        )
+        .unwrap();
         let client =
-            crate::provider::chatgpt::Client::with_base_url(&base_url, tokens, "fixture-account");
+            crate::provider::chatgpt::Client::new_trusted(&endpoint, tokens, "fixture-account");
         let result = run(
             &ListModelsTool::chatgpt(Arc::new(client), MAX_OUTPUT_BYTES),
             "{}",

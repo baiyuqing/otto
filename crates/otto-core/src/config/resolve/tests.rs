@@ -28,6 +28,7 @@ fn file_with_profiles(default_profile: &str, profiles: &[(&str, LegacyProfile)])
         ..Default::default()
     };
     convert_legacy_profiles(&mut file).expect("convert");
+    grant_fixture_endpoints(&mut file);
     file
 }
 
@@ -232,7 +233,7 @@ fn claude_defaults_and_workspace_credentials_are_environment_only() {
         &Overrides::default(),
     )
     .unwrap();
-    assert_eq!(runtime.base_url, "https://api.anthropic.com/");
+    assert_eq!(runtime.base_url, "https://api.anthropic.com");
     assert_eq!(runtime.api_key_env, "ANTHROPIC_API_KEY");
     assert_eq!(runtime.api_version, "2026-10-21");
     assert_eq!(runtime.workspace_id, "fixture-workspace");
@@ -292,4 +293,18 @@ fn claude_default_connection_keeps_subagent_models_and_checks_workspace_binding(
     changed.subagent_models.clear();
     changed.workspace_id_env = "OTHER_WORKSPACE".into();
     assert!(subagent_model_diagnostic(&file, &changed).is_some());
+}
+
+// Existing resolver behavior fixtures have explicit test-authority grants.
+// Security policy tests call the production resolver directly in endpoint_tests.
+fn grant_fixture_endpoints(file: &mut File) {
+    for entry in file.providers.values_mut() {
+        if let Ok(url) = url::Url::parse(&entry.base_url) {
+            entry
+                .trusted_origins
+                .push(url.origin().ascii_serialization());
+        }
+        entry.trusted_origins.push("https://changed.example".into());
+        entry.trusted_origins.push("https://other.example".into());
+    }
 }

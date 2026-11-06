@@ -39,8 +39,6 @@ use otto_core::provider::{
     StreamSink,
 };
 
-use crate::gourl::{self, Encoding};
-
 mod attempt;
 
 /// Longest wait for the TCP connect and TLS handshake of one attempt.
@@ -59,7 +57,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// deltas) on a 2xx body. Keepalive bytes and SSE comments do not reset it.
 const MODEL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Largest number of redirect hops followed before the policy stops.
-const MAX_REDIRECTS: usize = 3;
 /// The text an API key is replaced with when it is long enough to hold it.
 const REDACTED: &str = "[REDACTED]";
 /// Largest `GET /models` body read. A larger catalog is an error rather than
@@ -164,7 +161,14 @@ impl Client {
     /// [`Provider::complete`] call.
     pub fn new(base_url: &str, api_key: &str, api_version: &str, workspace_id: &str) -> Self {
         let state = match default_http_client() {
-            Ok(http) => Self::ready(base_url, http),
+            Ok(http) => otto_core::config::endpoint::TrustedEndpoint::authorize(
+                base_url,
+                "claude",
+                &[],
+                &[],
+            )
+            .map_err(str::to_string)
+            .and_then(|endpoint| Self::ready(endpoint.base_url(), http)),
             Err(error) => Err(format!("build Claude HTTP client: {error}")),
         };
         Self {
@@ -176,11 +180,8 @@ impl Client {
         }
     }
 
-    /// Builds a client on a caller-supplied [`reqwest::Client`].
-    ///
-    /// The caller owns the timeouts and the redirect policy of `http`; nothing
-    /// in [`default_http_client`] is reapplied. Base-URL validation is
-    /// unchanged.
+    /// Fails closed: opaque caller HTTP clients cannot prove redirect safety.
+    /// Migrate to `new_trusted` with an authorized endpoint and owned transport.
     pub fn with_http_client(
         base_url: &str,
         api_key: &str,
@@ -192,9 +193,30 @@ impl Client {
             api_key: api_key.to_string(),
             api_version: api_version.to_string(),
             workspace_id: workspace_id.to_string(),
-            state: Self::ready(base_url, http),
+            state: {
+                let _ = (base_url, http);
+                Err("injected HTTP clients cannot establish redirect safety; use new or new_trusted".into())
+            },
             model_idle_timeout: MODEL_IDLE_TIMEOUT,
         }
+    }
+
+    /// Uses an independently authorized endpoint and an owned no-redirect client.
+    pub fn new_trusted(
+        endpoint: &otto_core::config::endpoint::TrustedEndpoint,
+        api_key: &str,
+        api_version: &str,
+        workspace_id: &str,
+    ) -> Self {
+        let mut client = Self::new(endpoint.base_url(), api_key, api_version, workspace_id);
+        client.state = if endpoint.provider_type() != "claude" {
+            Err("endpoint capability has wrong provider type".into())
+        } else {
+            default_http_client()
+                .map_err(|error| error.to_string())
+                .and_then(|http| Self::ready(endpoint.base_url(), http))
+        };
+        client
     }
 
     /// Overrides the model-output idle bound; tests use a short one.
@@ -650,37 +672,15 @@ fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     text
 }
 
-/// The hardened client used when the caller supplies none.
-///
-/// A default [`reqwest::Client`] has no connect timeout and follows up to ten
-/// redirects anywhere, so a stalled or hostile endpoint could hold a request
-/// open or bounce authentication headers to another origin. There is
-/// deliberately no overall request timeout: a streaming completion may run for
-/// minutes and is bounded by the caller's cancellation token instead.
-///
-/// reqwest exposes no cap on the size of a response header block, so none is
-/// enforced here. reqwest exposes no cap on the size of a response header
-/// block.
+/// Owned transport: bounded connect/read time and no redirects, including
+/// same-origin redirects. Streaming remains bounded by operation control.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    crate::tls_provider::http_client_builder()
+    super::endpoint_dns::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_keepalive(KEEPALIVE)
         .read_timeout(READ_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let previous = attempt.previous();
-            if previous.len() >= MAX_REDIRECTS {
-                return attempt.error(format!("stopped after {MAX_REDIRECTS} redirects"));
-            }
-            if let Some(last) = previous.last() {
-                let next = attempt.url();
-                let changed_origin = next.scheme() != last.scheme()
-                    || next.host_str() != last.host_str()
-                    || next.port_or_known_default() != last.port_or_known_default();
-                if changed_origin {
-                    return attempt.error("redirect to a different origin is blocked");
-                }
-            }
-            attempt.follow()
+            attempt.error("provider redirects are disabled")
         }))
         .build()
 }
@@ -694,33 +694,7 @@ fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
 ///
 /// This is a pure function over borrowed input with no shared state.
 fn normalize_base_url(base_url: &str) -> Option<String> {
-    let raw = base_url.as_bytes();
-    // The fragment is split off first, then the query, so a bare `?` with
-    // nothing after it is exactly "a `?` before the `#`".
-    let before_fragment = match raw.iter().position(|&byte| byte == b'#') {
-        Some(hash) => &raw[..hash],
-        None => raw,
-    };
-    let parsed = gourl::parse(raw).ok()?;
-    if (parsed.scheme != b"http" && parsed.scheme != b"https")
-        || parsed.host.is_empty()
-        || parsed.user.is_some()
-        || !parsed.raw_query.is_empty()
-        || before_fragment.contains(&b'?')
-        || !parsed.fragment.is_empty()
-    {
-        return None;
-    }
-    let mut path = gourl::escape(&parsed.path, Encoding::Path);
-    if path.last() == Some(&b'/') {
-        path.pop();
-    }
-    let host = gourl::escape(&parsed.host, Encoding::Host);
-    let mut url = String::from_utf8(parsed.scheme).ok()?;
-    url.push_str("://");
-    url.push_str(&String::from_utf8(host).ok()?);
-    url.push_str(&String::from_utf8(path).ok()?);
-    Some(url)
+    otto_core::config::endpoint::normalize_base_url(base_url).ok()
 }
 
 #[cfg(test)]

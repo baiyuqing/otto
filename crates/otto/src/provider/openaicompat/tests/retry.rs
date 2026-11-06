@@ -8,7 +8,7 @@ async fn a_deadline_stopped_call_reports_deadline_exceeded() {
         http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
     })
     .await;
-    let client = Client::new(&server.url, "key");
+    let client = trusted_test_client(&server.url, "key");
     let mut emit = |_: StreamEvent| panic!("no event is emitted after deadline");
     let settlement = client
         .complete(&model_request(), &mut emit, &StoppedControl::deadline())
@@ -55,7 +55,7 @@ async fn http_429_and_503_with_retry_after_zero_are_retried_once_and_succeed() {
             }
         })
         .await;
-        let client = Client::new(&server.url, "key");
+        let client = trusted_test_client(&server.url, "key");
         let mut events = Vec::new();
         let settlement = client
             .complete(
@@ -94,7 +94,7 @@ async fn http_500_502_and_504_are_terminal_after_one_request() {
         })
         .await;
 
-        let client = Client::new(&server.url, "key");
+        let client = trusted_test_client(&server.url, "key");
         let mut events = Vec::new();
         let mut emit = |event| events.push(event);
         let statuses = Statuses::default();
@@ -128,7 +128,7 @@ async fn repeated_http_429_stops_after_four_requests_as_completed() {
         http_response(429, &[("Retry-After", "0")], "slow down")
     })
     .await;
-    let client = Client::new(&server.url, "key");
+    let client = trusted_test_client(&server.url, "key");
     let mut events = Vec::new();
     let settlement = client
         .complete(
@@ -168,7 +168,7 @@ async fn http_503_with_an_overflow_shaped_body_is_retried_as_a_plain_error() {
         )
     })
     .await;
-    let client = Client::new(&server.url, "key");
+    let client = trusted_test_client(&server.url, "key");
     let settlement = client
         .complete(&model_request(), &mut |_| {}, &CancellationToken::new())
         .await;
@@ -192,7 +192,7 @@ async fn http_400_with_an_overflow_body_is_not_retried() {
         )
     })
     .await;
-    let client = Client::new(&server.url, "key");
+    let client = trusted_test_client(&server.url, "key");
     let settlement = client
         .complete(&model_request(), &mut |_| {}, &CancellationToken::new())
         .await;
@@ -207,7 +207,7 @@ async fn http_400_with_an_overflow_body_is_not_retried() {
 /// the backoff.
 #[tokio::test(start_paused = true)]
 async fn a_refused_connection_is_retried_three_times_and_not_started() {
-    let client = Client::new("http://127.0.0.1:1", "key");
+    let client = trusted_test_client("http://127.0.0.1:1", "key");
     let mut events = Vec::new();
     let settlement = client
         .complete(
@@ -247,7 +247,7 @@ async fn a_connection_retry_recovers_once_the_endpoint_listens() {
             r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
         ])],
     );
-    let client = Client::new(&server.url, "key");
+    let client = trusted_test_client(&server.url, "key");
     let mut retries = 0;
     let settlement = client
         .complete(
@@ -282,7 +282,7 @@ async fn a_connection_closed_before_the_response_is_retried() {
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
@@ -307,7 +307,7 @@ async fn a_stream_cut_before_any_delta_is_retried() {
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
@@ -332,7 +332,7 @@ async fn a_repeated_stream_cut_stops_as_transport_lost() {
 
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &CancellationToken::new())
         .await;
     assert_eq!(settlement.attempts, 4);
@@ -375,7 +375,7 @@ async fn a_stream_cut_without_retry_budget_is_not_retried() {
     };
     let mut events = Vec::new();
     let mut emit = |event| events.push(event);
-    let settlement = Client::new(&server.url, "key")
+    let settlement = trusted_test_client(&server.url, "key")
         .complete(&model_request(), &mut emit, &control)
         .await;
     assert_eq!(settlement.attempts, 1);

@@ -750,4 +750,6 @@ mod memory_requests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
+mod proposal_tests;
+#[cfg(test)]
 mod tests;

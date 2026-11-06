@@ -464,6 +464,11 @@ fn list(input: ListInput<'_>) -> i32 {
         cursor: cursor.to_string(),
         now: chrono::Utc::now(),
         include_expired: true,
+        states: Vec::new(),
+        updated_after: None,
+        verified_after: None,
+        unverified_only: false,
+        review_due_only: false,
     });
     let _ = service.close();
     match result {

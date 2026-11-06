@@ -323,6 +323,49 @@ pub fn validate_record_ref(reference: &RecordRef) -> Result<()> {
     Ok(())
 }
 
+/// A state change names the current revision; `Superseded` needs a
+/// replacement id other than the record itself, every other state none.
+pub fn validate_set_state_request(request: &SetStateRequest) -> Result<()> {
+    validate_record_ref(&request.reference)?;
+    if !valid_revision(request.expected_revision) {
+        return Err(invalid_request("expected revision"));
+    }
+    match request.state {
+        RecordState::Superseded => {
+            if !valid_opaque_id(&request.superseded_by, MAX_ID_BYTES)
+                || request.superseded_by == request.reference.id
+            {
+                return Err(invalid_request("replacement record ID"));
+            }
+        }
+        _ => {
+            if !request.superseded_by.is_empty() {
+                return Err(invalid_request(
+                    "replacement record ID is only valid for superseded",
+                ));
+            }
+        }
+    }
+    if !request.reason.is_empty() && !valid_semantic(&request.reason, MAX_STATE_REASON_BYTES, true)
+    {
+        return Err(invalid_request("state reason"));
+    }
+    Ok(())
+}
+
+/// A verification names the current revision and an optional next review
+/// deadline.
+pub fn validate_verify_request(request: &VerifyRequest) -> Result<()> {
+    validate_record_ref(&request.reference)?;
+    if !valid_revision(request.expected_revision) {
+        return Err(invalid_request("expected revision"));
+    }
+    if !valid_optional_timestamp(request.review_at) {
+        return Err(invalid_request("review time"));
+    }
+    Ok(())
+}
+
 /// A restore names an earlier revision and the current one the caller read;
 /// both are positive, and the restored revision precedes the current one.
 pub fn validate_restore_request(request: &RestoreRequest) -> Result<()> {

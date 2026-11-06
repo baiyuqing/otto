@@ -432,6 +432,11 @@ impl port::MemoryService for BuiltinAdapter {
                                 cursor,
                                 now: Utc::now(),
                                 include_expired: false,
+                                states: Vec::new(),
+                                updated_after: None,
+                                verified_after: None,
+                                unverified_only: false,
+                                review_due_only: false,
                             })
                             .map_err(domain_error)?;
                         result.items = page

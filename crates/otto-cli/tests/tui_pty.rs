@@ -32,8 +32,8 @@ use std::thread;
 
 mod binary_harness;
 use binary_harness::pty::{
-    Screen, raw_contains, spawn, wait_for_raw_bytes, wait_for_screen_text,
-    wait_for_screen_text_gone, wait_until,
+    Screen, raw_contains, wait_for_raw_bytes, wait_for_screen_text, wait_for_screen_text_gone,
+    wait_until,
 };
 use otto::fixtures::scripted_provider;
 
@@ -186,7 +186,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
         command.env("TMPDIR", tmpdir);
     }
-    let (mut master, mut child, shared) = spawn(command);
+    let (mut master, mut child, shared) = binary_harness::job_control::spawn(command);
 
     eprintln!("[tui_pty] waiting for startup marker {STARTUP_MARKER:?}");
     wait_for_screen_text(&shared, STARTUP_MARKER);
@@ -201,6 +201,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         !raw_contains(&shared, b"\x1b[?1003h"),
         "any-motion reporting would wake the event loop on every pointer move"
     );
+    binary_harness::job_control::suspend_resume(&mut master, &child, &shared, "local-draft");
     eprintln!("[tui_pty] saw startup marker; typing prompt");
 
     master
@@ -257,6 +258,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         .write_all(format!("{SECOND_PROMPT}\r").as_bytes())
         .expect("start the held turn");
     wait_for_screen_text(&shared, HELD_TEXT);
+    binary_harness::job_control::suspend_resume(&mut master, &child, &shared, "live-draft");
     wait_for_raw_bytes(&shared, BUSY_TITLE.as_bytes());
     master
         .write_all(b"/context\r")

@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 
 mod binary_harness;
 use binary_harness::pty::{
-    raw_contains, spawn, wait_for_raw_bytes, wait_for_screen_text, wait_for_screen_text_gone,
-    wait_until,
+    raw_contains, wait_for_raw_bytes, wait_for_screen_text, wait_for_screen_text_gone, wait_until,
 };
 use otto::fixtures::scripted_provider::{Script, serve, text_reply};
 
@@ -150,7 +149,7 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
         .arg(&socket)
         .arg("--cwd")
         .arg(workspace.path());
-    let (mut master, mut child, shared) = spawn(attach);
+    let (mut master, mut child, shared) = binary_harness::job_control::spawn(attach);
 
     wait_for_screen_text(&shared, "└");
     wait_for_raw_bytes(&shared, b"\x1b[?1049h");
@@ -163,12 +162,14 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
         .write_all(b"\x1b[19~")
         .expect("configured F8 observer key");
     wait_for_screen_text(&shared, "No sub-agents");
+    binary_harness::job_control::cycle(&mut master, &child, &shared, "No sub-agents");
     wait_for_screen_text_gone(&shared, "attach-draft");
     master
         .write_all(b"\x1b[19~")
         .expect("return to attached composer");
     wait_for_screen_text(&shared, "attach-draft");
     master.write_all(b"\x15").expect("clear test draft");
+    binary_harness::job_control::suspend_resume(&mut master, &child, &shared, "attached-unsent");
 
     // No local echo: the `user_message` frame from serve puts the prompt on
     // screen, followed by the streamed reply.

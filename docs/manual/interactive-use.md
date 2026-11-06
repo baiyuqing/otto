@@ -257,6 +257,13 @@ still running.
 | `Ctrl+A` / `Ctrl+E` | Move the cursor to the start or end of the current composer line |
 | `Esc` | Return or dismiss the active screen; at the composer, deliver queued guidance now, or cancel the active turn when nothing is queued |
 | `Ctrl+C` | Cancel the active turn; when idle, a second press within one second clears and quits |
+| `Ctrl+Z` (Unix) | Suspend the TUI and return the terminal to the shell; use `fg` to resume the same session and draft |
+
+On Unix terminals with shell job control, `Ctrl+Z` restores the terminal before
+suspending Otto. Run `fg` in that shell to resume and redraw the TUI, preserving
+the session and unsubmitted input. This pauses the local process; it does not
+start a detached background agent. With `--attach`, only the TUI client is
+suspended; the separate `otto serve` process and its session keep running.
 
 ### The TUI attached to `otto serve`
 

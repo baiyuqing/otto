@@ -195,6 +195,19 @@ impl Client {
         client
     }
 
+    /// Shortens socket reads in offline fault tests without accepting an injected client.
+    /// Existing endpoint authorization errors and the owned redirect policy are preserved.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_test_read_timeout(mut self, timeout: Duration) -> Self {
+        if let Ok(state) = &mut self.state {
+            match http_client_with_read_timeout(timeout) {
+                Ok(http) => state.http = http,
+                Err(error) => self.state = Err(error.to_string()),
+            }
+        }
+        self
+    }
+
     /// Overrides the model-output idle bound; tests use a short one.
     pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
         self.model_idle_timeout = timeout;
@@ -657,10 +670,14 @@ fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
 /// Owned transport: bounded connect/read time and no redirects, including
 /// same-origin redirects. Streaming remains bounded by operation control.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    http_client_with_read_timeout(READ_TIMEOUT)
+}
+
+fn http_client_with_read_timeout(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
     super::endpoint_dns::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_keepalive(KEEPALIVE)
-        .read_timeout(READ_TIMEOUT)
+        .read_timeout(timeout)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             attempt.error("provider redirects are disabled")
         }))

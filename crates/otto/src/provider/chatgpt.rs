@@ -272,6 +272,16 @@ impl Client {
         self
     }
 
+    /// Shortens socket reads in offline fault tests without accepting an injected client.
+    /// Existing endpoint authorization errors and the owned redirect policy are preserved.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_test_read_timeout(mut self, timeout: Duration) -> Self {
+        if self.http.is_ok() {
+            self.http = http_client_with_read_timeout(timeout).map_err(|error| error.to_string());
+        }
+        self
+    }
+
     /// Overrides the model-output idle bound; tests use a short one.
     pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
         self.model_idle_timeout = timeout;
@@ -332,7 +342,7 @@ impl Client {
         let http =
             otto_core::config::endpoint::TrustedEndpoint::authorize(base_url, "chatgpt", &[], &[])
                 .map_err(str::to_string)
-                .and_then(|_| http);
+                .and(http);
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             tokens,
@@ -718,10 +728,14 @@ async fn await_control<T>(
 /// There is deliberately no overall request timeout: a streaming completion may
 /// run for minutes and is bounded by the caller's cancellation token.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    http_client_with_read_timeout(READ_TIMEOUT)
+}
+
+fn http_client_with_read_timeout(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
     super::endpoint_dns::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_keepalive(KEEPALIVE)
-        .read_timeout(READ_TIMEOUT)
+        .read_timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
 }

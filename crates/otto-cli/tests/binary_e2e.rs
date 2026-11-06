@@ -44,9 +44,7 @@ fn configure(home: &std::path::Path, base_url: &str) {
     std::fs::create_dir_all(&config_dir).expect("config dir");
     std::fs::write(
         config_dir.join("config.toml"),
-        format!(
-            "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"gpt-test\"\napi_key_env = \"OTTO_API_KEY\"\n"
-        ),
+        binary_harness::model_config(base_url, "OTTO_API_KEY"),
     )
     .expect("write config");
 }

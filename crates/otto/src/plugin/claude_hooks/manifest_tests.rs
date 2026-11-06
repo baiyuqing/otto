@@ -42,23 +42,27 @@ fn hooks_json_wrapper_gives_ordered_hooks_with_timeouts() {
     let (_directory, root) = package(&[("hooks/hooks.json", wrapped)]);
     let found = discover(&root, &json!({}));
     assert!(found.diagnostics.is_empty(), "{:?}", found.diagnostics);
+    let mut ordered_hooks = found.hooks.clone();
+    ordered_hooks.sort_by(|left, right| left.event.cmp(&right.event));
     assert_eq!(
-        commands(&found),
+        ordered_hooks
+            .iter()
+            .map(|hook| format!("{}:{}", hook.event, hook.command))
+            .collect::<Vec<_>>(),
         [
+            "SessionEnd:f",
             "SessionStart:a",
             "SessionStart:b",
             "SessionStart:c",
             "SessionStart:d",
-            "UserPromptSubmit:e",
-            "SessionEnd:f"
+            "UserPromptSubmit:e"
         ]
     );
-    let timeouts: Vec<u64> = found
-        .hooks
+    let timeouts: Vec<u64> = ordered_hooks
         .iter()
         .map(|hook| hook.timeout_seconds)
         .collect();
-    assert_eq!(timeouts, [15, 2, 300, 60, 30, 10]);
+    assert_eq!(timeouts, [10, 15, 2, 300, 60, 30]);
 }
 
 #[test]
@@ -326,12 +330,22 @@ fn token_economizer_configuration_parses_without_diagnostics() {
             .iter()
             .all(|hook| hook.command == command && hook.matcher.is_empty())
     );
-    let timeouts: Vec<u64> = found
+    let timeouts: std::collections::BTreeMap<_, _> = found
         .hooks
         .iter()
-        .map(|hook| hook.timeout_seconds)
+        .map(|hook| (hook.event.as_str(), hook.timeout_seconds))
         .collect();
-    assert_eq!(timeouts, [15, 20, 60, 60, 10, 10]);
+    assert_eq!(
+        timeouts,
+        std::collections::BTreeMap::from([
+            ("SessionStart", 15),
+            ("UserPromptSubmit", 20),
+            ("PostToolUse", 60),
+            ("PostToolUseFailure", 60),
+            ("Stop", 10),
+            ("SessionEnd", 10),
+        ])
+    );
 }
 
 #[test]

@@ -26,6 +26,16 @@ changes need no new tests.
 - File-memory tests use temporary roots; legacy import tests construct temporary
   schema-version-2 databases, not real user stores.
 
+## Provider fault transports
+
+Offline provider fixtures must explicitly authorize their own endpoint origins
+with `TrustedEndpoint` and use `new_trusted`. Do not inject a `reqwest::Client`:
+providers own their no-redirect transport. ChatGPT and OpenAI-compatible fault
+tests can shorten socket reads with `with_test_read_timeout`, available only
+under `test` or `test-support`; it preserves existing authorization failures and
+the provider's redirect policy. Use `with_model_idle_timeout` for model-output
+idle bounds instead of socket-read behavior.
+
 ## Summary-tree view evaluation
 
 `otto eval view-tree` is an opt-in live-provider evaluation of the summary-tree

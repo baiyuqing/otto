@@ -23,6 +23,24 @@ fn record(id: &str, revision: &str, text: &str) -> Record {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn unreferenced_recall_skips_lifecycle_and_keeps_content() {
+    let memory = Arc::new(FakeMemory::failing_lifecycle(
+        vec![record("", "", "UNREFERENCED-MARKER")],
+        "empty identities cannot be inspected",
+    ));
+    let agent = agent_over(vec![Turn::text("done")], MemorySession::new(), &memory);
+    let events = run_turn(&agent, "hello").await;
+    assert_eq!(memory.lifecycle_call_count(), 0);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::MemoryWarning { .. }))
+    );
+    assert!(request_text(&agent, 0).contains("UNREFERENCED-MARKER"));
+}
+
 fn record_a() -> Record {
     record("rec-a", "3", "MARKER-A prefers vim")
 }

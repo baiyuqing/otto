@@ -30,9 +30,7 @@ fn configure_with(home: &Path, base_url: &str, failover: bool) {
     std::fs::create_dir_all(home.join("Library/Caches")).expect("cache base");
     let config_dir = home.join(".config/otto");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    let mut text = format!(
-        "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"gpt-test\"\napi_key_env = \"OTTO_API_KEY\"\n"
-    );
+    let mut text = binary_harness::model_config(base_url, "OTTO_API_KEY");
     if failover {
         text.push_str("\n[failover]\nenabled = true\nlease_seconds = 12\n");
     }

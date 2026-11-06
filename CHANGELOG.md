@@ -64,6 +64,16 @@ commit ledger; Git and release tags retain the full history. See the
   `/remember --review-in AGE`, and filter `list` by state, kind, label, update
   and verification time, `--unverified` and `--review-due`. Record files without
   the new fields read as active (#591).
+- Before every provider request, Otto re-checks the state of the memory records
+  the conversation refers to: records recalled at the start of the turn that
+  were since forgotten or retired leave the request, and a fixed-template
+  `<memory_retraction .../>` notice (id, revisions and reason only, never text)
+  tells the model which earlier records are superseded, retracted, under review,
+  expired, updated or forgotten. Notices come from the references recorded in
+  the session and its checkpoints, so they survive a resume; turns without
+  references and plugin stores that no longer return a record produce none. See
+  [retraction notices](docs/manual/memory-and-extensions.md#retraction-notices)
+  (#591).
 
 ### Sessions
 

@@ -554,8 +554,9 @@ TUI-only commands:
   estimates (about 3 bytes per token), not tokenizer counts. `↑`/`↓` select,
   `Enter` expands a section or opens an item's full text (`↑`/`↓`/`PgUp`/`PgDn`
   scroll it), and `Esc` returns from details or closes the collection. The report is taken when the panel
-  opens. The memory section is the previous turn's recall; the next turn
-  recalls again with its own prompt.
+  opens. The memory section is the previous turn's recall together with the
+  [retraction notices](memory-and-extensions.md#retraction-notices) rendered
+  for its last request; the next turn recalls again with its own prompt.
 - `/agents` opens a centered panel of recorded sub-agent tasks, newest first, with
   status, agent (`default` when none), description, workspace, parent
   session, created time, duration, steps, tool calls, and tokens. It starts

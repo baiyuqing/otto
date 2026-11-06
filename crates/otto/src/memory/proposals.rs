@@ -456,30 +456,28 @@ impl Generator {
         self.backend.model()
     }
 
-    /// Runs the two rounds, validates, and queues the candidate through
-    /// `service`. Returns `Unavailable` when `cancel` fires first.
-    pub async fn propose(
+    /// Runs the two rounds and returns the parsed proposal before the layer-1
+    /// checks. A `supersede` or `correct` whose second round is unavailable
+    /// degrades to `needs_review`. Returns `Rejected` for an input the
+    /// generator cannot ask about and `Unavailable` when the backend fails or
+    /// `cancel` fires first.
+    pub async fn generate(
         &self,
-        service: &Service,
-        input: ProposalInput,
+        input: &ProposalInput,
         cancel: &CancellationToken,
-    ) -> Outcome {
-        if let Err(error) = validate_input(&input) {
-            return Outcome::Rejected(error.to_string());
-        }
-        let state = state_text(&input);
-        let first = match self
-            .ask(&state, &round_one_questions(&input), &input, cancel)
-            .await
-        {
-            Ok(answers) => answers,
-            Err(outcome) => return outcome,
-        };
+    ) -> std::result::Result<Proposal, Outcome> {
+        validate_input(input).map_err(|error| Outcome::Rejected(error.to_string()))?;
+        let state = state_text(input);
+        let first = self
+            .ask(&state, &round_one_questions(input), input, cancel)
+            .await?;
         let action = first
             .get(ACTION_QUESTION)
             .and_then(|answer| ProposalAction::parse(&answer.choice));
         let Some(action) = action else {
-            return Outcome::Unavailable("the model named no permitted action".into());
+            return Err(Outcome::Unavailable(
+                "the model named no permitted action".into(),
+            ));
         };
         let evidence_refs: Vec<String> = input
             .evidence
@@ -498,32 +496,47 @@ impl Generator {
             explanation: String::new(),
             replacement: None,
         };
-        if action != ProposalAction::NoChange {
-            match self
-                .ask(&state, &round_two_questions(action), &input, cancel)
-                .await
-            {
-                Ok(second) => {
-                    proposal.explanation = second
-                        .get(EXPLANATION_QUESTION)
-                        .map(|answer| answer.choice.trim().to_owned())
-                        .unwrap_or_default();
-                    proposal.replacement = second
-                        .get(REPLACEMENT_QUESTION)
-                        .map(|answer| answer.choice.clone());
-                }
-                // The auxiliary model cannot write text: the proposal degrades
-                // to a review request instead of being lost.
-                Err(Outcome::Unavailable(reason)) if action.needs_replacement() => {
-                    proposal.action = ProposalAction::NeedsReview;
-                    proposal.explanation = format!(
-                        "{} proposed; the replacement text could not be obtained ({reason})",
-                        action.as_str()
-                    );
-                }
-                Err(outcome) => return outcome,
-            }
+        if action == ProposalAction::NoChange {
+            return Ok(proposal);
         }
+        match self
+            .ask(&state, &round_two_questions(action), input, cancel)
+            .await
+        {
+            Ok(second) => {
+                proposal.explanation = second
+                    .get(EXPLANATION_QUESTION)
+                    .map(|answer| answer.choice.trim().to_owned())
+                    .unwrap_or_default();
+                proposal.replacement = second
+                    .get(REPLACEMENT_QUESTION)
+                    .map(|answer| answer.choice.clone());
+            }
+            // The auxiliary model cannot write text: the proposal degrades
+            // to a review request instead of being lost.
+            Err(Outcome::Unavailable(reason)) if action.needs_replacement() => {
+                proposal.action = ProposalAction::NeedsReview;
+                proposal.explanation = format!(
+                    "{} proposed; the replacement text could not be obtained ({reason})",
+                    action.as_str()
+                );
+            }
+            Err(outcome) => return Err(outcome),
+        }
+        Ok(proposal)
+    }
+
+    /// Generates, validates, and queues the candidate through `service`.
+    pub async fn propose(
+        &self,
+        service: &Service,
+        input: ProposalInput,
+        cancel: &CancellationToken,
+    ) -> Outcome {
+        let proposal = match self.generate(&input, cancel).await {
+            Ok(proposal) => proposal,
+            Err(outcome) => return outcome,
+        };
         if let Err(reason) = validate_proposal(&input, &proposal) {
             return Outcome::Rejected(reason);
         }
@@ -597,6 +610,8 @@ impl Generator {
         );
     }
 }
+
+pub mod evaluation;
 
 #[cfg(test)]
 mod tests;

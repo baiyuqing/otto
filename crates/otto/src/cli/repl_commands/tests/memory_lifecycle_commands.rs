@@ -158,3 +158,44 @@ async fn the_repl_runs_state_and_verify_against_the_store() {
         "{stdout}"
     );
 }
+
+fn proposed_candidate() -> crate::memory::Candidate {
+    crate::memory::Candidate {
+        id: "c1".into(),
+        proposed: Record::default(),
+        action: crate::memory::CandidateAction::Retract,
+        target_id: "r1".into(),
+        base_revision: 3,
+        reason: "the source was withdrawn".into(),
+        state: crate::memory::CandidateState::Pending,
+        created_at: timestamp(1_700_000_000),
+        decided_at: None,
+        decision_source: None,
+        result_record_id: String::new(),
+        result_revision: 0,
+    }
+}
+
+#[test]
+fn proposed_reply_renders_each_outcome_variant() {
+    use crate::memory::proposals::Outcome;
+    let render = |outcome| format_management_reply(&Reply::MemoryProposed(outcome));
+    assert_eq!(
+        render(Outcome::NoChange {
+            explanation: "evidence does not apply".into()
+        }),
+        "no change proposed: evidence does not apply"
+    );
+    assert_eq!(
+        render(Outcome::Proposed(proposed_candidate())),
+        "proposed retract of r1 as candidate c1 (review with /memory review c1 accept|reject): the source was withdrawn"
+    );
+    assert_eq!(
+        render(Outcome::Rejected("no supporting evidence".into())),
+        "proposal rejected: no supporting evidence"
+    );
+    assert_eq!(
+        render(Outcome::Unavailable("timed out".into())),
+        "proposal unavailable: timed out"
+    );
+}

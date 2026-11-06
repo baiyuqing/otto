@@ -53,6 +53,7 @@ pub(crate) const MEMORY_USAGE: &str = "usage: /memory list [--scope current|user
     /memory state <id> active|needs-review|retracted [--reason TEXT] | \
     /memory state <id> superseded <replacement-id> [--reason TEXT] | \
     /memory verify <id> [--review-in AGE] | \
+    /memory propose <id> <evidence text> | \
     /memory review <id> accept|reject";
 #[cfg(test)]
 pub(crate) const REMEMBER_USAGE: &str =

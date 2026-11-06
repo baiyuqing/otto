@@ -35,12 +35,12 @@ fn verify_request(
     }
 }
 
-fn history_file(store: &FileStore, id: &str, name: &str) -> PathBuf {
+pub(super) fn history_file(store: &FileStore, id: &str, name: &str) -> PathBuf {
     store.root().join("history").join(id).join(name)
 }
 
 /// Every file under `records/` and `history/` with its bytes, sorted by path.
-fn stored_files(store: &FileStore) -> Vec<(PathBuf, Vec<u8>)> {
+pub(super) fn stored_files(store: &FileStore) -> Vec<(PathBuf, Vec<u8>)> {
     fn walk(directory: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
         let Ok(entries) = fs::read_dir(directory) else {
             return;
@@ -61,7 +61,11 @@ fn stored_files(store: &FileStore) -> Vec<(PathBuf, Vec<u8>)> {
     files
 }
 
-fn retrieved_ids(store: &FileStore, scope: &Scope, include_expired: bool) -> Vec<String> {
+pub(super) fn retrieved_ids(
+    store: &FileStore,
+    scope: &Scope,
+    include_expired: bool,
+) -> Vec<String> {
     let mut query = request(vec![scope.clone()], "");
     query.include_expired = include_expired;
     let mut ids = ids(&store.retrieve(&query).expect("retrieve"));
@@ -510,7 +514,7 @@ fn reads_never_write_the_record_file_or_the_verification_time() {
     assert_eq!(store.get(&record_one).unwrap().verified_at, Some(at(2)));
 }
 
-fn list_request(scope: &Scope) -> ListRequest {
+pub(super) fn list_request(scope: &Scope) -> ListRequest {
     ListRequest {
         all_scopes: false,
         scopes: vec![scope.clone()],

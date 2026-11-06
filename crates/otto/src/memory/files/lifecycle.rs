@@ -27,18 +27,15 @@ impl FileStore {
                 request.expected_revision,
                 request.changed_at,
             )?;
-            let mut desired = next_revision(&current)?;
-            desired.state = request.state;
-            desired.superseded_by = String::new();
-            desired.state_reason = request.reason.clone();
-            match request.state {
-                RecordState::Superseded => {
-                    check_replacement(snapshot, &current, &request.superseded_by)?;
-                    desired.superseded_by = request.superseded_by.clone();
-                }
-                RecordState::Active => desired.state_reason = String::new(),
-                RecordState::NeedsReview | RecordState::Retracted => {}
+            if request.state == RecordState::Superseded {
+                check_replacement(snapshot, &current, &request.superseded_by)?;
             }
+            let desired = state_revision(
+                &current,
+                request.state,
+                &request.superseded_by,
+                &request.reason,
+            )?;
             self.write_lifecycle(snapshot, desired)
         })
     }
@@ -108,6 +105,28 @@ impl FileStore {
         self.replace_record(snapshot, &desired, false)?;
         Ok(desired)
     }
+}
+
+/// The next revision of `current` in `state`: content and `updated_at` are
+/// unchanged. An active record keeps neither a reason nor a replacement, and
+/// only a superseded record keeps `superseded_by`. Shared by `set_state` and
+/// the review of a retract, needs-review, supersede or correct candidate.
+pub(super) fn state_revision(
+    current: &Record,
+    state: RecordState,
+    superseded_by: &str,
+    reason: &str,
+) -> Result<Record> {
+    let mut desired = next_revision(current)?;
+    desired.state = state;
+    desired.superseded_by = String::new();
+    desired.state_reason = reason.to_string();
+    match state {
+        RecordState::Superseded => desired.superseded_by = superseded_by.to_string(),
+        RecordState::Active => desired.state_reason = String::new(),
+        RecordState::NeedsReview | RecordState::Retracted => {}
+    }
+    Ok(desired)
 }
 
 /// A copy of `current` with the revision advanced; every other field is

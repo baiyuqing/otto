@@ -89,7 +89,29 @@ pub fn validate_list_request(request: &ListRequest) -> Result<()> {
     validate_scopes(&request.scopes, true, false)?;
     validate_filters(&request.kinds, &request.labels)?;
     validate_page(request.limit, &request.cursor, MAX_PAGE_SIZE)?;
+    validate_list_states(&request.states)?;
+    if request.unverified_only && request.verified_after.is_some() {
+        return Err(invalid_request("unverified only with verified after"));
+    }
+    if !valid_optional_timestamp(request.updated_after)
+        || !valid_optional_timestamp(request.verified_after)
+    {
+        return Err(invalid_request("list time filter"));
+    }
     validate_now(request.now, request.include_expired)
+}
+
+fn validate_list_states(states: &[RecordState]) -> Result<()> {
+    if states.len() > RecordState::ALL.len() {
+        return Err(invalid_request("record state count"));
+    }
+    let mut seen = BTreeSet::new();
+    for state in states {
+        if !seen.insert(*state) {
+            return Err(invalid_request("duplicate record state"));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_candidate_list_request(request: &CandidateListRequest) -> Result<()> {

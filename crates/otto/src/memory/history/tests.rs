@@ -1,5 +1,5 @@
 use super::*;
-use crate::memory::{Origin, Provenance, Scope};
+use crate::memory::{Origin, Provenance, RecordState, Scope};
 use chrono::{DateTime, Utc};
 
 fn timestamp(seconds: i64) -> DateTime<Utc> {
@@ -99,6 +99,11 @@ fn field_changes_are_listed_in_a_fixed_order() {
     to.labels = vec!["editor".into()];
     to.key = "ide".into();
     to.kind = "fact".into();
+    to.review_at = Some(timestamp(1_800_000_100));
+    to.verified_at = Some(timestamp(1_700_000_050));
+    to.state_reason = "outdated".into();
+    to.superseded_by = "r2".into();
+    to.state = RecordState::Superseded;
 
     let fields: Vec<&str> = field_changes(&from, &to)
         .iter()
@@ -113,7 +118,12 @@ fn field_changes_are_listed_in_a_fixed_order() {
             "labels",
             "confidence",
             "expires_at",
-            "metadata"
+            "metadata",
+            "state",
+            "superseded_by",
+            "state_reason",
+            "verified_at",
+            "review_at"
         ]
     );
 }
@@ -248,6 +258,51 @@ fn comparison_omits_the_text_block_when_the_texts_are_equal() {
     assert!(!text.contains("text:"), "{text}");
     assert!(
         text.lines().nth(1).unwrap().starts_with("confidence: "),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_state_change_is_a_field_change_with_the_old_and_new_state() {
+    let from = revision_record(1, "vim");
+    let mut to = revision_record(2, "vim");
+    to.state = RecordState::Retracted;
+    to.state_reason = "wrong".into();
+
+    assert_eq!(
+        field_changes(&from, &to),
+        vec![
+            FieldChange {
+                field: "state",
+                from: "active".into(),
+                to: "retracted".into()
+            },
+            FieldChange {
+                field: "state_reason",
+                from: String::new(),
+                to: "wrong".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn history_shows_the_state_and_the_replacement_of_each_revision() {
+    let mut superseded = revision_record(2, "vim");
+    superseded.state = RecordState::Superseded;
+    superseded.superseded_by = "r9".into();
+    let history = RecordHistory {
+        revisions: vec![revision_record(1, "vim"), superseded],
+        skipped: Vec::new(),
+    };
+
+    let text = render_history(&history);
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert!(lines[0].contains(" origin=human state=active "), "{text}");
+    assert!(!lines[0].contains("superseded_by="), "{text}");
+    assert!(
+        lines[1].contains(" origin=human state=superseded superseded_by=r9 "),
         "{text}"
     );
 }

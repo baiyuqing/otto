@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use otto_core::model::EffectCertainty;
+use otto_core::model::{BlockType, EffectCertainty};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
     Provider, ProviderCapabilities, ProviderError, ProviderSettlement, Request, StreamSink,
@@ -71,19 +71,21 @@ impl<P> BudgetedProvider<P> {
             log,
         )
     }
-
-    /// Provider calls made so far, including refused ones.
-    pub fn calls(&self) -> u32 {
-        self.calls.load(Ordering::SeqCst)
-    }
 }
 
-/// The text of `request` for substring checks: the system prompt, then each message's text.
+/// The text of `request` for substring checks: the system prompt, then the text of every text
+/// and tool-result block of each message, so tool output is logged too.
 pub fn request_text(request: &Request) -> String {
     let mut text = request.system_prompt.clone();
     for message in &request.messages {
-        text.push('\n');
-        text.push_str(&message.text());
+        for block in &message.blocks {
+            if matches!(block.block_type, BlockType::Text | BlockType::ToolResult)
+                && !block.text.is_empty()
+            {
+                text.push('\n');
+                text.push_str(&block.text);
+            }
+        }
     }
     text
 }

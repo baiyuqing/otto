@@ -769,6 +769,10 @@ Notes:
   entry (`completed`, `failed`, or `cancelled`) when it returns. The end entry
   of a failed turn also records the error that ended it, with known secrets
   redacted and truncated to 4 KiB. Neither entry reaches the model.
+- Each turn that persists a user message also writes an `otto.memory_recall`
+  entry with the IDs and revisions of the memory records rendered into its
+  requests, never their text. An empty list means no record was rendered. The
+  entry does not reach the model.
 - When a session is reopened after its Otto process stopped in the middle of a
   turn (killed, out of memory, crashed, or the host lost power), Otto
   recovers it:
@@ -798,8 +802,11 @@ Notes:
     end with calls without results. Nothing is resumed until a frontend opens
     the session; `otto serve` does not reopen sessions on start.
 - Local manual and automatic compaction append Pi v3 `type: "compaction"`
-  checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
-  bounded file metadata. Responses remote compaction instead appends an
+  checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage,
+  bounded file metadata, `memoryRecords` (the IDs and revisions of the memory
+  records rendered into the summarized turns and earlier checkpoints, without
+  text) and `memoryCoverage` (`complete`; absent means unknown). Responses
+  remote compaction instead appends an
   invisible `otto.remote_compaction` custom checkpoint. It is append-only and
   contains provider-owned encrypted context, so a resumed session can return
   it unchanged without exposing it as transcript text.

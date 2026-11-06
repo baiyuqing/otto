@@ -33,6 +33,7 @@ use super::compaction_select::{
     COMPACTION_SUMMARY_DISPLAY_PREFIX, CompactionSelection, select_compaction,
 };
 use super::context_estimate::estimate_request;
+use super::memory_retraction::{render_summary_instructions, retracted_union};
 use super::summary::{
     SUMMARY_MAXIMUM_BYTES, SummaryRequest, TURN_SUMMARY_MAXIMUM_BYTES, build_summary_request,
 };
@@ -186,10 +187,27 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .as_ref()
             .map(|latest| self.redact_compaction_details(&latest.details))
             .unwrap_or_default();
+        // The references the new checkpoint will carry, and the retractions
+        // the summarizer is told about (#591 §5 layer 3): the retired records
+        // among those references.
+        let (memory_records, memory_coverage) = summarized_memory_references(
+            latest.as_ref().map(|latest| &latest.details),
+            selection
+                .historical_source
+                .iter()
+                .chain(&selection.turn_prefix_source),
+            &self.session.memory_references(),
+        );
+        let retractions = self
+            .compaction_retractions(&memory_records, emit, control)
+            .await;
         let (prepared, turn_prepared) = self
             .prepare_summary_requests(
                 &prepared_selection,
                 &self.redactor.redact_string(&focus),
+                &self
+                    .redactor
+                    .redact_string(&render_summary_instructions(&retractions)),
                 &previous_details,
             )
             .map_err(AgentError::InvalidCompactionSummary)?;
@@ -275,14 +293,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 combine_compaction_usage(usage, usage_present, turn_usage, turn_usage_present);
             details = turn_prepared.details;
         }
-        (details.memory_records, details.memory_coverage) = summarized_memory_references(
-            latest.as_ref().map(|latest| &latest.details),
-            selection
-                .historical_source
-                .iter()
-                .chain(&selection.turn_prefix_source),
-            &self.session.memory_references(),
-        );
+        details.memory_records = memory_records;
+        details.memory_coverage = memory_coverage;
+        details.memory_retracted =
+            retracted_union(latest.as_ref().map(|latest| &latest.details), &retractions);
         let user_messages = carry_user_messages(
             &prepared_selection.previous_user_messages,
             prepared_selection

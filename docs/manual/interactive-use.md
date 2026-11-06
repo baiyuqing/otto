@@ -806,8 +806,10 @@ Notes:
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage,
   bounded file metadata, `memoryRecords` (the IDs and revisions of the memory
   records rendered into the summarized turns and earlier checkpoints, without
-  text) and `memoryCoverage` (`complete`; absent means unknown). Responses
-  remote compaction instead appends an
+  text), `memoryCoverage` (`complete`; absent means unknown) and
+  `memoryRetracted` (the references whose retirement the summary accounts
+  for; see [retraction notices](memory-and-extensions.md#retraction-notices)).
+  Responses remote compaction instead appends an
   invisible `otto.remote_compaction` custom checkpoint. It is append-only and
   contains provider-owned encrypted context, so a resumed session can return
   it unchanged without exposing it as transcript text.

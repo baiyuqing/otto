@@ -167,6 +167,9 @@ fn item(service: &str, record: Record, standing: bool) -> port::RecallItem {
     metadata.insert("otto.key".into(), record.key);
     metadata.insert("otto.standing".into(), standing.to_string());
     metadata.insert("otto.state".into(), record.state.as_str().into());
+    if !record.superseded_by.is_empty() {
+        metadata.insert("otto.superseded_by".into(), record.superseded_by);
+    }
     port::RecallItem {
         reference: Some(reference(
             service,

@@ -125,6 +125,44 @@ fn review_facts_apply_leading_cd_and_make_directory_and_refuse_later_cd() {
 }
 
 #[test]
+fn review_facts_accept_static_command_env_after_leading_cd() {
+    let (_dir, workspace) = temp_workspace();
+    std::fs::create_dir_all(workspace.root().join("sub")).unwrap();
+    std::fs::write(workspace.root().join("sub/Makefile"), "all:\n").unwrap();
+    std::fs::write(workspace.root().join("sub/Cargo.toml"), "[package]\n").unwrap();
+    let tool = bash(
+        &workspace,
+        Arc::new(FakeExecutor::default()),
+        &[],
+        1024,
+        &[],
+    );
+    let expected = json!(workspace.root().join("sub"));
+    for command in [
+        "cd sub && CARGO_TARGET_DIR=/x cargo test --test '*' && CARGO_TARGET_DIR=/x cargo test --doc",
+        "cd sub && A=1 B='two' make",
+    ] {
+        let facts = tool.review_facts(command);
+        assert_ne!(facts["operation_unavailable"], true, "{command}");
+        assert_eq!(facts["cwd"], expected, "{command}");
+        assert_eq!(facts["complex_shell"], true, "{command}");
+    }
+    for command in [
+        "CDPATH=/tmp; cd sub && make",
+        "CDPATH=/tmp cd sub && make",
+        "cd sub && X=$(pwd) make",
+        "cd sub && A[$(pwd)]=1 make",
+        "cd sub && export A=1 && make",
+    ] {
+        assert_eq!(
+            tool.review_facts(command)["operation_unavailable"],
+            true,
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn review_facts_report_redirect_targets() {
     let (_dir, workspace) = temp_workspace();
     let tool = bash(

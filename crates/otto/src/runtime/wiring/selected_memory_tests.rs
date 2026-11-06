@@ -2,7 +2,7 @@ use super::*;
 use otto_core::{agent::memory::MemoryRecall, memory as port, operation::OperationControl};
 
 #[derive(Default)]
-struct RecallOnly {
+pub(super) struct RecallOnly {
     calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -41,7 +41,7 @@ impl port::MemoryService for RecallOnly {
     }
 }
 
-fn context() -> port::MemoryContext {
+pub(super) fn context() -> port::MemoryContext {
     let user = port::Scope {
         namespace: "user".into(),
         id: "host-user".into(),

@@ -95,11 +95,45 @@ impl Builder {
         if !self.memory.usable || self.memory.external() {
             return None;
         }
+        let backend = self.advice_backend(agent, model, usage);
+        Some(Arc::new(crate::memory::advice::Advisor::new_with_audit(
+            backend,
+            self.memory.advice_audit.clone(),
+        )))
+    }
+
+    /// The generator behind `/memory propose`, over the same kind of backend
+    /// as [`Self::advisor`] and the same audit log. `None` when memory is
+    /// unusable or external.
+    pub fn proposal_generator(
+        &self,
+        agent: super::super::builder::AdviceAgent,
+        model: &str,
+        usage: Option<crate::usage::Collector>,
+    ) -> Option<Arc<crate::memory::proposals::Generator>> {
+        if !self.memory.usable || self.memory.external() {
+            return None;
+        }
+        let backend = self.advice_backend(agent, model, usage);
+        Some(Arc::new(crate::memory::proposals::Generator::new(
+            backend,
+            self.memory.advice_audit.clone(),
+        )))
+    }
+
+    /// The auxiliary Jev backend when `TYPESAFE_API_KEY` is non-empty,
+    /// otherwise the session model through `agent`.
+    fn advice_backend(
+        &self,
+        agent: super::super::builder::AdviceAgent,
+        model: &str,
+        usage: Option<crate::usage::Collector>,
+    ) -> Box<dyn crate::decision::Backend> {
         let key = self
             .environment
             .get("TYPESAFE_API_KEY")
             .map_or("", String::as_str);
-        let backend: Box<dyn crate::decision::Backend> = if key.is_empty() {
+        if key.is_empty() {
             Box::new(super::super::advice::SessionBackend::new(
                 agent,
                 model.to_owned(),
@@ -110,11 +144,7 @@ impl Builder {
                 crate::typesafe::BASE_URL,
                 key,
             ))
-        };
-        Some(Arc::new(crate::memory::advice::Advisor::new_with_audit(
-            backend,
-            self.memory.advice_audit.clone(),
-        )))
+        }
     }
 
     /// Whether memory tools belong in this build. The boundary half of the

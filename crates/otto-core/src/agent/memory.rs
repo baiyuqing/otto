@@ -1,7 +1,9 @@
 //! Long-term memory recall for one turn.
 //!
 //! The agent asks for records once per turn, renders them into a request-local
-//! message, and never persists that message.
+//! message, and never persists that message. It persists the ids and
+//! revisions of the rendered records, without text, as the turn's
+//! `otto.memory_recall` session entry (see [`crate::session::memory_recall`]).
 //!
 //! Ownership: the agent borrows a [`MemoryRecall`] implementation through
 //! `Options`. It does not own the backing store and closes it only through
@@ -43,6 +45,10 @@ pub struct Scope {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Record {
     pub id: String,
+    /// The store's revision of the record at recall time, when the store
+    /// reports one. Persisted with the id in the turn's `otto.memory_recall`
+    /// entry; never rendered.
+    pub revision: Option<String>,
     pub scope: Scope,
     pub kind: String,
     pub key: String,
@@ -171,6 +177,7 @@ mod tests {
     fn render_escapes_delimiters() {
         let records = [Record {
             id: "rec-1".into(),
+            revision: None,
             scope: Scope {
                 namespace: "user".into(),
                 id: "u1".into(),
@@ -194,6 +201,7 @@ mod tests {
     fn render_puts_standing_records_first_under_their_own_preamble() {
         let record = |id: &str, standing: bool| Record {
             id: id.into(),
+            revision: None,
             scope: Scope {
                 namespace: "user".into(),
                 id: "u1".into(),
@@ -233,6 +241,7 @@ mod tests {
     fn render_writes_the_scope_as_namespace_and_id() {
         let records = [Record {
             id: "rec-1".into(),
+            revision: None,
             scope: Scope {
                 namespace: "user".into(),
                 id: "u1".into(),

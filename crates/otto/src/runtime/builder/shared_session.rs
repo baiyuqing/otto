@@ -167,6 +167,10 @@ impl SharedSession {
 
 #[async_trait::async_trait]
 impl Session for SharedSession {
+    fn memory_references(&self) -> Vec<otto_core::session::TurnMemoryReferences> {
+        self.0.transcript.memory_references()
+    }
+
     fn messages(&self) -> Vec<Message> {
         self.0.transcript.messages()
     }

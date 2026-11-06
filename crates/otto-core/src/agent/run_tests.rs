@@ -1,7 +1,7 @@
 //! Run-loop tests: the turn loop, overflow, compaction, memory context, and
 //! tasks.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -20,7 +20,10 @@ use crate::tool::{ToolExecutor, ToolResult};
 
 use super::context_report::SectionKind;
 use super::inbox::{Inbox, Notification, NotificationKind};
-use super::memory::{MemoryError, MemoryRecall, RecallRequest, RecallResult, Record, Scope};
+use super::memory::{
+    MemoryError, MemoryRecall, RecallRequest, RecallResult, Record, RecordLifecycle, RecordStatus,
+    Scope,
+};
 use super::progress::{ProgressPolicy, StallKind};
 use super::redactor::Redactor;
 use super::summary::SUMMARIZATION_SYSTEM_PROMPT;
@@ -56,6 +59,7 @@ mod memory_compaction;
 mod memory_context;
 mod memory_observation;
 mod memory_references;
+mod memory_retraction;
 mod progress_recovery;
 mod provider_tools;
 mod recording;
@@ -366,31 +370,70 @@ impl ToolExecutor for EchoExecutor {
     }
 }
 
-/// A memory binding that returns a fixed result and counts its calls.
+/// A memory binding that returns a configurable result, counts its calls and
+/// answers lifecycle queries from a table a test can change between calls.
 struct FakeMemory {
-    records: Vec<Record>,
+    records: Mutex<Vec<Record>>,
     error: Option<String>,
     calls: AtomicUsize,
     close_error: Option<String>,
+    /// Lifecycle answers that replace the default for an id.
+    lifecycle_overrides: Mutex<BTreeMap<String, RecordLifecycle>>,
+    lifecycle_error: Option<String>,
+    lifecycle_calls: AtomicUsize,
 }
 
 impl FakeMemory {
     fn with_records(records: Vec<Record>) -> Self {
         Self {
-            records,
+            records: Mutex::new(records),
             error: None,
             calls: AtomicUsize::new(0),
             close_error: None,
+            lifecycle_overrides: Mutex::new(BTreeMap::new()),
+            lifecycle_error: None,
+            lifecycle_calls: AtomicUsize::new(0),
         }
     }
 
     fn failing(message: &str) -> Self {
         Self {
-            records: Vec::new(),
             error: Some(message.into()),
-            calls: AtomicUsize::new(0),
-            close_error: None,
+            ..Self::with_records(Vec::new())
         }
+    }
+
+    fn failing_lifecycle(records: Vec<Record>, message: &str) -> Self {
+        Self {
+            lifecycle_error: Some(message.into()),
+            ..Self::with_records(records)
+        }
+    }
+
+    /// Replaces what the next recall returns.
+    fn set_records(&self, records: Vec<Record>) {
+        *self.records.lock().expect("records") = records;
+    }
+
+    /// Reports `id` with `status` and no revision from now on.
+    fn set_status(&self, id: &str, status: RecordStatus) {
+        self.set_status_at(id, status, None);
+    }
+
+    /// Reports `id` with `status` at `revision` from now on.
+    fn set_status_at(&self, id: &str, status: RecordStatus, revision: Option<&str>) {
+        self.lifecycle_overrides.lock().expect("lifecycle").insert(
+            id.into(),
+            RecordLifecycle {
+                id: id.into(),
+                revision: revision.map(str::to_owned),
+                status,
+            },
+        );
+    }
+
+    fn lifecycle_call_count(&self) -> usize {
+        self.lifecycle_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -406,10 +449,43 @@ impl MemoryRecall for FakeMemory {
         match &self.error {
             Some(message) => Err(MemoryError(message.clone())),
             None => Ok(RecallResult {
-                records: self.records.clone(),
+                records: self.records.lock().expect("records").clone(),
                 used_tokens: 1,
             }),
         }
+    }
+
+    async fn lifecycle(
+        &self,
+        ids: &[String],
+        _cancel: &CancellationToken,
+    ) -> Result<Vec<RecordLifecycle>, MemoryError> {
+        self.lifecycle_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(message) = &self.lifecycle_error {
+            return Err(MemoryError(message.clone()));
+        }
+        let overrides = self.lifecycle_overrides.lock().expect("lifecycle");
+        let records = self.records.lock().expect("records");
+        Ok(ids
+            .iter()
+            .map(|id| {
+                if let Some(answer) = overrides.get(id) {
+                    return answer.clone();
+                }
+                match records.iter().find(|record| &record.id == id) {
+                    Some(record) => RecordLifecycle {
+                        id: id.clone(),
+                        revision: record.revision.clone(),
+                        status: RecordStatus::Active,
+                    },
+                    None => RecordLifecycle {
+                        id: id.clone(),
+                        revision: None,
+                        status: RecordStatus::Unknown,
+                    },
+                }
+            })
+            .collect())
     }
 
     fn close(&self) -> Result<(), MemoryError> {

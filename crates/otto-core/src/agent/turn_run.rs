@@ -475,6 +475,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                                 revision: record.revision.clone(),
                             })
                             .collect();
+                        state.recalled = result.records;
                     }
                     Err(error) => emit(Event::MemoryWarning {
                         message: error.to_string(),

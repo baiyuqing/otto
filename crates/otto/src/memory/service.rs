@@ -757,6 +757,20 @@ impl core_memory::MemoryRecall for Binding {
         })
     }
 
+    async fn lifecycle(
+        &self,
+        ids: &[String],
+        cancel: &CancellationToken,
+    ) -> std::result::Result<Vec<core_memory::RecordLifecycle>, core_memory::MemoryError> {
+        if cancel.is_cancelled() {
+            return Err(core_memory::MemoryError(
+                ErrorKind::Canceled.message().into(),
+            ));
+        }
+        self.record_lifecycles(ids)
+            .map_err(binding_lifecycle::memory_error)
+    }
+
     fn close(&self) -> std::result::Result<(), core_memory::MemoryError> {
         self.release();
         Ok(())
@@ -777,6 +791,8 @@ fn core_record(record: Record, standing: bool) -> core_memory::Record {
         standing,
     }
 }
+
+mod binding_lifecycle;
 
 #[cfg(test)]
 mod tests;

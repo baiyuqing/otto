@@ -110,6 +110,10 @@ struct OrderCheckingTranscript {
 
 #[async_trait::async_trait]
 impl Session for OrderCheckingTranscript {
+    fn memory_references(&self) -> Vec<otto_core::session::TurnMemoryReferences> {
+        self.inner.memory_references()
+    }
+
     fn messages(&self) -> Vec<Message> {
         self.inner.messages()
     }

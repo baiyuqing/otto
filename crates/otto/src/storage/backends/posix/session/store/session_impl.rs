@@ -4,6 +4,15 @@ use super::*;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Session for Store {
+    fn memory_references(&self) -> Vec<otto_core::session::TurnMemoryReferences> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .memory_references
+    }
+
     fn messages(&self) -> Vec<Message> {
         Store::messages(self)
     }

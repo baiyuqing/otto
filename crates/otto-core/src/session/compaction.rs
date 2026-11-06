@@ -683,6 +683,7 @@ mod tests {
                 modified_files: vec!["both.go".into(), "m.go".into()],
                 omitted_read_files: 2,
                 omitted_modified_files: 3,
+                ..CompactionDetails::default()
             },
         );
     }

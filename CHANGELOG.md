@@ -48,6 +48,15 @@ commit ledger; Git and release tags retain the full history. See the
   `memoryCoverage`. Recalled record text is still not persisted. Turns and
   checkpoints written before this change read as unknown coverage. Older Otto
   binaries read sessions with the new entries unchanged (#591).
+- The file store keeps a revision history of each record in
+  `history/<id>/<revision>.md`. Inspect and restore it with
+  `otto memory history|diff|restore` and `/memory history|diff|restore`; a
+  restore writes a new revision and never lowers the revision number. Forget now
+  also removes the history and the text of pending candidates that target the
+  record, and prints each remaining copy as removed, suppressed, present or
+  unverified, including the advice audit log and session files. A record file
+  deleted by hand while its history exists is tombstoned the next time the store
+  opens, and its history is removed (#591).
 
 ### Sessions
 

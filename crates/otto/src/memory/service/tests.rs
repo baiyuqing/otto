@@ -53,7 +53,13 @@ impl MemoryStore for AlternateStore {
     fn standing_records(&self, _: &Scope, _: DateTime<Utc>) -> Result<Vec<Record>> {
         unsupported()
     }
-    fn forget(&self, _: &StoreForgetRequest) -> Result<Tombstone> {
+    fn forget(&self, _: &StoreForgetRequest) -> Result<crate::memory::ForgetOutcome> {
+        unsupported()
+    }
+    fn history(&self, _: &RecordRef) -> Result<RecordHistory> {
+        unsupported()
+    }
+    fn restore(&self, _: &StoreRestoreRequest) -> Result<Record> {
         unsupported()
     }
     fn review_within_standing_budget(&self, _: &StoreReviewRequest) -> Result<ReviewResult> {
@@ -111,5 +117,6 @@ fn model_proposal(scope: &Scope, key: &str, text: &str) -> ProposeRequest {
 }
 
 mod binding;
+mod history;
 mod recall;
 mod records;

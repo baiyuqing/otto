@@ -2,12 +2,8 @@
 use std::sync::Arc;
 
 use crate::app::Controller;
-use crate::memory::{
-    self, CandidateRef, ForgetRequest, ListRequest, RecordRef, RememberRequest, ReviewDecision,
-    ReviewRequest, Scope, SearchRequest, SearchResult, Service,
-};
+use crate::memory::{self, RememberRequest, ReviewDecision, Scope, SearchResult, Service};
 use crate::skill;
-use chrono::Utc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillManager {
@@ -57,6 +53,19 @@ pub enum Request {
     MemoryForget {
         id: String,
     },
+    MemoryHistory {
+        id: String,
+    },
+    /// Compares two revisions; `to` defaults to the current revision.
+    MemoryDiff {
+        id: String,
+        from: u64,
+        to: Option<u64>,
+    },
+    MemoryRestore {
+        id: String,
+        revision: u64,
+    },
     MemoryReviewList,
     MemoryReview {
         id: String,
@@ -93,7 +102,14 @@ pub enum Reply {
     MemoryForgotten {
         tombstone: memory::Tombstone,
         previous_revision: u64,
+        cleanup: Vec<memory::ForgetCleanupEntry>,
     },
+    MemoryHistory(memory::RecordHistory),
+    MemoryDiff {
+        from: Box<memory::Record>,
+        to: Box<memory::Record>,
+    },
+    MemoryRestored(memory::Record),
     MemoryReviewed(ReviewDecision, Box<memory::ReviewResult>),
     Remembered(memory::Record),
     Skills(skill::Catalog),
@@ -122,7 +138,9 @@ impl Request {
             "memory" => {
                 "usage: /memory list [--scope current|user|workspace|all] [--limit N] \
                     [--cursor CURSOR] | /memory show <id> | /memory search <query> | \
-                    /memory forget <id> | /memory review <id> accept|reject"
+                    /memory forget <id> | /memory history <id> | \
+                    /memory diff <id> <from> [<to>] | /memory restore <id> <revision> | \
+                    /memory review <id> accept|reject"
             }
             "remember" => "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>",
             "skill" => "usage: /skill | /skill <name> | /skill set <name> enabled|disabled",
@@ -175,6 +193,21 @@ impl Request {
                     query: rest.join(" "),
                 },
                 ["forget", id] => Request::MemoryForget { id: (*id).into() },
+                ["history", id] => Request::MemoryHistory { id: (*id).into() },
+                ["diff", id, from] => Request::MemoryDiff {
+                    id: (*id).into(),
+                    from: from.parse().map_err(|_| invalid())?,
+                    to: None,
+                },
+                ["diff", id, from, to] => Request::MemoryDiff {
+                    id: (*id).into(),
+                    from: from.parse().map_err(|_| invalid())?,
+                    to: Some(to.parse().map_err(|_| invalid())?),
+                },
+                ["restore", id, revision] => Request::MemoryRestore {
+                    id: (*id).into(),
+                    revision: revision.parse().map_err(|_| invalid())?,
+                },
                 ["review"] => Request::MemoryReviewList,
                 ["review", id, decision] => Request::MemoryReview {
                     id: (*id).into(),
@@ -415,6 +448,9 @@ impl Controller {
                     | MemoryShow { .. }
                     | MemorySearch { .. }
                     | MemoryForget { .. }
+                    | MemoryHistory { .. }
+                    | MemoryDiff { .. }
+                    | MemoryRestore { .. }
                     | MemoryReviewList
                     | MemoryReview { .. }
             ) {
@@ -428,153 +464,15 @@ impl Controller {
             }
         }
         match request {
-            MemoryList {
-                scope,
-                limit,
-                cursor,
-            } => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                let (all_scopes, scopes) = match scope {
-                    ScopeSelector::All => (true, Vec::new()),
-                    ScopeSelector::User => (false, vec![user]),
-                    ScopeSelector::Workspace => (false, vec![workspace]),
-                    ScopeSelector::Current => (false, vec![user, workspace]),
-                };
-                Ok(Reply::MemoryList(
-                    service
-                        .list(&ListRequest {
-                            all_scopes,
-                            scopes,
-                            kinds: vec![],
-                            labels: vec![],
-                            limit,
-                            cursor,
-                            now: Utc::now(),
-                            include_expired: true,
-                        })
-                        .map_err(|e| e.to_string())?,
-                ))
-            }
-            MemoryShow { id } => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                for scope in [user, workspace] {
-                    match service.get(&RecordRef {
-                        scope,
-                        id: id.clone(),
-                    }) {
-                        Ok(r) => return Ok(Reply::MemoryRecord(r)),
-                        Err(error) if error.kind == memory::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.to_string()),
-                    }
-                }
-                Err(format!("record {id} not found"))
-            }
-            MemorySearch { query } => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                Ok(Reply::MemorySearch(
-                    service
-                        .search(&SearchRequest {
-                            query,
-                            scopes: vec![user, workspace],
-                            limit: SEARCH_LIMIT,
-                            token_budget: SEARCH_TOKEN_BUDGET,
-                            now: Utc::now(),
-                            ..Default::default()
-                        })
-                        .map_err(|e| e.to_string())?,
-                ))
-            }
-            MemoryForget { id } => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                let mut last = None;
-                for scope in [user, workspace] {
-                    let reference = RecordRef {
-                        scope,
-                        id: id.clone(),
-                    };
-                    match service.get(&reference) {
-                        Ok(r) => {
-                            let revision = r.revision;
-                            let tombstone = service
-                                .forget(&ForgetRequest {
-                                    reference,
-                                    expected_revision: revision,
-                                    purge_backups: false,
-                                    confirm_purge: false,
-                                })
-                                .map_err(|e| e.to_string())?
-                                .tombstone;
-                            return Ok(Reply::MemoryForgotten {
-                                tombstone,
-                                previous_revision: revision,
-                            });
-                        }
-                        Err(e) if e.kind == memory::ErrorKind::NotFound => last = Some(e),
-                        Err(e) => return Err(e.to_string()),
-                    }
-                }
-                Err(format!(
-                    "record {id} not found{}",
-                    last.map(|e| format!(": {e}")).unwrap_or_default()
-                ))
-            }
-            MemoryReviewList => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                let pending = self
-                    .approval_snapshot()
-                    .map_err(|error| error.to_string())?;
-                let candidates = crate::approval::memory::human_pending_candidates(
-                    &service,
-                    &[user, workspace],
-                    &pending.requests,
-                    SEARCH_LIMIT,
-                )
-                .map_err(|error| error.to_string())?;
-                Ok(Reply::MemoryCandidates(candidates))
-            }
-            MemoryReview { id, decision } => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                let mut reference = None;
-                for scope in [user, workspace] {
-                    let candidate_ref = CandidateRef {
-                        scope,
-                        id: id.clone(),
-                    };
-                    match service.get_candidate(&candidate_ref) {
-                        Ok(_) => {
-                            reference = Some(candidate_ref);
-                            break;
-                        }
-                        Err(error) if error.kind == memory::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.to_string()),
-                    }
-                }
-                let reference = reference.ok_or_else(|| format!("candidate {id} not found"))?;
-                let result = self
-                    .review_memory(
-                        &ReviewRequest {
-                            reference,
-                            decision,
-                            edited: None,
-                            target_revision: None,
-                        },
-                        "memory-command",
-                    )
-                    .map_err(|e| e.to_string())?;
-                Ok(Reply::MemoryReviewed(decision, Box::new(result)))
-            }
+            request @ (MemoryList { .. }
+            | MemoryShow { .. }
+            | MemorySearch { .. }
+            | MemoryForget { .. }
+            | MemoryHistory { .. }
+            | MemoryDiff { .. }
+            | MemoryRestore { .. }
+            | MemoryReviewList
+            | MemoryReview { .. }) => self.memory_request(request),
             Remember {
                 scope,
                 kind,
@@ -681,6 +579,8 @@ impl Controller {
         }
     }
 }
+
+mod memory_requests;
 
 #[cfg(test)]
 mod tests;

@@ -1,4 +1,5 @@
 mod candidate_archive;
+mod history;
 
 use std::fs;
 use std::time::Duration;
@@ -157,7 +158,8 @@ fn forget_writes_a_tombstone_and_removes_the_record_file() {
             expected_revision: 1,
             forgotten_at: at(3),
         })
-        .expect("forget");
+        .expect("forget")
+        .tombstone;
     assert_eq!(tombstone.revision, 2);
     assert!(!record_path(&store, "rec-1").exists());
     assert!(store.root().join("tombstones/rec-1.json").exists());

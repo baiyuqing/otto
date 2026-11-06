@@ -26,6 +26,7 @@ routes:
 | --- | --- |
 | `identity.json` | Store and user scope IDs |
 | `records/<id>.md` | Active record |
+| `history/<id>/<revision>.md` | Superseded revision of a record, byte for byte as its former record file |
 | `tombstones/<id>.json` | Forgotten record ID, without its text |
 | `candidates/<id>.json` | Pending proposal |
 | `candidates/archive/<id>.json` | Accepted/rejected proposal receipt |
@@ -60,7 +61,10 @@ Reply to technical questions in Chinese.
 ```
 
 Hand edits apply at the next read, normally the next turn. Deleting a record
-removes it without a tombstone. Invalid or secret-bearing records are skipped;
+file by hand removes a record that was never updated without a tombstone. When
+the record has history files, the next time the store opens it writes a
+tombstone whose revision is the latest history revision plus 2 and removes the
+history directory. Invalid or secret-bearing records are skipped;
 `otto memory status` and startup warnings give reasons. Duplicate nonempty
 scope/kind/key records resolve to the later `updated_at`; tombstones always
 suppress their records. Prefer `/remember` over writing files manually.
@@ -325,6 +329,43 @@ inventories all stored workspaces. Pass returned `next_cursor` as `--cursor`.
 `show` reads an exact record in the selected scopes. Human `/remember` and
 `/memory forget <id>` apply immediately. Model writes create candidates;
 `/memory review <id> accept|reject` decides pending human reviews.
+
+Every update that replaces a record moves its former revision to
+`history/<id>/<revision>.md`. Revision 1 of a record that was never updated has
+no history file. Three commands read and use the history, as
+`otto memory ...` and as `/memory ...`:
+
+- `history <id>` prints one line per revision, oldest first, with the update
+  time, the origin, `restored_from=<n>` when the revision is a restore, and
+  `current=yes` on the current one. A history file that cannot be read is
+  listed as skipped with its reason.
+- `diff <id> <from> [<to>]` compares two revisions; `to` defaults to the
+  current revision. It prints the changed fields and a line diff of the text,
+  with `- ` for removed lines and `+ ` for added lines. A revision that is not
+  in the history is an error.
+- `restore <id> <revision>` writes the content of an earlier revision as a new
+  revision `n+1` with `source.origin` `human` and the metadata entry
+  `otto.restored_from_revision`. It never lowers the revision number. Restoring
+  the current revision, a revision that does not exist, or a forgotten record
+  fails. A restore is applied immediately and does not go through candidates.
+
+`forget` removes the record file and the whole history directory of the
+record, rejects every pending candidate that targets the record (its text is
+cleared and the receipt is archived), and writes the tombstone. It then
+prints one line per copy of the text it looked for, in one of four classes:
+
+| Class | Meaning |
+| --- | --- |
+| `removed` | The copy was deleted: `records/<id>.md`, `history/<id>/`, `candidates/<id>.json` |
+| `suppressed` | The copy remains but is no longer read |
+| `present` | The copy remains and is not deleted |
+| `unverified` | Otto did not scan the place, so a copy may exist |
+
+Two places outside the store are always reported. The memory advice audit log
+`~/.otto/memory-advice.db` is `unverified`: its rows are keyed by candidate ID
+and are not scanned, and a request may hold the record text. Session files are
+`present`: recalled text is never written to a session, but user input and tool
+output that repeat the text are independent history and are not deleted.
 
 Candidate advice can suggest scope, duplication/conflict and durability, but
 never changes authority or accepts anything. By default it uses the session

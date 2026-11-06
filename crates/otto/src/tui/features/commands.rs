@@ -491,6 +491,7 @@ fn management(name: &str, args: &str) -> Result<Transition, String> {
     let mutation = matches!(
         request,
         M::MemoryForget { .. }
+            | M::MemoryRestore { .. }
             | M::MemoryReview { .. }
             | M::Remember { .. }
             | M::SkillSet { .. }

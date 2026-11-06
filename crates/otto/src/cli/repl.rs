@@ -67,6 +67,7 @@ const HELP: &str = concat!(
     "\n",
     "Memory\n",
     "/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n",
+    "/memory history <id> | /memory diff <id> <from> [<to>] | /memory restore <id> <revision>\n",
     "/remember [--scope user|workspace] [--kind K] [--key K] <text>\n",
     "\n",
     "Tasks\n",

@@ -206,4 +206,36 @@ mod tests {
             None
         );
     }
+
+    fn text_question(max_bytes: usize) -> Question {
+        Question {
+            id: "explanation",
+            instructions: "Explain.".into(),
+            kind: Kind::Text { max_bytes },
+        }
+    }
+
+    fn choice_question() -> Question {
+        Question {
+            id: "action",
+            instructions: "Pick.".into(),
+            kind: Kind::Choice(vec![("defer".into(), "retain".into())]),
+        }
+    }
+
+    #[test]
+    fn wire_refuses_a_question_set_with_a_text_question() {
+        for questions in [
+            vec![text_question(16)],
+            vec![choice_question(), text_question(16)],
+            vec![text_question(16), choice_question()],
+        ] {
+            let failure = wire(&questions).expect_err("text is unsupported");
+            match failure {
+                Failure::Error(reason) => assert!(reason.contains("choice and yes/no"), "{reason}"),
+                other => panic!("expected Failure::Error, got {other:?}"),
+            }
+        }
+        assert!(wire(&[choice_question()]).is_ok());
+    }
 }

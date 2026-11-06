@@ -35,6 +35,10 @@ pub struct ProviderEntry {
     pub type_: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_origins: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_http_origins: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key_env: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -121,6 +125,12 @@ impl ProviderEntry {
                 "{table}.type must be \"claude\", \"openai-compatible\" or \"chatgpt\", got \"{}\"",
                 self.type_
             )));
+        }
+        if !self.base_url.is_empty() {
+            super::endpoint::normalize_base_url(&self.base_url).map_err(ConfigError::new)?;
+        }
+        for origin in self.trusted_origins.iter().chain(&self.allow_http_origins) {
+            super::endpoint::validate_origin_grant(origin).map_err(ConfigError::new)?;
         }
         let provider_type = self.provider_type(name);
         let rejected: &[(&str, &String)] = match provider_type {

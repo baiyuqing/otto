@@ -633,6 +633,7 @@ fn validate_provider_field(
             if value.is_empty() {
                 return Err(ConfigError::new("missing base_url"));
             }
+            otto_core::config::endpoint::normalize_base_url(value).map_err(ConfigError::new)?;
         }
         ProviderField::ApiKeyEnv => {
             if provider_type == PROVIDER_CHATGPT {

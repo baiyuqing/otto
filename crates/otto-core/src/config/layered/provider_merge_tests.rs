@@ -239,6 +239,10 @@ fn managed_forced_provider_field_rejects_a_conflicting_selection() {
         .unwrap();
     policy.apply(&mut merged, "managed").unwrap();
     let mut file = merged.file().unwrap();
+    file.providers.get_mut("deepseek").unwrap().trusted_origins = vec![
+        "https://api.deepseek.com".into(),
+        "https://other.test".into(),
+    ];
     file.policy = Some(policy);
     let env = std::collections::HashMap::from([("OTTO_API_KEY".to_string(), "k".to_string())]);
     let resolve = |overrides: &super::super::Overrides| {

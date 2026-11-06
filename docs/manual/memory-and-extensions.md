@@ -260,6 +260,19 @@ sources. Secrets use endpoint environment bindings, never inline DSNs/options.
 Normal startup opens published namespaces; editing config does not initialize
 an empty replacement. Use `otto storage --help` for init/transfer options.
 
+For linked storage callers, SQLite's regular `execute`, `prepare` and query APIs
+accept exactly one statement, rejecting stacked SQL and embedded NUL before
+live preparation. Validation uses SQLite's trigger-aware boundary recognizer on
+scratch state, outside the live connection lock. SQL text is limited to **8 MiB**
+and cumulative boundary-recognizer scanning to **64 MiB** per validation; unusually
+semicolon-dense literals, comments or trigger bodies may hit the work limit even
+below the text limit. `ValidationLimit` reports both limits and recovery in its
+visible error message, without echoing submitted SQL. Bind large data values as
+parameters or simplify trigger definitions. Only explicitly trusted scripts
+should use `execute_batch`, which intentionally permits multiple statements and
+does not provide these single-statement guards. Normal single-statement calls
+within the limits retain existing behavior, including accepted PRAGMA effects.
+
 Stop every affected process and prevent old binaries restarting before transfer:
 local locks cannot fence an uncooperating/distributed writer.
 
@@ -281,8 +294,16 @@ this is coordinated one-host operation, not distributed writer fencing.
 
 For a legacy-schema database of an earlier Otto release,
 `otto storage migrate SOURCE DESTINATION` requires Python 3, a new destination in an existing directory, stopped writers,
-and preserves source bytes. It validates recognized tables/counts before
-publication; memory databases are not supported. Do not mix old/new writers.
+and preserves source bytes. It reconstructs canonical schemas and imports bound,
+typed row values, validating supported schema versions, all table/index definitions
+and row counts before publication; source DDL is never executed. Extra columns,
+indexes, expressions, triggers or modified constraints are rejected even when table
+names match. Previously these modifications could be copied; do not remove them
+blindly to force migration. Keep the original database and use its matching older
+Otto release to export logical records for a supported transfer, or retain that
+release until a compatible migration is available. A failed import does not publish
+the destination; retry to a new path after resolving compatibility. Memory
+databases are not supported. Do not mix old/new writers.
 Read usage peaks without the `sqlite3` tool using
 `otto storage window-peaks ~/.otto/usage.db <session-id>` (read-only JSON).
 

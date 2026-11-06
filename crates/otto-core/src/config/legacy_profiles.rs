@@ -101,6 +101,8 @@ fn classify(name: &str, profile: &LegacyProfile) -> Result<ConvertibleProfile, S
         api_version: profile.api_version.clone(),
         workspace_id_env: profile.workspace_id_env.clone(),
         models: BTreeMap::new(),
+        trusted_origins: Vec::new(),
+        allow_http_origins: Vec::new(),
     };
     match provider_type {
         PROVIDER_CHATGPT => {

@@ -7,7 +7,7 @@ use super::*;
 #[tokio::test]
 async fn sends_the_expected_request_and_parses_text_and_a_tool_call() {
     let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
-    let client = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("test-token"), "acct-1");
 
     let (settlement, events) = complete(&client, &model_request()).await;
     let response = settlement.result.unwrap();
@@ -65,7 +65,7 @@ async fn returns_the_requested_remote_compaction() {
         "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
     );
     let server = testserver::spawn(|_| sse_response(STREAM)).await;
-    let client = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens("test-token"), "acct-1");
     let request = Request {
         request_remote_compaction: true,
         ..model_request()
@@ -98,7 +98,7 @@ async fn preserves_usage_presence() {
         ),
     ] {
         let server = testserver::spawn(move |_| sse_response(body)).await;
-        let client = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
+        let client = trusted_test_client(&server.url, static_tokens("test-token"), "acct-1");
         let (settlement, _) = complete(&client, &Request::default()).await;
         assert_eq!(settlement.result.unwrap().message.usage, want, "{name}");
     }
@@ -159,7 +159,7 @@ async fn a_rotated_token_and_account_id_are_redacted_from_the_stream_and_the_res
         ]
         .join("\n");
     let server = testserver::spawn(move |_| sse_response(&stream)).await;
-    let client = Client::with_base_url(&server.url, static_tokens(&access_token), account_id);
+    let client = trusted_test_client(&server.url, static_tokens(&access_token), account_id);
 
     let (settlement, events) = complete(&client, &Request::default()).await;
     let response = settlement.result.unwrap();
@@ -205,7 +205,7 @@ async fn a_credential_split_across_reasoning_deltas_is_redacted() {
         ]
         .join("\n");
     let server = testserver::spawn(move |_| sse_response(&stream)).await;
-    let client = Client::with_base_url(&server.url, static_tokens("token"), account_id);
+    let client = trusted_test_client(&server.url, static_tokens("token"), account_id);
 
     let (settlement, events) = complete(&client, &Request::default()).await;
     let response = settlement.result.unwrap();
@@ -234,7 +234,7 @@ async fn an_unauthorized_response_reports_fixed_guidance() {
         "x".repeat(32 << 10)
     );
     let server = testserver::spawn(move |_| testserver::status_response(401, &body)).await;
-    let client = Client::with_base_url(&server.url, static_tokens(access_token), account_id);
+    let client = trusted_test_client(&server.url, static_tokens(access_token), account_id);
 
     #[derive(Default)]
     struct Phases(std::sync::Mutex<Vec<(otto_core::diagnostics::Phase, Option<u16>)>>);
@@ -279,7 +279,7 @@ async fn a_redirect_is_reported_as_its_status_without_forwarding_the_request() {
     let target = testserver::spawn(|_| testserver::status_response(500, "unreachable")).await;
     let location = format!("{}/responses", target.url);
     let source = testserver::spawn(move |_| testserver::redirect_response(307, &location)).await;
-    let client = Client::with_base_url(
+    let client = trusted_test_client(
         &source.url,
         static_tokens("redirect-access-token"),
         "redirect-account-id",
@@ -314,7 +314,7 @@ async fn an_unusable_token_source_reports_a_fixed_authorization_error() {
         CancellationToken::new(),
     );
     for tokens in [expired, static_tokens("")] {
-        let client = Client::with_base_url("http://127.0.0.1:1", tokens, "acct-secret");
+        let client = trusted_test_client("http://127.0.0.1:1", tokens, "acct-secret");
         let (settlement, events) = complete(&client, &Request::default()).await;
         let error = settlement.result.unwrap_err();
         assert_eq!(
@@ -331,7 +331,7 @@ async fn an_unusable_token_source_reports_a_fixed_authorization_error() {
 /// An empty account id is as unusable as an empty access token.
 #[tokio::test]
 async fn an_empty_account_id_reports_a_fixed_authorization_error() {
-    let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "  ");
+    let client = trusted_test_client("http://127.0.0.1:1", static_tokens("token"), "  ");
     let (settlement, _) = complete(&client, &Request::default()).await;
     assert_eq!(
         settlement.result.unwrap_err().to_string(),
@@ -343,7 +343,7 @@ async fn an_empty_account_id_reports_a_fixed_authorization_error() {
 async fn an_unrepresentable_redaction_boundary_is_rejected_before_any_request() {
     let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
     let oversized = "x".repeat(otto_core::safetext::MAX_DYNAMIC_VALUE_BYTES + 1);
-    let client = Client::with_base_url(&server.url, static_tokens(&oversized), "acct-1");
+    let client = trusted_test_client(&server.url, static_tokens(&oversized), "acct-1");
 
     let (settlement, events) = complete(&client, &Request::default()).await;
     assert_eq!(

@@ -43,7 +43,7 @@ async fn unauthorized_request_refreshes_and_replays_same_request_once() {
     .await;
     let directory = tempfile::tempdir().unwrap();
     let tokens = rejected_token_source(&server, directory.path().join("chatgpt.json")).await;
-    let client = Client::with_base_url(&server.url, tokens, "acct-1");
+    let client = trusted_test_client(&server.url, tokens, "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert!(settlement.result.is_ok());
     assert_eq!(settlement.attempts, 2);
@@ -92,7 +92,7 @@ async fn unauthorized_refresh_failure_returns_fixed_authorization_error() {
     .await;
     let directory = tempfile::tempdir().unwrap();
     let tokens = rejected_token_source(&server, directory.path().join("chatgpt.json")).await;
-    let client = Client::with_base_url(&server.url, tokens, "acct-1");
+    let client = trusted_test_client(&server.url, tokens, "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert_eq!(settlement.attempts, 1);
     assert_eq!(
@@ -121,7 +121,7 @@ async fn unauthorized_recovery_is_attempted_only_once() {
     .await;
     let directory = tempfile::tempdir().unwrap();
     let tokens = rejected_token_source(&server, directory.path().join("chatgpt.json")).await;
-    let client = Client::with_base_url(&server.url, tokens, "acct-1");
+    let client = trusted_test_client(&server.url, tokens, "acct-1");
     let (settlement, events) = complete(&client, &model_request()).await;
     assert_eq!(settlement.attempts, 2);
     assert_eq!(
@@ -148,4 +148,31 @@ async fn unauthorized_recovery_is_attempted_only_once() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn endpoint_rejection_prevents_refresh_network_and_credential_writes() {
+    let server = testserver::spawn(|_| Vec::<u8>::new()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("credentials.json");
+    let tokens = TokenSource::with_endpoint(
+        crate::auth::oauth::Endpoint {
+            authorize_url: format!("{}/authorize", server.url),
+            token_url: format!("{}/token", server.url),
+        },
+        Credentials {
+            expiry: (chrono::Utc::now() - chrono::TimeDelta::minutes(1)).fixed_offset(),
+            ..Credentials::default()
+        },
+        path.clone(),
+        CancellationToken::new(),
+    );
+    let client = Client::with_base_url(&server.url, tokens, "fixture-account");
+    let (settlement, events) = complete(&client, &model_request()).await;
+    assert!(settlement.result.is_err());
+    assert_eq!(settlement.attempts, 0);
+    assert!(events.is_empty());
+    assert!(client.catalog(&CancellationToken::new()).await.is_err());
+    assert_eq!(server.count(), 0);
+    assert!(!path.exists());
 }

@@ -356,6 +356,15 @@ fn record_zero(record: &Record) -> bool {
         && record.expires_at.is_none()
 }
 
+/// Whether an accepted candidate of `action` writes a new record, so the
+/// review names its ID: create, supersede and correct.
+pub fn action_writes_new_record(action: CandidateAction) -> bool {
+    matches!(
+        action,
+        CandidateAction::Create | CandidateAction::Supersede | CandidateAction::Correct
+    )
+}
+
 pub fn validate_proposed_record(record: &Record, action: CandidateAction) -> Result<()> {
     validate_scope(&record.scope).map_err(|_| invalid_record("proposed scope"))?;
     if !record.id.is_empty()
@@ -381,14 +390,18 @@ pub fn validate_proposed_record(record: &Record, action: CandidateAction) -> Res
     if !action.carries_content() {
         // Forget, retract and needs_review carry no proposed content.
         if !presentation_route_only(&record.metadata) {
-            return Err(invalid_record("forget proposed content"));
+            return Err(invalid_record(
+                "proposed content of a candidate without content",
+            ));
         }
         let mut copy = record.clone();
         copy.scope = Scope::default();
         copy.source = Provenance::default();
         copy.metadata.clear();
         if !record_zero(&copy) {
-            return Err(invalid_record("forget proposed content"));
+            return Err(invalid_record(
+                "proposed content of a candidate without content",
+            ));
         }
         return Ok(());
     }
@@ -478,9 +491,9 @@ pub fn validate_candidate(candidate: &Candidate) -> Result<()> {
                 if !valid_revision(candidate.result_revision) {
                     return Err(invalid_record("accepted result revision"));
                 }
-                if candidate.action == CandidateAction::Create {
+                if action_writes_new_record(candidate.action) {
                     if !valid_opaque_id(&candidate.result_record_id, MAX_ID_BYTES) {
-                        return Err(invalid_record("accepted create result ID"));
+                        return Err(invalid_record("accepted result record ID"));
                     }
                 } else if !candidate.result_record_id.is_empty() {
                     return Err(invalid_record("accepted result ID"));

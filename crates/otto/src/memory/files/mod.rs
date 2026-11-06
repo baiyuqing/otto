@@ -42,8 +42,8 @@ use crate::fsops::{self, PosixPublish, Publish, PublishMode};
 use crate::memory::guard::{ContentGuard, guard_candidate, guard_record};
 use crate::memory::repository::MemoryOptions;
 use crate::memory::{
-    Candidate, Error, ErrorKind, GuardField, GuardInput, MAX_ID_BYTES, Record, Result, Scope,
-    StoreIdentity, Tombstone,
+    Candidate, Error, ErrorKind, GuardField, GuardInput, MAX_ID_BYTES, Record, RecordState, Result,
+    Scope, StoreIdentity, Tombstone,
 };
 
 #[cfg(test)]
@@ -388,7 +388,7 @@ impl FileStore {
         // wins, then the larger id; the others are reported.
         let mut winners: BTreeMap<(Scope, String, String), usize> = BTreeMap::new();
         for (index, record) in found.iter().enumerate() {
-            if record.key.is_empty() {
+            if record.key.is_empty() || record.state != RecordState::Active {
                 continue;
             }
             let key = (
@@ -413,7 +413,11 @@ impl FileStore {
                 record.key.clone(),
             );
             match winners.get(&key) {
-                Some(&winner) if winner != index && !record.key.is_empty() => {
+                Some(&winner)
+                    if winner != index
+                        && !record.key.is_empty()
+                        && record.state == RecordState::Active =>
+                {
                     invalid.push(InvalidFile {
                         path: self.path("records", &record.id, "md"),
                         reason: format!("duplicate key, superseded by record {}", found[winner].id),

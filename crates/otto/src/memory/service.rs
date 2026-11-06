@@ -29,21 +29,21 @@ use tokio_util::sync::CancellationToken;
 
 use super::MemoryStore;
 use super::validate::{
-    provenance_zero, validate_bind_scopes, validate_forget_request, validate_propose_request,
-    validate_recall_request, validate_record_ref, validate_remember_request,
-    validate_restore_request, validate_search_request, validate_set_state_request,
-    validate_verify_request,
+    action_writes_new_record, provenance_zero, validate_bind_scopes, validate_forget_request,
+    validate_propose_request, validate_recall_request, validate_record_ref,
+    validate_remember_request, validate_restore_request, validate_search_request,
+    validate_set_state_request, validate_verify_request,
 };
 use super::{
-    BindOptions, Candidate, CandidateAction, CandidateListRequest, CandidateState, CopyStatus,
-    Error, ErrorKind, ForgetCleanupEntry, ForgetRequest, ForgetResult, ListRequest,
-    MAX_QUERY_BYTES, MAX_QUERY_TERM_BYTES, MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest,
-    ProposeRequest, RecallRequest, RecallResult, Record, RecordHistory, RecordKey, RecordRef,
-    RecordState, RememberRequest, RestoreRequest, Result, RetrievalRequest, ReviewDecision,
-    ReviewRequest, ReviewResult, Scope, SearchRequest, SearchResult, SetStateRequest,
-    StandingUsage, StoreForgetRequest, StoreRestoreRequest, StoreReviewRequest,
-    StoreSetStateRequest, StoreVerifyRequest, TokenEstimator, Tombstone, UpsertRequest,
-    VerifyRequest, decide_default_policy, new_id,
+    BindOptions, Candidate, CandidateListRequest, CandidateState, CopyStatus, Error, ErrorKind,
+    ForgetCleanupEntry, ForgetRequest, ForgetResult, ListRequest, MAX_QUERY_BYTES,
+    MAX_QUERY_TERM_BYTES, MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest, ProposeRequest,
+    RecallRequest, RecallResult, Record, RecordHistory, RecordKey, RecordRef, RecordState,
+    RememberRequest, RestoreRequest, Result, RetrievalRequest, ReviewDecision, ReviewRequest,
+    ReviewResult, Scope, SearchRequest, SearchResult, SetStateRequest, StandingUsage,
+    StoreForgetRequest, StoreRestoreRequest, StoreReviewRequest, StoreSetStateRequest,
+    StoreVerifyRequest, TokenEstimator, Tombstone, UpsertRequest, VerifyRequest,
+    decide_default_policy, new_id,
 };
 
 /// The copies of a forgotten record's text that live outside the store and
@@ -475,7 +475,7 @@ impl Service {
             decision_source: Some(Origin::Human),
             decided_at: now_utc(),
         };
-        if request.decision == ReviewDecision::Accept && candidate.action == CandidateAction::Create
+        if request.decision == ReviewDecision::Accept && action_writes_new_record(candidate.action)
         {
             store_request.result_record_id = new_id()?;
         }

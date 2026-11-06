@@ -70,15 +70,20 @@ pub(super) fn standing_set(
 }
 
 /// Rejects `record` when storing it would push its user scope's standing set
-/// over the budget. The record being replaced, if any, is not counted.
-pub(super) fn check_standing_budget(snapshot: &Snapshot, record: &Record) -> Result<()> {
+/// over the budget. The record being replaced and the record `retiring_id`
+/// names, which the same review retires, are not counted.
+pub(super) fn check_standing_budget(
+    snapshot: &Snapshot,
+    record: &Record,
+    retiring_id: Option<&str>,
+) -> Result<()> {
     let now = Utc::now();
     if !standing_eligible(record, now) {
         return Ok(());
     }
     let used: usize = standing_set(snapshot, &record.scope, &[], false, now)
         .iter()
-        .filter(|existing| existing.id != record.id)
+        .filter(|existing| existing.id != record.id && Some(existing.id.as_str()) != retiring_id)
         .map(|existing| record_cost(None, existing))
         .sum();
     let needed = record_cost(None, record);
@@ -176,9 +181,11 @@ impl FileStore {
         self.snapshot()?
             .records
             .iter()
-            .find(|record| {
+            .filter(|record| {
                 record.scope == key.scope && record.kind == key.kind && record.key == key.key
             })
+            // An active record wins over an inactive one that kept the same key.
+            .min_by_key(|record| record.state != RecordState::Active)
             .cloned()
             .ok_or_else(|| Error::new(ErrorKind::NotFound))
     }
@@ -318,7 +325,33 @@ impl FileStore {
                 return Err(conflict_record(&record.id, 0, 0));
             }
         }
-        self.write_checked(snapshot, record, enforce_standing)
+        self.write_checked(snapshot, record, enforce_standing, None)
+    }
+
+    /// [`FileStore::insert_new`] for a replacement whose review retires
+    /// `retiring_id` afterwards under the same lock. That record is still
+    /// active when the replacement is written, so the duplicate-key and
+    /// standing-budget checks ignore it.
+    pub(super) fn insert_replacement(
+        &self,
+        snapshot: &Snapshot,
+        record: &Record,
+        enforce_standing: bool,
+        retiring_id: &str,
+    ) -> Result<()> {
+        Self::file_id(&record.id, "record ID")?;
+        for taken in [
+            self.path("records", &record.id, "md"),
+            self.path("tombstones", &record.id, "json"),
+        ] {
+            if std::fs::symlink_metadata(&taken).is_ok() {
+                if snapshot.is_invalid(&taken) {
+                    return Err(corrupt());
+                }
+                return Err(conflict_record(&record.id, 0, 0));
+            }
+        }
+        self.write_checked(snapshot, record, enforce_standing, Some(retiring_id))
     }
 
     /// Rewrites the file of an existing active record.
@@ -328,7 +361,7 @@ impl FileStore {
         record: &Record,
         enforce_standing: bool,
     ) -> Result<()> {
-        self.check_writable(snapshot, record, enforce_standing)?;
+        self.check_writable(snapshot, record, enforce_standing, None)?;
         self.archive_current_revision(snapshot, record)?;
         self.put_record(record)
     }
@@ -338,21 +371,29 @@ impl FileStore {
         snapshot: &Snapshot,
         record: &Record,
         enforce_standing: bool,
+        retiring_id: Option<&str>,
     ) -> Result<()> {
-        self.check_writable(snapshot, record, enforce_standing)?;
+        self.check_writable(snapshot, record, enforce_standing, retiring_id)?;
         self.put_record(record)
     }
 
-    /// Rejects a duplicate non-empty key and, when asked, a standing-budget overrun.
+    /// Rejects an active record whose non-empty (scope, kind, key) another
+    /// active record holds and, when asked, a standing-budget overrun. A
+    /// retracted, superseded or needs-review record keeps its key without
+    /// blocking a replacement, which is what a supersede or correct writes.
     fn check_writable(
         &self,
         snapshot: &Snapshot,
         record: &Record,
         enforce_standing: bool,
+        retiring_id: Option<&str>,
     ) -> Result<()> {
         if !record.key.is_empty()
+            && record.state == RecordState::Active
             && snapshot.records.iter().any(|other| {
                 other.id != record.id
+                    && Some(other.id.as_str()) != retiring_id
+                    && other.state == RecordState::Active
                     && other.scope == record.scope
                     && other.kind == record.kind
                     && other.key == record.key
@@ -361,7 +402,7 @@ impl FileStore {
             return Err(Error::new(ErrorKind::Conflict));
         }
         if enforce_standing {
-            check_standing_budget(snapshot, record)?;
+            check_standing_budget(snapshot, record, retiring_id)?;
         }
         Ok(())
     }

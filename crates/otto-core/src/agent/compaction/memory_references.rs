@@ -48,3 +48,42 @@ pub(super) fn summarized_memory_references<'a>(
 
 #[cfg(test)]
 mod tests;
+
+impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::session::Session>
+    super::Agent<P, T, S>
+{
+    /// The retired records among `references`, as the notices the summary
+    /// request carries so the summarizer drops statements derived from them.
+    /// Without a memory binding there are none; a lifecycle failure is a
+    /// memory warning and compacts without retractions.
+    pub(super) async fn compaction_retractions(
+        &self,
+        references: &[MemoryRecordRef],
+        emit: super::EventSink<'_>,
+        control: &dyn crate::operation::OperationControl,
+    ) -> Vec<crate::agent::memory_retraction::RetractionNotice> {
+        let Some(binding) = &self.options.memory else {
+            return Vec::new();
+        };
+        let ids: Vec<String> = references
+            .iter()
+            .map(|reference| reference.id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        match binding.lifecycle(&ids, control.cancellation_token()).await {
+            Ok(lifecycle) => {
+                crate::agent::memory_retraction::select_retraction_notices(references, &lifecycle)
+            }
+            Err(error) => {
+                emit(super::Event::MemoryWarning {
+                    message: error.to_string(),
+                });
+                Vec::new()
+            }
+        }
+    }
+}

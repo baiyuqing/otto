@@ -79,15 +79,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             omitted_modified_files: details.omitted_modified_files,
             memory_records: details.memory_records.clone(),
             memory_coverage: details.memory_coverage,
+            memory_retracted: details.memory_retracted.clone(),
         }
     }
 
     /// Builds the summary request, plus a second one when the current turn was
-    /// split and both halves have content.
+    /// split and both halves have content. `retraction_instructions` is the
+    /// rendered block of retracted memory records the summarizer must drop,
+    /// or the empty string.
     pub(super) fn prepare_summary_requests(
         &self,
         selection: &CompactionSelection,
         focus: &str,
+        retraction_instructions: &str,
         previous_details: &CompactionDetails,
     ) -> Result<(SummaryRequest, Option<SummaryRequest>), String> {
         let turn_prefix_only = CompactionSelection {
@@ -102,8 +106,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         } else {
             selection
         };
-        let prepared =
-            build_summary_request(&self.options, request_selection, focus, previous_details)?;
+        let prepared = build_summary_request(
+            &self.options,
+            request_selection,
+            focus,
+            retraction_instructions,
+            previous_details,
+        )?;
         if !selection.split_turn
             || selection.historical_source.is_empty()
             || selection.turn_prefix_source.is_empty()
@@ -114,8 +123,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             turn_prefix_source: selection.turn_prefix_source.clone(),
             ..CompactionSelection::default()
         };
-        let turn_prepared =
-            build_summary_request(&self.options, &turn_selection, focus, &prepared.details)?;
+        let turn_prepared = build_summary_request(
+            &self.options,
+            &turn_selection,
+            focus,
+            retraction_instructions,
+            &prepared.details,
+        )?;
         Ok((prepared, Some(turn_prepared)))
     }
 

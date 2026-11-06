@@ -160,3 +160,6 @@ pub fn memory_request_text(memory_context: &str, retraction_context: &str) -> St
         (false, false) => format!("{memory_context}\n{retraction_context}"),
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -23,6 +23,7 @@ use otto_core::memory::Trust;
 use tokio_util::sync::CancellationToken;
 
 use super::advice::audit::{self, NewRow};
+use super::validate::valid_text;
 use super::{
     Candidate, CandidateAction, MAX_ID_BYTES, MAX_RECORD_TEXT_BYTES, Origin, ProposeRequest,
     Provenance, Record, Result, Service, valid_opaque_id,
@@ -301,11 +302,11 @@ pub fn round_two_questions(action: ProposalAction) -> Vec<Question> {
     questions
 }
 
-/// Whether `text` repeats the record: the whole trimmed text, or any line of
-/// at least [`LEAK_LINE_MINIMUM_BYTES`] bytes.
+/// Whether `text` repeats the record: the whole trimmed text or any line of
+/// it, each only when it is at least [`LEAK_LINE_MINIMUM_BYTES`] bytes.
 pub fn contains_record_text(text: &str, record: &Record) -> bool {
     let whole = record.text.trim();
-    if !whole.is_empty() && text.contains(whole) {
+    if whole.len() >= LEAK_LINE_MINIMUM_BYTES && text.contains(whole) {
         return true;
     }
     record
@@ -372,11 +373,8 @@ pub fn validate_proposal(
             if trimmed == input.target.text.trim() {
                 return Err("replacement text equals the record text".into());
             }
-            if trimmed != replacement
-                || replacement
-                    .chars()
-                    .any(|character| character.is_control() && character != '\n')
-            {
+            // The store's own text rule: no control character, newline included.
+            if trimmed != replacement || !valid_text(replacement, MAX_RECORD_TEXT_BYTES) {
                 return Err("replacement text is not trimmed or holds control characters".into());
             }
         }
@@ -555,7 +553,9 @@ impl Generator {
     ) -> std::result::Result<std::collections::HashMap<String, crate::decision::Answer>, Outcome>
     {
         let started = Instant::now();
+        // Biased: a token cancelled before the call wins over a ready backend.
         let exchange = tokio::select! {
+            biased;
             _ = cancel.cancelled() => {
                 return Err(Outcome::Unavailable("canceled".into()));
             }
@@ -597,3 +597,6 @@ impl Generator {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

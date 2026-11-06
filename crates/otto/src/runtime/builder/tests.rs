@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 mod authorization;
+mod memory_proposals;
 mod provider_turns;
 mod runtime_info;
 mod session_resources_sharing;

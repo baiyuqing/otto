@@ -776,6 +776,10 @@ fn memory_state_and_verify_are_mutations_and_list_is_a_query() {
         BackendRequest::Command(Command::Management(M::MemoryVerify { .. }))
     ));
     assert!(matches!(
+        start("/memory propose r1 the editor changed"),
+        BackendRequest::Command(Command::Management(M::MemoryPropose { .. }))
+    ));
+    assert!(matches!(
         start("/memory list --state all"),
         BackendRequest::Management(M::MemoryList { .. })
     ));

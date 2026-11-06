@@ -234,3 +234,155 @@ async fn append_rejects_out_of_sequence_tool_traffic() {
         );
     }
 }
+
+fn memory_reference(id: &str, revision: Option<&str>) -> MemoryRecordRef {
+    MemoryRecordRef {
+        id: id.into(),
+        revision: revision.map(str::to_owned),
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn memory_recall_record_is_anchored_to_the_preceding_user_message() {
+    let session = MemorySession::new();
+    session.append(user("one")).await.expect("append");
+    session
+        .append_custom(
+            MEMORY_RECALL_CUSTOM_TYPE,
+            &encode_memory_recall(&[
+                memory_reference("rec-b", None),
+                memory_reference("rec-a", Some("2")),
+            ]),
+        )
+        .await
+        .expect("append recall");
+    let user_message_id = session.messages()[0].id.clone();
+    assert_eq!(
+        session.memory_references(),
+        [TurnMemoryReferences {
+            user_message_id,
+            records: vec![
+                memory_reference("rec-a", Some("2")),
+                memory_reference("rec-b", None)
+            ],
+        }]
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn memory_recall_malformed_data_is_rejected_and_stores_nothing() {
+    let session = MemorySession::new();
+    session.append(user("one")).await.expect("append");
+    for data in [
+        "not json",
+        r#"{"schemaVersion":2,"records":[]}"#,
+        r#"{"schemaVersion":1,"records":[{"id":""}]}"#,
+        r#"{"schemaVersion":1}"#,
+    ] {
+        let error = session
+            .append_custom(MEMORY_RECALL_CUSTOM_TYPE, data)
+            .await
+            .expect_err("malformed recall accepted");
+        assert!(
+            matches!(error, SessionError::Persist(_)),
+            "{data}: {error:?}"
+        );
+    }
+    assert!(session.memory_references().is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn memory_recall_without_a_user_message_is_a_sequence_error() {
+    let session = MemorySession::new();
+    let error = session
+        .append_custom(MEMORY_RECALL_CUSTOM_TYPE, &encode_memory_recall(&[]))
+        .await
+        .expect_err("recall without a user message accepted");
+    assert!(matches!(error, SessionError::Sequence(_)), "{error:?}");
+    assert!(session.memory_references().is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn memory_references_list_two_turns_in_order_and_survive_compaction() {
+    let session = MemorySession::new();
+    session.append(user("one")).await.expect("append");
+    session
+        .append_custom(
+            MEMORY_RECALL_CUSTOM_TYPE,
+            &encode_memory_recall(&[memory_reference("rec-a", None)]),
+        )
+        .await
+        .expect("first recall");
+    session.append(user("two")).await.expect("append");
+    session
+        .append_custom(
+            MEMORY_RECALL_CUSTOM_TYPE,
+            &encode_memory_recall(&[memory_reference("rec-b", Some("1"))]),
+        )
+        .await
+        .expect("second recall");
+    let user_ids: Vec<String> = session
+        .messages()
+        .iter()
+        .map(|message| message.id.clone())
+        .collect();
+    let expected = vec![
+        TurnMemoryReferences {
+            user_message_id: user_ids[0].clone(),
+            records: vec![memory_reference("rec-a", None)],
+        },
+        TurnMemoryReferences {
+            user_message_id: user_ids[1].clone(),
+            records: vec![memory_reference("rec-b", Some("1"))],
+        },
+    ];
+    assert_eq!(session.memory_references(), expected);
+
+    session
+        .append_compaction(CompactionCheckpoint {
+            summary: "summary".into(),
+            first_kept_entry_id: user_ids[1].clone(),
+            created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            ..CompactionCheckpoint::default()
+        })
+        .await
+        .expect("checkpoint");
+    assert_eq!(session.memory_references(), expected);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn compaction_details_carry_memory_records_and_coverage() {
+    let session = MemorySession::new();
+    session.append(user("one")).await.expect("append");
+    session.append(user("two")).await.expect("append");
+    let first_kept = session.messages()[1].id.clone();
+    let details = CompactionDetails {
+        memory_records: vec![
+            memory_reference("rec-a", Some("1")),
+            memory_reference("rec-b", None),
+        ],
+        memory_coverage: MemoryReferenceCoverage::Complete,
+        ..CompactionDetails::default()
+    };
+    session
+        .append_compaction(CompactionCheckpoint {
+            summary: "summary".into(),
+            first_kept_entry_id: first_kept,
+            details: details.clone(),
+            created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            ..CompactionCheckpoint::default()
+        })
+        .await
+        .expect("checkpoint");
+    let latest = session.latest_compaction().expect("latest compaction");
+    assert_eq!(latest.details.memory_records, details.memory_records);
+    assert_eq!(
+        latest.details.memory_coverage,
+        MemoryReferenceCoverage::Complete
+    );
+}

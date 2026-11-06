@@ -171,8 +171,8 @@ attach client mode, `dispatcher.rs` and `command.rs` route requests, and
 
 `src/main.rs` starts the process and calls `otto_cli::run` (`src/run.rs`),
 the composition root. Command modules: `acp`, `config_command`,
-`eval_command/`, `flags/`, `mcp/`, `memory_command/`, `panic_cleanup`,
-`plugin`, `run/`, `sandbox_setup`, `serve/`, `setup`, `storage`,
+`eval_command/`, `flags/`, `mcp/`, `memory_command/`, `memory_eval_command/`,
+`panic_cleanup`, `plugin`, `run/`, `sandbox_setup`, `serve/`, `setup`, `storage`,
 `storage_transfer/`, `terminate`, `trust`, `workflow`, `workspace_command`.
 The crate depends on all four other crates and owns the `[[bin]] name = "otto"`
 target. Feature `storage-conformance` (default) gates

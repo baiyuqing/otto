@@ -10,18 +10,18 @@ mod answer_judging;
 mod argument_parsing;
 mod cost_input;
 mod eval_report;
-mod model_calls;
+pub(crate) mod model_calls;
 mod node_compression;
-mod output_files;
+pub(crate) mod output_files;
 mod probe_answering;
 mod probe_generation;
 mod session_input;
-mod tool_executors;
+pub(crate) mod tool_executors;
 mod tree_build;
 mod view_replay;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,83 @@ const BUILD_FILE: &str = "build.json";
 const COST_FILE: &str = "cost.json";
 const REPORT_JSON_FILE: &str = "report.json";
 const REPORT_MARKDOWN_FILE: &str = "report.md";
+
+/// One of the evaluation targets of `otto eval`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EvalCommand {
+    ViewTree(Invocation),
+    MemoryRetraction(crate::memory_eval_command::Invocation),
+}
+
+impl EvalCommand {
+    /// Whether the command only prints its size estimate.
+    pub fn is_dry_run(&self) -> bool {
+        match self {
+            Self::ViewTree(invocation) => invocation.is_dry_run(),
+            Self::MemoryRetraction(invocation) => invocation.is_dry_run(),
+        }
+    }
+
+    /// The flags the shared option parser needs to locate the workspace and configuration.
+    pub fn startup_flags(&self) -> Vec<String> {
+        match self {
+            Self::ViewTree(invocation) => invocation.startup_flags(),
+            Self::MemoryRetraction(invocation) => invocation.startup_flags(),
+        }
+    }
+}
+
+/// Parses the arguments after `eval`: the target, then the target's own grammar.
+pub fn parse_command(args: &[String]) -> Result<EvalCommand, String> {
+    match args.first().map(String::as_str) {
+        Some("view-tree") => parse(args).map(EvalCommand::ViewTree),
+        Some("memory-retraction") => {
+            crate::memory_eval_command::parse(&args[1..]).map(EvalCommand::MemoryRetraction)
+        }
+        Some(other) => Err(format!(
+            "otto: unknown eval target {other:?}; the targets are view-tree and memory-retraction"
+        )),
+        None => Err("otto: eval requires a target: view-tree or memory-retraction".into()),
+    }
+}
+
+/// Runs the `--dry-run` of either target.
+pub fn run_dry_command(
+    command: &EvalCommand,
+    roots: &Roots,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> i32 {
+    match command {
+        EvalCommand::ViewTree(invocation) => run_dry(invocation, roots, stdout, stderr),
+        EvalCommand::MemoryRetraction(invocation) => {
+            crate::memory_eval_command::run_dry(invocation, stdout, stderr)
+        }
+    }
+}
+
+/// Runs either target against the runtime's provider.
+pub async fn run_command(
+    command: &EvalCommand,
+    builder: &Builder,
+    runtime: &Runtime,
+    roots: &Roots,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    cancel: &CancellationToken,
+) -> i32 {
+    match command {
+        EvalCommand::ViewTree(invocation) => {
+            run(invocation, builder, runtime, roots, stdout, stderr, cancel).await
+        }
+        EvalCommand::MemoryRetraction(invocation) => {
+            crate::memory_eval_command::run(
+                invocation, builder, runtime, roots, stdout, stderr, cancel,
+            )
+            .await
+        }
+    }
+}
 
 /// Where the session files and the evaluation output live.
 pub struct Roots {

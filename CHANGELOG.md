@@ -74,6 +74,14 @@ commit ledger; Git and release tags retain the full history. See the
   references and plugin stores that no longer return a record produce none. See
   [retraction notices](docs/manual/memory-and-extensions.md#retraction-notices)
   (#591).
+- A compaction summary written from turns that used a since-retired memory
+  record is marked in every request (`<memory_summary_affected .../>`) with a
+  one-time warning per turn; a checkpoint without references or a
+  provider-managed compaction is marked as unknown coverage. `/compact` and
+  automatic compaction rebuild the summary with the retracted records listed
+  for the summarizer and record them in the checkpoint's `memoryRetracted`, so
+  the mark stops. The rebuild uses the previous summary and the messages since
+  the checkpoint; `/new` is the complete recovery path (#591).
 
 ### Sessions
 

@@ -383,6 +383,16 @@ pub enum ChangeAction {
     Create,
     Update,
     Forget,
+    /// Withdraw the target without asserting its opposite.
+    Retract,
+    /// Replace the target with the proposed content; the target is marked
+    /// superseded and names its replacement.
+    Supersede,
+    /// Replace an incorrect target with the proposed content; the target is
+    /// marked retracted.
+    Correct,
+    /// Mark the target as needing human review.
+    NeedsReview,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {

@@ -275,7 +275,8 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
     {
         return Err(invalid_request("proposal source origin or decision"));
     }
-    if request.action == CandidateAction::Forget {
+    if !request.action.carries_content() {
+        // Forget, retract and needs_review name a target and carry no content.
         validate_scope(&request.scope)?;
         if !valid_opaque_id(&request.target_id, MAX_ID_BYTES)
             || !valid_revision(request.base_revision)
@@ -314,14 +315,16 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
             }
             require_standing_key(&request.scope, &request.kind, &request.key)?;
         }
-        CandidateAction::Update => {
+        CandidateAction::Update | CandidateAction::Supersede | CandidateAction::Correct => {
             if !valid_opaque_id(&request.target_id, MAX_ID_BYTES)
                 || !valid_revision(request.base_revision)
             {
                 return Err(invalid_request("update proposal target"));
             }
         }
-        CandidateAction::Forget => unreachable!("handled above"),
+        CandidateAction::Forget | CandidateAction::Retract | CandidateAction::NeedsReview => {
+            unreachable!("handled above")
+        }
     }
     Ok(())
 }

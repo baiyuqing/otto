@@ -222,6 +222,9 @@ impl RequestSizer for ScriptedSizer {
 pub struct Runner {
     /// The memory client of this runner; `/remember` uses it.
     pub(crate) memory_client: Option<Arc<crate::memory::client::Client>>,
+    /// The lifecycle proposal generator over the advice backend; `/memory
+    /// propose` uses it. Absent without a usable native memory store.
+    pub(crate) memory_proposals: Option<Arc<crate::memory::proposals::Generator>>,
     authorization_run: Arc<Mutex<String>>,
     approvals: Option<(Arc<crate::approval::Service>, otto_core::approval::Scope)>,
     /// Reviewer registered for this runner; `close` unregisters it.

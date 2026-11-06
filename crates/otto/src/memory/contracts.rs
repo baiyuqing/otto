@@ -288,6 +288,19 @@ pub enum CandidateAction {
     Create,
     Update,
     Forget,
+    /// Accepting sets the target `retracted` with the candidate reason; no
+    /// proposed content.
+    Retract,
+    /// Accepting creates the proposed replacement record and sets the target
+    /// `superseded` with `superseded_by` naming it.
+    Supersede,
+    /// Accepting creates the proposed replacement record with
+    /// `metadata["otto.corrects"]` naming the target and sets the target
+    /// `retracted`.
+    Correct,
+    /// Accepting sets the target `needs_review` with the candidate reason; no
+    /// proposed content.
+    NeedsReview,
 }
 
 impl CandidateAction {
@@ -296,6 +309,10 @@ impl CandidateAction {
             CandidateAction::Create => "create",
             CandidateAction::Update => "update",
             CandidateAction::Forget => "forget",
+            CandidateAction::Retract => "retract",
+            CandidateAction::Supersede => "supersede",
+            CandidateAction::Correct => "correct",
+            CandidateAction::NeedsReview => "needs_review",
         }
     }
 
@@ -304,10 +321,35 @@ impl CandidateAction {
             "create" => Some(CandidateAction::Create),
             "update" => Some(CandidateAction::Update),
             "forget" => Some(CandidateAction::Forget),
+            "retract" => Some(CandidateAction::Retract),
+            "supersede" => Some(CandidateAction::Supersede),
+            "correct" => Some(CandidateAction::Correct),
+            "needs_review" => Some(CandidateAction::NeedsReview),
             _ => None,
         }
     }
+
+    /// Whether the action names an existing target record.
+    pub fn targets_record(self) -> bool {
+        !matches!(self, CandidateAction::Create)
+    }
+
+    /// Whether an accepted candidate of this action writes a record from the
+    /// proposed content (a new record or a new revision).
+    pub fn carries_content(self) -> bool {
+        matches!(
+            self,
+            CandidateAction::Create
+                | CandidateAction::Update
+                | CandidateAction::Supersede
+                | CandidateAction::Correct
+        )
+    }
 }
+
+/// The metadata name a correction replacement carries; its value is the id of
+/// the record it corrects.
+pub const CORRECTS_METADATA: &str = "otto.corrects";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CandidateState {

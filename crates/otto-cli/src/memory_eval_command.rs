@@ -129,6 +129,7 @@ pub async fn execute<P: Provider + Clone + Send + Sync + 'static>(
         Vec::new()
     };
     if options.layer.includes(Layer::Three) {
+        write_transcripts(&out, &items, &options.variants).await?;
         run_layer_three(env, log, options, &items, &out, &mut answers, stdout).await?;
     }
     let proposals = if options.layer.includes(Layer::Two) {
@@ -146,6 +147,29 @@ pub async fn execute<P: Provider + Clone + Send + Sync + 'static>(
         out.path(REPORT_MARKDOWN_FILE).display()
     )
     .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Writes `transcripts/<item>-<variant>.jsonl` for every selected item and variant that has
+/// no file yet: the constructed prior, one entry per line.
+async fn write_transcripts(
+    out: &OutputDir,
+    items: &[Item],
+    variants: &[Variant],
+) -> Result<(), String> {
+    let directory = out.path("transcripts");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create {}: {error}", directory.display()))?;
+    for item in items {
+        for variant in variants {
+            let name = transcripts::transcript_file(&item.name, *variant);
+            if out.exists(&name) {
+                continue;
+            }
+            let transcript = transcripts::build_transcript(item, *variant).await?;
+            out.write_jsonl(&name, &transcript.entries)?;
+        }
+    }
     Ok(())
 }
 

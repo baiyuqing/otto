@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::items::Item;
+use super::items::{Item, Retirement};
 
 /// Terms that admit the current value is unknown. Lowercase; matched as substrings.
 pub const UNCERTAINTY_TERMS: &[&str] = &[
@@ -42,9 +42,23 @@ pub struct RuleChecks {
     pub control_abstention: Option<bool>,
 }
 
-/// Case-insensitive substring match of `term` in `text`.
+/// Case-insensitive match of `term` in `text`. When `term` starts with a letter or digit, the
+/// match must not continue a longer word: `npm install` does not match inside `pnpm install`,
+/// and `30s` does not match inside `130s`.
 pub fn contains_term(text: &str, term: &str) -> bool {
-    text.to_lowercase().contains(&term.to_lowercase())
+    let text = text.to_lowercase();
+    let term = term.to_lowercase();
+    if term.is_empty() {
+        return false;
+    }
+    let starts_with_word_character = term.chars().next().is_some_and(char::is_alphanumeric);
+    text.match_indices(&term).any(|(start, _)| {
+        !starts_with_word_character
+            || text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|before| !before.is_alphanumeric())
+    })
 }
 
 /// Whether `text` holds an uncertainty term.
@@ -54,12 +68,34 @@ pub fn admits_uncertainty(text: &str) -> bool {
         .any(|term| contains_term(text, term))
 }
 
+/// Whether `answer` holds any of `terms`.
+fn holds_any(answer: &str, terms: &[String]) -> bool {
+    terms.iter().any(|term| contains_term(answer, term))
+}
+
 /// The task-answer rules.
-pub fn check_task_answer(_item: &Item, _answer: &str) -> RuleChecks {
-    RuleChecks::default()
+pub fn check_task_answer(item: &Item, answer: &str) -> RuleChecks {
+    let continued_reliance = holds_any(answer, &item.obsolete_terms);
+    RuleChecks {
+        continued_reliance,
+        uses_replacement: item
+            .replacement
+            .as_ref()
+            .map(|_| holds_any(answer, &item.checks.must_contain_any)),
+        admits_uncertainty: admits_uncertainty(answer),
+        answer_leakage: item.retirement == Retirement::Forgotten
+            && (answer.contains(&item.record.marker) || continued_reliance),
+        ..RuleChecks::default()
+    }
 }
 
 /// The control-answer rules.
-pub fn check_control_answer(_item: &Item, _answer: &str) -> RuleChecks {
-    RuleChecks::default()
+pub fn check_control_answer(item: &Item, answer: &str) -> RuleChecks {
+    let has_control_term = holds_any(answer, &item.control.must_contain_any);
+    RuleChecks {
+        control_utility: Some(has_control_term),
+        control_collateral: Some(holds_any(answer, &item.control.must_not_contain)),
+        control_abstention: Some(admits_uncertainty(answer) && !has_control_term),
+        ..RuleChecks::default()
+    }
 }

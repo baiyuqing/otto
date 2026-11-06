@@ -9,6 +9,9 @@ use serde::Deserialize;
 
 use otto::storage::{Connection, Value, params_from_iter};
 
+#[cfg(test)]
+mod schema_tests;
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 enum Export {
@@ -115,7 +118,10 @@ pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i
         Err(()) => {
             let _ = writeln!(
                 stderr,
-                "storage operation failed; migration requires stopped Otto processes, Python 3, a recognized legacy database, and a new destination path"
+                "storage operation failed; migration requires stopped Otto processes, Python 3, \
+                 a canonical supported legacy schema, and a new destination path; \
+                 for modified/unsupported schemas use the matching older Otto release to export \
+                 logical records, keeping the source unchanged"
             );
             1
         }
@@ -173,25 +179,20 @@ fn import(reader: impl BufRead, connection: &mut Connection) -> Result<(), ()> {
         "skill-checks" if version == 1 => &["skill_checks"],
         _ => return Err(()),
     };
-    if counts.is_empty()
+    if counts.len() != allowed.len()
         || counts
             .iter()
             .any(|(table, count)| !allowed.contains(&table.as_str()) || *count < 0)
     {
         return Err(());
     }
+    let canonical = otto::storage::backends::sqlite::migration::legacy::canonical_schema(
+        &family, version, &schema,
+    )
+    .map_err(|_| ())?;
     let transaction = connection.transaction().map_err(|_| ())?;
-    for sql in schema {
-        // The exporter emits individual CREATE TABLE/INDEX statements.
-        // execute prepares one statement, never a script from the input.
-        if !sql.starts_with("CREATE TABLE ")
-            && !sql.starts_with("CREATE INDEX ")
-            && !sql.starts_with("CREATE UNIQUE INDEX ")
-        {
-            return Err(());
-        }
-        transaction.execute(&sql, ()).map_err(|_| ())?;
-    }
+    // Only locally constructed trusted DDL reaches the explicit script API.
+    transaction.execute_batch(&canonical).map_err(|_| ())?;
     transaction
         .pragma_update("user_version", version)
         .map_err(|_| ())?;

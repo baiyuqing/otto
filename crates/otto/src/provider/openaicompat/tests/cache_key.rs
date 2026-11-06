@@ -37,7 +37,7 @@ fn bodies(server: &http::Server) -> Vec<String> {
 #[tokio::test]
 async fn a_non_empty_cache_key_is_sent_as_prompt_cache_key() {
     let server = reject_first(500, "unused").await;
-    let client = Client::new(&server.url, "sk-test-secret");
+    let client = trusted_test_client(&server.url, "sk-test-secret");
     let _ = complete(&client, &keyed_request("session-1")).await;
     let bodies = bodies(&server);
     assert_eq!(bodies.len(), 1);
@@ -52,7 +52,7 @@ async fn a_non_empty_cache_key_is_sent_as_prompt_cache_key() {
 async fn a_400_or_422_naming_the_field_is_resent_once_without_it() {
     for status in [400u16, 422] {
         let server = reject_first(status, REJECTION_BODY).await;
-        let client = Client::new(&server.url, "sk-test-secret");
+        let client = trusted_test_client(&server.url, "sk-test-secret");
         let mut events = Vec::new();
         let mut emit = |event: StreamEvent| events.push(event);
         let settlement = client
@@ -109,7 +109,7 @@ async fn the_resend_does_not_use_the_failure_retry_budget() {
         },
     )
     .await;
-    let client = Client::new(&server.url, "sk-test-secret");
+    let client = trusted_test_client(&server.url, "sk-test-secret");
     let mut events = Vec::new();
     let mut emit = |event: StreamEvent| events.push(event);
     let settlement = client
@@ -134,7 +134,7 @@ async fn the_resend_does_not_use_the_failure_retry_budget() {
 #[tokio::test]
 async fn a_400_that_does_not_name_the_field_is_not_resent() {
     let server = reject_first(400, r#"{"error":{"message":"bad request"}}"#).await;
-    let client = Client::new(&server.url, "sk-test-secret");
+    let client = trusted_test_client(&server.url, "sk-test-secret");
     let error = complete(&client, &keyed_request("session-1"))
         .await
         .unwrap_err();
@@ -148,7 +148,7 @@ async fn a_400_that_does_not_name_the_field_is_not_resent() {
 #[tokio::test]
 async fn an_empty_cache_key_is_never_resent() {
     let server = reject_first(400, REJECTION_BODY).await;
-    let client = Client::new(&server.url, "sk-test-secret");
+    let client = trusted_test_client(&server.url, "sk-test-secret");
     let error = complete(&client, &keyed_request("")).await.unwrap_err();
     assert!(error.to_string().contains("prompt_cache_key"), "{error}");
     let sent = bodies(&server);

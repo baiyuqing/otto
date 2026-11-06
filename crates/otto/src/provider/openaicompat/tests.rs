@@ -132,3 +132,50 @@ fn header(head: &str, name: &str) -> String {
         .map(|line| line[name.len() + 2..].trim().to_string())
         .unwrap_or_default()
 }
+
+// Mock endpoints receive explicit test-owned origin grants, never production bypasses.
+fn trusted_test_client(base_url: &str, api_key: &str) -> Client {
+    let origin = url::Url::parse(base_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_default();
+    match otto_core::config::endpoint::TrustedEndpoint::authorize(
+        base_url,
+        "openai-compatible",
+        &[origin.clone()],
+        &[origin],
+    ) {
+        Ok(endpoint) => Client::new_trusted(&endpoint, api_key),
+        Err(_) => Client::new(base_url, api_key),
+    }
+}
+
+#[tokio::test]
+async fn endpoint_rejection_prevents_secret_body_network_and_injected_redirect_client() {
+    let server = http::spawn(|_| Vec::<u8>::new()).await;
+    let clients = [
+        Client::new(&server.url, "fixture-secret"),
+        Client::with_http_client(&server.url, "fixture-secret", reqwest::Client::new()),
+    ];
+    for client in clients {
+        let settlement = client
+            .complete(&model_request(), &mut |_| {}, &CancellationToken::new())
+            .await;
+        assert!(settlement.result.is_err());
+        assert_eq!(settlement.attempts, 0);
+        assert!(client.list_models(&CancellationToken::new()).await.is_err());
+        assert!(client.catalog(&CancellationToken::new()).await.is_err());
+    }
+    assert_eq!(server.count(), 0);
+}
+
+#[tokio::test]
+async fn endpoint_catalog_redirect_does_not_reach_target() {
+    let target = http::spawn(|_| Vec::<u8>::new()).await;
+    let location = format!("{}/models", target.url);
+    let source = http::spawn(move |_| format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")).await;
+    let client = trusted_test_client(&source.url, "fixture-secret");
+    assert!(client.catalog(&CancellationToken::new()).await.is_err());
+    assert_eq!(source.count(), 1);
+    assert_eq!(target.count(), 0);
+}

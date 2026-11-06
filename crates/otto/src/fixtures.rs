@@ -38,6 +38,7 @@ pub fn config() -> File {
             ProviderEntry {
                 type_: "openai-compatible".to_string(),
                 base_url: "https://gw.example.com/v1".to_string(),
+                trusted_origins: vec!["https://gw.example.com".into()],
                 api_key_env: key_env.to_string(),
                 models: std::collections::BTreeMap::from([(
                     model.to_string(),

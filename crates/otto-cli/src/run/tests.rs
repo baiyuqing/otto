@@ -313,7 +313,7 @@ default_profile = "alpha"
 
 [profiles.alpha]
 provider = "openai-compatible"
-base_url = "https://example.com/v1"
+base_url = "https://api.openai.com/v1"
 model = "gpt-test"
 api_key_env = "ALPHA_KEY"
 
@@ -427,7 +427,7 @@ default_profile = "alpha"
 
 [profiles.alpha]
 provider = "openai-compatible"
-base_url = "https://example.com/v1"
+base_url = "https://api.openai.com/v1"
 model = "gpt-test"
 api_key_env = "ALPHA_KEY"
 

@@ -51,7 +51,7 @@ async fn messages_use_native_authentication_and_stream_codec() {
         response(200, STREAM)
     })
     .await;
-    let client = Client::new(
+    let client = trusted_test_client(
         &server.url,
         "fixture-key",
         "2026-10-21",
@@ -86,7 +86,7 @@ async fn both_model_listing_paths_use_claude_headers() {
         )
     })
     .await;
-    let client = Client::new(&server.url, "fixture-key", "2026-10-21", "");
+    let client = trusted_test_client(&server.url, "fixture-key", "2026-10-21", "");
     assert_eq!(
         client.list_models(&CancellationToken::new()).await.unwrap(),
         ["fixture-a", "fixture-z"]
@@ -99,7 +99,7 @@ async fn both_model_listing_paths_use_claude_headers() {
 async fn errors_redact_key_and_workspace_and_cancel_before_dispatch() {
     let server =
         http::spawn(|_| response(400, "fixture-api-secret fixture-workspace-secret")).await;
-    let client = Client::new(
+    let client = trusted_test_client(
         &server.url,
         "fixture-api-secret",
         "2026-10-21",
@@ -122,7 +122,7 @@ async fn errors_redact_key_and_workspace_and_cancel_before_dispatch() {
 
 #[test]
 fn request_size_matches_claude_wire_encoding() {
-    let client = Client::new("https://api.anthropic.com", "", "2026-10-21", "");
+    let client = trusted_test_client("https://api.anthropic.com", "", "2026-10-21", "");
     let request = request();
     assert_eq!(
         client.serialized_request_size(&request).unwrap(),
@@ -146,7 +146,7 @@ async fn rate_limits_and_overload_observe_retry_after_and_retry_events() {
                 format!("HTTP/1.1 {status} Retry\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
             } else { response(200, STREAM) }
         }).await;
-        let client = Client::new(&server.url, "fixture-key", "2026-10-21", "");
+        let client = trusted_test_client(&server.url, "fixture-key", "2026-10-21", "");
         let mut retries = Vec::new();
         let result = client
             .complete(
@@ -169,7 +169,7 @@ async fn rate_limits_and_overload_observe_retry_after_and_retry_events() {
 #[tokio::test]
 async fn context_overflow_is_typed_and_model_catalog_body_is_bounded() {
     let server = http::spawn(|_| response(400, r#"{"error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#)).await;
-    let client = Client::new(&server.url, "fixture-key", "2026-10-21", "");
+    let client = trusted_test_client(&server.url, "fixture-key", "2026-10-21", "");
     assert!(matches!(
         client
             .complete(&request(), &mut |_| {}, &CancellationToken::new())
@@ -178,7 +178,7 @@ async fn context_overflow_is_typed_and_model_catalog_body_is_bounded() {
         Err(ProviderError::Overflow(_))
     ));
     let server = http::spawn(|_| response(200, &"x".repeat(MAX_MODELS_BODY + 1))).await;
-    let client = Client::new(&server.url, "fixture-key", "2026-10-21", "");
+    let client = trusted_test_client(&server.url, "fixture-key", "2026-10-21", "");
     assert!(
         client
             .list_models(&CancellationToken::new())
@@ -203,7 +203,7 @@ impl OperationControl for DeadlineControl {
 }
 #[tokio::test]
 async fn deadline_before_dispatch_is_not_user_cancellation() {
-    let client = Client::new("https://api.anthropic.com", "fixture-key", "2026-10-21", "");
+    let client = trusted_test_client("https://api.anthropic.com", "fixture-key", "2026-10-21", "");
     let result = client
         .complete(
             &request(),
@@ -227,7 +227,7 @@ async fn observed_calls_report_headers_and_received_bytes() {
         }
     }
     let server = http::spawn(|_| response(200, STREAM)).await;
-    let client = Client::new(&server.url, "fixture-key", "2026-10-21", "");
+    let client = trusted_test_client(&server.url, "fixture-key", "2026-10-21", "");
     let observer = Seen(Default::default());
     let result = client
         .complete_observed(
@@ -247,4 +247,67 @@ async fn observed_calls_report_headers_and_received_bytes() {
         seen.iter()
             .any(|(phase, bytes, _)| matches!(phase, Phase::Receiving) && *bytes > 0)
     );
+}
+
+// Mock endpoints receive explicit test-owned origin grants, never production bypasses.
+fn trusted_test_client(
+    base_url: &str,
+    api_key: &str,
+    api_version: &str,
+    workspace_id: &str,
+) -> Client {
+    let origin = url::Url::parse(base_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_default();
+    match otto_core::config::endpoint::TrustedEndpoint::authorize(
+        base_url,
+        "claude",
+        &[origin.clone()],
+        &[origin],
+    ) {
+        Ok(endpoint) => Client::new_trusted(&endpoint, api_key, api_version, workspace_id),
+        Err(_) => Client::new(base_url, api_key, api_version, workspace_id),
+    }
+}
+
+#[tokio::test]
+async fn endpoint_rejection_prevents_secret_body_network_and_injected_redirect_client() {
+    let server = http::spawn(|_| Vec::<u8>::new()).await;
+    let clients = [
+        Client::new(
+            &server.url,
+            "fixture-secret",
+            "2026-10-21",
+            "fixture-workspace",
+        ),
+        Client::with_http_client(
+            &server.url,
+            "fixture-secret",
+            "2026-10-21",
+            "fixture-workspace",
+            reqwest::Client::new(),
+        ),
+    ];
+    for client in clients {
+        let settlement = client
+            .complete(&request(), &mut |_| {}, &CancellationToken::new())
+            .await;
+        assert!(settlement.result.is_err());
+        assert_eq!(settlement.attempts, 0);
+        assert!(client.list_models(&CancellationToken::new()).await.is_err());
+        assert!(client.catalog(&CancellationToken::new()).await.is_err());
+    }
+    assert_eq!(server.count(), 0);
+}
+
+#[tokio::test]
+async fn endpoint_catalog_redirect_does_not_reach_target() {
+    let target = http::spawn(|_| Vec::<u8>::new()).await;
+    let location = format!("{}/models", target.url);
+    let source = http::spawn(move |_| format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")).await;
+    let client = trusted_test_client(&source.url, "fixture-secret", "2026-10-21", "");
+    assert!(client.catalog(&CancellationToken::new()).await.is_err());
+    assert_eq!(source.count(), 1);
+    assert_eq!(target.count(), 0);
 }

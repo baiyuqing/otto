@@ -13,7 +13,14 @@ use crate::config::resolve::Runtime;
 use crate::config::{ConfigError, DEFAULT_CLAUDE_API_VERSION, PROVIDER_CLAUDE};
 
 const PROJECT_MODEL_FIELDS: [&str; 3] = ["thinking", "context_window", "compaction_window"];
-const CONNECTION_FIELDS: [&str; 4] = ["base_url", "api_key_env", "api_version", "workspace_id_env"];
+const CONNECTION_FIELDS: [&str; 6] = [
+    "base_url",
+    "api_key_env",
+    "api_version",
+    "workspace_id_env",
+    "trusted_origins",
+    "allow_http_origins",
+];
 
 fn model_key(provider: &str, model_id: &str) -> String {
     if model_id

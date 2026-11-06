@@ -179,6 +179,7 @@ fn resolve_initial_runtime_ignores_session_selection() {
         ProviderEntry {
             type_: "openai-compatible".to_string(),
             base_url: "https://gw.example.com/v1".to_string(),
+            trusted_origins: vec!["https://gw.example.com".into()],
             api_key_env: "WORK_KEY".to_string(),
             models: std::collections::BTreeMap::from([
                 ("profile-model".to_string(), ModelEntry::default()),

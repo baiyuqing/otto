@@ -278,3 +278,17 @@ fn an_accepted_proposal_becomes_a_record_and_a_rejected_one_does_not() {
     );
     assert_eq!(rejected.candidate.state, CandidateState::Rejected);
 }
+
+#[test]
+fn core_record_reports_the_store_revision_as_a_decimal_string() {
+    let record = Record {
+        id: "rec-1".into(),
+        revision: 7,
+        ..Record::default()
+    };
+    assert_eq!(
+        core_record(record.clone(), false).revision.as_deref(),
+        Some("7")
+    );
+    assert_eq!(core_record(record, true).revision.as_deref(), Some("7"));
+}

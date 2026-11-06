@@ -198,6 +198,10 @@ fn parse_key(value: &str) -> Result<Option<KeyEvent>, String> {
     if modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'C')) {
         return Err("ui.observer cannot override Ctrl+C cancellation".into());
     }
+    #[cfg(unix)]
+    if super::super::terminal_input::is_suspend_key(KeyEvent::new(code, modifiers)) {
+        return Err("ui.observer cannot override Ctrl+Z job suspension".into());
+    }
     Ok(Some(KeyEvent::new(code, modifiers)))
 }
 

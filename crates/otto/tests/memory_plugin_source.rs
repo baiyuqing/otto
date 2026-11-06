@@ -90,7 +90,8 @@ fn recall_reaches_the_request_and_the_file_store_stays_closed() {
             .await
             .unwrap();
         let session = otto.new_session(None).await.unwrap();
-        assert!(turn(&session, "what do you remember").await.is_empty());
+        let warnings = turn(&session, "what do you remember").await;
+        assert!(warnings.is_empty(), "{warnings:?}");
         let bodies = requests.lock().unwrap().clone();
         let request = request_json(&bodies, 0);
         assert!(message_text(&request).contains(RECALL_MARKER));

@@ -324,8 +324,19 @@ async fn chatgpt_stream_recovery_completes_child_and_persists_safe_attempt_facts
     let dir = tempfile::tempdir().unwrap();
     let tasks = Arc::new(Tasks::new());
     let mut config = test_config(&FakeProvider::new(), &tasks, Vec::new());
-    config.provider = Arc::new(crate::provider::chatgpt::Client::with_base_url(
+    let origin = url::Url::parse(&server.url)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    let endpoint = otto_core::config::endpoint::TrustedEndpoint::authorize(
         &server.url,
+        "chatgpt",
+        std::slice::from_ref(&origin),
+        std::slice::from_ref(&origin),
+    )
+    .expect("test-owned HTTP endpoint");
+    config.provider = Arc::new(crate::provider::chatgpt::Client::new_trusted(
+        &endpoint,
         crate::auth::token::TokenSource::new(
             crate::auth::Credentials {
                 access_token: "test-token".into(),

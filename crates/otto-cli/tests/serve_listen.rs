@@ -63,8 +63,8 @@ fn fixture(base_url: &str, extra_config: &str) -> Fixture {
     std::fs::write(
         &config,
         format!(
-            "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\n\
-             base_url = \"{base_url}\"\nmodel = \"gpt-test\"\napi_key_env = \"TEST_KEY\"\n{extra_config}"
+            "{}{extra_config}",
+            binary_harness::model_config(base_url, "TEST_KEY")
         ),
     )
     .expect("write config");

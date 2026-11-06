@@ -203,8 +203,8 @@ fn trusted_test_client(base_url: &str, tokens: TokenSource, account_id: &str) ->
     match otto_core::config::endpoint::TrustedEndpoint::authorize(
         base_url,
         "chatgpt",
-        &[origin.clone()],
-        &[origin],
+        std::slice::from_ref(&origin),
+        std::slice::from_ref(&origin),
     ) {
         Ok(endpoint) => Client::new_trusted(&endpoint, tokens, account_id),
         Err(_) => Client::with_base_url(base_url, tokens, account_id),

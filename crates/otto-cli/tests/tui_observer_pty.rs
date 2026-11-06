@@ -41,9 +41,8 @@ fn observer_round_trip(bindings: &str, open_key: &[u8], back_key: &[u8]) {
     std::fs::write(
         &config_path,
         format!(
-            "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\n\
-             base_url = \"http://127.0.0.1:1\"\nmodel = \"gpt-test\"\n\
-             api_key_env = \"OTTO_OBSERVER_TEST_KEY\"\n{bindings}",
+            "{}{bindings}",
+            binary_harness::model_config("http://127.0.0.1:1", "OTTO_OBSERVER_TEST_KEY")
         ),
     )
     .expect("write test configuration");

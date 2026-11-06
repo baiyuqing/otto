@@ -142,8 +142,8 @@ fn trusted_test_client(base_url: &str, api_key: &str) -> Client {
     match otto_core::config::endpoint::TrustedEndpoint::authorize(
         base_url,
         "openai-compatible",
-        &[origin.clone()],
-        &[origin],
+        std::slice::from_ref(&origin),
+        std::slice::from_ref(&origin),
     ) {
         Ok(endpoint) => Client::new_trusted(&endpoint, api_key),
         Err(_) => Client::new(base_url, api_key),

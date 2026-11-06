@@ -108,11 +108,10 @@ impl Fixture {
         if !recall_exits {
             write("recall", json!({"result": recall_result()}));
         }
-        // serde_json orders keys alphabetically, so `operation` is the first key; a missing reply
-        // file makes the command exit 1.
+        // Match operation independently of JSON member order; missing replies fail.
         let body = format!(
             "read -r line; printf '%s\\n' \"$line\" >> {log}\n\
-             op=$(printf '%s' \"$line\" | sed -n 's/^{{\"operation\":\"\\([a-z_]*\\)\".*/\\1/p')\n\
+             op=$(printf '%s' \"$line\" | sed -n 's/.*\"operation\":\"\\([a-z_]*\\)\".*/\\1/p')\n\
              id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
              sed \"s/__REQUEST_ID__/$id/\" {replies}/$op.json",
             log = self.log().display(),
@@ -160,12 +159,14 @@ impl Fixture {
         let workspace = self.workspace();
         std::fs::create_dir_all(home.join(".config/otto")).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
+        let origin = url::Url::parse(url).unwrap().origin().ascii_serialization();
         std::fs::write(
             home.join(".config/otto/config.toml"),
             format!(
-                "default_profile = \"test\"\n[profiles.test]\nprovider = \
-                \"openai-compatible\"\nbase_url = \"{url}\"\nmodel = \
-                \"offline-test\"\napi_key_env = \"TEST_KEY\"\n[sandbox]\ndriver = \
+                "default_model = \"test/offline-test\"\n[providers.test]\ntype = \
+                \"openai-compatible\"\nbase_url = \"{url}\"\n\
+                api_key_env = \"TEST_KEY\"\ntrusted_origins = [\"{origin}\"]\n\
+                allow_http_origins = [\"{origin}\"]\n[providers.test.models.offline-test]\n[sandbox]\ndriver = \
                 \"off\"\n[server]\nworkspace_roots = [\"{}\"]\n{memory}\n",
                 self.root.path().to_string_lossy()
             ),

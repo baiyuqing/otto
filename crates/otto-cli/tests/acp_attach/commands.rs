@@ -132,8 +132,8 @@ fn a_relay_lists_and_switches_profiles_on_serve() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         agent_text(&frames),
-        "Model other/gpt-test (type openai-compatible)\n\
-         Configured models: other/gpt-other, other/gpt-test\n\
+        "Model test/gpt-test (type openai-compatible)\n\
+         Configured models: other/gpt-other, test/gpt-test\n\
          Switch with /model <provider>/<model_id>."
     );
 
@@ -181,8 +181,8 @@ fn add_profile(home: &Path, name: &str, base_url: &str, model: &str) {
     std::fs::write(
         &config,
         format!(
-            "{text}\n[profiles.{name}]\nprovider = \"openai-compatible\"\n\
-             base_url = \"{base_url}\"\nmodel = \"{model}\"\napi_key_env = \"OTTO_API_KEY\"\n"
+            "{text}\n{}",
+            binary_harness::provider_config(name, base_url, model, "OTTO_API_KEY")
         ),
     )
     .unwrap();

@@ -283,7 +283,8 @@ async fn a_redirect_is_reported_as_its_status_without_forwarding_the_request() {
         &source.url,
         static_tokens("redirect-access-token"),
         "redirect-account-id",
-    );
+    )
+    .with_test_read_timeout(Duration::from_millis(200));
 
     let (settlement, _) = complete(&client, &model_request()).await;
     assert_eq!(
@@ -292,6 +293,25 @@ async fn a_redirect_is_reported_as_its_status_without_forwarding_the_request() {
     );
     assert_eq!(source.count(), 1);
     assert_eq!(target.count(), 0);
+}
+
+#[tokio::test]
+async fn test_read_timeout_preserves_endpoint_rejection() {
+    let client = Client::with_base_url(
+        "http://127.0.0.1:1",
+        static_tokens("test-token"),
+        "test-account",
+    )
+    .with_test_read_timeout(Duration::from_millis(200));
+    let (settlement, _) = complete(&client, &model_request()).await;
+    assert!(
+        settlement
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("not trusted")
+    );
+    assert_eq!(settlement.attempts, 0);
 }
 
 #[tokio::test]

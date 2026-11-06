@@ -162,8 +162,7 @@ impl Fixture {
             .run(COMMON_QUERY_WORD, &mut |_| {}, &CancellationToken::new())
             .await
             .expect("turn");
-        let joined = requests.lock().unwrap().join("\n");
-        joined
+        requests.lock().unwrap().join("\n")
     }
 }
 

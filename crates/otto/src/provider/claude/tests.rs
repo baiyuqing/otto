@@ -263,8 +263,8 @@ fn trusted_test_client(
     match otto_core::config::endpoint::TrustedEndpoint::authorize(
         base_url,
         "claude",
-        &[origin.clone()],
-        &[origin],
+        std::slice::from_ref(&origin),
+        std::slice::from_ref(&origin),
     ) {
         Ok(endpoint) => Client::new_trusted(&endpoint, api_key, api_version, workspace_id),
         Err(_) => Client::new(base_url, api_key, api_version, workspace_id),

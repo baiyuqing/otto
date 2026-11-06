@@ -76,8 +76,25 @@ fn deadline_control(budget: Duration) -> Arc<Control> {
 const STOP: &str = r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
 const DELTA: &str = r#"{"choices":[{"delta":{"content":"visible"}}]}"#;
 
+fn test_endpoint(
+    base_url: &str,
+    provider_type: &str,
+) -> otto_core::config::endpoint::TrustedEndpoint {
+    let origin = url::Url::parse(base_url)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    otto_core::config::endpoint::TrustedEndpoint::authorize(
+        base_url,
+        provider_type,
+        std::slice::from_ref(&origin),
+        std::slice::from_ref(&origin),
+    )
+    .expect("test-owned HTTP endpoint")
+}
+
 fn openai(server: &Server) -> openaicompat::Client {
-    openaicompat::Client::new(&server.url, "key")
+    openaicompat::Client::new_trusted(&test_endpoint(&server.url, "openai-compatible"), "key")
 }
 
 #[tokio::test]
@@ -278,8 +295,11 @@ async fn openai_cancellation_during_backoff_is_cancelled_and_sends_no_further_re
 /// deadline while the connect is pending.
 #[tokio::test]
 async fn openai_deadline_budget_smaller_than_the_backoff_stops_without_waiting() {
-    let client =
-        openaicompat::Client::new(&format!("http://127.0.0.1:{}", http::refused_port()), "key");
+    let endpoint = test_endpoint(
+        &format!("http://127.0.0.1:{}", http::refused_port()),
+        "openai-compatible",
+    );
+    let client = openaicompat::Client::new_trusted(&endpoint, "key");
     let control = Control::new(Deadline::after(Duration::from_millis(500)));
     let started = std::time::Instant::now();
     let (settlement, events) = complete(&client, &control).await;
@@ -293,18 +313,9 @@ async fn openai_deadline_budget_smaller_than_the_backoff_stops_without_waiting()
     assert!(started.elapsed() < Duration::from_millis(500));
 }
 
-/// A reqwest client whose read timeout is 200 ms, so a silent peer fails the
-/// attempt without waiting for the 60 s production timeout.
-fn short_timeout_http() -> reqwest::Client {
-    otto::tls_provider::http_client_builder()
-        .read_timeout(Duration::from_millis(200))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("build the test HTTP client")
-}
-
+/// An owned, authorized transport with short socket reads for silent-peer faults.
 fn openai_short(server: &Server) -> openaicompat::Client {
-    openaicompat::Client::with_http_client(&server.url, "key", short_timeout_http())
+    openai(server).with_test_read_timeout(Duration::from_millis(200))
 }
 
 fn assert_one_retry_then_success(
@@ -454,7 +465,11 @@ fn tokens(access_token: &str) -> TokenSource {
 }
 
 fn chatgpt(server: &Server, access_token: &str) -> chatgpt::Client {
-    chatgpt::Client::with_base_url(&server.url, tokens(access_token), "acct-1")
+    chatgpt::Client::new_trusted(
+        &test_endpoint(&server.url, "chatgpt"),
+        tokens(access_token),
+        "acct-1",
+    )
 }
 
 #[tokio::test]
@@ -572,16 +587,7 @@ async fn chatgpt_reset_after_output_recovers_and_marks_partial_output() {
 }
 
 fn chatgpt_short(server: &Server) -> chatgpt::Client {
-    chatgpt::Client::with_http_client(
-        &server.url,
-        tokens("token"),
-        "acct-1",
-        otto::tls_provider::http_client_builder()
-            .read_timeout(Duration::from_millis(200))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("build the test HTTP client"),
-    )
+    chatgpt(server, "token").with_test_read_timeout(Duration::from_millis(200))
 }
 
 #[tokio::test]
@@ -667,8 +673,7 @@ const IDLE: Duration = Duration::from_millis(500);
 const IDLE_REASON: &str = "model output idle timeout";
 
 fn chatgpt_idle(server: &Server) -> chatgpt::Client {
-    chatgpt::Client::with_http_client(&server.url, tokens("token"), "acct-1", short_timeout_http())
-        .with_model_idle_timeout(IDLE)
+    chatgpt_short(server).with_model_idle_timeout(IDLE)
 }
 
 fn openai_idle(server: &Server) -> openaicompat::Client {

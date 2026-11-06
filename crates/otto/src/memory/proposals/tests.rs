@@ -20,6 +20,14 @@ mod layer_one;
 
 pub(super) const RECORD_TEXT: &str = "Prefers the vim editor for every project";
 
+#[test]
+fn outcome_keeps_candidate_storage_indirect() {
+    assert!(
+        std::mem::size_of::<Outcome>() <= 2 * std::mem::size_of::<String>(),
+        "proposal outcomes must not inline the large candidate payload"
+    );
+}
+
 /// One call the fake backend received.
 #[derive(Debug, Clone)]
 pub(super) struct Asked {
@@ -234,7 +242,7 @@ pub(super) fn local_evidence() -> Vec<EvidenceItem> {
 
 pub(super) fn proposed(outcome: Outcome) -> Candidate {
     match outcome {
-        Outcome::Proposed(candidate) => candidate,
+        Outcome::Proposed(candidate) => *candidate,
         other => panic!("expected Outcome::Proposed, got {other:?}"),
     }
 }

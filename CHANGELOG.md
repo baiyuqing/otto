@@ -40,6 +40,15 @@ commit ledger; Git and release tags retain the full history. See the
   Remove Lua packages before downgrading to older Otto binaries. See
   [Lua handlers](docs/manual/memory-and-extensions.md#lua-handlers).
 
+### Memory
+
+- Sessions now record which memory records each turn and each compaction
+  checkpoint saw, by ID and revision only. Each turn writes an
+  `otto.memory_recall` entry, and checkpoints carry `memoryRecords` and
+  `memoryCoverage`. Recalled record text is still not persisted. Turns and
+  checkpoints written before this change read as unknown coverage. Older Otto
+  binaries read sessions with the new entries unchanged (#591).
+
 ### Sessions
 
 - Permanently delete sessions through the TUI, `/delete`, `otto delete <SESSION>`,

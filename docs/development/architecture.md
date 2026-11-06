@@ -145,7 +145,8 @@ every implementation and wrapper, with reopen support for durable state.
   explicitly write or drop entries. Provider-owned compaction is returned only
   to its producer, never projected as UI/model text. Turn and provider-call
   records remain versioned and redacted; their codecs live in
-  `otto-core/src/session/{turn,provider_call}.rs`.
+  `otto-core/src/session/{turn,provider_call,memory_recall}.rs`. Memory recall
+  records and checkpoint memory fields hold record IDs and revisions only.
 - Interrupted calls distinguish possible execution from known nonexecution.
   Recovery uses typed operation facts and tool-owned retry safety, never tool
   names or output text. Automatically replay only genuine read-only effects;

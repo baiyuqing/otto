@@ -309,8 +309,12 @@ Read usage peaks without the `sqlite3` tool using
 
 ### Local memory use
 
-Recall is request-local and is not copied into session JSONL, compaction or
-logs. Standing preferences have their own budget; other active/unexpired
+Recalled record text is request-local and is not copied into session JSONL,
+compaction summaries or logs. The IDs and revisions of injected records are
+recorded, without text, in the turn's `otto.memory_recall` session entry and in
+compaction checkpoints (`memoryRecords`, `memoryCoverage`). A turn or
+checkpoint written before these entries existed has unknown coverage.
+Standing preferences have their own budget; other active/unexpired
 user/workspace records are untrusted reference material, bounded by
 `max_results`/`recall_tokens`. Workspace records replace same-kind/key user
 records and identical text is deduplicated. Recall is not a complete inventory.

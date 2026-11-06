@@ -479,6 +479,31 @@ cannot report a forgotten record. Notices are request-local: they are not
 written to the session file, compaction summaries or logs. `/context` shows
 the notices rendered for the previous turn's last request.
 
+A compaction summary is written from turns whose replies may paraphrase a
+record, so a checkpoint also carries `memoryRetracted`: the references among
+its `memoryRecords` whose retirement the summary already accounts for. When a
+record in the summary's `memoryRecords` is retired and not in
+`memoryRetracted`, every request marks the summary after the record notices:
+
+```text
+<memory_summary_affected checkpoint="compaction-3" record="A" reason="retracted"/>
+```
+
+A checkpoint written without references (unknown coverage), and a
+provider-managed compaction, cannot be traced to records; when any record
+notice exists they are marked with `coverage="unknown"` instead
+(`checkpoint="remote"` for the provider-managed one). The first request of a
+turn with a marked summary also prints a memory warning that names the
+checkpoint and the records. `/compact` rebuilds the summary: the summary
+request lists the retracted records under `Retracted memory records:` with the
+instruction to drop statements derived from them or record them as withdrawn,
+and the new checkpoint carries them in `memoryRetracted`, so the mark stops.
+Automatic compaction does the same when it runs. The rebuild starts from the
+previous summary and the messages since the checkpoint, not from the raw
+history before it; that history stays in the session file, and `/new` starts a
+session without it. Removing a record from a summary does not remove meaning
+the model took from it in retained messages.
+
 ### Standing preferences
 
 For habits that apply in every workspace, use user scope, `preference` or

@@ -172,7 +172,7 @@ pub enum Outcome {
     /// The model found no supported change.
     NoChange { explanation: String },
     /// A pending candidate was queued for review.
-    Proposed(Candidate),
+    Proposed(Box<Candidate>),
     /// The proposal failed a layer-1 check and nothing was written.
     Rejected(String),
     /// The model could not be reached, timed out or answered out of form.
@@ -549,7 +549,9 @@ impl Generator {
             return Outcome::Rejected("the action yields no candidate".into());
         };
         match service.propose(&request) {
-            Ok(mut candidates) if !candidates.is_empty() => Outcome::Proposed(candidates.remove(0)),
+            Ok(mut candidates) if !candidates.is_empty() => {
+                Outcome::Proposed(Box::new(candidates.remove(0)))
+            }
             Ok(_) => Outcome::Rejected("the proposal was not queued".into()),
             Err(error) => Outcome::Rejected(error.to_string()),
         }

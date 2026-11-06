@@ -264,8 +264,8 @@ fn model_command_reports_and_switches_the_session_without_a_provider_request() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(
         message_text(&frames),
-        "Model other/gpt-test (type openai-compatible)\n\
-         Configured models: other/gpt-other, other/gpt-test\n\
+        "Model test/gpt-test (type openai-compatible)\n\
+         Configured models: other/gpt-other, test/gpt-test\n\
          Switch with /model <provider>/<model_id>."
     );
 
@@ -297,7 +297,7 @@ fn model_command_reports_and_switches_the_session_without_a_provider_request() {
     );
     let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
     assert!(
-        config.starts_with("default_profile = \"test\""),
+        config.starts_with("default_model = \"test/gpt-test\""),
         "the switch wrote the configuration file: {config}"
     );
 
@@ -441,8 +441,8 @@ fn add_profile(home: &Path, name: &str, base_url: &str, model: &str) {
     std::fs::write(
         &config,
         format!(
-            "{text}\n[profiles.{name}]\nprovider = \"openai-compatible\"\n\
-             base_url = \"{base_url}\"\nmodel = \"{model}\"\napi_key_env = \"OTTO_API_KEY\"\n"
+            "{text}\n{}",
+            binary_harness::provider_config(name, base_url, model, "OTTO_API_KEY")
         ),
     )
     .unwrap();

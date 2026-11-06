@@ -388,8 +388,8 @@ async fn state_and_verify_of_an_unknown_record_report_not_found() {
     let fixture = memory_fixture().await;
     for args in ["state nope retracted", "verify nope"] {
         let error = run_memory(&fixture.controller, args)
-            .err()
-            .expect("an error");
+            .map(|_| ())
+            .expect_err("an error");
         assert!(error.contains("not found"), "{args}: {error}");
     }
 }

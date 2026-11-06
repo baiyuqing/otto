@@ -351,7 +351,7 @@ mod tests {
         drop(service);
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch("ALTER TABLE approval_claims RENAME TO newer_claims;
-            CREATE TABLE approval_claims (approval_id TEXT PRIMARY KEY, owner TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL) STRICT;
+            CREATE TABLE approval_claims (approval_id TEXT PRIMARY KEY REFERENCES approvals(id), owner TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL) STRICT;
             INSERT INTO approval_claims SELECT approval_id,owner,2147483647,'2000-01-01T00:00:00Z' FROM newer_claims;
             DROP TABLE newer_claims; PRAGMA user_version=1;").unwrap();
         drop(connection);

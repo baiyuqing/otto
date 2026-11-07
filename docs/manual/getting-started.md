@@ -59,8 +59,9 @@ version when required. The Claude provider covers the Messages API used by
 Otto; Bedrock, Vertex AI, Foundry, OAuth and workload identity are different
 connections and are not supported by this provider.
 
-Claude prompt caching is enabled by default: Otto caches tool definitions and
-system text and automatically advances the conversation's cache breakpoint.
+Claude prompt caching is enabled by default: Otto sets cache breakpoints on the
+system text (which also covers the tool definitions), on the end of the
+conversation before the last two user messages, and on the last message block.
 It uses the provider's five-minute lifetime; active hits refresh that lifetime.
 The first write and a write after expiry use the provider's cache-write price.
 Prefix changes, small prompts and endpoint/model support affect actual hits.

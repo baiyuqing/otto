@@ -12,11 +12,13 @@ async fn cached_requests_preserve_the_transcript_and_record_writes_then_hits() {
     let observed = calls.clone();
     let server=http::spawn(move |incoming| {
         let body:serde_json::Value=serde_json::from_str(&incoming.body).unwrap();
-        assert_eq!(body["cache_control"],serde_json::json!({"type":"ephemeral"}));
+        let control=serde_json::json!({"type":"ephemeral"});
+        assert!(body.get("cache_control").is_none());
         assert_eq!(body["system"][0]["text"],"stable system");
-        assert_eq!(body["system"][0]["cache_control"],body["cache_control"]);
-        assert_eq!(body["tools"][0]["cache_control"],body["cache_control"]);
+        assert_eq!(body["system"][0]["cache_control"],control);
+        assert!(body["tools"][0].get("cache_control").is_none());
         assert_eq!(body["messages"][0]["content"][0]["text"],"hello");
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"],control);
         let first=observed.fetch_add(1,Ordering::SeqCst)==0;
         let usage=serde_json::json!({"input_tokens":2,"output_tokens":0,
             "cache_creation_input_tokens":if first {100} else {0},

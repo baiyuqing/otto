@@ -80,7 +80,7 @@ impl Executor for AgentExecutor {
         match task.status {
             TaskStatus::Succeeded => Ok(task.result),
             TaskStatus::Canceled => Err("context canceled".to_string()),
-            TaskStatus::Failed => Err(task.error),
+            TaskStatus::Failed | TaskStatus::Unavailable => Err(task.error),
             TaskStatus::Interrupted => Err(if task.error.is_empty() {
                 "workflow child was interrupted".to_string()
             } else {

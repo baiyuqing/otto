@@ -439,5 +439,8 @@ impl Observer {
 mod tests;
 
 fn terminal_status(status: &str) -> bool {
-    matches!(status, "succeeded" | "failed" | "canceled" | "interrupted")
+    matches!(
+        status,
+        "succeeded" | "failed" | "canceled" | "interrupted" | "unavailable"
+    )
 }

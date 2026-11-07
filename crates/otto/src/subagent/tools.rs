@@ -67,7 +67,8 @@ const AGENT_YIELD_DESCRIPTION: &str = "Yield this parent turn when only child de
     running. Pending input, tool errors and approval replanning take \
     precedence.";
 
-const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus \
+const AGENT_STATUS_DESCRIPTION: &str = "Show live or recovered non-running task snapshots and recovery coverage/errors; \
+    recovery never restarts execution. Show task status and a bounded final conclusion (at most 4 KiB plus \
     truncation and report-file metadata). Recent research steps are omitted \
     by default; set include_history only when explicitly needed. For a \
     truncated final answer, returns its persistent report path when storage \
@@ -129,9 +130,9 @@ const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-ag
     starting a new one: prompt is the next user message delivered to it, \
     and agent, model, name, description, and fork_before must be absent or \
     empty, and context absent or \"fresh\"; the task keeps its recorded \
-    values. For completed tasks, use agent_status and read the saved report \
+    values. Resume atomically admits one new attempt; inspect uncertain tool effects first. It never replays a suspended process. \
+    For completed tasks, use agent_status and read the saved report \
     instead. External ACP tasks cannot be resumed.";
-
 /// Parent agent tools, including explicit nonblocking `agent_yield`,
 /// without a built [`Runner`]. The redaction boundary check needs the tool set
 /// a real runner would register, and none of the definitions read runner state.
@@ -567,13 +568,22 @@ impl Tool for AgentStatusTool {
 
         let tasks = self.runner.tasks();
         let all = tasks.list();
+        let diagnostics = tasks.recovery_diagnostics();
         if all.is_empty() {
-            return text_result("no tasks in this session");
+            return text_result(if diagnostics.is_empty() {
+                "no tasks in this session".into()
+            } else {
+                format!(
+                    "0 task snapshots; recovery coverage is not empty evidence:\n{}",
+                    diagnostics.join("\n")
+                )
+            });
         }
 
         let now = self.runner.now();
         if args.task_id.is_empty() {
-            let lines: Vec<String> = all.iter().map(|task| status_line(task, now)).collect();
+            let mut lines: Vec<String> = all.iter().map(|task| status_line(task, now)).collect();
+            lines.extend(diagnostics);
             return crate::tool::result::capped_text_result(
                 &lines.join("\n"),
                 self.runner
@@ -586,6 +596,7 @@ impl Tool for AgentStatusTool {
             return error_result(format!("unknown task: {}", args.task_id));
         };
         let mut lines = vec![status_line(&task, now)];
+        lines.extend(diagnostics);
         if !task.model.is_empty() {
             lines.push(format!("model: {}", task.model));
         }

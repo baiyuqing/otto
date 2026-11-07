@@ -623,6 +623,57 @@ newest first, at most 20). Steering text and prompts that opened wake turns
 are not fork points, and a prompt whose text appears more than once cannot
 be selected. The parent session is only read.
 
+### Child recovery after process loss
+
+Every activation of a saved parent inventories only that parent's direct child
+transcripts, even if its own last turn finished normally. `agent_status` shows
+reconstructed task snapshots; unfinished lost-owner children are **interrupted,
+not running**. This restores identity and inspectability, not suspended futures,
+processes, approval objects or shell state. No recovered child starts automatically.
+In-memory (`--no-session`) tasks have no cross-process recovery.
+
+Discovery validates parent linkage, task/header/filename identity and conflicting
+IDs, rejects symlinks, and bounds directory entries (4096), each transcript
+(16 MiB) and aggregate child reads (64 MiB). Incomplete/corrupt/unavailable scans
+produce warnings and status diagnostics rather than silently claiming no tasks.
+A durable admission without a usable child spec, or a child whose ownership or
+repair cannot be established, is `unavailable`, non-running and not resumable.
+Unavailable is terminal for observation/wait, never successful execution. The
+legacy frontend task wire enum exposes it as `failed` with the diagnostic retained;
+`agent_status` and observer records retain the explicit `unavailable` label.
+Incomplete coverage blocks new task IDs because their upper bound is unknown;
+validated known interrupted children can still be explicitly resumed.
+Diagnostics remain available at activation even when provider execution is unavailable.
+FIFO/nonregular entries cannot block inventory. Before repair or resume writes,
+Otto compares the locked descriptor's identity and exact validated transcript
+with discovery evidence; replacement, linkage changes or intervening writes fail
+closed before repair. A rejected attempt append that left the transcript unchanged
+allows explicit same-process retry under the original task and child identity.
+An uncertain changed transcript is unavailable rather than treated as rolled back.
+
+Offline SIGKILL tests exercise production Runner children during active execution,
+after durable tool results, and before tool-result recording. Admission-only and
+terminal-before-notice cases use seeded durable fixtures; they verify reconciliation,
+not those exact production crash windows.
+
+Before asking `agent` to `resume` an interrupted task, read its transcript and
+check any uncertain tool effects. Resume preserves the logical task ID and child
+transcript, atomically admits one new attempt, and records additive `resumed`
+lineage; it does not infer that a newly constructed replacement is the original.
+Concurrent resume attempts cannot both start. A failed repair or unusable/conflicting
+child record makes its resume unavailable; correct the reported storage/linkage problem and reopen
+instead of reconstructing history or blindly rerunning commands. Completed and
+external ACP tasks cannot resume. Recovered snapshots do not claim historical
+usage/timestamps that are absent from lifecycle facts; resumed progress counters
+start fresh for that attempt.
+
+Terminal lifecycle facts precede completion notification. Stable task/attempt
+input IDs let reopening regenerate pending notices without duplicate delivery.
+Persistence failures stay visible; they never count as a successfully recorded
+completion. Independent custom events, including local memory receipts, do not
+turn a completed attempt back into an unfinished one. Upgrade using the normal
+source-install procedure and restart all processes before reopening saved sessions.
+
 Assign bounded file scopes and request findings with file/line evidence. After
 delegation, the parent relies on the child report and reads its saved report
 sections rather than repeating source inspection. Follow-up questions can be

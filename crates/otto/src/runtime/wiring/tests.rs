@@ -547,17 +547,19 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
 
     let inbox = resources.notifications().clone();
     let queued = inbox.queued();
-    assert_eq!(queued.len(), 2, "{queued:?}");
+    assert_eq!(queued.len(), 3, "{queued:?}");
     assert_eq!(queued[0].notification.text, "already queued");
+    assert!(queued[1].notification.text.contains("t1"));
+    assert!(queued[1].notification.id.starts_with("child-result:t1:"));
     assert!(
-        queued[1].notification.text.contains("stopped-host"),
+        queued[2].notification.text.contains("stopped-host"),
         "{}",
-        queued[1].notification.text
+        queued[2].notification.text
     );
     assert!(
-        queued[1].notification.text.contains("read"),
+        queued[2].notification.text.contains("read"),
         "{}",
-        queued[1].notification.text
+        queued[2].notification.text
     );
     assert!(
         queued[1].notification.text.contains("t1"),
@@ -568,7 +570,7 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
     let on_disk: Vec<otto_core::agent::inbox::Entry> =
         serde_json::from_str(&std::fs::read_to_string(&inbox_path).expect("read inbox file"))
             .expect("decode inbox file");
-    assert_eq!(on_disk.len(), 2, "{on_disk:?}");
+    assert_eq!(on_disk.len(), 3, "{on_disk:?}");
 
     let records = crate::subagent::interrupted::scan(&children_dir);
     let record = records
@@ -578,7 +580,7 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
     assert_eq!(
         record.final_status,
         Some(crate::subagent::interrupted::INTERRUPTED_STATUS.to_string()),
-        "notify's mark_interrupted call must have run after the push"
+        "activation must persist interruption before notifying"
     );
 }
 
@@ -648,12 +650,13 @@ fn a_plain_reopen_after_process_loss_notifies_and_marks_children_interrupted() {
     let resources = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
 
     let queued = resources.notifications().queued();
-    assert_eq!(queued.len(), 1, "{queued:?}");
-    let text = &queued[0].notification.text;
+    assert_eq!(queued.len(), 2, "{queued:?}");
+    assert!(queued[0].notification.text.contains("t1"));
+    assert!(resources.tasks().unwrap().get("t1").is_some());
+    let text = &queued[1].notification.text;
     assert!(text.contains("previous Otto process"), "{text}");
     assert!(text.contains("Continue the interrupted turn"), "{text}");
     assert!(text.contains("bash"), "{text}");
-    assert!(text.contains("t1"), "{text}");
     let record = crate::subagent::interrupted::scan(&children_dir)
         .into_iter()
         .find(|record| record.task_id == "t1")

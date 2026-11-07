@@ -172,7 +172,7 @@ fn list_keeps_scope_limit_and_cursor_with_the_new_filters() {
 fn state_command_parses_each_target_state() {
     assert!(matches!(
         parse_memory("state r1 needs-review"),
-        Ok(Request::MemoryState { id, state: RecordState::NeedsReview, superseded_by, reason })
+        Ok(Request::MemoryState { id, state: RecordState::NeedsReview, superseded_by, reason, expected_revision: None })
             if id == "r1" && superseded_by.is_empty() && reason.is_empty()
     ));
     assert!(matches!(
@@ -214,7 +214,7 @@ fn state_command_rejects_missing_replacement_and_bad_arguments() {
 fn verify_command_parses_the_review_deadline() {
     assert!(matches!(
         parse_memory("verify r1"),
-        Ok(Request::MemoryVerify { id, review_at: None }) if id == "r1"
+        Ok(Request::MemoryVerify { id, review_at: None, expected_revision: None }) if id == "r1"
     ));
     let before = Utc::now();
     match parse_memory("verify r1 --review-in 30d") {

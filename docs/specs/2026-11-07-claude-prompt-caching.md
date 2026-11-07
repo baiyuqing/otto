@@ -17,13 +17,31 @@ wire contract and accounting. They do not establish a real endpoint's hit rate.
 
 ## Request strategy
 
-- Use documented automatic caching with top-level
-  `cache_control: {"type":"ephemeral"}` and the default five-minute lifetime.
-- Also anchor the last tool definition and the system text with explicit
-  five-minute breakpoints. This retains reusable tools when the system changes
-  and the system prefix when the moving conversation breakpoint cannot match.
-  Together with automatic conversation caching there are at most three points,
-  below the API limit of four. Omit anchors for absent tools/system.
+- Use explicit five-minute `cache_control: {"type":"ephemeral"}` breakpoints. The
+  encoder sets no top-level (automatic) `cache_control`: automatic caching looks
+  back only about 20 content blocks for an earlier entry, which a long turn
+  exceeds. It sets no breakpoint on tool definitions: the system text breakpoint
+  covers tools and system, because the API hashes tools, then system, then
+  messages.
+- Breakpoints: the system text (omitted when empty), the last content block of
+  each message prefix named in `Request::cache_boundaries`, and the last content
+  block of the request. At most four in total; when more are requested, the
+  system and last-block breakpoints stay and the earliest boundaries are
+  dropped. A boundary counts source messages; it marks the last block emitted
+  for them (reasoning and empty messages emit none; adjacent same-role messages
+  coalesce), and a count above the message count is ignored.
+- The agent loop sets `cache_boundaries` to the indices of the last two user
+  messages of the persisted history, computed before the request-local memory
+  message is inserted and after the tool-result overlay. Index `i` is the prefix
+  of the first `i` messages; `0` is dropped. These are the prefixes that the next
+  turn's requests contain unchanged, because the memory message and the live
+  overlay text are never persisted.
+- Residual limitation: the first request of a turn writes the previous turn's
+  content once more at the write price when that turn used a memory message
+  (inserted before its last user message) or a memory-tool overlay (live text in
+  place of the stored placeholder). The next turn then reads it. A steering user
+  message appended after an overlay result in the same turn can also miss. Other
+  providers ignore `cache_boundaries`.
 - All calls, child calls, compaction calls, retries and payload-size estimates
   share the same encoder. Retry bodies remain semantically stable. Do not strip
   cache controls and silently resend an API-rejected request at full input price.

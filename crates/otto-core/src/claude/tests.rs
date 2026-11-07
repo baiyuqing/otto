@@ -1,3 +1,4 @@
+mod cache_boundary_tests;
 mod cache_usage_tests;
 mod stream_tests;
 mod tool_input_tests;

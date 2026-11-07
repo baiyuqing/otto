@@ -19,8 +19,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
-- Claude prompt caching is enabled by default for tools, system text and growing
-  conversation history, using five-minute cache entries. Cache reads and writes
+- Claude prompt caching is enabled by default with explicit breakpoints on the
+  system text (covering tools), the previous turns' history and the last message
+  block, using five-minute cache entries. Cache reads and writes
   now count correctly in total input; optional write/lifetime breakdowns survive
   sessions, compaction, usage storage and API queries. Legacy breakdowns remain
   unknown. Restart Otto to use the new requests; actual savings depend on the

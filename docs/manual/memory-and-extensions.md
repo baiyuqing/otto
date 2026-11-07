@@ -336,7 +336,8 @@ Use `/memory list` or `otto memory list` to page active records (see
 [record states](#record-states-and-times)); the current user and workspace
 scopes are listed by default, and `--scope user|workspace|all` narrows or
 explicitly inventories all stored workspaces. Pass returned `next_cursor` as
-`--cursor`. `show` reads an exact record in the selected scopes. Human
+`--cursor`. Web and desktop clients of `otto serve` use the same operations through
+the [HTTP memory routes](servers-and-connectors.md#memory-management). `show` reads an exact record in the selected scopes. Human
 `/remember` and `/memory forget <id>` apply immediately. Model writes create
 candidates; `/memory review <id> accept|reject` decides pending human reviews.
 

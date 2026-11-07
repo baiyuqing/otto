@@ -19,6 +19,8 @@ pub mod diff;
 pub mod fs;
 pub mod listen;
 pub mod mcp;
+mod memory_dto;
+pub mod memory_routes;
 mod middleware;
 mod permanent_delete;
 mod registry;
@@ -608,6 +610,50 @@ impl Server {
                 post(timers::cancel),
             )
             .route("/v1/sessions/{id}/mcp", get(mcp::list))
+            .route(
+                "/v1/sessions/{id}/memory/records",
+                get(memory_routes::list).post(memory_routes::create),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/records/{record_id}",
+                get(memory_routes::show).delete(memory_routes::forget),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/records/{record_id}/state",
+                post(memory_routes::set_state),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/records/{record_id}/verify",
+                post(memory_routes::verify),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/records/{record_id}/history",
+                get(memory_routes::history),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/records/{record_id}/diff",
+                get(memory_routes::diff),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/records/{record_id}/restore",
+                post(memory_routes::restore),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/records/{record_id}/propose",
+                post(memory_routes::propose),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/search",
+                get(memory_routes::search),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/candidates",
+                get(memory_routes::candidates),
+            )
+            .route(
+                "/v1/sessions/{id}/memory/candidates/{candidate_id}/review",
+                post(memory_routes::review),
+            )
             .route("/v1/sessions/{id}/skill-manager", get(skills::manager))
             .route("/v1/sessions/{id}/skill-manager/{name}", get(skills::info))
             .route("/v1/sessions/{id}/skills", get(skills::list))

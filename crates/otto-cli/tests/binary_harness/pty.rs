@@ -347,6 +347,16 @@ pub fn spawn(
         ws_ypixel: 0,
     };
     let pty = nix::pty::openpty(Some(&winsize), None).expect("open a pty");
+    // openpty(3) returns descriptors without FD_CLOEXEC. An inherited master
+    // stays open in the child after the test process exits, so the session
+    // never receives SIGHUP and the spawned shell and Otto keep running.
+    for descriptor in [&pty.master, &pty.slave] {
+        nix::fcntl::fcntl(
+            descriptor,
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        )
+        .expect("set FD_CLOEXEC on the pty");
+    }
     let master = std::fs::File::from(pty.master);
     let slave = std::fs::File::from(pty.slave);
     command

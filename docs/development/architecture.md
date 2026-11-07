@@ -141,6 +141,8 @@ every implementation and wrapper, with reopen support for durable state.
   cumulative SSE counters are disjoint and replace prior counts on updates.
   Pi assistant/checkpoint details preserve optional counts that mandatory Pi
   zeroes cannot represent; any duplicate counts must agree with Pi usage.
+  Old serialized usage remains readable; Rust callers constructing `Usage`
+  literals must supply optional fields or use `..Default::default()`.
 - Usage storage contains content-free records only, never prompts, responses,
   tool bodies or opaque context. Logical calls, transport attempts and token
   reports are distinct counts. Frontends query the shared API.

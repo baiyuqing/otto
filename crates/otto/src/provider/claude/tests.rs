@@ -1,3 +1,5 @@
+mod stream_tests;
+
 use super::*;
 use crate::faults::http;
 use otto_core::model::{Block, Message, Role};

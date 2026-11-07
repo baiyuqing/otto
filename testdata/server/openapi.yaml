@@ -2193,7 +2193,7 @@ paths:
                   maxLength: 32000
                 channel:
                   type: string
-                  enum: [telegram, feishu]
+                  enum: [telegram]
                   description: Transient channel context for this dialogue request.
       responses:
         "200":
@@ -2393,7 +2393,7 @@ paths:
                   description: Non-whitespace text, limited to 32000 UTF-8 bytes.
                 channel:
                   type: string
-                  enum: [telegram, feishu]
+                  enum: [telegram]
                   description: Transient channel context for this dialogue request.
       responses:
         "200":
@@ -2496,14 +2496,14 @@ paths:
                     starts.
                 channel:
                   type: string
-                  enum: [telegram, feishu]
+                  enum: [telegram]
                   description: Transient chat channel context for this turn; it is not persisted in session history.
                 origin:
                   type: string
                   description: >
                     Where the turn came from: terminal, web, or
-                    chat:<platform>:<chat id> with platform telegram or
-                    feishu. Absent means web. Scheduled items created in this
+                    chat:<platform>:<chat id> with platform telegram.
+                    Absent means web. Scheduled items created in this
                     turn are delivered to this origin. A chat origin whose
                     platform differs from channel is rejected with 400.
                 input_id: { $ref: "#/components/schemas/InputId" }

@@ -131,8 +131,8 @@ requests needing additional authority without prompting, while confined work
 continues and the sandbox stays enabled. The reviewer is inactive under `never`.
 The preference survives session loading and process
 restarts in `approvals.db`; new sessions start in AUTO. TUI and Web footers show
-MANUAL, AUTO or YOLO. The same commands work in ACP. Telegram and Feishu
-accept `/permissions`, `/permissions manual|auto` and the `policy`/`reviewer`
+MANUAL, AUTO or YOLO. The same commands work in ACP. Telegram
+accepts `/permissions`, `/permissions manual|auto` and the `policy`/`reviewer`
 forms; they reject `/permissions yolo`, so a chat participant cannot select
 YOLO. In Telegram, `/permissions` without arguments shows AUTO/MANUAL buttons
 that apply to the session shown on the message; a YOLO session reports YOLO in
@@ -182,13 +182,13 @@ sandbox or external-tool permission. Mandatory domain checks still apply.
   including when clicked. The TUI has no feedback field. A successful Approve
   or Deny closes the panel immediately and advances to the next pending request.
 - Passive chat delivery is separate from approval visibility. An approval made
-  during a Telegram or Feishu turn is presented only to that exact originating
+  during a Telegram turn is presented only to that exact originating
   chat. Workspace-visible memory reviews remain discoverable from authorized
   approval or `/memory` lists, but an originless or unrelated request is not
   broadcast to every chat bound to the session or workspace.
 - Web: the approval queue shows the full proposal, feedback input, approve,
   reject and withdraw controls. It refreshes pending state across clients.
-- Telegram/Feishu: use the request's card buttons, or
+- Telegram: use the request's card buttons, or
   `/allow <request-id> [feedback]` and `/deny <request-id> [feedback]`.
   With multiple requests, select an explicit ID.
 
@@ -412,7 +412,7 @@ An item belongs to the origin of the turn that created it:
 | --- | --- | --- |
 | terminal | the TUI, the REPL, `otto --prompt`, `otto --attach` | one running TUI or REPL on this host, as a system line; the TUI also rings the terminal bell |
 | web | the browser UI | an open browser UI page, as a notice |
-| a chat | a Telegram or Feishu chat through `otto-connect` | that chat, through `otto-connect` (see [Messages and replies](servers-and-connectors.md#messages-and-replies)) |
+| a chat | a Telegram chat through `otto-connect` | that chat, through `otto-connect` (see [Messages and replies](servers-and-connectors.md#messages-and-replies)) |
 
 Turns from an editor ACP client, scheduled runs, sub-agents, and workflows
 have no origin; there the three tools return an error. If

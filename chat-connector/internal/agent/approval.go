@@ -30,7 +30,7 @@ func (a *Agent) ApprovalMessageWithChannel(ctx context.Context, id, text, channe
 	}
 	params := map[string]any{"sessionId": id, "text": text}
 	if p.channelContext {
-		if channel == "telegram" || channel == "feishu" {
+		if channel == "telegram" {
 			params["channel"] = channel
 		}
 	} else {

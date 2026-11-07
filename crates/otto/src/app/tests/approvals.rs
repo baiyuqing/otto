@@ -192,20 +192,20 @@ async fn approve_always_excludes_the_exact_command_reloads_and_grants_the_reques
     let (controller, approvals, calls) =
         controller_with_approvals(workspace.path(), sessions.path()).await;
     let session_id = controller.info().session_id;
-    let id = approvals.request(&session_id, "lark-cli auth status");
+    let id = approvals.request(&session_id, "acme-cli auth status");
 
     let message = controller.approve_bash_always(&id).await.expect("approve");
 
     assert_eq!(
         message,
         format!(
-            "The user approved {id} and excluded 'lark-cli auth status' from the sandbox. Retry the same Bash command now."
+            "The user approved {id} and excluded 'acme-cli auth status' from the sandbox. Retry the same Bash command now."
         )
     );
     assert_eq!(*calls.lock().expect("calls"), 1);
     let written = std::fs::read_to_string(controller.config_path()).expect("read config");
     assert!(
-        written.contains("excluded_commands = ['lark-cli auth status']"),
+        written.contains("excluded_commands = ['acme-cli auth status']"),
         "{written}"
     );
 }
@@ -220,7 +220,7 @@ async fn approve_always_refuses_commands_the_model_could_steer() {
 
     for command in [
         "git push; rm -rf x",
-        "bash -c 'lark-cli x'",
+        "bash -c 'acme-cli x'",
         "sudo ls",
         "make test",
         "./build.sh",
@@ -247,7 +247,7 @@ async fn approve_always_refuses_an_unknown_id_and_a_busy_controller() {
     let (controller, approvals, _) =
         controller_with_approvals(workspace.path(), sessions.path()).await;
     let session_id = controller.info().session_id;
-    let id = approvals.request(&session_id, "lark-cli auth status");
+    let id = approvals.request(&session_id, "acme-cli auth status");
 
     assert_eq!(
         controller.approve_bash_always("approval-99").await,

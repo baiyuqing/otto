@@ -8,8 +8,8 @@
 # OTTO_ENV_FILE), the same file scripts/otto.sh reads, plus the settings in
 # OTTO_TCP_* below. Secrets are environment variables: OTTO_ACP_TOKEN is read
 # by `otto serve` and by connect through `[agent] token_env`, and the
-# connector's Telegram token or Feishu app secret come from the variables its
-# configuration names. The script writes no secret.
+# connector's Telegram token comes from the variable its configuration names.
+# The script writes no secret.
 #
 # The supervisor restarts a process that exits, 1 s doubling to 60 s, and
 # immediately after it had run for 60 s; five consecutive fast failures stop

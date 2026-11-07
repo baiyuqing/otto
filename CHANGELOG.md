@@ -9,8 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
-- Claude stream sequence errors identify the rejected event and violated rule
-  without including response content. Protocol validation remains unchanged.
+- Claude streams accept repeated message-level updates and late or missing block
+  stops, finalizing content at `message_stop` with strict tool-argument validation.
+  Truncated/invalid arguments and streams without a message stop still fail;
+  initial and streamed tool arguments preserve numeric literals. Sequence errors
+  identify the violated rule without response content. Restart Otto after updating.
 
 - Unix terminal users can suspend the TUI with `Ctrl+Z` and resume with `fg`:
   Otto restores the shell terminal before suspending, then redraws the same

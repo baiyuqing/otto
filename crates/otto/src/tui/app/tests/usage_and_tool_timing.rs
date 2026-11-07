@@ -70,6 +70,7 @@ fn provider_usage_updates_the_footer_during_a_turn() {
         input_tokens: 10,
         output_tokens: 2,
         cached_input_tokens: 4,
+        ..Default::default()
     };
 
     app.apply_event(&WireEvent {
@@ -78,6 +79,7 @@ fn provider_usage_updates_the_footer_during_a_turn() {
             input_tokens: 7,
             output_tokens: 3,
             cached_input_tokens: 5,
+            ..Default::default()
         }),
         usage_present: Some(true),
         ..Default::default()
@@ -95,6 +97,7 @@ fn provider_usage_updates_the_footer_during_a_turn() {
             input_tokens: 17,
             output_tokens: 5,
             cached_input_tokens: 9,
+            ..Default::default()
         }
     );
 }
@@ -115,6 +118,7 @@ fn a_task_notification_decides_whether_the_cache_share_is_shown() {
             input_tokens: 40,
             output_tokens: 5,
             cached_input_tokens: 0,
+            ..Default::default()
         }),
         usage_present: Some(true),
         ..Default::default()
@@ -135,6 +139,7 @@ fn a_measured_task_notification_keeps_the_cache_share() {
             input_tokens: 40,
             output_tokens: 5,
             cached_input_tokens: 30,
+            ..Default::default()
         }),
         usage_present: Some(true),
         cached_input_tokens_present: Some(true),

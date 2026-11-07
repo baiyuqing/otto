@@ -511,6 +511,7 @@ fn store_aggregates_usage_across_assistant_appends() {
                 input_tokens: 10,
                 output_tokens: 4,
                 cached_input_tokens: 2,
+                ..Default::default()
             },
         ))
         .expect("append");
@@ -522,6 +523,7 @@ fn store_aggregates_usage_across_assistant_appends() {
                 input_tokens: 5,
                 output_tokens: 1,
                 cached_input_tokens: 0,
+                ..Default::default()
             },
         ))
         .expect("append");
@@ -532,7 +534,8 @@ fn store_aggregates_usage_across_assistant_appends() {
         Usage {
             input_tokens: 15,
             output_tokens: 5,
-            cached_input_tokens: 2
+            cached_input_tokens: 2,
+            ..Default::default()
         }
     );
     store.close().expect("close");

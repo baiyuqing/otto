@@ -176,6 +176,7 @@ fn a_context_message_keeps_its_usage_in_the_otto_details() {
         input_tokens: 40,
         output_tokens: 5,
         cached_input_tokens: 30,
+        ..Default::default()
     };
     let message = Message {
         id: "n1".into(),
@@ -402,6 +403,7 @@ fn assert_warning_contains(warnings: &[Warning], text: &str) {
     );
 }
 
+mod cache_usage;
 mod context_edits;
 mod history_messages;
 mod memory_references;

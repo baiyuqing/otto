@@ -31,17 +31,28 @@ impl Store {
             ..PiCompaction::default()
         }));
 
+        if compaction_details_present(&checkpoint.details)
+            || checkpoint
+                .usage
+                .is_some_and(|usage| usage.cache_write_input_tokens.is_some())
+        {
+            let mut details = serde_json::to_value(&checkpoint.details)
+                .map_err(|error| PiError::other(format!("encode compaction details: {error}")))?;
+            if let Some(usage) = checkpoint
+                .usage
+                .filter(|usage| usage.cache_write_input_tokens.is_some())
+            {
+                details["otto"] = serde_json::json!({ "usage": usage });
+            }
+            if let Some(compaction) = entry.compaction.as_mut() {
+                compaction.details = Some(raw_value(details.to_string())?);
+            }
+        }
+
         let mut candidate = state.entries.clone();
         candidate.push(entry.clone());
         let (resolved, _) = build_context(&candidate, &entry_id)?;
 
-        if compaction_details_present(&checkpoint.details) {
-            let encoded = serde_json::to_string(&checkpoint.details)
-                .map_err(|error| PiError::other(format!("encode compaction details: {error}")))?;
-            if let Some(compaction) = entry.compaction.as_mut() {
-                compaction.details = Some(raw_value(encoded)?);
-            }
-        }
         let last = candidate.len() - 1;
         candidate[last] = entry.clone();
 

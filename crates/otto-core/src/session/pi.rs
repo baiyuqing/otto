@@ -381,10 +381,9 @@ pub struct PiOttoDetails {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub usage_present: bool,
-    /// The token usage a notification carried when it entered the transcript,
-    /// such as a sub-agent task's total. `piCustomMessage` has no usage field,
-    /// so it travels in this extension instead; absent when its producer
-    /// reported none.
+    /// Notification usage, or an assistant/checkpoint's exact optional cache
+    /// breakdown. Pi's mandatory cacheWrite zero cannot distinguish an absent
+    /// write count from a reported zero; this extension preserves that fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     #[serde(

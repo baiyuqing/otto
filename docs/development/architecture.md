@@ -135,6 +135,12 @@ every implementation and wrapper, with reopen support for durable state.
 - `Response::message` owns finish reason and usage. Missing usage differs from
   explicitly reported zero; cached-input presence is separately tracked.
   Preserve both distinctions through events, persistence and aggregates.
+  `Usage.input_tokens` includes cache reads and writes. Optional
+  `cache_write_input_tokens` and its `cache_write_1h_input_tokens` subset retain
+  missing versus zero; aggregate them only across complete reports. Claude's
+  cumulative SSE counters are disjoint and replace prior counts on updates.
+  Pi assistant/checkpoint details preserve optional counts that mandatory Pi
+  zeroes cannot represent; any duplicate counts must agree with Pi usage.
 - Usage storage contains content-free records only, never prompts, responses,
   tool bodies or opaque context. Logical calls, transport attempts and token
   reports are distinct counts. Frontends query the shared API.

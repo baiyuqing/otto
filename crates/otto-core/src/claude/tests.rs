@@ -1,3 +1,4 @@
+mod cache_usage_tests;
 mod stream_tests;
 mod tool_input_tests;
 
@@ -107,7 +108,7 @@ fn maps_messages_and_tools_without_openai_fields() {
         protocol::serialized_request_size(&request).unwrap()
     );
     let body: Value = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(body["system"], "be useful");
+    assert_eq!(body["system"][0]["text"], "be useful");
     assert_eq!(body["stream"], true);
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(

@@ -9,6 +9,7 @@ mod commands;
 #[cfg(test)]
 mod delete_tests;
 mod review;
+mod session_details;
 pub(super) mod skills;
 #[cfg(test)]
 mod tests;

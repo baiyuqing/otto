@@ -12,7 +12,6 @@ pub(super) async fn run_subcommand(
     stderr: &mut (dyn Write + Send),
     environment_entries: &[Vec<u8>],
     cancel: &CancellationToken,
-    backends: &otto::runtime::storage::BackendRegistry,
     memory_extension: bool,
 ) -> Option<i32> {
     if memory_extension && args.first().is_some_and(|argument| argument == "memory") {
@@ -47,25 +46,7 @@ pub(super) async fn run_subcommand(
         return Some(crate::workspace_command::run(&args[1..], stdout, stderr));
     }
     if args.first().is_some_and(|command| command == "storage") {
-        if backends.is_empty()
-            && args.get(1).is_none_or(|command| command != "init")
-            && !args.iter().any(|argument| argument == "--to-config")
-        {
-            // Preserve legacy storage commands' environment-independent dispatch.
-            return Some(crate::storage::run_async(&args[1..], stdout, stderr).await);
-        }
-        let entries = match capture_environment(environment_entries.to_vec()) {
-            Ok(entries) => entries,
-            Err(message) => return Some(fail(stderr, &message)),
-        };
-        let lookup = match environment_lookup(&entries) {
-            Ok(lookup) => lookup,
-            Err(message) => return Some(fail(stderr, &message)),
-        };
-        return Some(
-            crate::storage::run_async_with_backends(&args[1..], stdout, stderr, backends, &lookup)
-                .await,
-        );
+        return Some(crate::storage::run(&args[1..], stdout, stderr));
     }
     // These dispatch before flag parsing, because their argument grammars are
     // their own.
@@ -81,43 +62,11 @@ pub(super) async fn run_subcommand(
             Err(message) => return Some(fail(stderr, &message)),
         };
         if first == "memory" {
-            let home = match resolve_home(&lookup) {
-                Ok(home) => home,
-                Err(message) => return Some(fail(stderr, &message)),
-            };
-            let config = match crate::memory_command::startup_configuration(&args[1..], &home) {
-                Ok(config) => config,
-                Err(()) => {
-                    return Some(crate::memory_command::run_with_storage(
-                        &args[1..],
-                        stdout,
-                        stderr,
-                        &lookup,
-                        &Default::default(),
-                    ));
-                }
-            };
-            let storage = if crate::memory_command::has_store(&config, &lookup, &home) {
-                Default::default()
-            } else {
-                match otto::runtime::storage::Storage::open_home_with(
-                    Path::new(&home),
-                    backends,
-                    &config.storage,
-                    &lookup,
-                )
-                .await
-                {
-                    Ok(storage) => storage,
-                    Err(message) => return Some(fail(stderr, &message)),
-                }
-            };
-            return Some(crate::memory_command::run_with_storage(
+            return Some(crate::memory_command::run(
                 &args[1..],
                 stdout,
                 stderr,
                 &lookup,
-                &storage,
             ));
         }
         return Some(

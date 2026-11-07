@@ -9,8 +9,6 @@ publish.workspace = true
 workspace = true
 
 [features]
-default = ["storage-conformance"]
-storage-conformance = []
 # Test-only fault injection (`otto::faults`). Off in every shipped build; the
 # integration tests turn it on through the self dev-dependency below.
 fault-injection = []

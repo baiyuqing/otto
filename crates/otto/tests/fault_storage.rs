@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use otto::faults::sql::{FaultySqlDriver, SqlOp};
 use otto::faults::{Fault, FaultError, FaultPlan, Filter, Rule, SqlFault, Trigger};
-use otto::runtime::storage::{Endpoint, RepositoryFactory, SqlRepositories};
+use otto::runtime::storage::SqlRepositories;
+use otto::storage::Connection;
 use otto::storage::drivers::sqlite::SqliteDriver;
-use otto::storage::{Connection, OpenPolicy};
 
 /// What a repository's caller learns from one write. Most repositories
 /// collapse every storage error into one opaque domain error.
@@ -71,13 +71,6 @@ fn factory(plan: &Arc<FaultPlan<SqlOp>>) -> SqlRepositories {
     )))
 }
 
-fn endpoint(address: &str) -> Endpoint<'_> {
-    Endpoint {
-        address,
-        policy: OpenPolicy::CreateIfMissing,
-    }
-}
-
 fn rule(op: SqlOp, filter: Filter, trigger: Trigger, fault: Fault) -> Rule<SqlOp> {
     Rule::new(op, trigger, fault).filter(filter)
 }
@@ -100,7 +93,7 @@ fn rows(path: &Path, table: &str) -> i64 {
 fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     use otto::approval::{self, Proposal};
     use otto_core::approval::{Authority, Kind, Scope, Subject};
-    let store = factory.approvals(endpoint(address)).ok()?;
+    let store = factory.approvals(Path::new(address)).ok()?;
     let service = approval::Service::in_memory().unwrap();
     let scope = Scope {
         workspace: "/contract".into(),
@@ -147,7 +140,7 @@ fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 
 fn schedule(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     use otto::schedule::{Kind, Origin, store::NewItem};
-    let store = factory.schedule(endpoint(address)).ok()?;
+    let store = factory.schedule(Path::new(address)).ok()?;
     let listed = store.clone();
     let now = chrono::Utc::now();
     Some(Handle {
@@ -177,7 +170,7 @@ fn schedule(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 }
 
 fn workflow(factory: &SqlRepositories, address: &str) -> Option<Handle> {
-    let store = factory.workflow(endpoint(address)).ok()?;
+    let store = factory.workflow(Path::new(address)).ok()?;
     let definition = otto::workflow::Definition {
         source: String::new(),
         name: "contract".into(),
@@ -212,7 +205,7 @@ fn workflow(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 }
 
 fn tasks(factory: &SqlRepositories, address: &str) -> Option<Handle> {
-    let store = factory.tasks(endpoint(address)).ok()?;
+    let store = factory.tasks(Path::new(address)).ok()?;
     let listed = store.clone();
     let context = otto::subagent::record::TaskContext {
         parent_session: "memory:contract".into(),
@@ -247,7 +240,7 @@ fn tasks(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 }
 
 fn usage(factory: &SqlRepositories, address: &str) -> Option<Handle> {
-    let store = factory.usage(endpoint(address)).ok()?;
+    let store = factory.usage(Path::new(address)).ok()?;
     Some(Handle {
         write: Box::new(move |_| {
             let record = otto::usage::UsageRecord {
@@ -272,7 +265,7 @@ fn usage(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 
 fn skill_checks(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     use otto::skill::check_repository::{NewRow, ResultJson};
-    let store = factory.skill_checks(endpoint(address)).ok()?;
+    let store = factory.skill_checks(Path::new(address)).ok()?;
     Some(Handle {
         write: Box::new(move |n| {
             let result = ResultJson::Rules { rules: Vec::new() };
@@ -297,7 +290,7 @@ fn skill_checks(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 
 fn memory_advice(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     use otto::memory::advice::audit::NewRow;
-    let store = factory.memory_advice(endpoint(address)).ok()?;
+    let store = factory.memory_advice(Path::new(address)).ok()?;
     Some(Handle {
         write: Box::new(move |_| {
             let row = NewRow {

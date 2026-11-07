@@ -1,114 +1,19 @@
-//! Offline legacy import and read-only usage inspection.
+//! Read-only usage inspection: `otto storage window-peaks`.
 
-use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
-use serde::Deserialize;
-
-use otto::storage::{Connection, Value, params_from_iter};
-
-#[cfg(test)]
-mod schema_tests;
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
-enum Export {
-    Header {
-        family: String,
-        version: i64,
-        schema: Vec<String>,
-        counts: BTreeMap<String, i64>,
-    },
-    Row {
-        table: String,
-        values: Vec<Cell>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "lowercase")]
-enum Cell {
-    Null,
-    Integer(i64),
-    Real(f64),
-    Text(String),
-    Blob(Vec<u8>),
-}
-
-impl From<Cell> for Value {
-    fn from(value: Cell) -> Self {
-        match value {
-            Cell::Null => Self::Null,
-            Cell::Integer(value) => Self::Integer(value),
-            Cell::Real(value) => Self::Real(value),
-            Cell::Text(value) => Self::Text(value),
-            Cell::Blob(value) => Self::Blob(value),
-        }
-    }
-}
-
-pub async fn run_async(
-    args: &[String],
-    stdout: &mut (dyn Write + Send),
-    stderr: &mut (dyn Write + Send),
-) -> i32 {
-    run_async_with_backends(
-        args,
-        stdout,
-        stderr,
-        &Default::default(),
-        &Default::default(),
-    )
-    .await
-}
-
-pub async fn run_async_with_backends(
-    args: &[String],
-    stdout: &mut (dyn Write + Send),
-    stderr: &mut (dyn Write + Send),
-    backends: &otto::runtime::storage::BackendRegistry,
-    environment: &std::collections::HashMap<String, String>,
-) -> i32 {
-    if args.first().is_some_and(|arg| arg == "init") {
-        return super::storage_transfer::initialize(
-            &args[1..],
-            stdout,
-            stderr,
-            backends,
-            environment,
-        )
-        .await;
-    }
-    if args.first().is_some_and(|arg| arg == "transfer") {
-        return super::storage_transfer::run_with_backends(
-            &args[1..],
-            stdout,
-            stderr,
-            backends,
-            environment,
-        )
-        .await;
-    }
-    if args.first().is_some_and(|arg| arg == "abort") {
-        return super::storage_transfer::abort(&args[1..], stdout, stderr).await;
-    }
-    run(args, stdout, stderr)
-}
+use otto::storage::Connection;
 
 pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let result = match args {
-        [command, source, destination] if command == "migrate" => {
-            migrate(Path::new(source), Path::new(destination))
-        }
         [command, database, session] if command == "window-peaks" => {
             window_peaks(Path::new(database), session, stdout)
         }
         _ => {
             let _ = writeln!(
                 stderr,
-                "usage: otto storage migrate <legacy.db> <new.db> | window-peaks <usage.db> <session-id>"
+                "usage: otto storage window-peaks <usage.db> <session-id>"
             );
             return 2;
         }
@@ -116,13 +21,7 @@ pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i
     match result {
         Ok(()) => 0,
         Err(()) => {
-            let _ = writeln!(
-                stderr,
-                "storage operation failed; migration requires stopped Otto processes, Python 3, \
-                 a canonical supported legacy schema, and a new destination path; \
-                 for modified/unsupported schemas use the matching older Otto release to export \
-                 logical records, keeping the source unchanged"
-            );
+            let _ = writeln!(stderr, "storage operation failed");
             1
         }
     }
@@ -152,128 +51,4 @@ fn window_peaks(path: &Path, session: &str, stdout: &mut dyn Write) -> Result<()
     }
     serde_json::to_writer(&mut *stdout, &peaks).map_err(|_| ())?;
     writeln!(stdout).map_err(|_| ())
-}
-
-fn import(reader: impl BufRead, connection: &mut Connection) -> Result<(), ()> {
-    let mut lines = reader.lines();
-    let first = lines.next().ok_or(())?.map_err(|_| ())?;
-    let Export::Header {
-        family,
-        version,
-        schema,
-        counts,
-    } = serde_json::from_str(&first).map_err(|_| ())?
-    else {
-        return Err(());
-    };
-    let allowed: &[&str] = match family.as_str() {
-        "usage" if version == 0 => &["usage_events"],
-        "tasks" if version == 1 => &["tasks"],
-        "workflow" if version == 0 => &[
-            "workflow_runs",
-            "workflow_steps",
-            "workflow_attempts",
-            "workflow_requests",
-            "workflow_events",
-        ],
-        "skill-checks" if version == 1 => &["skill_checks"],
-        _ => return Err(()),
-    };
-    if counts.len() != allowed.len()
-        || counts
-            .iter()
-            .any(|(table, count)| !allowed.contains(&table.as_str()) || *count < 0)
-    {
-        return Err(());
-    }
-    let canonical = otto::storage::backends::sqlite::migration::legacy::canonical_schema(
-        &family, version, &schema,
-    )
-    .map_err(|_| ())?;
-    let transaction = connection.transaction().map_err(|_| ())?;
-    // Only locally constructed trusted DDL reaches the explicit script API.
-    transaction.execute_batch(&canonical).map_err(|_| ())?;
-    transaction
-        .pragma_update("user_version", version)
-        .map_err(|_| ())?;
-    for line in lines {
-        let line = line.map_err(|_| ())?;
-        let Export::Row { table, values } = serde_json::from_str(&line).map_err(|_| ())? else {
-            return Err(());
-        };
-        if !counts.contains_key(&table) || !allowed.contains(&table.as_str()) || values.is_empty() {
-            return Err(());
-        }
-        let placeholders = vec!["?"; values.len()].join(",");
-        transaction
-            .execute(
-                &format!("INSERT INTO {table} VALUES({placeholders})"),
-                params_from_iter(values.into_iter().map(Value::from)),
-            )
-            .map_err(|_| ())?;
-    }
-    for (table, expected) in counts {
-        let actual: i64 = transaction
-            .query_row(&format!("SELECT count(*) FROM {table}"), (), |row| {
-                row.get(0)
-            })
-            .map_err(|_| ())?;
-        if actual != expected {
-            return Err(());
-        }
-    }
-    transaction.commit().map_err(|_| ())
-}
-
-fn migrate(source: &Path, destination: &Path) -> Result<(), ()> {
-    if !source.is_file() || destination.exists() {
-        return Err(());
-    }
-    let parent = destination
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let staging = tempfile::Builder::new()
-        .prefix(".otto-sqlite-migrate-")
-        .tempfile_in(parent)
-        .map_err(|_| ())?;
-    let mut child = Command::new("python3")
-        .args([
-            "-I",
-            "-c",
-            include_str!("../../../scripts/export-legacy-storage.py"),
-        ])
-        .arg(source)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| ())?;
-    let outcome = (|| {
-        let mut connection = Connection::open(staging.path()).map_err(|_| ())?;
-        import(
-            BufReader::new(child.stdout.take().ok_or(())?),
-            &mut connection,
-        )?;
-        if !child.wait().map_err(|_| ())?.success() {
-            return Err(());
-        }
-        connection.checkpoint().map_err(|_| ())?;
-        connection.close().map_err(|_| ())?;
-        staging.as_file().sync_all().map_err(|_| ())?;
-        Ok(())
-    })();
-    if outcome.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    // SQLite creates WAL and shared-memory files next to the staging DB.
-    for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", staging.path().display()));
-    }
-    outcome?;
-    staging.persist_noclobber(destination).map_err(|_| ())?;
-    std::fs::File::open(parent)
-        .and_then(|dir| dir.sync_all())
-        .map_err(|_| ())
 }

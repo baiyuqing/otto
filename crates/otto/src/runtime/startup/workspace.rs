@@ -177,26 +177,6 @@ pub fn load(
     })
 }
 
-/// Opens the storage backend the configuration selects. The error is already
-/// redacted by the boundary.
-pub async fn open_storage(
-    loaded: &Loaded,
-    lookup: &EnvironmentLookup,
-    backends: &crate::runtime::storage::BackendRegistry,
-) -> Result<Arc<crate::runtime::storage::Storage>, String> {
-    match crate::runtime::storage::Storage::open_home_with(
-        Path::new(&loaded.home),
-        backends,
-        &loaded.config.storage,
-        lookup,
-    )
-    .await
-    {
-        Ok(storage) => Ok(Arc::new(storage)),
-        Err(error) => Err(loaded.boundary.redact(&error)),
-    }
-}
-
 /// The configuration environment and the captured ChatGPT credentials.
 pub struct Configured {
     pub environment: HashMap<String, String>,
@@ -319,7 +299,6 @@ pub struct PreparedWorkspace {
 pub fn prepare_workspace(
     loaded: &Loaded,
     environment: &HashMap<String, String>,
-    storage: &crate::runtime::storage::Storage,
     workspace_path: &str,
 ) -> Result<PreparedWorkspace, String> {
     let startup = &loaded.boundary;
@@ -343,10 +322,7 @@ pub fn prepare_workspace(
     };
     let default_session_root: PathBuf =
         [loaded.home.as_str(), ".otto", "sessions"].iter().collect();
-    let session_root = match storage.session_root(&default_session_root) {
-        Ok(root) => root,
-        Err(error) => return Err(startup.redact(&error)),
-    };
+    let session_root = default_session_root;
     Ok(PreparedWorkspace {
         memory_config,
         workspace,

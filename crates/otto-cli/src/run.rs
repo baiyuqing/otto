@@ -147,33 +147,6 @@ pub async fn run(
     cancel: &CancellationToken,
     terminate: &super::terminate::Terminate,
 ) -> i32 {
-    run_with_backends(
-        args,
-        stdin,
-        stdout,
-        stderr,
-        environment_entries,
-        terminal,
-        cancel,
-        terminate,
-        &otto::runtime::storage::BackendRegistry::default(),
-    )
-    .await
-}
-
-/// Process entry point for statically linked storage extensions.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_with_backends(
-    args: &[String],
-    stdin: Box<dyn BufRead + Send + 'static>,
-    stdout: &mut (dyn Write + Send),
-    stderr: &mut (dyn Write + Send),
-    environment_entries: Vec<Vec<u8>>,
-    terminal: bool,
-    cancel: &CancellationToken,
-    terminate: &super::terminate::Terminate,
-    backends: &otto::runtime::storage::BackendRegistry,
-) -> i32 {
     run_with_extensions(
         args,
         stdin,
@@ -183,7 +156,6 @@ pub async fn run_with_backends(
         terminal,
         cancel,
         terminate,
-        backends,
         None,
     )
     .await

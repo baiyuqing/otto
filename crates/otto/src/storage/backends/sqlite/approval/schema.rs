@@ -156,7 +156,7 @@ pub(super) fn backup_before_v4(
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
-        super::super::migration::legacy::validate_objects(
+        super::super::schema_objects::validate_objects(
             &[source_sql],
             std::slice::from_ref(&expected),
         )
@@ -185,7 +185,7 @@ pub(super) fn backup_before_v4(
         let trusted = variants
             .into_iter()
             .find(|candidate| {
-                super::super::migration::legacy::validate_objects(
+                super::super::schema_objects::validate_objects(
                     std::slice::from_ref(source_sql),
                     std::slice::from_ref(candidate),
                 )

@@ -28,6 +28,7 @@ pub enum EntryKind {
     Compaction,
     Error,
     System,
+    LocalCommand,
 }
 
 /// The prefix the session layer puts on a compaction summary's display text;
@@ -426,6 +427,7 @@ fn entry_kind_label(kind: EntryKind) -> &'static str {
         EntryKind::Compaction => "compaction",
         EntryKind::Error => "error",
         EntryKind::System => "system",
+        EntryKind::LocalCommand => "local_command",
     }
 }
 
@@ -508,3 +510,40 @@ fn pair_tool_result(
 
 #[cfg(test)]
 mod tests;
+
+/// Merge independent human receipts into the display without creating Messages.
+pub fn project_local_commands(
+    entries: &mut Vec<Entry>,
+    receipts: &[otto_core::session::local_command::LocalCommandReceipt],
+) {
+    entries.retain(|entry| entry.kind != Some(EntryKind::LocalCommand));
+    for receipt in receipts {
+        let position = entries
+            .iter()
+            .position(|entry| {
+                entry
+                    .id
+                    .strip_prefix("message-")
+                    .and_then(|id| id.split('-').next())
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .is_some_and(|index| index >= receipt.after_messages)
+            })
+            .unwrap_or(entries.len());
+        entries.insert(
+            position,
+            Entry {
+                id: format!("local-command-{}", receipt.id),
+                kind: Some(EntryKind::LocalCommand),
+                raw: format!(
+                    "{} {} — {}",
+                    receipt.marker(),
+                    receipt.command,
+                    receipt.summary
+                ),
+                tool_args: receipt.parameters.clone(),
+                tool_output: receipt.output.clone(),
+                ..Entry::default()
+            },
+        );
+    }
+}

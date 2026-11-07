@@ -51,7 +51,7 @@ async fn the_system_prompt_carries_the_workspace_context_and_hides_the_api_key()
     assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
     assert!(prompt.contains(
         "<available_tools>read, grep, find, ls, write, edit, \
-                submit_verification, web_fetch, web_search, list_models, agent, \
+                session_info, submit_verification, web_fetch, web_search, list_models, agent, \
                 agent_status, agent_yield, agent_send, agent_cancel, remind, \
                 remind_status, remind_cancel, request_approval, approval_pending, \
                 approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, \

@@ -75,6 +75,7 @@ fn child_tools_with_budget(
         write_paths,
         parent_inbox,
         task_id: "t1".to_string(),
+        session_id: "test-child-session".to_string(),
         max_output_bytes: 16384,
         reports_left: Arc::new(AtomicUsize::new(budget)),
     }
@@ -460,3 +461,5 @@ mod resume_tool;
 mod scheduling;
 mod start;
 mod tools;
+
+mod session_identity;

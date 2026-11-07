@@ -13,6 +13,21 @@ commit ledger; Git and release tags retain the full history. See the
   compacts succeeded, failed, canceled and interrupted panes; Enter or clicking a
   title toggles a pane, with the manual choice retained during snapshot refreshes.
 
+- `/session` offers Copy Session ID (the default) and Copy all displayed details.
+  Up/Down selects, Enter copies and Esc closes; the popup remains open with copy
+  feedback. Attached sessions copy on the terminal client, not the server.
+
+- The read-only `session_info {}` tool returns only the executing runner's own
+  session ID, including isolated child identities and in-memory runs. Persisted
+  children retain their transcript ID on resume. Rebuild/reinstall and restart
+  Otto to use the new built-in in an existing installation.
+
+- `/memory` and `/remember` retain independent LOCAL COMMAND receipts in the
+  conversation timeline, including errors, query output and replay after reopen.
+  Local and attached terminals show compact `›_` entries with expandable details;
+  session HTTP and ACP transports expose receipts separately from model messages.
+  Receipts never enter model context, compaction or automatic memory learning.
+
 ### Breaking changes
 
 - `otto storage migrate`, `otto storage init`, `otto storage transfer` and

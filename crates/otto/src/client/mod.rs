@@ -324,6 +324,8 @@ struct SessionWire {
     forked_from: Option<crate::app::ForkedFrom>,
     #[serde(default)]
     plan: Vec<otto_core::session::PlanStep>,
+    #[serde(default)]
+    local_commands: Vec<otto_core::session::local_command::LocalCommandReceipt>,
 }
 
 #[derive(Default, Deserialize)]
@@ -367,6 +369,7 @@ impl SessionWire {
             }),
             forked_from: self.forked_from,
             plan: self.plan,
+            local_commands: self.local_commands,
             session_id: self.id,
             session_name: self.name,
             workspace: self.workspace,

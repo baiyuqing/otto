@@ -209,6 +209,10 @@ pub enum Reply {
     Tasks(Vec<crate::app::Task>),
     Task(crate::app::Task),
     TaskCancelled(String),
+    MemoryServiceResult {
+        status: otto_core::session::local_command::LocalCommandStatus,
+        text: String,
+    },
     Notice(String),
     Usage(String),
 }
@@ -603,7 +607,28 @@ impl Controller {
         if pending {
             line.push_str(" pending");
         }
-        Ok(Reply::Notice(line))
+        use otto_core::session::local_command::LocalCommandStatus;
+        let status = if pending {
+            LocalCommandStatus::Pending
+        } else if receipt.completion == Completion::Failed
+            || receipt
+                .items
+                .iter()
+                .any(|item| item.state == ItemState::Failed)
+        {
+            LocalCommandStatus::Error
+        } else if receipt.completion == Completion::Unknown
+            || receipt.items.is_empty()
+            || receipt
+                .items
+                .iter()
+                .any(|item| item.state == ItemState::Unknown)
+        {
+            LocalCommandStatus::Pending
+        } else {
+            LocalCommandStatus::Success
+        };
+        Ok(Reply::MemoryServiceResult { status, text: line })
     }
 
     pub fn management(&self, request: Request) -> Result<Reply, String> {

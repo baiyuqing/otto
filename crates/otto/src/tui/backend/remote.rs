@@ -103,6 +103,11 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
             let mut history = false;
             let mut prompt = None;
             let message = match command {
+                Command::MemoryInvocation { name, args } => {
+                    history = true;
+                    client.memory_command(session, &name, &args).await.map_err(mutation_error)?;
+                    String::new()
+                }
                 Command::NewSession => {
                     remote
                         .open(Some(remote.workspace()), None)

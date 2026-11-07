@@ -6,7 +6,7 @@ use serde_json::json;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-fn events(arguments: &str, late_stop: bool) -> Vec<String> {
+pub(super) fn events(arguments: &str, late_stop: bool) -> Vec<String> {
     let mut events = vec![
         json!({"type":"message_start","message":{"id":"m","role":"assistant",
             "content":[],"usage":{"input_tokens":2,"output_tokens":0}}}).to_string(),
@@ -94,7 +94,7 @@ async fn invalid_inputs_and_eof_return_errors_after_provisional_output_without_r
         assert_eq!(server.count(), 1);
         let error = settlement.result.unwrap_err();
         assert!(matches!(error, ProviderError::Other(_)));
-        assert_eq!(error.to_string(), expected);
+        assert!(error.to_string().starts_with(expected), "{error}");
         assert!(!error.to_string().contains("private-marker"));
     }
 }

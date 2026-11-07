@@ -41,6 +41,14 @@ pub struct ModelLimits {
     pub source_url: String,
 }
 
+impl ModelLimits {
+    /// Query the canonical catalog without resolving runtime configuration.
+    /// Unknown or malformed model identifiers return unknown, zeroed limits.
+    pub fn for_model(model: &str) -> Self {
+        resolve_model_limits(model)
+    }
+}
+
 /// Looks up `model`'s context-window limits. Unknown models (including
 /// ambiguous namespace prefixes and malformed `:batch` suffixes) return a
 /// zeroed, `known: false` [`ModelLimits`].
@@ -158,7 +166,8 @@ fn openai_alias_family(model: &str) -> Option<ModelFamily> {
 fn anthropic_alias_family(model: &str) -> Option<ModelFamily> {
     use ModelFamily::*;
     Some(match model {
-        "claude-fable-5" | "claude-opus-5" | "claude-sonnet-5" => ClaudeMillion128,
+        "claude-fable-5-1" | "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5"
+        | "claude-fable-5" | "claude-opus-5" | "claude-sonnet-5" => ClaudeMillion128,
         "claude-opus-4-8" | "claude-opus-4.8" => ClaudeMillion128,
         "claude-opus-4-7" | "claude-opus-4.7" => ClaudeMillion128,
         "claude-opus-4-6" | "claude-opus-4.6" => ClaudeMillion128,

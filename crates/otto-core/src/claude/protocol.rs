@@ -1,12 +1,11 @@
 //! Claude Messages request mapping. Unsupported content fails rather than being
 //! silently dropped. Persisted reasoning is intentionally not replayed.
+use super::output_budget::OutputBudget;
 use crate::model::{BlockType, FinishReason, Role};
 use crate::provider::{ProviderError, Request};
 use serde::Serialize;
 use serde_json::{json, value::RawValue};
 
-/// Conservative output budget supported by the initial Claude integration.
-pub const MAX_TOKENS: u32 = 4096;
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRequest {
     pub model: String,
@@ -130,7 +129,7 @@ pub fn build_request(request: &Request) -> Result<WireRequest, ProviderError> {
         messages,
         tools,
         stream: true,
-        max_tokens: MAX_TOKENS,
+        max_tokens: OutputBudget::for_model(&request.model).initial,
     })
 }
 /// Exact serialized byte count, sharing validation with the request encoder.

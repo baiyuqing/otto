@@ -9,6 +9,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- The user manual now has a unified session JSONL reference covering record
+  types, custom metadata, model-context behavior and recovery distinctions.
+
 - New inputs carry per-message source, transport and delivery metadata through
   queues, history and resume. Models can distinguish local TUI, REPL/one-shot,
   HTTP and ACP ingress without rewriting user text. Attached TUI and connector

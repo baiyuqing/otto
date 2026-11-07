@@ -50,8 +50,13 @@ Canonical targets (see root `Makefile`):
 | `make check-linux` | Code limits, formatting, lint, native/connector tests, WASM check, script/license checks |
 | `make check-fast` | Manual path-selected checks since merge-base with `origin/main` |
 
-The gates do not build a release binary or browser frontend. Keep Cargo feature
-sets aligned across targets: `connect-check` uses `cargo test --workspace
+The gates do not build a release binary or browser frontend. `connect-check`
+resolves the test binary under `CARGO_TARGET_DIR` when set (relative paths are
+resolved from the checkout), otherwise under `target/`. Keep the host test
+`TMPDIR` outside every admitted Git checkout/worktree: Seatbelt rejects private
+state nested under a writable worktree root.
+
+Keep Cargo feature sets aligned across targets: `connect-check` uses `cargo test --workspace
 --no-run` to reuse the native test build, not a separate `cargo build` feature
 set. Default tests remain offline; live provider probes are opt-in.
 

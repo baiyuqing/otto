@@ -289,7 +289,7 @@ async fn forget_resolves_the_revision_and_reports_a_missing_record() {
         .await
         .expect_err("command error");
     assert!(
-        super::super::repl::is_command_error(&error, "/memory forget"),
+        super::super::repl::is_command_error(&error, "/memory"),
         "{error:?}"
     );
     assert!(error.to_string().contains("not found"), "{error}");
@@ -426,7 +426,7 @@ async fn review_reports_unknown_ids_and_usage_mistakes() {
         .await
         .expect_err("command error");
     assert!(
-        super::super::repl::is_command_error(&error, "/memory review"),
+        super::super::repl::is_command_error(&error, "/memory"),
         "{error:?}"
     );
     assert!(error.to_string().contains("not found"), "{error}");

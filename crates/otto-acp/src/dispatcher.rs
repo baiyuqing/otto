@@ -392,8 +392,7 @@ impl Dispatcher {
                                     &prompt,
                                     channel,
                                     origin.as_ref(),
-                                    request_id.as_deref(),
-                                    input_id.as_deref(),
+                                    (request_id.as_deref(), input_id.as_deref()),
                                 )
                                 .await;
                             match started {

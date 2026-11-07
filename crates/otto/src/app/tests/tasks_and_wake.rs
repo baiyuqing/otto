@@ -3,7 +3,7 @@
 use super::*;
 
 #[tokio::test]
-async fn a_runner_without_a_registry_reports_no_tasks_and_no_wake() {
+async fn a_runner_exposes_its_task_view_and_has_no_wake_without_pending_input() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let mut builder = builder(workspace.path(), sessions.path());
@@ -17,7 +17,7 @@ async fn a_runner_without_a_registry_reports_no_tasks_and_no_wake() {
     let info = builder.runtime_info(&runtime);
     let controller = Controller::new(builder, true, session, runner, info);
 
-    assert!(controller.tasks().is_none());
+    assert!(controller.tasks().is_some());
     assert!(controller.prepare_wake().expect("prepare").is_none());
     controller
         .runner()

@@ -30,13 +30,25 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
         update["sessionUpdate"], "available_commands_update",
         "{frame}"
     );
-    assert_eq!(update["availableCommands"][0]["name"], "model");
-    assert_eq!(update["availableCommands"][1]["name"], "context");
-    assert_eq!(update["availableCommands"][2]["name"], "compact");
-    assert_eq!(update["availableCommands"][3]["name"], "steer");
-    assert_eq!(update["availableCommands"][4]["name"], "queue");
-    assert_eq!(update["availableCommands"][5]["name"], "permissions");
-    assert_eq!(update["availableCommands"].as_array().unwrap().len(), 6);
+    let commands: Vec<_> = update["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "model",
+            "context",
+            "compact",
+            "memory",
+            "remember",
+            "steer",
+            "queue",
+            "permissions"
+        ]
+    );
 
     let (_, first_response) = relay.call("session/prompt", prompt(&session_id, "MARKER-USER-1"));
     assert_eq!(
@@ -60,7 +72,7 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     let text = agent_text(&frames);
     assert!(text.contains("Estimated next request: "), "{text}");
-    assert!(text.contains("Messages (4): "), "{text}");
+    assert!(text.contains("Messages (6): "), "{text}");
     for hidden in [&system[..40], "MARKER-USER-1", "MARKER-ASSISTANT-2"] {
         assert!(!text.contains(hidden), "{hidden:?} leaked into {text}");
     }

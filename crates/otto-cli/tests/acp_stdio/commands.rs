@@ -179,6 +179,8 @@ fn session_new_and_load_are_followed_by_the_command_list() {
             &json!("model"),
             &json!("context"),
             &json!("compact"),
+            &json!("memory"),
+            &json!("remember"),
             &json!("steer"),
             &json!("queue"),
             &json!("permissions")
@@ -236,7 +238,7 @@ fn context_command_answers_with_counts_and_sends_no_provider_request() {
     let text = message_text(&frames);
     assert!(text.contains("Estimated next request: "), "{text}");
     assert!(text.contains("System prompt: "), "{text}");
-    assert!(text.contains("Messages (2): "), "{text}");
+    assert!(text.contains("Messages (3): "), "{text}");
     for hidden in [&system[..40], "MARKER-USER-BODY", "MARKER-ASSISTANT-BODY"] {
         assert!(!text.contains(hidden), "{hidden:?} leaked into {text}");
     }

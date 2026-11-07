@@ -486,7 +486,7 @@ Shared commands:
   whose selected action is `Cancel`; applying it also asks Otto to retry the
   command that failed. The model can also request the same persistent read
   grant through Bash's `sandbox_read_path` argument. Otto shows an approval
-  dialog in the TUI or an Allow/Deny card in Telegram and Feishu, including
+  dialog in the TUI or an Allow/Deny card in Telegram, including
   the resolved path and the fact that it will be saved. This grant is always a
   user decision, whatever the session approval mode. Approval updates
   `read_paths`, reloads the sandbox, and asks the model to retry the command
@@ -762,7 +762,7 @@ Notes:
   highest `t<N>` in the transcript directory, so a resumed session does not
   reuse an id.
 - **Undelivered notifications** (a finished or reporting sub-agent, a fired
-  `remind` timer, a `[feishu]` message) are written to
+  `remind` timer) are written to
   `<session-id>.inbox.json` beside the session file, mode `0600`, and removed
   from it once delivered to the model. Reopening the session restores them,
   and the REPL, the TUI, `otto serve`, and `otto acp` start a wake turn to

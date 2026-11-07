@@ -84,7 +84,7 @@ fn a_relayed_prompt_sends_the_same_updates_as_local_acp() {
     assert_eq!(approval["result"], Value::Null, "{approval}");
     let (_, control) = relay.call(
         "_otto/tasks/control",
-        json!({"sessionId":session_id,"text":"what can you do?","channel":"feishu"}),
+        json!({"sessionId":session_id,"text":"what can you do?","channel":"telegram"}),
     );
     assert_eq!(control["result"], Value::Null, "{control}");
     let (relay_frames, response) = relay.call("session/prompt", prompt(&session_id, "read hello"));

@@ -349,7 +349,7 @@ func TestTaskControlRequiresCapabilityAndTargetsOnlyActiveTurns(t *testing.T) {
 		if err != nil || reply == nil || reply.Queued || reply.Text != "Guidance accepted." {
 			t.Fatalf("ControlMessageWithChannel = (%+v, %v)", reply, err)
 		}
-		queued, err := a.ControlMessageWithChannel(ctx, id, "follow-up: next", "feishu")
+		queued, err := a.ControlMessageWithChannel(ctx, id, "follow-up: next", "telegram")
 		if err != nil || queued == nil || !queued.Queued {
 			t.Fatalf("queued control = (%+v, %v)", queued, err)
 		}
@@ -361,7 +361,6 @@ func TestTaskControlRequiresCapabilityAndTargetsOnlyActiveTurns(t *testing.T) {
 			"task_control:guide",
 			"task_control_channel:telegram",
 			"task_control:follow-up: next",
-			"task_control_channel:feishu",
 			"steer:focus on the failing test",
 		} {
 			if !slices.Contains(calls, want) {

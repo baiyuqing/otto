@@ -378,7 +378,7 @@ async fn forget_queues_a_forget_candidate_for_human_review() {
     let target = remember_record(&service, "editor", "prefers vim");
     let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
     origin.set(Some(
-        crate::schedule::Origin::chat("feishu", "oc_42").unwrap(),
+        crate::schedule::Origin::chat("telegram", "c_42").unwrap(),
     ));
     let tool =
         ForgetTool::new(Arc::clone(&service), vec![scope()]).with_turn_context("session-1", origin);
@@ -401,7 +401,7 @@ async fn forget_queues_a_forget_candidate_for_human_review() {
     assert_eq!(candidate.proposed.source.session_id, "session-1");
     assert_eq!(
         candidate.proposed.metadata[crate::memory::PRESENTATION_ORIGIN_METADATA],
-        "chat:feishu:oc_42"
+        "chat:telegram:c_42"
     );
 }
 

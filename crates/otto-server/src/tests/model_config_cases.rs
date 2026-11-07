@@ -314,3 +314,13 @@ async fn a_file_with_legacy_profile_keys_rejects_every_change_with_409_legacy_pr
     assert_eq!(reply.json()["error"]["code"], "legacy_profiles_config");
     assert!(reply.body.contains("default_profile"), "{}", reply.body);
 }
+
+#[tokio::test]
+async fn listing_models_without_a_bound_key_reports_api_key_unavailable() {
+    let harness = config_harness();
+    let reply = harness
+        .send("GET", "/v1/config/models?provider=work", None)
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "api_key_unavailable");
+}

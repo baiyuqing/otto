@@ -327,3 +327,35 @@ fn usage_collector_is_bound_to_the_runtime_and_session() {
     assert_eq!(summary.input_tokens, 10);
     assert_eq!(summary.cached_input_tokens, Some(4));
 }
+
+#[tokio::test]
+async fn a_provider_without_an_api_key_starts_and_rejects_requests_with_recovery_steps() {
+    use otto_core::provider::{Provider, ProviderError, Request};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let builder = builder(dir.path());
+    let session = SharedSession::memory(Header::default());
+    let mut keyless = runtime();
+    keyless.api_key = String::new();
+    keyless.api_key_env = "GATEWAY_KEY".into();
+    let runner = builder
+        .build_runner(&session, &keyless)
+        .await
+        .expect("a missing key must not prevent building the session");
+    let ProviderClient::Compat { client, .. } = runner.provider() else {
+        panic!("expected an OpenAI-compatible client");
+    };
+    let settlement = client
+        .complete(
+            &Request::default(),
+            &mut |_| {},
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(settlement.attempts, 0, "nothing may be sent without a key");
+    let Err(ProviderError::Other(message)) = settlement.result else {
+        panic!("expected a missing-key error");
+    };
+    assert!(message.contains("missing api key"), "{message}");
+    assert!(message.contains("GATEWAY_KEY"), "{message}");
+    assert!(message.contains("/model"), "{message}");
+}

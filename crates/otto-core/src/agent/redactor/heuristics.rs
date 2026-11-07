@@ -183,9 +183,16 @@ fn assignment_finding(line: &str) -> Option<std::ops::Range<usize>> {
         offset += scheme_length + separators;
         value = after_scheme.get(separators..)?;
     }
+    if super::source_values::nonliteral_assignment(line, offset) {
+        return None;
+    }
     let range = delimited_value_range(value)?;
     let finding = offset + range.start..offset + range.end;
-    credential_value(line.get(finding.clone())?).then_some(finding)
+    let candidate = line.get(finding.clone())?;
+    if super::source_values::public_api_key_reference(key, candidate) {
+        return None;
+    }
+    credential_value(candidate).then_some(finding)
 }
 
 /// Receives one finding range and returns whether the scan should continue.

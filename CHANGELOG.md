@@ -21,6 +21,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Models receive explicit partial/withheld redaction notices and guidance to avoid
+  placeholder searches, edits and encoding workarounds. Operational tools reject
+  placeholder-bearing arguments before execution; genuine zero-match grep results
+  are explicit. Source-only credential expressions and public API-key environment
+  references remain readable, while real registered values and credential literals
+  remain protected. Notices affect provider copies, preserving live tool JSON and
+  append-only history. Restart the Otto process to use the updated behavior.
+
 - Otto starts when the selected Claude or OpenAI-compatible provider has no
   API key in the environment, so you can switch to another configured model
   with `/model`. Requests to the keyless provider fail before anything is sent,

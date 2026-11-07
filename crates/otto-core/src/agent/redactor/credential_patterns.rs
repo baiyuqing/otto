@@ -38,6 +38,9 @@ pub(super) fn finding_ranges(text: &str) -> Vec<Range<usize>> {
             continue;
         }
         let start = captures[0].len() + captures.get(0).expect("whole match").start();
+        if super::source_values::nonliteral_assignment(text, start) {
+            continue;
+        }
         let remaining = &text[start..];
         let (offset, length) = match remaining.as_bytes().first() {
             Some(b'\'' | b'"' | b'`') => {
@@ -52,7 +55,9 @@ pub(super) fn finding_ranges(text: &str) -> Vec<Range<usize>> {
             ),
         };
         let range = start + offset..start + offset + length;
-        if credential_value(&text[range.clone()]) {
+        if !super::source_values::public_api_key_reference(&captures[1], &text[range.clone()])
+            && credential_value(&text[range.clone()])
+        {
             findings.push(range);
         }
     }

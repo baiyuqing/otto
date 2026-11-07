@@ -258,6 +258,11 @@ directories remain supported.
 The six file tools are always enabled and always restricted to the initial
 canonical workspace, even when `--sandbox off` is selected:
 
+These tools and `bash` reject reserved redaction placeholders in arguments with
+`redacted_input` before execution. Use original non-sensitive context, rather
+than treating withheld content as a literal path, search or replacement. See
+[redaction feedback](interactive-use.md#session-credential-redaction).
+
 - `read` reads UTF-8 text with optional line offsets and limits; files larger
   than 64 MiB are rejected before being read into memory. Each call returns at
   most 4 KiB of body text, or the smaller configured output cap. A truncated
@@ -267,7 +272,8 @@ canonical workspace, even when `--sandbox off` is selected:
 - `grep` searches file contents with RE2-style regular expressions
   (case-insensitive matching, optional `**` glob filtering, up to 30 matches by
   default, 1000 maximum). Results also have a 4 KiB body cap; narrow the path,
-  glob or pattern when truncated rather than repeating a broad query.
+  glob or pattern when truncated rather than repeating a broad query. A zero-match
+  search returns `No matches.`; searches rooted in `.git` explain that it is excluded.
 - `find` returns sorted regular-file paths matching `**` globs (up to 1000 by
   default, 10000 maximum).
 - `ls` lists one directory level in sorted order; directories end in `/` and

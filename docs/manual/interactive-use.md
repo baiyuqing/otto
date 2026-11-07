@@ -621,11 +621,36 @@ with valid checksums, and Bitcoin WIF keys. Public wallet addresses and arbitrar
 hashes are not automatically removed. Detection runs offline and adds no
 runtime dependency. See the [rules and provenance](../development/credential-detection.md).
 
-Only recording copies receive this extra scanning; live tool execution keeps
-its existing argument handling. Resuming restores the sanitized text, so
+Recording sanitation never substitutes sanitized arguments into live tool
+calls. Live execution uses the original arguments subject to the placeholder
+validation below. Resuming restores the sanitized text, so
 removed credentials cannot be recovered from history. Calls whose recorded
 arguments contain redaction markers are not automatically replayed after a
 crash. Existing logs are left as they are.
+
+Model-bound tool results carry an `otto_redaction` notice when content was
+hidden: `status="partial"` means some content remains visible; `status="withheld"`
+means only placeholders remain. Fixed reasons distinguish credential detection,
+personal data and previously redacted/mixed content. These annotations are added
+only to the provider-bound copy: live tool output and its JSON formatting are not
+wrapped or annotated, and new notices are not appended to session history.
+
+Internal private-use markers (`U+E000` through `U+E03F`) and typed personal-data
+placeholders such as `<EMAIL_1>` represent withheld content. They are not source
+text or evidence that a search found nothing. The system prompt tells the model
+to use surrounding non-sensitive context, never reconstruct hidden content with
+encodings or character codes, and explain when withholding blocks progress.
+`grep`, `find`, `read`, `ls`, `edit`, `write` and `bash` reject placeholder-bearing
+arguments before execution with `redacted_input`; hook rewrites are checked too.
+Use fresh non-sensitive context instead of copying a placeholder into a command,
+path, search or edit. A genuine zero-match `grep` returns `No matches.`
+
+The heuristic preserves public API-key environment references and unquoted,
+semicolon-terminated source calls containing only names/references, for example
+`let mut api_key = String::new();`. Quoted values and arbitrary identifiers remain
+subject to credential detection. Registered secret values still take precedence,
+including when a secret happens to equal one of those source expressions or
+public names. Existing recorded placeholders are not restored automatically.
 
 Session JSONL is still plaintext. This is not complete secret detection:
 unknown formats, encoded/transformed values, non-English wallet phrases,

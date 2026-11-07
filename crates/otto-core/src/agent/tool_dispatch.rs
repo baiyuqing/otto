@@ -59,8 +59,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             tool_call_id: block.tool_call_id.clone(),
             arguments: arguments.get().to_owned(),
         });
-        let mut hook_denial = None;
-        if !skipped
+        let mut admission_denial =
+            crate::tool::redaction::argument_error(&block.tool_name, arguments.get())
+                .map(str::to_owned);
+        if admission_denial.is_none()
+            && !skipped
             && control.admission_stop_reason().is_none()
             && self.options.hooks.is_some()
             && self
@@ -85,9 +88,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .await
                 .inspect(|response| self.hook_notice(emit, response))
             {
-                Err(message) => hook_denial = Some(message),
+                Err(message) => admission_denial = Some(message),
                 Ok(response) if response.decision == Some(hooks::Decision::Deny) => {
-                    hook_denial = Some(
+                    admission_denial = Some(
                         response
                             .reason
                             .unwrap_or_else(|| "Hook denied this tool".into()),
@@ -96,7 +99,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 Ok(response) => {
                     if let Some(value) = response.arguments {
                         if !value.is_object() {
-                            hook_denial = Some("Hook arguments must be a JSON object".into());
+                            admission_denial = Some("Hook arguments must be a JSON object".into());
                         } else {
                             let replacement =
                                 RawValue::from_string(value.to_string()).expect("serialized JSON");
@@ -131,10 +134,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             }
         }
-        let hook_blocked = hook_denial.is_some();
+        if admission_denial.is_none() {
+            admission_denial =
+                crate::tool::redaction::argument_error(&block.tool_name, arguments.get())
+                    .map(str::to_owned);
+        }
+        let admission_blocked = admission_denial.is_some();
         let mut execution = if let Some(reason) = control.admission_stop_reason() {
             stopped_tool_execution(reason)
-        } else if let Some(message) = hook_denial {
+        } else if let Some(message) = admission_denial {
             ToolExecution {
                 result: ToolResult::error(message),
                 outcome: OperationOutcome {
@@ -145,7 +153,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         } else if skipped {
             ToolExecution {
-                result: ToolResult::error("Not started: a preceding approval requires replanning."),
+                result: ToolResult::error(
+                    "Not started: a preceding tool result requires replanning.",
+                ),
                 outcome: OperationOutcome {
                     disposition: OperationDisposition::Error,
                     effect_certainty: EffectCertainty::NotStarted,
@@ -257,7 +267,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
             None => execution.result.content.clone(),
         };
-        let batch_control = if hook_blocked {
+        let batch_control = if admission_blocked {
             crate::approval::BatchControl::Replan
         } else {
             self.tools.batch_control(&block.tool_name, &execution)

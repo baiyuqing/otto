@@ -23,6 +23,14 @@ impl Runner {
         resume_id: Option<String>,
         deadline: Deadline,
     ) -> Result<Task, StartError> {
+        let fresh_session_id = match transcript
+            .as_ref()
+            .and_then(|(session, _)| session.session_id())
+        {
+            Some(session_id) => session_id,
+            None => crate::runtime::builder::random_id()
+                .map_err(|error| StartError::SessionIdentity(error.to_string()))?,
+        };
         let cancel = CancellationToken::new();
         // The task id names the child's file, so the transcript is built
         // after the task is registered; history reads it once it is set.
@@ -85,13 +93,13 @@ impl Runner {
                 }
                 transcript
             }
-            (None, None) => Arc::new(MemorySession::new()),
-            (None, Some(build)) => match build(&task.id) {
+            (None, None) => Arc::new(MemorySession::with_session_id(fresh_session_id.clone())),
+            (None, Some(build)) => match build(&task.id, &fresh_session_id) {
                 Ok(Some((transcript, path))) => {
                     self.config.tasks.set_session_path(&task.id, &path);
                     transcript
                 }
-                Ok(None) => Arc::new(MemorySession::new()),
+                Ok(None) => Arc::new(MemorySession::with_session_id(fresh_session_id.clone())),
                 Err(error) => {
                     // No transcript was built, so there is nothing to append
                     // otto.task_result to.
@@ -107,6 +115,7 @@ impl Runner {
                 }
             },
         };
+        let session_id = transcript.session_id().unwrap_or(fresh_session_id);
         let _ = slot.set(Arc::clone(&transcript));
         if let Some(build) = &self.config.child_mailbox
             && let Some(path) = self
@@ -197,6 +206,7 @@ impl Runner {
         }
 
         let tools = ChildTools {
+            session_id,
             registry: Arc::clone(&self.child_registry),
             allowed: definition
                 .as_ref()

@@ -31,7 +31,7 @@ async fn otto_task_spec_is_written_before_the_child_runs_and_covers_a_queued_tas
         ..definition("reviewer")
     }]);
     let parent = parent_path.clone();
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         Ok(Some(child_store(&parent, task_id, None)))
     }));
     let (runner, _) = runner(config);
@@ -107,7 +107,7 @@ async fn otto_task_result_is_appended_after_the_notification_when_succeeded() {
     let mut config = test_config(&provider, &tasks, Vec::new());
     let parent = parent_path.clone();
     let checking_tasks = Arc::clone(&tasks);
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         let (inner, path) = child_store(&parent, task_id, None);
         let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
             inner,
@@ -149,7 +149,7 @@ async fn otto_task_result_is_appended_after_the_notification_when_failed() {
     let mut config = test_config(&provider, &tasks, Vec::new());
     let parent = parent_path.clone();
     let checking_tasks = Arc::clone(&tasks);
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         let (inner, path) = child_store(&parent, task_id, None);
         let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
             inner,
@@ -199,7 +199,7 @@ async fn otto_task_result_is_appended_after_the_notification_when_canceled() {
     let mut config = test_config(&provider, &tasks, Vec::new());
     let parent = parent_path.clone();
     let checking_tasks = Arc::clone(&tasks);
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         let (inner, path) = child_store(&parent, task_id, None);
         let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
             inner,
@@ -246,7 +246,7 @@ async fn migration_marks_running_and_queued_tasks_interrupted_and_pushes_no_fini
     let mut config = test_config(&provider, &tasks, Vec::new());
     config.max_parallel = 1;
     let parent = parent_path.clone();
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         Ok(Some(child_store(&parent, task_id, None)))
     }));
     let (runner, _) = runner(config);
@@ -386,7 +386,7 @@ async fn a_child_transcript_with_its_inherited_context_is_written_to_its_own_fil
     .collect();
     config.parent_session = Some(Arc::new(move || inherited.clone()));
     let parent = parent_path.clone();
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         Ok(Some(child_store(&parent, task_id, None)))
     }));
     let (runner, _) = runner(config);
@@ -434,7 +434,7 @@ async fn a_child_transcript_write_failure_fails_only_that_task() {
         .filter(Filter::NameContains(".jsonl")),
     ]);
     let child_plan = Arc::clone(&plan);
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         Ok(Some(child_store(
             &parent_path,
             task_id,

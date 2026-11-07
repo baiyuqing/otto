@@ -10,7 +10,7 @@ async fn agent_records_the_spawning_tool_call_in_the_child_task_spec() {
     provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
     let tasks = Arc::new(Tasks::new());
     let mut config = test_config(&provider, &tasks, Vec::new());
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         let name = format!("{task_id}-child");
         let store = crate::session::Store::create_child_lazy(
             &parent,

@@ -91,6 +91,13 @@ pub(crate) fn composer_edit(key: KeyEvent) -> Option<Edit> {
 }
 
 pub(crate) fn hints(view: &View, state: &State) -> String {
+    if view
+        .actions
+        .iter()
+        .any(|action| action.id == "session-copy-id")
+    {
+        return "↑/↓ select · Enter copy · Esc close".into();
+    }
     let mut hints = vec!["Tab focus", "↑/↓ navigate", "Enter select", "Esc back"]
         .into_iter()
         .map(str::to_string)

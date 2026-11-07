@@ -369,6 +369,14 @@ type ExtensionHandler interface {
 
 // HandleExtensionMethod implements acp.ExtensionMethodHandler.
 func (c *client) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if method == "_otto/local_commands/update" {
+		var update struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(params, &update) == nil && c.p.isLoading(update.SessionID) {
+			return map[string]any{}, nil
+		}
+	}
 	if h, ok := c.handler.(ExtensionHandler); ok {
 		return h.Extension(ctx, method, params)
 	}

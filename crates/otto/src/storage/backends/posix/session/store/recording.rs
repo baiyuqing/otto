@@ -10,7 +10,8 @@ pub(super) static RECORD_REDACTOR: LazyLock<Redactor> = LazyLock::new(|| Redacto
 pub(super) fn custom_data(custom_type: &str, raw: &str) -> String {
     if matches!(
         custom_type,
-        "otto.task_spec"
+        "otto.local_command"
+            | "otto.task_spec"
             | "otto.task_result"
             | "otto.hook.arguments"
             | "otto.hook.result"

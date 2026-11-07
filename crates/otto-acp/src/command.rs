@@ -17,6 +17,7 @@ use otto_core::wire::events::WireCompaction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Command<'a> {
+    Memory { name: &'a str, args: &'a str },
     Context,
     Permissions { args: &'a str },
     Compact { focus: &'a str },
@@ -28,6 +29,16 @@ pub(super) enum Command<'a> {
 /// `Some` when the whole prompt is one of the supported slash commands.
 pub(super) fn parse(text: &str) -> Option<Command<'_>> {
     let text = text.trim_end();
+    for name in ["memory", "remember"] {
+        if let Some(rest) = text.strip_prefix(&format!("/{name}"))
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            return Some(Command::Memory {
+                name,
+                args: rest.trim(),
+            });
+        }
+    }
     // `/auto` is a hidden alias of `/permissions`.
     if let Some(rest) = text
         .strip_prefix("/permissions")
@@ -88,6 +99,20 @@ pub(super) fn available_commands() -> SessionUpdate {
         )
         .input(AvailableCommandInput::Unstructured(
             UnstructuredCommandInput::new("optional focus"),
+        )),
+        AvailableCommand::new(
+            "memory",
+            "Inspect, search, review or change memory; records a local command receipt",
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("subcommand and parameters"),
+        )),
+        AvailableCommand::new(
+            "remember",
+            "Remember a record; records a local command receipt",
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("options and text"),
         )),
         AvailableCommand::new("steer", "Guide the active task at its next safe boundary").input(
             AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("guidance")),
@@ -277,6 +302,25 @@ mod tests {
     }
 
     #[test]
+    fn memory_commands_are_local_even_when_invalid_and_never_match_prefixes() {
+        for input in [
+            "/memory list",
+            "/memory invalid",
+            "/memory",
+            "/remember text",
+            "/remember",
+        ] {
+            assert!(
+                matches!(parse(input), Some(Command::Memory { .. })),
+                "{input}"
+            );
+        }
+        for input in ["/memoryx list", "/remembered text", "please /memory list"] {
+            assert!(parse(input).is_none(), "{input}");
+        }
+    }
+
+    #[test]
     fn available_commands_advertise_supported_commands() {
         let value = serde_json::to_value(available_commands()).expect("serializes");
         assert_eq!(value["sessionUpdate"], "available_commands_update");
@@ -287,10 +331,12 @@ mod tests {
         assert!(commands[1].get("input").is_none());
         assert_eq!(commands[2]["name"], "compact");
         assert_eq!(commands[2]["input"]["hint"], "optional focus");
-        assert_eq!(commands[3]["name"], "steer");
-        assert_eq!(commands[4]["name"], "queue");
-        assert_eq!(commands[5]["name"], "permissions");
-        assert_eq!(commands.len(), 6);
+        assert_eq!(commands[3]["name"], "memory");
+        assert_eq!(commands[4]["name"], "remember");
+        assert_eq!(commands[5]["name"], "steer");
+        assert_eq!(commands[6]["name"], "queue");
+        assert_eq!(commands[7]["name"], "permissions");
+        assert_eq!(commands.len(), 8);
         assert!(commands.iter().all(|command| command["name"] != "auto"));
         for alias in ["/auto off", "/auto", "/permissions off"] {
             assert!(

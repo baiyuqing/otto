@@ -342,10 +342,14 @@ fn resolve_impl(
         super::PROVIDER_OPENAI_COMPATIBLE | super::PROVIDER_CLAUDE
     ) && credentials
     {
+        api_key = resolve_api_key(env, &api_key_env);
+        // An unbound key is not a credential binding: the process starts and
+        // provider requests fail until the user sets one or switches models.
         if let Some(allowed) = file
             .policy
             .as_ref()
             .and_then(|p| p.allowed_credential_variables.as_ref())
+            .filter(|_| !api_key.is_empty())
         {
             let actual = if !api_key_env.is_empty() && !env_value(env, &api_key_env).is_empty() {
                 api_key_env.as_str()
@@ -358,7 +362,6 @@ fn resolve_impl(
                 ));
             }
         }
-        api_key = resolve_api_key(env, &api_key_env)?;
     }
 
     let workspace_id =
@@ -447,26 +450,26 @@ fn validate_subagent_models(
     Ok(())
 }
 
-fn resolve_api_key(
-    env: &HashMap<String, String>,
-    api_key_env: &str,
-) -> Result<String, ConfigError> {
+/// The API key bound by `api_key_env`, then the fallback variable; empty when
+/// neither is set. A missing key never blocks startup or model selection: the
+/// provider client rejects requests until a key is bound.
+fn resolve_api_key(env: &HashMap<String, String>, api_key_env: &str) -> String {
     if !api_key_env.is_empty() {
         let value = env_value(env, api_key_env);
         if !value.is_empty() {
-            return Ok(value);
+            return value;
         }
-        let fallback = env_value(env, "OTTO_API_KEY");
+        let fallback = env_value(env, super::providers::FALLBACK_API_KEY_ENV);
         if !fallback.is_empty() {
-            return Ok(fallback);
+            return fallback;
         }
-        return Err(ConfigError::new("missing api key"));
+        return String::new();
     }
-    let fallback = env_value(env, "OTTO_API_KEY");
+    let fallback = env_value(env, super::providers::FALLBACK_API_KEY_ENV);
     if !fallback.is_empty() {
-        return Ok(fallback);
+        return fallback;
     }
-    Err(ConfigError::new("missing api key"))
+    String::new()
 }
 
 /// Re-implements `otto::provider::openaicompat::normalize_base_url` on the

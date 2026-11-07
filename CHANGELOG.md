@@ -19,6 +19,14 @@ commit ledger; Git and release tags retain the full history. See the
   `~/.otto/storage/writer-admission.lock` are no longer read and can be
   deleted. Only `otto storage window-peaks` remains.
 
+### Fixed
+
+- Otto starts when the selected Claude or OpenAI-compatible provider has no
+  API key in the environment, so you can switch to another configured model
+  with `/model`. Requests to the keyless provider fail before anything is sent,
+  naming the variable to set; `GET /v1/config/models` still answers
+  `400 api_key_unavailable` for such a provider.
+
 ## 0.5.0 - 2026-11-07
 
 ### Added

@@ -227,8 +227,8 @@ pub async fn models(
             ..Default::default()
         },
     ) {
-        Ok(runtime) => runtime,
-        Err(_) => {
+        Ok(runtime) if !runtime.api_key.is_empty() => runtime,
+        _ => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "api_key_unavailable",

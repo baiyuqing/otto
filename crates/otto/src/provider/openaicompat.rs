@@ -214,6 +214,14 @@ impl Client {
         self
     }
 
+    /// Rejects every request with `message` before anything is sent; used when
+    /// the selected provider has no API key bound, so the process can still
+    /// start and the user can bind a key or switch models.
+    pub fn with_missing_credential(mut self, message: &str) -> Self {
+        self.state = Err(message.to_string());
+        self
+    }
+
     fn ready(base_url: &str, http: reqwest::Client) -> Result<Ready, String> {
         match normalize_base_url(base_url) {
             Some(base_url) => Ok(Ready { base_url, http }),

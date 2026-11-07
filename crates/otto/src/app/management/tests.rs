@@ -136,6 +136,10 @@ async fn remember_reaches_the_memory_service_and_other_memory_requests_stay_unsu
         .management(Request::MemoryReviewList)
         .unwrap_err();
     assert!(error.ends_with("the selected memory service manages its records"));
+    let typed = controller
+        .management_typed(Request::parse("memory", "list").unwrap())
+        .unwrap_err();
+    assert_eq!(typed.kind, super::ManagementErrorKind::Unsupported);
 }
 
 #[test]
@@ -190,7 +194,7 @@ fn history_diff_and_restore_parse_their_arguments() {
     ));
     assert!(matches!(
         Request::parse("memory", "restore r1 2"),
-        Ok(Request::MemoryRestore { id, revision: 2 }) if id == "r1"
+        Ok(Request::MemoryRestore { id, revision: 2, expected_revision: None }) if id == "r1"
     ));
 }
 

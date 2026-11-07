@@ -23,6 +23,8 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time", "sync", "fs", "net"] }
 tokio-util.workspace = true
 tokio-rustls.workspace = true
+# Query strings of the memory routes (repeatable filters).
+url.workspace = true
 
 [dev-dependencies]
 base64.workspace = true

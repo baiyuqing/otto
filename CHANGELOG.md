@@ -7,6 +7,16 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Added
+
+- `otto serve` exposes memory management over HTTP under
+  `/v1/sessions/{id}/memory/` for web and desktop clients: list and filter
+  records by lifecycle state, remember, retract, supersede, flag for review,
+  verify, forget, history, diff, restore, model proposals, and accepting or
+  rejecting pending candidates. Writes accept `expected_revision` for
+  optimistic concurrency. See
+  [Memory management](docs/manual/servers-and-connectors.md#memory-management).
+
 ### Fixed
 
 - Claude tool calls use model-aware output budgets instead of a universal 4,096

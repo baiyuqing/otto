@@ -1865,6 +1865,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tower",
+ "url",
 ]
 
 [[package]]

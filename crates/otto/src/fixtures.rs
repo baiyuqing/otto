@@ -227,6 +227,20 @@ pub async fn controller_with_memory(
     store_path: &Path,
 ) -> Controller {
     let mut builder = builder(workspace, session_root);
+    wire_file_memory(&mut builder, workspace, store_path);
+    let runtime = initial_runtime(&builder);
+    let session = builder.create_session(&runtime).expect("session");
+    let runner = builder
+        .build_runner(&session, &runtime)
+        .await
+        .expect("runner");
+    let info = builder.runtime_info(&runtime);
+    Controller::new(builder, true, session, runner, info)
+}
+
+/// Gives `builder` a usable file-backed memory store at `store_path`, with
+/// the workspace scope of `workspace`, as startup does for `files` memory.
+pub fn wire_file_memory(builder: &mut Builder, workspace: &Path, store_path: &Path) {
     let runtime = MemoryRuntime {
         enabled: true,
         backend: "files".into(),
@@ -251,14 +265,6 @@ pub async fn controller_with_memory(
     builder.workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
             .expect("workspace scope");
-    let runtime = initial_runtime(&builder);
-    let session = builder.create_session(&runtime).expect("session");
-    let runner = builder
-        .build_runner(&session, &runtime)
-        .await
-        .expect("runner");
-    let info = builder.runtime_info(&runtime);
-    Controller::new(builder, true, session, runner, info)
 }
 
 /// Writes three user-scope records of about 600 tokens each straight into the

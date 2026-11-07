@@ -10,6 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
+mod inventory;
+pub use inventory::{Inventory, inventory};
+
 use otto_core::model::{Message, Role};
 use otto_core::session::context::pending_tool_calls;
 
@@ -46,12 +49,8 @@ pub struct ChildRecord {
     pub started: bool,
     pub unanswered: Vec<UnansweredCall>,
     pub last_assistant_text: String,
-    /// The status recorded on the transcript's last entry, when that entry
-    /// is an `otto.task_result` custom entry. `None` when the transcript has
-    /// no `otto.task_result` yet, or when anything was appended after one
-    /// (for example a resumed run's own messages): a task is only ever
-    /// eligible for another resume while its transcript still ends exactly
-    /// where its last run left it.
+    /// Latest attempt's terminal result. Unrelated custom entries do not
+    /// change it; subsequent messages or an explicit attempt entry do.
     pub final_status: Option<String>,
 }
 
@@ -99,22 +98,33 @@ fn scan_one(path: &Path) -> Option<ChildRecord> {
     }
     let spec = spec?;
 
-    // Only the transcript's very last entry can set `final_status`: an
-    // `otto.task_result` entry followed by anything else (a resumed run's
-    // own messages, for example) means the task is running again, not
-    // interrupted.
-    let final_status = raw_entries.last().and_then(|entry| {
-        let custom = entry.custom.as_ref()?;
-        if custom.custom_type != TASK_RESULT_CUSTOM_TYPE {
-            return None;
-        }
-        let result_json = custom.data.as_ref()?;
-        serde_json::from_str::<serde_json::Value>(result_json.get())
-            .ok()?
-            .get("status")?
-            .as_str()
-            .map(str::to_string)
-    });
+    // Non-lifecycle custom entries (memory receipts, compaction metadata)
+    // must not erase a terminal result. A message or explicit new attempt
+    // after a result does start a new unfinished attempt.
+    let final_status = raw_entries
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.message.is_some()
+                || entry.custom.as_ref().is_some_and(|custom| {
+                    matches!(
+                        custom.custom_type.as_str(),
+                        TASK_RESULT_CUSTOM_TYPE | "otto.task_attempt"
+                    )
+                })
+        })
+        .and_then(|entry| {
+            let custom = entry.custom.as_ref()?;
+            if custom.custom_type != TASK_RESULT_CUSTOM_TYPE {
+                return None;
+            }
+            let result_json = custom.data.as_ref()?;
+            serde_json::from_str::<serde_json::Value>(result_json.get())
+                .ok()?
+                .get("status")?
+                .as_str()
+                .map(str::to_string)
+        });
 
     let started = messages
         .iter()

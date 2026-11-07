@@ -158,7 +158,15 @@ impl Runner {
             .ok_or(StartError::ResumeNoSession)?;
         let children_dir = locate().ok_or(StartError::ResumeNoSession)?;
 
-        let records = interrupted::scan(&children_dir);
+        let parent = children_dir.with_extension("jsonl");
+        let inventory = interrupted::inventory(&parent);
+        if !inventory.complete {
+            return Err(StartError::ResumeFailed(format!(
+                "child inventory incomplete; inspect recovery diagnostics: {}",
+                inventory.diagnostics.join("; ")
+            )));
+        }
+        let records = inventory.records;
         let record = records
             .iter()
             .find(|record| record.task_id == target)
@@ -173,6 +181,13 @@ impl Runner {
             return Err(StartError::ResumeNotInterrupted(record.task_id.clone()));
         }
 
+        // Legacy callers may explicitly resume before resource activation. Import
+        // only the validated interrupted record; never replace an existing entry.
+        if self.config.tasks.get(&record.task_id).is_none() {
+            self.config
+                .tasks
+                .import_recovered(crate::subagent::recovery::snapshot(record))?;
+        }
         let (store, _warnings) = crate::session::Store::open(&record.path)
             .map_err(|error| StartError::ResumeFailed(error.to_string()))?;
         if let Some(lease) = self.config.lease.as_ref().and_then(|source| source()) {

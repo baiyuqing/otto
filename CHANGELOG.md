@@ -9,6 +9,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Claude stream sequence errors identify the rejected event and violated rule
+  without including response content. Protocol validation remains unchanged.
+
 - Unix terminal users can suspend the TUI with `Ctrl+Z` and resume with `fg`:
   Otto restores the shell terminal before suspending, then redraws the same
   session and draft on resume. Attached clients leave the server session running.

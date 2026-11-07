@@ -150,9 +150,13 @@ fn malformed_tool_inputs_fail_at_both_completion_boundaries_without_marking_done
             body += &stop("tool_use");
             let mut assembler = StreamAssembler::new();
             let error = assembler.push(body.as_bytes(), &mut |_| {}).unwrap_err();
-            assert_eq!(error, StreamError::MalformedArguments);
+            assert!(matches!(error, StreamError::MalformedArguments(_)));
             assert!(!assembler.is_done());
-            assert_eq!(error.to_string(), "malformed Claude tool input");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("malformed Claude tool input: ")
+            );
         }
     }
 }
@@ -277,9 +281,9 @@ fn message_stop_validates_every_open_tool_before_marking_the_response_done() {
         + &input(1, "{\"unfinished\":")
         + &stop("tool_use");
     let mut assembler = StreamAssembler::new();
-    assert_eq!(
+    assert!(matches!(
         assembler.push(body.as_bytes(), &mut |_| {}),
-        Err(StreamError::MalformedArguments)
-    );
+        Err(StreamError::MalformedArguments(_))
+    ));
     assert!(!assembler.is_done());
 }

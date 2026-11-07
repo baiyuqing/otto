@@ -74,9 +74,10 @@ impl Client {
     /// A transient transport failure or the model idle timeout is
     /// [`AttemptError::Interrupted`], so the retry policy may repeat the
     /// attempt; its flag records whether a reasoning, text or tool-call delta
-    /// had already reached `emit` in this attempt. Stream codec errors,
-    /// response validation failures and non-transient transport errors are
-    /// [`AttemptError::Sent`] at any point.
+    /// had already reached `emit` in this attempt. Completed tool-input
+    /// failures retain typed metadata in [`AttemptError::ToolInput`] so the
+    /// caller can decide whether a larger budget can recover. Other codec,
+    /// validation and non-transient transport errors are [`AttemptError::Sent`].
     async fn read_response(
         &self,
         response: reqwest::Response,
@@ -165,7 +166,7 @@ impl Client {
             {
                 if let Err(error) = assembler.push(&chunk, &mut forward) {
                     check_running(control).map_err(AttemptError::Sent)?;
-                    return Err(AttemptError::Sent(ProviderError::Other(error.to_string())));
+                    return Err(stream_error(error, emitted));
                 }
                 if progressed.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     deadline = tokio::time::Instant::now() + self.model_idle_timeout;
@@ -177,7 +178,7 @@ impl Client {
                         Ok(response) => Ok(response),
                         Err(error) => {
                             check_running(control).map_err(AttemptError::Sent)?;
-                            Err(AttemptError::Sent(ProviderError::Other(error.to_string())))
+                            Err(stream_error(error, emitted))
                         }
                     };
                 }
@@ -186,7 +187,7 @@ impl Client {
         }
         let result = assembler
             .finish(&mut forward)
-            .map_err(|error| AttemptError::Sent(ProviderError::Other(error.to_string())));
+            .map_err(|error| stream_error(error, emitted));
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
@@ -276,5 +277,15 @@ impl Client {
             output = out;
         }
         output
+    }
+}
+
+/// Preserve typed, content-free input failure metadata through the transport.
+fn stream_error(error: StreamError, emitted: bool) -> AttemptError {
+    match error {
+        StreamError::MalformedArguments(input_error) => {
+            AttemptError::ToolInput(input_error, emitted)
+        }
+        error => AttemptError::Sent(ProviderError::Other(error.to_string())),
     }
 }

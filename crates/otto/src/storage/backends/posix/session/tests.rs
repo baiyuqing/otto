@@ -41,6 +41,7 @@ mod inputs;
 mod lease_prepare;
 mod list_for_delete;
 mod listing_hardening;
+mod local_commands;
 mod open_repair;
 mod permanent_delete;
 mod prepare_archive;

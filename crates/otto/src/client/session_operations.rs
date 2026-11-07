@@ -3,6 +3,28 @@
 use super::*;
 
 impl Client {
+    pub async fn memory_command(
+        &self,
+        session: &str,
+        name: &str,
+        args: &str,
+    ) -> Result<String, Error> {
+        let response = self
+            .send(
+                self.http
+                    .post(format!("{BASE}/v1/sessions/{session}/local-commands"))
+                    .header("content-type", "application/json")
+                    .body(serde_json::json!({"name": name, "args": args}).to_string()),
+            )
+            .await?;
+        let value: serde_json::Value = decode(response).await?;
+        Ok(value
+            .get("output")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned())
+    }
+
     pub async fn compact(
         &self,
         session_id: &str,

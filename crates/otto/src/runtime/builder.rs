@@ -125,6 +125,7 @@ struct MemoryState {
     header: Header,
     name: String,
     custom_data: HashMap<String, String>,
+    local_commands: Vec<otto_core::session::local_command::LocalCommandReceipt>,
 }
 
 /// A session shared by the agent and the frontend: a cloneable handle to one

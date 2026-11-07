@@ -248,6 +248,9 @@ func (b *Bridge) shutdown() {
 // text to a chat that is in its platform's chats allowlist. The connector
 // keeps no state for it; the agent retries failed deliveries.
 func (b *Bridge) Extension(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if method == "_otto/local_commands/update" {
+		return b.localCommands(ctx, params)
+	}
 	if method != "_otto/schedule/deliver" {
 		return nil, acp.NewMethodNotFound(method)
 	}

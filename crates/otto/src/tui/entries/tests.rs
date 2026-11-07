@@ -1,4 +1,5 @@
 use super::*;
+mod local_commands;
 use otto_core::model::{ContextMetadata, OperationId, ToolResultMetadata};
 
 fn user(text: &str) -> Message {

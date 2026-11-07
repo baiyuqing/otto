@@ -11,6 +11,7 @@ impl MemoryHandle {
                 header,
                 name: String::new(),
                 custom_data: HashMap::new(),
+                local_commands: Vec::new(),
             }),
             writer_ownership: None,
         }
@@ -112,6 +113,11 @@ impl Session for MemoryHandle {
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         self.inner.append_custom(custom_type, data).await?;
+        if custom_type == otto_core::session::local_command::LOCAL_COMMAND_CUSTOM_TYPE {
+            let receipt = serde_json::from_str(data)
+                .map_err(|error| SessionError::Persist(error.to_string()))?;
+            self.state().local_commands.push(receipt);
+        }
         self.state()
             .custom_data
             .insert(custom_type.into(), data.into());
@@ -120,6 +126,14 @@ impl Session for MemoryHandle {
 }
 
 impl SessionHandle for MemoryHandle {
+    fn append_local_command(&self, encoded: &str) -> Result<(), String> {
+        let receipt = serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+        self.state().local_commands.push(receipt);
+        Ok(())
+    }
+    fn local_commands(&self) -> Vec<otto_core::session::local_command::LocalCommandReceipt> {
+        otto_core::session::local_command::fold_local_commands(self.state().local_commands.clone())
+    }
     fn custom_data(&self, custom_type: &str) -> Option<String> {
         self.state().custom_data.get(custom_type).cloned()
     }

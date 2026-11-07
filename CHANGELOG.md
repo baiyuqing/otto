@@ -7,6 +7,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Added
+
+- `/memory` and `/remember` retain independent LOCAL COMMAND receipts in the
+  conversation timeline, including errors, query output and replay after reopen.
+  Local and attached terminals show compact `›_` entries with expandable details;
+  session HTTP and ACP transports expose receipts separately from model messages.
+  Receipts never enter model context, compaction or automatic memory learning.
+
 ### Breaking changes
 
 - `otto storage migrate`, `otto storage init`, `otto storage transfer` and

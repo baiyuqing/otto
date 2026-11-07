@@ -9,6 +9,16 @@ impl Controller {
     /// [`Self::management`] with a typed error, for frontends that map the
     /// failure category (the HTTP routes) rather than print it.
     pub fn management_typed(&self, request: Request) -> Result<Reply, ManagementError> {
+        if super::super::local_commands::is_memory_request(&request) {
+            return self.receipt_management(request);
+        }
+        self.management_unrecorded(request)
+    }
+
+    pub(in crate::app) fn management_unrecorded(
+        &self,
+        request: Request,
+    ) -> Result<Reply, ManagementError> {
         use Request::*;
         if self.memory_wiring().external() {
             if let Remember {

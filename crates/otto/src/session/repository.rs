@@ -19,6 +19,14 @@ pub trait WriterOwnership: std::fmt::Debug + Send + Sync {
 
 /// Native session operations used by frontends and runtime composition.
 pub trait SessionHandle: Session + Send + Sync {
+    /// Record an already-scanned independent Pi custom event, synchronously.
+    fn append_local_command(&self, _encoded: &str) -> Result<(), String> {
+        Err("local command recording is unavailable for this session repository".into())
+    }
+    /// Human-only command observations; never part of `Session::messages`.
+    fn local_commands(&self) -> Vec<otto_core::session::local_command::LocalCommandReceipt> {
+        Vec::new()
+    }
     fn header(&self) -> Header;
     fn name(&self) -> String;
     fn path(&self) -> String;

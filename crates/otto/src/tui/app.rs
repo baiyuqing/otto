@@ -169,7 +169,8 @@ impl App {
         Self::with_catalog(backend, features::Catalog::default())
     }
     pub(crate) fn with_catalog(backend: &Backend<'_>, catalog: features::Catalog) -> Self {
-        let (entries, usage) = entries::entries_from_history(&backend.history());
+        let (mut entries, usage) = entries::entries_from_history(&backend.history());
+        entries::project_local_commands(&mut entries, &backend.info().local_commands);
         let composer = Composer::new(prompt_history(&entries));
         let cache_breakdown_complete =
             (usage.input_tokens != 0 || usage.output_tokens != 0).then_some(false);

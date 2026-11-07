@@ -75,6 +75,7 @@ fn project_invocation_identity(
 pub mod approval;
 pub mod approval_control;
 pub mod channel;
+mod local_commands;
 pub mod management;
 pub mod task_control;
 pub mod turn_queue;
@@ -163,6 +164,7 @@ pub struct ModelSummary {
 /// What a frontend may display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Info {
+    pub local_commands: Vec<otto_core::session::local_command::LocalCommandReceipt>,
     pub session_id: String,
     pub session_name: String,
     pub session_path: String,

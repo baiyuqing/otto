@@ -55,7 +55,7 @@ fn completion_is_visible_without_socket_eof() {
             event(json!({"type":"message_stop"})).as_bytes(),
             &mut |_| {}
         ),
-        Err(StreamError::Sequence)
+        Err(StreamError::Sequence("message_stop: before message_start"))
     );
     assert!(!invalid.is_done());
 }
@@ -215,16 +215,21 @@ fn rejects_duplicate_malformed_and_out_of_order_input() {
     assert_eq!(decode("data: {broken}\n\n"), Err(StreamError::Decode));
     assert_eq!(
         decode(&event(json!({"type":"message_stop"}))),
-        Err(StreamError::Sequence)
+        Err(StreamError::Sequence("message_stop: before message_start"))
     );
     assert_eq!(decode(&start()), Err(StreamError::MissingStop));
-    assert_eq!(decode(&(start() + &start())), Err(StreamError::Sequence));
+    assert_eq!(
+        decode(&(start() + &start())),
+        Err(StreamError::Sequence("message_start: duplicate start"))
+    );
     let block = event(
         json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
     );
     assert_eq!(
         decode(&(start() + &block + &block)),
-        Err(StreamError::Sequence)
+        Err(StreamError::Sequence(
+            "content_block_start: duplicate block index"
+        ))
     );
     let bad = start()
         + &event(
@@ -271,7 +276,9 @@ fn rejects_negative_usage_duplicate_tool_ids_and_argument_keys() {
     };
     assert_eq!(
         decode(&(start() + &tool(0) + &tool(1))),
-        Err(StreamError::Sequence)
+        Err(StreamError::Sequence(
+            "content_block_start: empty tool id/name or duplicate tool id"
+        ))
     );
     let body = start()
         + &tool(0)
@@ -317,4 +324,105 @@ fn overflow_is_narrow_and_content_free() {
         assert!(overflow::classify_overflow(400, body.as_bytes()).is_none());
     }
     assert!(overflow::classify_overflow(400, br#"{"error":{"type":"invalid_request_error","type":"other","message":"prompt is too long: 3 tokens > 2 maximum"}}"#).is_none());
+}
+
+#[test]
+fn sequence_errors_identify_the_violated_rule_without_response_content() {
+    let text_block = event(json!({"type":"content_block_start","index":0,
+        "content_block":{"type":"text","text":"private-response-marker"}}));
+    let tool_block = |index| {
+        event(json!({"type":"content_block_start","index":index,
+        "content_block":{"type":"tool_use","id":"private-tool-marker",
+        "name":"private-name-marker","input":{}}}))
+    };
+    let block_stop = event(json!({"type":"content_block_stop","index":0}));
+    let message_delta = event(json!({"type":"message_delta",
+        "delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}));
+    let text_delta = event(json!({"type":"content_block_delta","index":0,
+        "delta":{"type":"text_delta","text":"private-response-marker"}}));
+    let input_delta = event(json!({"type":"content_block_delta","index":0,
+        "delta":{"type":"input_json_delta","partial_json":"private-input-marker"}}));
+    let started = start();
+    let ended = started.clone() + &message_delta;
+    let mut cases = vec![
+        (
+            started.clone() + &message_delta + &message_delta,
+            "message_delta: duplicate delta",
+        ),
+        (
+            started.clone() + &text_block + &message_delta,
+            "message_delta: content block still open",
+        ),
+        (
+            started.clone() + &event(json!({"type":"message_stop"})),
+            "message_stop: missing message_delta",
+        ),
+        (
+            started.clone() + &text_delta,
+            "content_block_delta: block missing or already stopped",
+        ),
+        (
+            started.clone() + &block_stop,
+            "content_block_stop: block missing or already stopped",
+        ),
+        (
+            started.clone() + &text_block + &block_stop + &text_delta,
+            "content_block_delta: block missing or already stopped",
+        ),
+        (
+            started.clone() + &text_block + &block_stop + &block_stop,
+            "content_block_stop: block missing or already stopped",
+        ),
+        (
+            started.clone() + &text_block + &input_delta,
+            "content_block_delta: input_json_delta on non-tool block",
+        ),
+        (
+            started.clone() + &tool_block(0) + &text_delta,
+            "content_block_delta: text_delta on non-text block",
+        ),
+        (
+            started.clone() + &tool_block(0) + &tool_block(1),
+            "content_block_start: empty tool id/name or duplicate tool id",
+        ),
+        (
+            started.clone() + &text_block + &text_block,
+            "content_block_start: duplicate block index",
+        ),
+        (started.clone() + &started, "message_start: duplicate start"),
+        (message_delta.clone(), "message_delta: before message_start"),
+        (
+            event(json!({"type":"message_stop"})),
+            "message_stop: before message_start",
+        ),
+    ];
+    for (wire_event, before, after) in [
+        (
+            text_block,
+            "content_block_start: before message_start",
+            "content_block_start: after message_delta",
+        ),
+        (
+            text_delta,
+            "content_block_delta: before message_start",
+            "content_block_delta: after message_delta",
+        ),
+        (
+            block_stop,
+            "content_block_stop: before message_start",
+            "content_block_stop: after message_delta",
+        ),
+    ] {
+        cases.push((wire_event.clone(), before));
+        cases.push((ended.clone() + &wire_event, after));
+    }
+    for (body, reason) in cases {
+        let error = decode(&body).unwrap_err();
+        assert_eq!(error, StreamError::Sequence(reason));
+        assert_eq!(
+            error.to_string(),
+            format!("invalid Claude stream sequence: {reason}")
+        );
+        assert!(!error.to_string().contains("private-"));
+    }
 }

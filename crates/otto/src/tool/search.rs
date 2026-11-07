@@ -560,7 +560,7 @@ mod git_alias_tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    /// Runs both tools against `search_path` and asserts both produce no output.
+    /// Runs both tools against `search_path` and asserts Git metadata is excluded.
     async fn both_are_empty(root: &Path, search_path: &str) {
         let workspace = workspace(root);
         let quoted = serde_json::to_string(search_path).unwrap();
@@ -579,7 +579,7 @@ mod git_alias_tests {
             "find({search_path}) = {found:?}"
         );
         assert!(
-            !grepped.is_error && grepped.content.is_empty(),
+            !grepped.is_error && grepped.content == "No matches (.git is excluded).",
             "grep({search_path}) = {grepped:?}"
         );
     }

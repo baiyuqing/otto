@@ -202,9 +202,6 @@ impl Client {
         channel: Option<Channel>,
     ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
         let mut body = json!({"text": text});
-        if let Some(source) = self.client_source {
-            body["client_source"] = json!(source);
-        }
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }
@@ -311,9 +308,6 @@ impl Client {
         channel: Option<Channel>,
     ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
         let mut body = json!({"text": text});
-        if let Some(source) = self.client_source {
-            body["client_source"] = json!(source);
-        }
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }

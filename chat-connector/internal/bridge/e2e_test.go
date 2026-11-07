@@ -437,16 +437,17 @@ func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, tcp bool) {
 	}
 	bin := ottoBin(t)
 	requestID := regexp.MustCompile(`Only withdraw request ([^ ]+)\.`)
-	provider := newScriptedFakeProvider(t, nil, func(body []byte, _ int) string {
+	provider := newScriptedFakeProvider(t, nil, func(body []byte, request int) string {
 		var req struct {
 			Messages []struct {
-				Role string `json:"role"`
+				Role       string `json:"role"`
+				ToolCallID string `json:"tool_call_id"`
 			} `json:"messages"`
 		}
 		_ = json.Unmarshal(body, &req)
 		hasToolResult := false
 		for _, message := range req.Messages {
-			hasToolResult = hasToolResult || message.Role == "tool"
+			hasToolResult = hasToolResult || (message.Role == "tool" && message.ToolCallID == "revoke-call")
 		}
 		if match := requestID.FindSubmatch(body); len(match) == 2 {
 			if hasToolResult {
@@ -463,7 +464,7 @@ func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, tcp bool) {
 			"sandbox_permissions": "require_escalated",
 			"justification":       "create a marker only if this approval is granted",
 		})
-		return chatToolCallReply("approval-command", "bash", string(arguments))
+		return chatToolCallReply(fmt.Sprintf("approval-command-%d", request), "bash", string(arguments))
 	})
 	home := ottoHome(t, provider.URL)
 	workspace, err := filepath.EvalSymlinks(t.TempDir())

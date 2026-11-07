@@ -37,7 +37,7 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 				t.Fatal(err)
 			}
 			sid := ""
-			for _, turn := range []struct {
+			for turnIndex, turn := range []struct {
 				platform string
 				text     string
 				guidance string
@@ -55,7 +55,14 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				h.say(turn.text)
+				// Each new harness resets its local message counter. Distinct messages
+				// in one persisted session need distinct platform IDs.
+				message := h.msg("c1", "u1", turn.text)
+				message.MessageID = fmt.Sprintf("m%d", turnIndex+1)
+				if got, want := chatInputID(message), fmt.Sprintf("chat:telegram:c1:m%d", turnIndex+1); got != want {
+					t.Fatalf("input id = %q, want %q", got, want)
+				}
+				h.plat.deliver(message)
 				if got := h.waitSent(1); got[0] != "echo: "+turn.text {
 					t.Fatalf("reply = %q", got)
 				}
@@ -93,8 +100,15 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := lastProviderBody(provider)
-			if got := userTexts([]byte(body)); !slices.Equal(got, []string{"help me plan my day", "write a short invitation", plainText}) {
-				t.Fatalf("persisted user texts = %q", got)
+			var actualUserTexts []string
+			for _, text := range userTexts([]byte(body)) {
+				// Runtime provenance is represented as a separate user-role message.
+				if !strings.HasPrefix(text, "Runtime origin for the following user input ") {
+					actualUserTexts = append(actualUserTexts, text)
+				}
+			}
+			if !slices.Equal(actualUserTexts, []string{"help me plan my day", "write a short invitation", plainText}) {
+				t.Fatalf("persisted user texts = %q", actualUserTexts)
 			}
 			system := systemText([]byte(body))
 			if strings.Contains(system, "Telegram chat") {

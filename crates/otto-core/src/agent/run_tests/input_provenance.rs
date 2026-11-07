@@ -2,7 +2,8 @@
 use super::*;
 use crate::model::{InputProvenance, InputSource, InputTransport};
 
-#[tokio::test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn mixed_frontends_same_body_keep_identity_and_separate_runtime_labels() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok"), Turn::text("ok")]),
@@ -61,7 +62,8 @@ async fn mixed_frontends_same_body_keep_identity_and_separate_runtime_labels() {
     assert_eq!(requests[0].messages[0..2], requests[1].messages[0..2]);
 }
 
-#[tokio::test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn provenance_is_consumed_by_wake_and_not_inherited_by_later_input() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok")]),

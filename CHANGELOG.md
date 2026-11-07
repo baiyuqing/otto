@@ -50,6 +50,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Attached ACP and chat connector approval dialogues no longer fail with HTTP 400
+  when the client has an application-source claim. Source claims remain on input
+  admission requests, not dialogue-control requests. Rebuild/reinstall and restart
+  Otto to use the fix.
+- Local acceptance checks support `CARGO_TARGET_DIR` for connector end-to-end
+  tests, and core asynchronous tests run under both native and WASM test runners.
+
 - Reopening a saved parent reconstructs child-task snapshots even when its own
   turn finished normally. Lost-owner children become interrupted, never live;
   explicit resume preserves task/transcript identity and atomically admits one

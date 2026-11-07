@@ -349,6 +349,7 @@ mod tests {
         const ALLOWED: &[&str] = &[
             "runtime/",
             "subagent/tasks.rs",
+            "subagent/tasks/recovery.rs",
             "subagent/runner.rs",
             "subagent/runner/child_run.rs",
         ];

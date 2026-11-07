@@ -253,6 +253,15 @@ impl Prepared {
     /// Fails, releasing the descriptor, when the path now names a different
     /// file or the session's identifying metadata changed since preparation.
     pub fn activate(self) -> Result<(Store, Vec<Warning>), PiError> {
+        self.activate_checked(|_, _| Ok(()))
+    }
+
+    /// Validates caller evidence under the pinned descriptor's exclusive lock,
+    /// before incomplete-line or dangling-call repair can mutate the journal.
+    pub(crate) fn activate_checked(
+        self,
+        check: impl FnOnce(&mut dyn JournalFile, &Metadata) -> Result<(), PiError>,
+    ) -> Result<(Store, Vec<Warning>), PiError> {
         let taken = self
             .handle
             .lock()
@@ -276,6 +285,7 @@ impl Prepared {
                 "prepared session metadata changed before activation",
             ));
         }
+        check(file.as_mut(), &current_metadata)?;
         // Only now, with every check passed, does the lease pass to the
         // `Store`: an `activate` that fails above leaves the lease with
         // `self`, released by `drop` when this `Prepared` goes out of scope.

@@ -15,12 +15,32 @@ and adds its existing PII handling. Do not substitute recorded arguments into
 live tool calls or broaden `redact_string` globally: its callers also handle
 protocol identities, execution and streaming.
 
+Provider-bound tool-result copies add fixed redaction status/reason notices;
+frontends and persisted result formatting stay unchanged. The implementation is
+`agent/redactor/feedback.rs`. Exact marker selection remains collision-safe and
+notices themselves pass through known-value replacement. Suppressing/incomplete
+redactors still block provider requests; notices do not bypass that refusal.
+
+`tool::redaction` defines reserved private-use and typed personal-data placeholders
+for operational arguments. The core agent checks before hooks and after their
+rewrites; the native registry also checks before authorization/effects. Validation
+returns a not-started error without echoing arguments. Narrative tools remain able
+to discuss withheld content. Shared operational capability descriptions and the
+runtime prompt advertise this contract.
+
 Provider patterns cover AWS access key IDs, Alibaba access key IDs and Azure
 AD client secrets, alongside existing token prefixes. Contextual assignments
 and JSON field names identify access/secret keys, credentials, client secrets,
 passwords, tokens and wallet material. Generic assigned values have an
 eight-byte minimum and placeholder exclusions; arbitrary high-entropy strings
-are not treated as secrets solely because of their entropy.
+are not treated as secrets solely because of their entropy. The documented public
+names `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OTTO_API_KEY` can remain readable
+in contextual API-key references; they are not excluded from password/token
+fields or structural JSON credential values. `source_values.rs` excludes unquoted,
+semicolon-terminated calls made only of identifier paths and reference arguments;
+quoted values, numeric literals and arbitrary bare identifiers are not excluded.
+Known-value replacement and independent credential-prefix detection still apply.
+Do not broaden these rules into file/directory exemptions or skip exact matching.
 
 Connection handling recognizes URL password userinfo, sensitive URL query
 values, common password/key assignments in DSNs and Go MySQL DSNs. Wallet

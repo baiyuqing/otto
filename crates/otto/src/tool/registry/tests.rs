@@ -439,3 +439,35 @@ async fn before_is_not_started_and_after_is_unknown() {
     assert_eq!(execution.outcome.disposition, OperationDisposition::Error);
     assert_eq!(execution.outcome.effect_certainty, EffectCertainty::Unknown);
 }
+
+#[tokio::test]
+async fn operational_placeholders_are_rejected_before_native_tool_execution() {
+    let registry = Registry::new(vec![Box::new(FakeTool {
+        name: "bash",
+        result: None,
+        cancel_during_call: true,
+    })])
+    .unwrap();
+    let cancel = CancellationToken::new();
+    let id = operation_id();
+    let arguments = raw(r#"{"command":"echo \ue000"}"#);
+    let execution = registry
+        .execute(
+            ToolCall {
+                tool_call_id: "c",
+                operation_id: &id,
+                name: "bash",
+                arguments: &arguments,
+                attempt: 1,
+            },
+            &cancel,
+        )
+        .await;
+    assert!(execution.result.is_error);
+    assert!(execution.result.content.starts_with("redacted_input:"));
+    assert_eq!(
+        execution.outcome.effect_certainty,
+        EffectCertainty::NotStarted
+    );
+    assert!(!cancel.is_cancelled(), "the concrete tool must not execute");
+}

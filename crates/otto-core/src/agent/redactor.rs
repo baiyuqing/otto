@@ -192,8 +192,12 @@ impl Redactor {
                 {
                     return Err(blocked());
                 }
-                block.text = redact_provider_text_value(self, pii.as_deref_mut(), &block.text)
-                    .ok_or_else(blocked)?;
+                block.text = if block.block_type == BlockType::ToolResult {
+                    self.tool_result_for_provider(pii.as_deref_mut(), &block.text)
+                } else {
+                    redact_provider_text_value(self, pii.as_deref_mut(), &block.text)
+                }
+                .ok_or_else(blocked)?;
                 if let Some(arguments) = &block.arguments {
                     block.arguments = Some(
                         redact_egress_json(self, pii.as_deref_mut(), arguments.get())
@@ -466,10 +470,12 @@ fn encode_object(members: Vec<(String, String)>) -> String {
 
 mod connection_strings;
 mod credential_patterns;
+mod feedback;
 mod heuristics;
 mod json_parse;
 mod pii;
 mod recording;
+mod source_values;
 mod wallet_secrets;
 
 use heuristics::*;
@@ -477,6 +483,8 @@ use pii::*;
 
 #[cfg(test)]
 mod egress_scan_tests;
+#[cfg(test)]
+mod feedback_tests;
 #[cfg(test)]
 mod pii_tests;
 #[cfg(test)]

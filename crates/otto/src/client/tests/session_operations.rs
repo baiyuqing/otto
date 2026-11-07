@@ -126,7 +126,7 @@ async fn task_control_client_uses_session_routes_and_transient_channel() {
         request(&seen, 0),
         (
             "POST /v1/sessions/s1/tasks/steer".into(),
-            json!({"text":"inspect the result"})
+            json!({"text":"inspect the result","client_source":null})
         )
     );
     assert_eq!(
@@ -134,6 +134,42 @@ async fn task_control_client_uses_session_routes_and_transient_channel() {
         (
             "POST /v1/sessions/s1/tasks/control".into(),
             json!({"text":"what can you do?","channel":"telegram"})
+        )
+    );
+}
+
+/// Control dialogue routes reject unknown JSON fields; the ACP source tag is
+/// only sent to routes that admit ordinary user input.
+#[tokio::test]
+async fn tagged_client_keeps_provenance_out_of_control_dialogue_requests() {
+    let (client, seen, _dir) = stub(|_, _| json_body(StatusCode::OK, "null"));
+    let client = client.with_input_source(otto_core::model::InputSource::Acp);
+    assert!(
+        client
+            .approval_message_with_channel("s1", "why?", Some(Channel::Telegram))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        client
+            .control_message_with_channel("s1", "what now?", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        request(&seen, 0),
+        (
+            "POST /v1/sessions/s1/approvals/message".into(),
+            json!({"text":"why?", "channel":"telegram"})
+        )
+    );
+    assert_eq!(
+        request(&seen, 1),
+        (
+            "POST /v1/sessions/s1/tasks/control".into(),
+            json!({"text":"what now?"})
         )
     );
 }

@@ -376,10 +376,8 @@ fn apply_input<B: Backend>(
                     focus_surface(app, col, row);
                 }
             } else if app.observer.active {
-                if phase == DragPhase::Start {
-                    if !app.observer.toggle_at(col, row) {
-                        app.observer.focus_at(col, row);
-                    }
+                if phase == DragPhase::Start && !app.observer.toggle_at(col, row) {
+                    app.observer.focus_at(col, row);
                 }
             } else if let Some(text) = apply_selection(app, terminal, phase, col, row)?
                 && let Err(error) = selection::copy(&text)

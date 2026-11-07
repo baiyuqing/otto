@@ -80,18 +80,18 @@ impl Runner {
             armed: true,
             interrupted_on_drop: resume_id.is_some(),
         };
-        if resume_id.is_none() {
-            if let Err(error) = self.config.tasks.persist_admission(&task).await {
-                self.finish_without_transcript(
-                    &task.id,
-                    TaskStatus::Interrupted,
-                    now,
-                    &[],
-                    Some(&error.to_string()),
-                );
-                start_guard.disarm();
-                return Err(error.into());
-            }
+        if resume_id.is_none()
+            && let Err(error) = self.config.tasks.persist_admission(&task).await
+        {
+            self.finish_without_transcript(
+                &task.id,
+                TaskStatus::Interrupted,
+                now,
+                &[],
+                Some(&error.to_string()),
+            );
+            start_guard.disarm();
+            return Err(error.into());
         }
         let transcript = match (transcript, &self.config.child_session) {
             (Some((transcript, path)), _) => {

@@ -305,3 +305,29 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     wait_for_raw_bytes(&shared, b"\x1b[?2004l");
     eprintln!("[tui_pty] saw alt-screen exit sequence");
 }
+
+/// A child spawned on the harness PTY must not inherit the master descriptor.
+/// If it did, the master would stay open after the test process exits, the
+/// session would never get SIGHUP, and the shell and Otto would keep running.
+#[test]
+fn a_pty_child_does_not_inherit_the_master_descriptor() {
+    use std::os::fd::AsRawFd as _;
+    let mut probe = Command::new("/bin/sh");
+    probe.args([
+        "-c",
+        "read master_fd; if { true >&\"$master_fd\"; } 2>/dev/null; then echo MASTER-INHERITED; else echo MASTER-CLOSED; fi",
+    ]);
+    let (mut master, mut child, shared) = binary_harness::pty::spawn(probe);
+    // The child sees inherited descriptors under the parent's numbers.
+    master
+        .write_all(format!("{}\n", master.as_raw_fd()).as_bytes())
+        .expect("send the master descriptor number");
+    wait_until(&shared, "descriptor probe result", |shared| {
+        raw_contains(shared, b"MASTER-CLOSED") || raw_contains(shared, b"MASTER-INHERITED")
+    });
+    let _ = child.wait();
+    assert!(
+        raw_contains(&shared, b"MASTER-CLOSED"),
+        "the child inherited the PTY master descriptor"
+    );
+}

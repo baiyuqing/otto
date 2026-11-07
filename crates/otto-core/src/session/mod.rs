@@ -228,6 +228,12 @@ impl<T: ?Sized> SessionBounds for T {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Session: SessionBounds {
+    /// Stable runner identity when this transcript has one (for example its
+    /// persisted header ID). Wrappers must forward this identity unchanged.
+    fn session_id(&self) -> Option<String> {
+        None
+    }
+
     /// A copy of the transcript in append order.
     fn messages(&self) -> Vec<Message>;
 
@@ -520,10 +526,19 @@ impl State {
 /// write to disk.
 #[derive(Debug, Default)]
 pub struct MemorySession {
+    session_id: Option<String>,
     state: Mutex<State>,
 }
 
 impl MemorySession {
+    /// Creates an ephemeral transcript bound to its runner's stable identity.
+    pub fn with_session_id(session_id: String) -> Self {
+        Self {
+            session_id: Some(session_id),
+            ..Self::default()
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -532,6 +547,10 @@ impl MemorySession {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Session for MemorySession {
+    fn session_id(&self) -> Option<String> {
+        self.session_id.clone()
+    }
+
     fn messages(&self) -> Vec<Message> {
         self.state.lock().expect("session mutex").messages.clone()
     }
@@ -775,3 +794,5 @@ impl Session for MemorySession {
 
 #[cfg(test)]
 mod tests;
+
+pub mod local_command;

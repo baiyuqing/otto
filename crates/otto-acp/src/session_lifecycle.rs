@@ -128,6 +128,19 @@ impl Connection {
         for update in update::history_updates(&history) {
             self.update(&id, update);
         }
+        let receipts = match &self.backend {
+            Backend::Local(local) => local
+                .session(&id)
+                .map(|session| session.controller.info().local_commands)
+                .unwrap_or_default(),
+            Backend::Attach(relay) => relay
+                .client
+                .session(&id)
+                .await
+                .map(|info| info.local_commands)
+                .unwrap_or_default(),
+        };
+        self.local_command_receipts(&id, &receipts);
         self.restore_queued_prompts(&id);
         if !plan.is_empty() {
             self.update(&id, update::plan_update(&plan));

@@ -726,61 +726,30 @@ fn registered_commands_extend_help_completion_and_dispatch() {
 }
 
 #[test]
-fn memory_restore_is_a_mutation_and_history_and_diff_are_queries() {
-    use crate::app::management::Request as M;
+fn memory_commands_route_raw_input_through_receipt_boundary_locally_and_attached() {
     let catalog = Catalog::default();
-    let start = |command: &str| {
-        let Transition::Push(mut presenter) =
-            catalog.open(command, &Info::default(), false).unwrap()
-        else {
-            panic!("{command} should open a surface")
-        };
-        presenter.start().expect("a backend request")
-    };
-    assert!(matches!(
-        start("/memory restore r1 2"),
-        BackendRequest::Command(Command::Management(M::MemoryRestore { revision: 2, .. }))
-    ));
-    assert!(matches!(
-        start("/memory history r1"),
-        BackendRequest::Management(M::MemoryHistory { .. })
-    ));
-    assert!(matches!(
-        start("/memory diff r1 1 2"),
-        BackendRequest::Management(M::MemoryDiff {
-            from: 1,
-            to: Some(2),
-            ..
-        })
-    ));
-}
-
-#[test]
-fn memory_state_and_verify_are_mutations_and_list_is_a_query() {
-    use crate::app::management::Request as M;
-    let catalog = Catalog::default();
-    let start = |command: &str| {
-        let Transition::Push(mut presenter) =
-            catalog.open(command, &Info::default(), false).unwrap()
-        else {
-            panic!("{command} should open a surface")
-        };
-        presenter.start().expect("a backend request")
-    };
-    assert!(matches!(
-        start("/memory state r1 needs-review"),
-        BackendRequest::Command(Command::Management(M::MemoryState { .. }))
-    ));
-    assert!(matches!(
-        start("/memory verify r1"),
-        BackendRequest::Command(Command::Management(M::MemoryVerify { .. }))
-    ));
-    assert!(matches!(
-        start("/memory propose r1 the editor changed"),
-        BackendRequest::Command(Command::Management(M::MemoryPropose { .. }))
-    ));
-    assert!(matches!(
-        start("/memory list --state all"),
-        BackendRequest::Management(M::MemoryList { .. })
-    ));
+    for attached in [false, true] {
+        for args in [
+            "restore r1 2",
+            "history r1",
+            "diff r1 1 2",
+            "state r1 retracted",
+            "verify r1",
+            "propose r1 changed",
+            "list --state all",
+            "invalid",
+            "",
+        ] {
+            let command = format!("/memory {args}");
+            let Transition::Push(mut presenter) =
+                catalog.open(&command, &Info::default(), attached).unwrap()
+            else {
+                panic!("receipt command surface expected")
+            };
+            assert!(
+                matches!(presenter.start(), Some(BackendRequest::Command(Command::MemoryInvocation { name, args: actual }))
+                if name == "memory" && actual == args)
+            );
+        }
+    }
 }

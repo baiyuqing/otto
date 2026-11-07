@@ -52,6 +52,15 @@ fn implementation_and_yield_policies_follow_registered_capabilities() {
 }
 
 #[test]
+fn session_info_guidance_requires_only_the_identity_tool() {
+    let prompt = system_prompt_for(&definitions(&["session_info"]), off(), "", "", "");
+    assert!(prompt.contains("<session_identity_policy>"));
+    assert!(prompt.contains("Use session_info with {}"));
+    assert!(!prompt.contains("<retrieval_policy>"));
+    assert!(!system_prompt_for(&[], off(), "", "", "").contains("<session_identity_policy>"));
+}
+
+#[test]
 fn retrieval_guidance_is_conditional_and_research_stays_in_the_child() {
     let full = system_prompt_for(&definitions(&["agent", "read", "bash"]), off(), "", "", "");
     assert!(full.contains("source downloads, searches and analysis stay in the child"));

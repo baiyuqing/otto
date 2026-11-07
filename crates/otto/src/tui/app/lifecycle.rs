@@ -89,6 +89,7 @@ impl App {
     pub fn refresh(&mut self, backend: &Backend<'_>) -> Ticket {
         let old = (self.info.workspace.clone(), self.info.session_id.clone());
         let (mut entries, usage) = entries::entries_from_history(&backend.history());
+        entries::project_local_commands(&mut entries, &backend.info().local_commands);
         let info = backend.info();
         if old == (info.workspace.clone(), info.session_id.clone()) {
             for entry in &mut entries {
@@ -190,6 +191,7 @@ impl App {
             return;
         }
         self.info = info;
+        entries::project_local_commands(&mut self.entries, &self.info.local_commands);
         self.usage = self.info.usage;
     }
     pub(crate) fn memory_review_available(&mut self) {

@@ -19,6 +19,18 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
     let mut history = false;
     let mut prompt = None;
     let message = match command {
+        Command::MemoryInvocation { name, args } => {
+            history = true;
+            blocking(c.clone(), move |c| {
+                if let Err(error) = c.memory_command(&name, &args)
+                    && error.kind == crate::app::management::ManagementErrorKind::Internal
+                {
+                    return Err(error.message);
+                }
+                Ok(String::new())
+            })
+            .await?
+        }
         Command::Fork(_) | Command::SteeringState => unreachable!(),
         Command::NewSession => {
             c.new_session().await?;
@@ -171,37 +183,16 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
         },
         Command::MemoryReview { id, accept } => {
             blocking(c.clone(), move |c| {
-                let (service, user, workspace) = c
-                    .memory_manager()
-                    .ok_or_else(|| "Memory review is unavailable.".to_string())?;
-                let reference = [user, workspace]
-                    .into_iter()
-                    .find_map(|scope| {
-                        let reference = CandidateRef {
-                            scope,
-                            id: id.clone(),
-                        };
-                        service.get_candidate(&reference).ok().map(|_| reference)
-                    })
-                    .ok_or_else(|| "candidate not found".to_string())?;
-                c.review_memory(
-                    &ReviewRequest {
-                        reference,
-                        decision: if accept {
-                            ReviewDecision::Accept
-                        } else {
-                            ReviewDecision::Reject
-                        },
-                        edited: None,
-                        target_revision: None,
+                c.management(crate::app::management::Request::MemoryReview {
+                    id,
+                    decision: if accept {
+                        ReviewDecision::Accept
+                    } else {
+                        ReviewDecision::Reject
                     },
-                    "tui",
-                )
-                .map_err(|error| error.to_string())?;
-                Ok(format!(
-                    "{} {id}",
-                    if accept { "accepted" } else { "rejected" }
-                ))
+                    transport: "tui",
+                })
+                .map(|reply| crate::cli::repl_commands::format_management_reply(&reply))
             })
             .await?
         }

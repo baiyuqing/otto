@@ -337,6 +337,7 @@ async fn a_retried_request_appends_one_provider_call_record() {
         input_tokens: 40,
         output_tokens: 3,
         cached_input_tokens: 10,
+        ..Default::default()
     };
     turn.outcome
         .as_mut()

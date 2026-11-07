@@ -219,6 +219,7 @@ impl StreamAssembler {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
                 cached_input_tokens: usage.cached_tokens(),
+                ..Default::default()
             });
         }
         for choice in chunk.choices {
@@ -361,7 +362,8 @@ mod tests {
             Some(Usage {
                 input_tokens: 11,
                 output_tokens: 7,
-                cached_input_tokens: 0
+                cached_input_tokens: 0,
+                ..Default::default()
             })
         );
         assert_eq!(response.message.blocks.len(), 2);
@@ -453,7 +455,8 @@ mod tests {
             Some(Usage {
                 input_tokens: 5,
                 output_tokens: 9,
-                cached_input_tokens: 0
+                cached_input_tokens: 0,
+                ..Default::default()
             })
         );
     }
@@ -571,7 +574,8 @@ mod tests {
                 Some(Usage {
                     input_tokens: 100,
                     output_tokens: 7,
-                    cached_input_tokens: *cached
+                    cached_input_tokens: *cached,
+                    ..Default::default()
                 })
             );
         }

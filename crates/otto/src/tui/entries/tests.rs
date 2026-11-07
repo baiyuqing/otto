@@ -236,6 +236,7 @@ fn usage_accumulates_across_messages_and_ignores_missing_usage() {
                 input_tokens: 10,
                 output_tokens: 5,
                 cached_input_tokens: 2,
+                ..Default::default()
             }),
             ..user("a")
         },
@@ -244,6 +245,7 @@ fn usage_accumulates_across_messages_and_ignores_missing_usage() {
                 input_tokens: 3,
                 output_tokens: 1,
                 cached_input_tokens: 0,
+                ..Default::default()
             }),
             ..user("b")
         },

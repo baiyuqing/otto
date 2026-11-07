@@ -55,6 +55,10 @@ pub struct Request {
     pub remote_compaction: Option<RemoteCompaction>,
     /// Requests a remote compaction item instead of an ordinary assistant turn.
     pub request_remote_compaction: bool,
+    /// Message counts at which the request's message prefix is expected to recur
+    /// in later requests. Providers with explicit cache breakpoints mark the
+    /// last content of each such prefix; others ignore it. Empty means none.
+    pub cache_boundaries: Vec<usize>,
 }
 
 /// One completion response.

@@ -189,6 +189,7 @@ async fn a_remote_tail_usage_anchors_the_estimate_after_an_older_local_checkpoin
                 input_tokens: 200_000,
                 output_tokens: 1,
                 cached_input_tokens: 0,
+                ..Default::default()
             }),
             ..Message::default()
         })

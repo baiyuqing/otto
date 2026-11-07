@@ -736,8 +736,21 @@ path are separate boundaries.
 
 `GET /v1/usage` returns all recorded totals; pass `session_id` to restrict the
 query. `cache_hit_rate` is the weighted ratio
-`cached_input_tokens / input_tokens`. A provider that omits its cache-token
-breakdown contributes zero cached tokens.
+`cached_input_tokens / input_tokens`. Input includes ordinary input, cache reads
+and cache writes. Claude reports these separately; Otto normalizes their sum
+before context accounting and display. A missing cache-read breakdown makes
+`cached_input_tokens` and `cache_hit_rate` unknown (`null`), not zero.
+
+`cache_write_input_tokens` counts newly cached input; `cache_write_1h_input_tokens`
+is its one-hour subset. They are optional in provider/turn `usage` values and
+nullable in aggregate/daily results. Each aggregate is known only when every
+reported usage contributing to it supplies that counter. Old records remain
+unknown; an explicit zero stays known. Database upgrades add nullable columns
+without rewriting session history or inventing historic cache counts.
+Pi sessions retain writes in `cacheWrite`/`cacheWrite1h`, with exact optional
+presence in Otto details. Monetary amounts are not calculated from these totals;
+read and write tokens have different prices, and failed/canceled calls may
+provide no usage.
 
 `GET /v1/usage/daily` returns the same metrics grouped by UTC date and fills
 days without provider calls with zeroes. The Web UI uses the existing

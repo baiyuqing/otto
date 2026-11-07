@@ -194,6 +194,7 @@ mod tests {
             input_tokens: input,
             output_tokens: 0,
             cached_input_tokens: cached,
+            ..Default::default()
         });
         message
     }

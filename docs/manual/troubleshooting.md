@@ -123,14 +123,28 @@ install it as a plugin package and set `backend = "plugin:<package>"`; see
 
 ### Claude reports `invalid Claude stream sequence`
 
-Otto rejected an unexpected Claude streaming event order or block/delta pairing.
-The error suffix identifies the event and violated rule, for example
-`message_delta: content block still open`. It contains no response text, tool
-names or arguments. Include the complete error and session ID when reporting
-this issue; HTTP 200 alone does not establish that the stream was valid.
-Older binaries report only the generic error: update and restart Otto to obtain
-the detailed reason on a subsequent failure. This diagnostic does not relax
-protocol validation or repair an invalid upstream stream.
+Otto rejected an invalid Claude message lifecycle or block/delta pairing. The
+error suffix identifies the event and violated rule without response text, tool
+names or arguments. Include the complete error and session ID when reporting an
+issue; HTTP 200 alone does not establish that the stream completed successfully.
+
+Message-level updates may occur multiple times and interleave with content
+blocks. They update cumulative usage and stop metadata without closing the
+blocks. An explicit `message_stop` completes the response and finalizes blocks
+that did not receive `content_block_stop`, matching the official SDK's
+accumulation behavior. Streamed text and tool arguments remain provisional until
+then. Socket EOF alone does not complete a response.
+
+Both completion boundaries validate tool input as one complete JSON object.
+Malformed, truncated or duplicate-key arguments fail; Otto never replaces them
+with empty arguments to execute a tool. Empty input fragments leave the initial
+input object unchanged. Streamed and initial arguments preserve numeric literals.
+
+If an older binary reports `message_delta: content block still open`, update and
+restart the process performing the model request. That check incorrectly treated
+message metadata as a content-completion barrier. See the official
+[streaming protocol](https://platform.claude.com/docs/en/build-with-claude/streaming)
+and [SDK accumulator](https://github.com/anthropics/anthropic-sdk-go/blob/main/messageutil.go).
 
 ## Provider endpoint is not trusted
 

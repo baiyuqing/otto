@@ -124,8 +124,6 @@ pub trait SessionRepository: Send + Sync {
             .find(|session| session.id == session_id)?;
         self.custom_data(&source.path, custom_type)
     }
-    /// Checks an explicitly selected namespace without creating it.
-    fn validate_existing_root(&self, root: &Path) -> Result<(), String>;
     fn create_lazy(
         &self,
         root: &Path,
@@ -141,12 +139,6 @@ pub trait SessionRepository: Send + Sync {
     ) -> Result<(Arc<dyn SessionHandle>, String), String>;
     fn prepare(
         &self,
-        reference: &str,
-        create_lease: Option<u64>,
-    ) -> Result<Box<dyn PreparedSession>, String>;
-    fn prepare_in(
-        &self,
-        root: &Path,
         reference: &str,
         create_lease: Option<u64>,
     ) -> Result<Box<dyn PreparedSession>, String>;

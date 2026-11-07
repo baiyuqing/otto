@@ -210,7 +210,7 @@ impl Builder {
                     if path.is_empty() {
                         return Err("needs a saved session".to_owned());
                     }
-                    storage.sessions()?.fork_context(&path, prompt)
+                    storage.sessions().fork_context(&path, prompt)
                 }) as subagent::runner::ParentFork
             }),
             max_parallel: catalogs.agents.max_parallel.max(0) as usize,

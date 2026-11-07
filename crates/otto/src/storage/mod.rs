@@ -1,13 +1,8 @@
-//! Storage capability families and portable migration contracts.
-//! SQL compatibility remains SQLite-specific. External dialects implement
-//! the domain repositories through the runtime factory boundary.
+//! Storage capability families and the SQLite SQL layer.
 pub mod backends;
-#[cfg(feature = "storage-conformance")]
-pub mod conformance;
 pub mod contracts;
 pub mod drivers;
 pub mod files;
-pub mod migration;
 pub mod sql;
 pub mod worker;
 pub use contracts::*;
@@ -137,7 +132,7 @@ impl Connection {
         self.inner.close()
     }
 
-    /// Backfill before publishing a renamed migration file.
+    /// Backfill the write-ahead log into the database file.
     pub fn checkpoint(&self) -> Result<()> {
         self.inner.checkpoint()
     }

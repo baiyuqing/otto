@@ -38,7 +38,6 @@ use super::{
 #[path = "audit_contracts.rs"]
 pub mod audit;
 pub mod jev;
-pub mod migration;
 pub mod session;
 
 /// The longest a model has to answer for one candidate.

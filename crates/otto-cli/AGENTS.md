@@ -15,13 +15,11 @@ The [repository rules](../../AGENTS.md) apply. Use the
   `otto-acp`. A command module calls them; it does not reimplement them.
 - `cli::{login, repl, repl_commands}` stay in `otto` because `tui` uses them.
 - Unit tests sit beside the modules. Integration tests are in `tests/`: the
-  binary, ACP, serve, signal, SQLite migration, PTY, version, embed parity,
-  plugin CLI and external storage backend tests, plus `binary_harness/`.
+  binary, ACP, serve, signal, PTY, version, embed parity and plugin CLI
+  tests, plus `binary_harness/`.
   Run one with `cargo test -p otto-cli --test <name>`.
 - `tests/version.rs` checks the shared version in `Cargo.lock` for `otto`,
   `otto-core`, `otto-server`, `otto-acp` and `otto-cli`.
-- Feature `storage-conformance` (default) gates
-  `tests/external_storage_backend.rs`.
 - Scaffolding comes from `otto::fixtures` through the `test-support`
   dev-dependency. A test-only item in `otto` that this crate needs is public
   and gated `#[cfg(any(test, feature = "test-support"))]`.

@@ -127,34 +127,6 @@ fn split_positionals<'a>(subcommand: &str, args: &'a [String]) -> (&'a [String],
     args.split_at(count)
 }
 
-/// Runs `otto memory ...` and returns its exit code.
-pub(crate) fn startup_configuration(
-    args: &[String],
-    home: &str,
-) -> Result<otto_core::config::File, ()> {
-    let (command, mut rest) = args.split_first().ok_or(())?;
-    let (_, flag_arguments) = split_positionals(command, rest);
-    rest = flag_arguments;
-    let flags = parse_flags(rest).map_err(|_| ())?;
-    super::run::load_config_for(&flags.config_path, flags.explicit_config, home)
-        .map(|(_, file)| file)
-        .map_err(|_| ())
-}
-
-/// Whether the memory directory that `config` resolves to already holds a
-/// store. Then `otto memory` needs no storage route authority: the routes only
-/// locate a database to import.
-pub(crate) fn has_store(
-    config: &otto_core::config::File,
-    lookup: &HashMap<String, String>,
-    home: &str,
-) -> bool {
-    let mut environment = super::run::config_environment_for(config, lookup);
-    environment.insert("HOME".to_string(), home.to_string());
-    resolve_memory(config, &environment)
-        .is_ok_and(|memory| otto::memory::files::has_identity(Path::new(&memory.dir)))
-}
-
 pub fn run(
     args: &[String],
     stdout: &mut (dyn Write + Send),
@@ -170,7 +142,7 @@ pub fn run(
     )
 }
 
-/// Runs the memory command using the process-wide storage routes.
+/// Runs the memory command with the given storage.
 pub fn run_with_storage(
     args: &[String],
     stdout: &mut (dyn Write + Send),

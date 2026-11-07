@@ -78,7 +78,6 @@ async fn authorization_admission_preserves_each_original_and_legacy_new_task_can
     let (reopened, _) = builder
         .storage
         .sessions()
-        .unwrap()
         .prepare(&path, None)
         .unwrap()
         .activate()

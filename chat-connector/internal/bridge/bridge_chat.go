@@ -504,8 +504,6 @@ func chatPrompt(m Message) string {
 	switch m.Platform {
 	case "telegram":
 		channel = "Telegram"
-	case "feishu":
-		channel = "Feishu (Lark)"
 	default:
 		return m.Text
 	}

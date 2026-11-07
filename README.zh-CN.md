@@ -8,7 +8,7 @@
 
 Otto 帮你研究、写作、规划、编程和处理日常任务。可从终端、独立的
 [otto-plus](https://github.com/baiyuqing/otto-plus) 浏览器客户端，或通过
-`otto-connect` 从 Telegram、飞书使用。连接 `otto serve` 后，各客户端可以共享服务端会话。
+`otto-connect` 从 Telegram 使用。连接 `otto serve` 后，各客户端可以共享服务端会话。
 
 - **保持上下文：** 持久化会话、记忆与可复用 skills。
 - **委派与自动化：** 子代理、定时任务和可恢复的持久化 workflow。
@@ -69,7 +69,7 @@ OpenAI-compatible provider 还需选择接口地址。启动前在进程环境�
 | --- | --- |
 | 终端交互、会话和脚本模式 | [交互使用](docs/manual/interactive-use.md) |
 | 审批、沙箱、工具和子代理 | [安全与工具](docs/manual/safety-and-tools.md) |
-| 浏览器/API、ACP、Telegram 或飞书 | [服务端与连接器](docs/manual/servers-and-connectors.md) |
+| 浏览器/API、ACP 或 Telegram | [服务端与连接器](docs/manual/servers-and-connectors.md) |
 | 持久化 workflow 与工作区身份 | [自动化](docs/manual/automation.md) |
 | 记忆、skills、MCP 和扩展 | [记忆与扩展](docs/manual/memory-and-extensions.md) |
 | 在 Rust 应用中嵌入 Otto | [嵌入 API](docs/development/architecture.md#embedding-api) |

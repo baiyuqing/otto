@@ -37,7 +37,7 @@ pub(super) fn parse_prompt(params: &Value) -> Result<(String, String, Option<Cha
         None => None,
         Some(Value::String(value)) => Some(
             serde_json::from_value::<Channel>(Value::String(value.clone()))
-                .map_err(|_| invalid_params("_meta.otto.channel must be telegram or feishu"))?,
+                .map_err(|_| invalid_params("_meta.otto.channel must be telegram"))?,
         ),
         Some(_) => return Err(invalid_params("_meta.otto.channel must be a string")),
     };
@@ -111,7 +111,6 @@ pub(super) fn parse_input_id(
 pub(super) fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Telegram => "telegram",
-        Channel::Feishu => "feishu",
     }
 }
 

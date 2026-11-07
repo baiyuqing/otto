@@ -480,7 +480,7 @@ fn openapi_documents_every_route() {
         let want = format!("\n  {path}:");
         assert!(document.contains(&want), "openapi.yaml is missing {path}");
     }
-    assert!(document.matches("enum: [telegram, feishu]").count() >= 2);
+    assert!(document.matches("enum: [telegram]").count() >= 2);
 }
 
 #[tokio::test]

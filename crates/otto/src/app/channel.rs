@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
     Telegram,
-    Feishu,
 }
 
 impl Channel {
@@ -25,15 +24,6 @@ impl Channel {
                     approval-only dialogue. This channel does not grant additional tools or \
                     permissions."
             }
-            Self::Feishu => {
-                "The user is communicating through Feishu (Lark) chat and cannot see the \
-                    local terminal. Keep replies readable in chat; Markdown is supported. \
-                    Explain results, progress, and necessary user actions. For a pending \
-                    permission request, the user can click Deny or send /deny; /stop \
-                    cancels the turn and clears its queue. Ordinary messages during \
-                    approval are handled by an approval-only dialogue. This channel does \
-                    not grant additional tools or permissions."
-            }
         }
     }
 }
@@ -48,19 +38,12 @@ mod tests {
             serde_json::to_string(&Channel::Telegram).unwrap(),
             "\"telegram\""
         );
-        assert_eq!(
-            serde_json::to_string(&Channel::Feishu).unwrap(),
-            "\"feishu\""
-        );
         assert!(serde_json::from_str::<Channel>("\"slack\"").is_err());
         assert!(Channel::Telegram.system_context().contains("Telegram"));
-        assert!(Channel::Feishu.system_context().contains("Feishu (Lark)"));
-        for channel in [Channel::Telegram, Channel::Feishu] {
-            assert!(
-                channel
-                    .system_context()
-                    .contains("does not grant additional tools")
-            );
-        }
+        assert!(
+            Channel::Telegram
+                .system_context()
+                .contains("does not grant additional tools")
+        );
     }
 }

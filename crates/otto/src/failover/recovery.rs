@@ -59,10 +59,12 @@ pub fn notify(
     let Some(recovery) = recovery else {
         return Vec::new();
     };
-    let interrupted_children: Vec<ChildRecord> = interrupted::scan(children_dir)
-        .into_iter()
-        .filter(|child| child.final_status.is_none())
-        .collect();
+    let interrupted_children: Vec<ChildRecord> =
+        interrupted::inventory(&children_dir.with_extension("jsonl"))
+            .records
+            .into_iter()
+            .filter(|child| child.final_status.is_none())
+            .collect();
 
     let mut warnings = Vec::new();
     if recovery.resume_exhausted() {
@@ -347,6 +349,7 @@ mod tests {
 
     fn interrupted_child(task_id: &str) -> ChildRecord {
         ChildRecord {
+            attempt_id: String::new(),
             path: std::path::PathBuf::from(format!("/tmp/{task_id}.jsonl")),
             task_id: task_id.to_string(),
             name: "worker".to_string(),

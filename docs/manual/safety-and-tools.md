@@ -623,6 +623,40 @@ newest first, at most 20). Steering text and prompts that opened wake turns
 are not fork points, and a prompt whose text appears more than once cannot
 be selected. The parent session is only read.
 
+### Child recovery after process loss
+
+Every activation of a saved parent inventories only that parent's direct child
+transcripts, even if its own last turn finished normally. `agent_status` shows
+reconstructed task snapshots; unfinished lost-owner children are **interrupted,
+not running**. This restores identity and inspectability, not suspended futures,
+processes, approval objects or shell state. No recovered child starts automatically.
+In-memory (`--no-session`) tasks have no cross-process recovery.
+
+Discovery validates parent linkage, task/header/filename identity and conflicting
+IDs, rejects symlinks, and bounds directory entries (4096), each transcript
+(16 MiB) and aggregate child reads (64 MiB). Incomplete/corrupt/unavailable scans
+produce warnings and status diagnostics rather than silently claiming no tasks.
+A durable admission without a usable child spec is visible but cannot resume.
+Diagnostics remain available at activation even when provider execution is unavailable.
+
+Before asking `agent` to `resume` an interrupted task, read its transcript and
+check any uncertain tool effects. Resume preserves the logical task ID and child
+transcript, atomically admits one new attempt, and records additive `resumed`
+lineage; it does not infer that a newly constructed replacement is the original.
+Concurrent resume attempts cannot both start. A failed repair or incomplete scan
+makes resume unavailable; correct the reported storage/linkage problem and reopen
+instead of reconstructing history or blindly rerunning commands. Completed and
+external ACP tasks cannot resume. Recovered snapshots do not claim historical
+usage/timestamps that are absent from lifecycle facts; resumed progress counters
+start fresh for that attempt.
+
+Terminal lifecycle facts precede completion notification. Stable task/attempt
+input IDs let reopening regenerate pending notices without duplicate delivery.
+Persistence failures stay visible; they never count as a successfully recorded
+completion. Independent custom events, including local memory receipts, do not
+turn a completed attempt back into an unfinished one. Upgrade using the normal
+source-install procedure and restart all processes before reopening saved sessions.
+
 Assign bounded file scopes and request findings with file/line evidence. After
 delegation, the parent relies on the child report and reads its saved report
 sections rather than repeating source inspection. Follow-up questions can be

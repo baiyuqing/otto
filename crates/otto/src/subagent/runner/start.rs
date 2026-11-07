@@ -222,7 +222,7 @@ impl Runner {
             now,
             Vec::new(),
             Some((transcript, record.path.to_string_lossy().into_owned())),
-            Some(record.task_id.clone()),
+            Some((record.task_id.clone(), record.attempt_id.clone())),
             self.task_deadline(None),
         )
         .await

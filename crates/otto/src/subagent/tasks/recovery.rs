@@ -5,7 +5,7 @@ use super::*;
 impl Tasks {
     pub(crate) fn with_admission_transcript(
         mut self,
-        transcript: Arc<dyn otto_core::session::Session + Send + Sync>,
+        transcript: Arc<dyn crate::session::SessionHandle>,
     ) -> Self {
         self.admission_transcript = Some(transcript);
         self
@@ -85,6 +85,7 @@ impl Tasks {
     pub(crate) fn begin_resume(
         &self,
         id: &str,
+        expected_attempt: &str,
         mut task: Task,
         cancel: CancellationToken,
         history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
@@ -97,7 +98,8 @@ impl Tasks {
             .entries
             .get_mut(id)
             .ok_or_else(|| TaskError::NotFound(id.into()))?;
-        if entry.task.status != TaskStatus::Interrupted {
+        if entry.task.status != TaskStatus::Interrupted || entry.task.attempt_id != expected_attempt
+        {
             return Err(TaskError::Invalid(format!(
                 "task {id} is not interrupted or is already resuming"
             )));
@@ -121,6 +123,18 @@ impl Tasks {
         self.signal();
         self.record(id);
         Ok(task)
+    }
+
+    pub(crate) fn has_delivered_input(&self, id: &str) -> bool {
+        self.admission_transcript
+            .as_ref()
+            .is_some_and(|transcript| transcript.has_input(id))
+    }
+
+    pub(crate) fn set_attempt_id(&self, id: &str, attempt_id: &str) {
+        if let Some(entry) = self.lock().entries.get_mut(id) {
+            entry.task.attempt_id = attempt_id.to_owned();
+        }
     }
 
     pub(crate) fn set_recovery_diagnostics(&self, diagnostics: Vec<String>) {

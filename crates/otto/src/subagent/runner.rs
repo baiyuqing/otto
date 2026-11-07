@@ -301,6 +301,7 @@ struct StartGuard {
     now: DateTime<Utc>,
     cancel: CancellationToken,
     armed: bool,
+    interrupted_on_drop: bool,
 }
 
 impl StartGuard {
@@ -315,7 +316,11 @@ impl Drop for StartGuard {
             self.cancel.cancel();
             self.runner.finish_without_transcript(
                 &self.task_id,
-                TaskStatus::Canceled,
+                if self.interrupted_on_drop {
+                    TaskStatus::Interrupted
+                } else {
+                    TaskStatus::Canceled
+                },
                 self.now,
                 &[],
                 Some("task start was canceled before child execution"),
@@ -558,6 +563,7 @@ pub enum StartError {
 mod child_run;
 mod child_tools;
 mod completion;
+mod durable_completion;
 pub(super) mod external;
 mod shared_provider;
 mod start;

@@ -72,6 +72,8 @@ impl ModelSource {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Task {
     pub id: String,
+    /// Durable execution attempt identity; empty for legacy transcripts.
+    pub attempt_id: String,
     pub name: String,
     /// The catalog definition name, or empty for the default sub-agent.
     pub agent: String,

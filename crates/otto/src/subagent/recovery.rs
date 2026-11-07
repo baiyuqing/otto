@@ -18,6 +18,7 @@ pub(crate) fn snapshot(child: &interrupted::ChildRecord) -> Task {
     };
     Task {
         id: child.task_id.clone(),
+        attempt_id: child.attempt_id.clone(),
         name: child.name.clone(),
         agent: child.agent.clone(),
         description: child.description.clone(),
@@ -73,7 +74,8 @@ pub(crate) fn activate(
         }
         // Key from the latest durable lifecycle entry, not process time. Both
         // queued and delivered inbox input ids prevent repeated-open duplicates.
-        if let Ok((entries, _)) = crate::session::Store::read_entries(&child.path)
+        if child.final_status.is_some()
+            && let Ok((entries, _)) = crate::session::Store::read_entries(&child.path)
             && let Some(entry) = entries.iter().rev().find(|entry| {
                 entry
                     .custom
@@ -87,8 +89,17 @@ pub(crate) fn activate(
                 child.final_status.as_deref().unwrap_or("unavailable"),
                 super::runner::completion_text(&snapshot(&child), 4096)
             );
+            let attempt = if child.attempt_id.is_empty() {
+                &entry.id
+            } else {
+                &child.attempt_id
+            };
+            let input_id = format!("child-result:{}:{}", child.task_id, attempt);
+            if tasks.has_delivered_input(&input_id) {
+                continue;
+            }
             if let Err(error) = inbox.enqueue(Notification {
-                id: format!("child-result:{}:{}", child.task_id, entry.id),
+                id: input_id,
                 task_id: child.task_id.clone(),
                 kind: Some(NotificationKind::Message),
                 text,
@@ -165,3 +176,6 @@ pub(crate) fn activate(
     }
     tasks.set_recovery_diagnostics(diagnostics);
 }
+
+#[cfg(test)]
+mod tests;

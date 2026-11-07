@@ -38,6 +38,15 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Reopening a saved parent reconstructs child-task snapshots even when its own
+  turn finished normally. Lost-owner children become interrupted, never live;
+  explicit resume preserves task/transcript identity and atomically admits one
+  attempt. Bounded scan failures and admission-only tasks stay diagnostic rather
+  than appearing as an empty registry. Durable task/attempt keys deduplicate
+  recovery notices; unrelated custom receipts do not erase terminal results.
+  Rebuild/reinstall and restart Otto to use this behavior. Recovery does not
+  restore processes or automatically replay uncertain external effects.
+
 - Models receive explicit partial/withheld redaction notices and guidance to avoid
   placeholder searches, edits and encoding workarounds. Operational tools reject
   placeholder-bearing arguments before execution; genuine zero-match grep results

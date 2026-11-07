@@ -100,7 +100,7 @@ impl Updates {
 /// The per-session sub-agent task registry.
 pub struct Tasks {
     state: Mutex<State>,
-    admission_transcript: Option<Arc<dyn otto_core::session::Session + Send + Sync>>,
+    admission_transcript: Option<Arc<dyn crate::session::SessionHandle>>,
     inbox: Arc<Inbox>,
     /// `inbox` as the port every consumer uses.
     mailbox: Arc<dyn Mailbox>,
@@ -376,6 +376,8 @@ impl Tasks {
             match state.entries.get_mut(id) {
                 Some(entry) if !entry.task.is_final() => {
                     entry.task.status = status;
+                    entry.cancel = None;
+                    entry.in_tool = false;
                     entry.task.finished_at = Some(finished_at);
                     entry.task.result = result.to_string();
                     entry.task.error = task_error.to_string();

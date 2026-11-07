@@ -1,14 +1,14 @@
 //! Bounded, confined recovery discovery. Unknown evidence is never an empty scan.
 
-use std::collections::HashSet;
-use std::io::BufRead;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 
 use super::ChildRecord;
 
 const MAX_CHILDREN: usize = 4096;
 const MAX_CHILD_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_HEADER_BYTES: u64 = 64 * 1024;
+const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Coverage is separate from records: callers must display diagnostics even
 /// when no usable child can be reconstructed.
@@ -20,33 +20,21 @@ pub struct Inventory {
     pub directory_missing: bool,
 }
 
-/// Scans only the selected parent's direct child directory. Symlinks, oversized
-/// files, conflicting ids and invalid linkage are unavailable, never resumable.
-/// `parent` is the selected saved transcript, not a path taken from a child.
+/// Scans only the selected parent's direct child directory using pinned POSIX
+/// descriptors. Never follows stored parent paths. Duplicate identities are
+/// excluded, not arbitrarily selected as execution authority.
 pub fn inventory(parent: &Path) -> Inventory {
     let directory = parent.with_extension("");
     let mut result = Inventory {
         complete: true,
         ..Inventory::default()
     };
-    let entries = match std::fs::symlink_metadata(&directory) {
+    let dir = match crate::fsops::open_dir_no_follow(&directory) {
+        Ok(dir) => dir,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             result.directory_missing = true;
             return result;
         }
-        Ok(metadata) if metadata.file_type().is_dir() => std::fs::read_dir(&directory),
-        Ok(_) => {
-            result.diagnostics.push(format!(
-                "recovery: {} is not a real directory",
-                directory.display()
-            ));
-            result.complete = false;
-            return result;
-        }
-        Err(error) => Err(error),
-    };
-    let entries = match entries {
-        Ok(entries) => entries,
         Err(error) => {
             result.complete = false;
             result.diagnostics.push(format!(
@@ -56,62 +44,109 @@ pub fn inventory(parent: &Path) -> Inventory {
             return result;
         }
     };
+    let mut names = match crate::fsops::read_directory_names(&dir, MAX_CHILDREN) {
+        Ok(names) => names,
+        Err(error) => {
+            result.complete = false;
+            result
+                .diagnostics
+                .push(format!("recovery: directory coverage unavailable: {error}"));
+            return result;
+        }
+    };
+    names.sort();
     let mut task_ids = HashSet::new();
     let mut conflicts = HashSet::new();
-    let mut child_ids = HashSet::new();
-    for (index, entry) in entries.enumerate() {
-        if index >= MAX_CHILDREN {
-            result.complete = false;
-            result.diagnostics.push(format!(
-                "recovery: scan truncated at {MAX_CHILDREN} directory entries"
-            ));
-            break;
-        }
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                result.complete = false;
-                result
-                    .diagnostics
-                    .push(format!("recovery: directory entry unavailable: {error}"));
-                continue;
-            }
-        };
-        let path = entry.path();
+    let mut child_ids = HashMap::new();
+    let mut scan_bytes = 0;
+    for name in names {
+        let path = directory.join(&name);
         if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
             continue;
         }
         let checked = (|| -> Result<ChildRecord, String> {
-            let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-            if !metadata.file_type().is_file() || metadata.len() > MAX_CHILD_BYTES {
-                return Err("not a regular bounded transcript (symlinks are not followed)".into());
-            }
-            use std::io::Read;
-            let file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
-            let mut header = String::new();
-            std::io::BufReader::new(file.take(MAX_HEADER_BYTES))
-                .read_line(&mut header)
+            let file = crate::fsops::open_at_no_follow(&dir, &name, libc::O_RDONLY)
                 .map_err(|error| error.to_string())?;
-            let header: serde_json::Value =
-                serde_json::from_str(&header).map_err(|error| error.to_string())?;
-            let expected = parent.canonicalize().map_err(|error| error.to_string())?;
-            let linked = header
-                .get("parentSession")
-                .and_then(|value| value.as_str())
+            let metadata = file.metadata().map_err(|error| error.to_string())?;
+            if !metadata.is_file() || metadata.len() > MAX_CHILD_BYTES {
+                return Err("not a regular bounded transcript".into());
+            }
+            scan_bytes += metadata.len();
+            if scan_bytes > MAX_SCAN_BYTES {
+                return Err("aggregate scan byte limit exceeded".into());
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_CHILD_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            if bytes.len() as u64 > MAX_CHILD_BYTES {
+                return Err("child grew beyond scan limit".into());
+            }
+            let (decoded, messages) = crate::session::Store::decode_recovery_bytes(&bytes)
+                .map_err(|error| error.to_string())?;
+            let mut has_spec = false;
+            for entry in &decoded.entries {
+                let Some(custom) = &entry.custom else {
+                    continue;
+                };
+                if !matches!(
+                    custom.custom_type.as_str(),
+                    "otto.task_spec" | "otto.task_attempt" | "otto.task_result"
+                ) {
+                    continue;
+                }
+                let data = custom.data.as_ref().ok_or("missing lifecycle payload")?;
+                match custom.custom_type.as_str() {
+                    "otto.task_spec" => {
+                        if has_spec {
+                            return Err("multiple task specifications".into());
+                        }
+                        has_spec = true;
+                        serde_json::from_str::<super::TaskSpecData>(data.get())
+                            .map_err(|error| error.to_string())?;
+                    }
+                    "otto.task_attempt" => {
+                        let data: serde_json::Value =
+                            serde_json::from_str(data.get()).map_err(|error| error.to_string())?;
+                        if data.get("version").and_then(|value| value.as_u64()) != Some(1)
+                            || data
+                                .get("attemptId")
+                                .and_then(|value| value.as_str())
+                                .is_none_or(str::is_empty)
+                        {
+                            return Err("unsupported or malformed attempt fact".into());
+                        }
+                    }
+                    _ => {
+                        let data: serde_json::Value =
+                            serde_json::from_str(data.get()).map_err(|error| error.to_string())?;
+                        if data
+                            .get("status")
+                            .and_then(|value| value.as_str())
+                            .is_none_or(|status| {
+                                !matches!(
+                                    status,
+                                    "succeeded" | "failed" | "canceled" | "interrupted"
+                                )
+                            })
+                        {
+                            return Err("unsupported or malformed terminal fact".into());
+                        }
+                    }
+                }
+            }
+            let expected = crate::fsops::clean_go_path(&parent.to_string_lossy());
+            let linked = decoded
+                .header
+                .parent_session
+                .as_deref()
                 .ok_or("missing parentSession linkage")?;
-            if Path::new(linked)
-                .canonicalize()
-                .map_err(|error| error.to_string())?
-                != expected
-            {
+            if crate::fsops::clean_go_path(linked) != expected {
                 return Err("parentSession does not match selected parent".into());
             }
-            let child_id = header
-                .get("id")
-                .and_then(|value| value.as_str())
-                .ok_or("missing child id")?;
-            let record = super::scan_one(&path)
-                .ok_or("unreadable transcript or missing/invalid task spec")?;
+            let child_id = &decoded.header.id;
+            let record = super::record_from_entries(&path, &decoded.entries, &messages)
+                .ok_or("missing/invalid task spec")?;
             let counter = record
                 .task_id
                 .strip_prefix('t')
@@ -126,8 +161,9 @@ pub fn inventory(parent: &Path) -> Inventory {
             if !task_ids.insert(record.task_id.clone()) {
                 conflicts.insert(record.task_id.clone());
             }
-            if !child_ids.insert(child_id.to_owned()) {
-                return Err("duplicate child session identity".into());
+            if let Some(previous) = child_ids.insert(child_id.clone(), record.task_id.clone()) {
+                conflicts.insert(previous);
+                conflicts.insert(record.task_id.clone());
             }
             Ok(record)
         })();
@@ -140,6 +176,9 @@ pub fn inventory(parent: &Path) -> Inventory {
                     .push(format!("recovery: {}: {error}", path.display()));
             }
         }
+        if scan_bytes > MAX_SCAN_BYTES {
+            break;
+        }
     }
     result
         .records
@@ -147,7 +186,7 @@ pub fn inventory(parent: &Path) -> Inventory {
     for id in conflicts {
         result.complete = false;
         result.diagnostics.push(format!(
-            "recovery: conflicting transcripts for {id}; resume unavailable"
+            "recovery: conflicting identity for {id}; resume unavailable"
         ));
     }
     result

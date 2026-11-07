@@ -7,6 +7,8 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+## 0.5.0 - 2026-11-07
+
 ### Added
 
 - `otto serve` exposes memory management over HTTP under

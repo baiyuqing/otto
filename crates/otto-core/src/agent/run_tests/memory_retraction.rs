@@ -41,7 +41,8 @@ async fn unreferenced_recall_skips_lifecycle_and_keeps_content() {
     assert!(request_text(&agent, 0).contains("UNREFERENCED-MARKER"));
 }
 
-#[tokio::test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn provenance_stays_adjacent_with_memory_retraction_and_changing_recall() {
     use crate::model::{InputProvenance, InputSource};
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));

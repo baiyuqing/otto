@@ -140,7 +140,7 @@ fn record_from_entries(
         .iter()
         .any(|message| message.role == Role::User && message.text() == spec.prompt);
 
-    let unanswered = unanswered_calls_from(&pending_tool_calls(&messages).unwrap_or_default());
+    let unanswered = unanswered_calls_from(&pending_tool_calls(messages).unwrap_or_default());
 
     let last_assistant_text = messages
         .iter()

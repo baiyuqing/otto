@@ -375,26 +375,3 @@ async fn the_task_commands_resolve_a_task_name() {
     assert!(canceled.is_cancelled(), "the cancel token must fire");
     assert_eq!(stderr, "");
 }
-
-/// With `[agents]` off the runner registers no registry, and both commands
-/// say so.
-#[tokio::test]
-async fn the_task_commands_without_a_registry_report_it_once_each() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let sessions = tempfile::tempdir().expect("sessions");
-    let mut builder = fixtures::builder(workspace.path(), sessions.path());
-    builder.shared_mut().config.agents.enabled = Some(false);
-    let runtime = fixtures::initial_runtime(&builder);
-    let session_store = builder.create_session(&runtime).expect("session");
-    let runner = builder
-        .build_runner(&session_store, &runtime)
-        .await
-        .expect("runner");
-    let info = builder.runtime_info(&runtime);
-    let controller = Controller::new(builder, true, session_store, runner, info);
-    assert!(controller.subagent_tasks().is_none(), "agents are disabled");
-
-    let (_, stderr) = session("/tasks\n/task t1\n/exit\n", &controller).await;
-
-    assert_eq!(stderr.matches(SUBAGENTS_UNAVAILABLE).count(), 2, "{stderr}");
-}

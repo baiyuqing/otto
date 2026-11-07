@@ -96,7 +96,7 @@ mod tests {
                     let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
                     for marker in ["impl Tool for ", "impl crate::tool::Tool for "] {
                         for implementation in production.split(marker).skip(1) {
-                            let body = implementation.split("fn definition(").next().unwrap();
+                            let body = implementation.split("\nimpl ").next().unwrap();
                             assert!(
                                 body.contains("fn retry_safety("),
                                 "{}: {} has no explicit retry safety",

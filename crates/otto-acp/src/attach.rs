@@ -370,8 +370,7 @@ impl Relay {
         text: &str,
         channel: Option<Channel>,
         origin: Option<&Origin>,
-        request_id: Option<&str>,
-        input_id: Option<&str>,
+        (request_id, input_id): (Option<&str>, Option<&str>),
     ) -> Result<otto::client::TurnStream, agent_client_protocol_schema::v1::Error> {
         if self.lost.is_cancelled() {
             return Err(error(INTERNAL_ERROR, LOST));

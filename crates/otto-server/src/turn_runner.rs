@@ -482,10 +482,8 @@ impl Server {
             let cancel = self.cancel.child_token();
             let session_id = session.ctrl.info().session_id;
             let log = Arc::clone(&self.log);
-            if busy {
-                if let Some(origin) = &mut input_provenance {
-                    origin.delivery = otto_core::model::InputDelivery::Queued;
-                }
+            if busy && let Some(origin) = &mut input_provenance {
+                origin.delivery = otto_core::model::InputDelivery::Queued;
             }
             let (turn, running) = if busy {
                 // The saved copy needs an input id so a restore can tell
@@ -552,12 +550,15 @@ impl Server {
         if let Some((text, image, channel, origin, input_id, input_provenance)) = running {
             self.spawn_user_turn(
                 session,
-                Arc::clone(&turn),
-                text,
-                image,
-                (channel, origin),
-                input_id,
-                input_provenance,
+                QueuedTurn {
+                    turn: Arc::clone(&turn),
+                    text,
+                    image,
+                    channel,
+                    origin,
+                    input_id,
+                    input_provenance,
+                },
             );
         }
         Ok(turn)
@@ -586,15 +587,7 @@ impl Server {
         self.bump_status();
         if let Some(next) = next {
             session.touch();
-            self.spawn_user_turn(
-                session,
-                next.turn,
-                next.text,
-                next.image,
-                (next.channel, next.origin),
-                next.input_id,
-                next.input_provenance,
-            );
+            self.spawn_user_turn(session, next);
         }
     }
 
@@ -602,12 +595,15 @@ impl Server {
     pub(super) fn spawn_user_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
-        turn: Arc<Turn>,
-        text: String,
-        image: Option<Block>,
-        (channel, origin): (Option<Channel>, Option<otto::schedule::Origin>),
-        input_id: Option<String>,
-        input_provenance: Option<otto_core::model::InputProvenance>,
+        QueuedTurn {
+            turn,
+            text,
+            image,
+            channel,
+            origin,
+            input_id,
+            input_provenance,
+        }: QueuedTurn,
     ) {
         let mut user_event = WireEvent::user_message(&text, image.is_some());
         user_event.input_id = input_id.clone().unwrap_or_default();

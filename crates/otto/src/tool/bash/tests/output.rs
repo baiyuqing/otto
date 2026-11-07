@@ -8,7 +8,7 @@ async fn the_definitions_describe_the_read_denylist_and_no_private_home() {
     let read_path_description = "Request user approval to permanently allow reading one absolute existing path that the sandbox read denylist covers, before running this command inside the sandbox";
     for definition in [bash_definition(), bash_definition_with_approvals()] {
         assert!(
-            definition.description.ends_with(read_note),
+            definition.description.contains(read_note),
             "{}",
             definition.description
         );

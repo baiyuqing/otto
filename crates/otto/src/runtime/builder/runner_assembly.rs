@@ -39,6 +39,9 @@ impl Builder {
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let mut tools = self.builtin_file_tools(max_output);
+        tools.push(Box::new(crate::tool::session_info::SessionInfo {
+            session_id: session.header().id,
+        }));
         // Parent-only: child registries are built before their session exists,
         // so only the parent can bind verdict evidence to authoritative history.
         tools.push(Box::new(verification::SubmitVerification::new(

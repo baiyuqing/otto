@@ -650,14 +650,13 @@ mod mcp_tests;
 /// `<parent without .jsonl>/<task id>-<child id>.jsonl`. A parent with no file
 /// (`--no-session`, or nothing written yet) keeps its children in memory.
 fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) -> ChildSession {
-    Arc::new(move |task_id: &str| {
+    Arc::new(move |task_id: &str, session_id: &str| {
         let parent_path = parent.path();
         if parent_path.is_empty() {
             return Ok(None);
         }
         let mut header = parent.header();
-        header.id = super::builder::random_id()
-            .map_err(|error| format!("create sub-agent session id: {error}"))?;
+        header.id = session_id.to_owned();
         header.created_at = chrono::Utc::now();
         let name = format!("{task_id}-{}", header.id);
         let (store, path) =

@@ -7,6 +7,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Added
+
+- `/session` offers Copy Session ID (the default) and Copy all displayed details.
+  Up/Down selects, Enter copies and Esc closes; the popup remains open with copy
+  feedback. Attached sessions copy on the terminal client, not the server.
+
+- The read-only `session_info {}` tool returns only the executing runner's own
+  session ID, including isolated child identities and in-memory runs. Persisted
+  children retain their transcript ID on resume. Rebuild/reinstall and restart
+  Otto to use the new built-in in an existing installation.
+
 ### Breaking changes
 
 - `otto storage migrate`, `otto storage init`, `otto storage transfer` and

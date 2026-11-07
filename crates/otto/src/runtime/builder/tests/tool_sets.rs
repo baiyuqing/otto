@@ -45,6 +45,7 @@ async fn builtin_file_tools_are_registered_in_a_fixed_order() {
             "ls",
             "write",
             "edit",
+            "session_info",
             "submit_verification",
             "web_fetch",
             "web_search",
@@ -216,7 +217,7 @@ async fn the_bash_tool_is_added_only_when_the_sandbox_is_usable() {
         .await
         .expect("runner");
     let names = tool_names(&runner);
-    assert_eq!(names.iter().position(|name| name == "bash"), Some(9));
+    assert_eq!(names.iter().position(|name| name == "bash"), Some(10));
 }
 
 #[tokio::test]

@@ -235,39 +235,174 @@ components:
           type: integer
         cached_input_tokens:
           type: integer
+        cache_write_input_tokens:
+          type: integer
+          minimum: 0
+          description: Newly cached input tokens included in input_tokens; omitted when not reported.
+        cache_write_1h_input_tokens:
+          type: integer
+          minimum: 0
+          description: One-hour cache writes, included in cache_write_input_tokens; omitted when not reported.
+      required: [input_tokens, output_tokens]
     UsageSummary:
       type: object
       properties:
-        requests:
+        usage_events:
           type: integer
-        reported_requests:
+          minimum: 0
+        reported_usage_events:
           type: integer
+          minimum: 0
+        logical_operations:
+          type: integer
+          minimum: 0
+        actual_attempts:
+          type: integer
+          minimum: 0
+        succeeded_operations:
+          type: integer
+          minimum: 0
+        failed_operations:
+          type: integer
+          minimum: 0
+        canceled_operations:
+          type: integer
+          minimum: 0
+        deadline_exceeded_operations:
+          type: integer
+          minimum: 0
+        interrupted_operations:
+          type: integer
+          minimum: 0
+        not_started_operations:
+          type: integer
+          minimum: 0
+        known_no_effect_operations:
+          type: integer
+          minimum: 0
+        completed_effect_operations:
+          type: integer
+          minimum: 0
+        unknown_effect_operations:
+          type: integer
+          minimum: 0
         input_tokens:
           type: integer
+          minimum: 0
         output_tokens:
           type: integer
+          minimum: 0
         cached_input_tokens:
-          type: integer
+          type: [integer, "null"]
+          description: Cache reads, or null when any reported usage lacks this breakdown.
+        cache_write_input_tokens:
+          type: [integer, "null"]
+          description: Cache writes, or null when any reported usage lacks this breakdown.
+        cache_write_1h_input_tokens:
+          type: [integer, "null"]
+          description: One-hour cache writes, or null when any reported usage lacks this breakdown.
         cache_hit_rate:
-          type: number
-      required: [requests, reported_requests, input_tokens, output_tokens, cached_input_tokens, cache_hit_rate]
+          type: [number, "null"]
+      required:
+        - usage_events
+        - reported_usage_events
+        - logical_operations
+        - actual_attempts
+        - succeeded_operations
+        - failed_operations
+        - canceled_operations
+        - deadline_exceeded_operations
+        - interrupted_operations
+        - not_started_operations
+        - known_no_effect_operations
+        - completed_effect_operations
+        - unknown_effect_operations
+        - input_tokens
+        - output_tokens
+        - cached_input_tokens
+        - cache_write_input_tokens
+        - cache_write_1h_input_tokens
+        - cache_hit_rate
     DailyUsage:
       type: object
       properties:
         date:
           type: string
           format: date
-        requests:
+        usage_events:
           type: integer
-        reported_requests:
+          minimum: 0
+        reported_usage_events:
           type: integer
+          minimum: 0
+        logical_operations:
+          type: integer
+          minimum: 0
+        actual_attempts:
+          type: integer
+          minimum: 0
+        succeeded_operations:
+          type: integer
+          minimum: 0
+        failed_operations:
+          type: integer
+          minimum: 0
+        canceled_operations:
+          type: integer
+          minimum: 0
+        deadline_exceeded_operations:
+          type: integer
+          minimum: 0
+        interrupted_operations:
+          type: integer
+          minimum: 0
+        not_started_operations:
+          type: integer
+          minimum: 0
+        known_no_effect_operations:
+          type: integer
+          minimum: 0
+        completed_effect_operations:
+          type: integer
+          minimum: 0
+        unknown_effect_operations:
+          type: integer
+          minimum: 0
         input_tokens:
           type: integer
+          minimum: 0
         output_tokens:
           type: integer
+          minimum: 0
         cached_input_tokens:
-          type: integer
-      required: [date, requests, reported_requests, input_tokens, output_tokens, cached_input_tokens]
+          type: [integer, "null"]
+          description: Cache reads, or null when any reported usage lacks this breakdown.
+        cache_write_input_tokens:
+          type: [integer, "null"]
+          description: Cache writes, or null when any reported usage lacks this breakdown.
+        cache_write_1h_input_tokens:
+          type: [integer, "null"]
+          description: One-hour cache writes, or null when any reported usage lacks this breakdown.
+      required:
+        - date
+        - usage_events
+        - reported_usage_events
+        - logical_operations
+        - actual_attempts
+        - succeeded_operations
+        - failed_operations
+        - canceled_operations
+        - deadline_exceeded_operations
+        - interrupted_operations
+        - not_started_operations
+        - known_no_effect_operations
+        - completed_effect_operations
+        - unknown_effect_operations
+        - input_tokens
+        - output_tokens
+        - cached_input_tokens
+        - cache_write_input_tokens
+        - cache_write_1h_input_tokens
     UsageAnalysis:
       type: object
       properties:

@@ -260,7 +260,8 @@ pub fn latest_compaction_metadata(
         .as_ref()
         .ok_or_else(|| PiError::invalid("compaction payload is required"))?;
     let (first_kept, retained_tail_only) = resolve_compaction_boundary(&path, latest)?;
-    let usage = optional_pi_usage_to_model(compaction.usage.as_ref())?;
+    let usage =
+        optional_pi_usage_to_model(compaction.usage.as_ref(), compaction.details.as_deref())?;
     let first_post_checkpoint_message_id = path[latest + 1..]
         .iter()
         .find(|candidate| is_real_compaction_context_entry(candidate))

@@ -51,6 +51,7 @@ impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
 
 mod auto_compaction;
 mod capability_plan;
+mod claude_cache_prefix;
 mod context_oneshot;
 mod durable_boundaries;
 mod input_delivery;
@@ -160,6 +161,7 @@ impl Turn {
                         input_tokens: 5,
                         output_tokens: 7,
                         cached_input_tokens: 0,
+                        ..Default::default()
                     }),
                     ..Message::default()
                 },
@@ -178,6 +180,7 @@ impl Turn {
                         input_tokens: 50,
                         output_tokens: 2,
                         cached_input_tokens: 20,
+                        ..Default::default()
                     }),
                     ..Message::default()
                 },

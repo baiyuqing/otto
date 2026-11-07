@@ -429,6 +429,7 @@ mod tests {
     fn full_request_encodes_every_field() {
         let request = Request {
             cache_key: String::new(),
+            cache_boundaries: Vec::new(),
             model: "test-model".into(),
             system_prompt: "sys".into(),
             thinking: "high".into(),

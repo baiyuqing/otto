@@ -225,7 +225,11 @@ pub fn build_context(
                         model: message.model.clone(),
                     });
                     if let Some(usage) = pi_assistant_usage_to_model(message)? {
-                        resolved.usage = add_resolved_usage(resolved.usage, Some(&usage));
+                        resolved.usage = if resolved.usage_present {
+                            add_resolved_usage(resolved.usage, Some(&usage))
+                        } else {
+                            usage
+                        };
                         resolved.usage_present = true;
                     }
                 }
@@ -257,8 +261,15 @@ pub fn build_context(
                 // not leave an older provider-owned opaque prefix active.
                 resolved.remote_compaction = None;
                 remote_compaction_entry_index = None;
-                let usage = optional_pi_usage_to_model(compaction.usage.as_ref())?;
-                resolved.usage = add_resolved_usage(resolved.usage, usage.as_ref());
+                let usage = optional_pi_usage_to_model(
+                    compaction.usage.as_ref(),
+                    compaction.details.as_deref(),
+                )?;
+                resolved.usage = if resolved.usage_present {
+                    add_resolved_usage(resolved.usage, usage.as_ref())
+                } else {
+                    usage.unwrap_or_default()
+                };
                 if compaction.usage.is_some() {
                     resolved.usage_present = true;
                 }
@@ -268,8 +279,13 @@ pub fn build_context(
                     .branch_summary
                     .as_ref()
                     .ok_or_else(|| PiError::invalid("branch_summary payload is required"))?;
-                let usage = optional_pi_usage_to_model(summary.usage.as_ref())?;
-                resolved.usage = add_resolved_usage(resolved.usage, usage.as_ref());
+                let usage =
+                    optional_pi_usage_to_model(summary.usage.as_ref(), summary.details.as_deref())?;
+                resolved.usage = if resolved.usage_present {
+                    add_resolved_usage(resolved.usage, usage.as_ref())
+                } else {
+                    usage.unwrap_or_default()
+                };
                 if summary.usage.is_some() {
                     resolved.usage_present = true;
                 }
@@ -286,7 +302,11 @@ pub fn build_context(
                 if let Some(details) = decode_pi_otto_details(custom.details.as_deref())?
                     && let Some(usage) = details.usage
                 {
-                    resolved.usage = add_resolved_usage(resolved.usage, Some(&usage));
+                    resolved.usage = if resolved.usage_present {
+                        add_resolved_usage(resolved.usage, Some(&usage))
+                    } else {
+                        usage
+                    };
                     resolved.usage_present = true;
                 }
             }

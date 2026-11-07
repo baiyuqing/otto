@@ -528,6 +528,7 @@ mod tests {
                     input_tokens: 5,
                     output_tokens: 2,
                     cached_input_tokens: 4,
+                    ..Default::default()
                 },
                 present: true,
                 cached_input_tokens_present: true,

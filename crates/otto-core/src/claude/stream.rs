@@ -4,12 +4,13 @@
 //! message_stop completes the response, finalizing any blocks without an explicit
 //! stop using the same strict tool-input validation. Errors are content-free.
 //! After any error, discard this assembler.
+use super::cache_usage::CacheUsage;
 use super::{
     json,
     protocol::finish_reason,
     tool_input::{ToolInputError, ToolInputFailure, ToolInputFailureKind},
 };
-use crate::model::{Block, BlockType, FinishReason, Message, Role, Usage};
+use crate::model::{Block, BlockType, FinishReason, Message, Role};
 use crate::provider::{Response, StreamEvent};
 use serde::Deserialize;
 use serde_json::{Value, value::RawValue};
@@ -84,7 +85,7 @@ pub struct StreamAssembler {
     id: String,
     blocks: BTreeMap<u64, PendingBlock>,
     call_ids: HashSet<String>,
-    usage: Option<Usage>,
+    usage: Option<CacheUsage>,
     finish: Option<FinishReason>,
     stop_reason: &'static str,
     reported_output_tokens: Option<i64>,
@@ -168,21 +169,10 @@ impl StreamAssembler {
         Ok(())
     }
     fn usage(&mut self, value: &Value) -> Result<(), StreamError> {
-        let object = value.as_object().ok_or(StreamError::Decode)?;
-        let usage = self.usage.get_or_insert_with(Usage::default);
-        for (key, target) in [
-            ("input_tokens", &mut usage.input_tokens),
-            ("output_tokens", &mut usage.output_tokens),
-        ] {
-            if let Some(count) = object.get(key).filter(|count| !count.is_null()) {
-                let count = count
-                    .as_i64()
-                    .filter(|count| *count >= 0)
-                    .ok_or(StreamError::Decode)?;
-                *target = count;
-            }
-        }
-        if let Some(count) = object.get("output_tokens").and_then(Value::as_i64) {
+        self.usage
+            .get_or_insert_with(CacheUsage::default)
+            .update(value)?;
+        if let Some(count) = value.get("output_tokens").and_then(Value::as_i64) {
             self.reported_output_tokens = Some(count);
         }
         Ok(())
@@ -409,6 +399,9 @@ impl StreamAssembler {
                     }
                     .into());
                 }
+                if let Some(usage) = &self.usage {
+                    usage.normalized()?;
+                }
                 self.done = true;
             }
             _ => {}
@@ -434,10 +427,15 @@ impl StreamAssembler {
                     .into_values()
                     .filter_map(|pending| pending.block)
                     .collect(),
-                usage: self.usage,
+                usage: self
+                    .usage
+                    .as_ref()
+                    .map(CacheUsage::normalized)
+                    .transpose()?,
                 finish_reason: self.finish,
                 ..Message::default()
             },
+            cached_input_tokens_present: self.usage.as_ref().is_some_and(CacheUsage::read_present),
             ..Response::default()
         })
     }

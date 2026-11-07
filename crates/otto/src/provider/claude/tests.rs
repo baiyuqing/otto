@@ -1,3 +1,4 @@
+mod cache_usage_tests;
 mod recovery_tests;
 mod stream_tests;
 

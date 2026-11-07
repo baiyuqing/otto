@@ -161,6 +161,7 @@ fn assistant_tool_call() -> Response {
                 input_tokens: 10,
                 output_tokens: 3,
                 cached_input_tokens: 0,
+                ..Default::default()
             }),
             blocks: vec![Block {
                 block_type: BlockType::ToolCall,
@@ -489,7 +490,8 @@ async fn run_executes_a_tool_turn_then_a_text_turn() {
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 3,
-                    cached_input_tokens: 0
+                    cached_input_tokens: 0,
+                    ..Default::default()
                 },
                 present: true,
                 cached_input_tokens_present: false,

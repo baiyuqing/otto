@@ -32,11 +32,13 @@ fn usage_is_combined_only_when_both_sides_reported_it() {
         input_tokens: 1,
         output_tokens: 2,
         cached_input_tokens: 3,
+        ..Default::default()
     };
     let right = Usage {
         input_tokens: 10,
         output_tokens: 20,
         cached_input_tokens: 30,
+        ..Default::default()
     };
     assert_eq!(
         combine_compaction_usage(left, false, right, true),
@@ -53,6 +55,7 @@ fn usage_is_combined_only_when_both_sides_reported_it() {
                 input_tokens: 11,
                 output_tokens: 22,
                 cached_input_tokens: 33,
+                ..Default::default()
             },
             true
         )

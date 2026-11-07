@@ -22,7 +22,10 @@ pub fn pi_entry_to_context_messages(entry: &PiEntry) -> Result<Vec<Message>, PiE
                 .compaction
                 .as_ref()
                 .ok_or_else(|| PiError::invalid("compaction payload is required"))?;
-            let usage = optional_pi_usage_to_model(compaction.usage.as_ref())?;
+            let usage = optional_pi_usage_to_model(
+                compaction.usage.as_ref(),
+                compaction.details.as_deref(),
+            )?;
             let mut summary = new_context_message(
                 &entry.id,
                 COMPACTION_CONTEXT_TYPE,
@@ -55,7 +58,8 @@ pub fn pi_entry_to_context_messages(entry: &PiEntry) -> Result<Vec<Message>, PiE
                 .branch_summary
                 .as_ref()
                 .ok_or_else(|| PiError::invalid("branch_summary payload is required"))?;
-            let usage = optional_pi_usage_to_model(branch.usage.as_ref())?;
+            let usage =
+                optional_pi_usage_to_model(branch.usage.as_ref(), branch.details.as_deref())?;
             Ok(vec![new_context_message(
                 &entry.id,
                 BRANCH_CONTEXT_TYPE,
@@ -347,18 +351,22 @@ fn custom_context_text(custom_type: &str, text: &str) -> String {
 
 pub(crate) fn optional_pi_usage_to_model(
     usage: Option<&PiUsage>,
+    details: Option<&RawValue>,
 ) -> Result<Option<Usage>, PiError> {
     let Some(usage) = usage else {
         return Ok(None);
     };
-    match pi_usage_to_model(Some(usage))? {
-        Some(converted) => Ok(Some(converted)),
-        None => Ok(Some(Usage::default())),
-    }
+    let converted = pi_usage_to_model(Some(usage))?.or(Some(Usage::default()));
+    restore_usage_details(converted, usage, details)
 }
 
 pub(super) fn pi_assistant_usage_to_model(wire: &PiMessage) -> Result<Option<Usage>, PiError> {
-    if let Some(usage) = pi_usage_to_model(wire.usage.as_ref())? {
+    let converted = pi_usage_to_model(wire.usage.as_ref())?;
+    let wire_usage = wire
+        .usage
+        .as_ref()
+        .ok_or_else(|| PiError::invalid("assistant usage is required"))?;
+    if let Some(usage) = restore_usage_details(converted, wire_usage, wire.details.as_deref())? {
         return Ok(Some(usage));
     }
     if let Some(details) = decode_pi_otto_details(wire.details.as_deref())?
@@ -369,23 +377,44 @@ pub(super) fn pi_assistant_usage_to_model(wire: &PiMessage) -> Result<Option<Usa
     Ok(None)
 }
 
+fn restore_usage_details(
+    converted: Option<Usage>,
+    wire: &PiUsage,
+    details: Option<&RawValue>,
+) -> Result<Option<Usage>, PiError> {
+    let Some(details) = decode_pi_otto_details(details)? else {
+        return Ok(converted);
+    };
+    let Some(usage) = details.usage else {
+        return Ok(converted);
+    };
+    let encoded = model_usage_to_pi(Some(&usage))?.expect("present usage");
+    if (
+        encoded.input,
+        encoded.output,
+        encoded.cache_read,
+        encoded.cache_write,
+        encoded.cache_write_1h,
+    ) != (
+        wire.input,
+        wire.output,
+        wire.cache_read,
+        wire.cache_write,
+        wire.cache_write_1h,
+    ) {
+        return Err(PiError::invalid(
+            "Otto usage details disagree with Pi usage",
+        ));
+    }
+    Ok(Some(usage))
+}
+
 /// Adds `usage` into `total`, saturating instead of overflowing.
-pub fn add_resolved_usage(mut total: Usage, usage: Option<&Usage>) -> Usage {
+pub fn add_resolved_usage(total: Usage, usage: Option<&Usage>) -> Usage {
     let Some(usage) = usage else {
         return total;
     };
-    total.input_tokens = saturating_usage_add(total.input_tokens, usage.input_tokens);
-    total.output_tokens = saturating_usage_add(total.output_tokens, usage.output_tokens);
-    total.cached_input_tokens =
-        saturating_usage_add(total.cached_input_tokens, usage.cached_input_tokens);
-    total
-}
-
-fn saturating_usage_add(total: i64, delta: i64) -> i64 {
-    if delta <= 0 {
-        return total;
-    }
-    total.saturating_add(delta)
+    total.saturating_add(*usage)
 }
 
 pub(super) fn known_pi_entry_type(entry_type: &str) -> bool {

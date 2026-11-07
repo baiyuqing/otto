@@ -298,6 +298,7 @@ async fn pending_notifications_are_delivered_before_the_user_message() {
             input_tokens: 2,
             output_tokens: 1,
             cached_input_tokens: 0,
+            ..Default::default()
         }),
         ..Default::default()
     });

@@ -114,6 +114,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: 0,
+                ..Default::default()
             }),
             request: Some(RequestEstimate {
                 system_prompt_tokens: 1,

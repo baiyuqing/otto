@@ -383,6 +383,8 @@ async fn a_task_keeps_its_cache_breakdown_only_while_every_report_has_one() {
         input_tokens: 10,
         output_tokens: 2,
         cached_input_tokens: 4,
+        cache_write_input_tokens: Some(3),
+        cache_write_1h_input_tokens: Some(1),
     };
 
     tasks.record_provider_step(&task.id, usage, "", true, true);
@@ -399,6 +401,8 @@ async fn a_task_keeps_its_cache_breakdown_only_while_every_report_has_one() {
         "one report without the breakdown leaves the cached total unmeasured"
     );
     assert_eq!(mixed.usage.cached_input_tokens, 8);
+    assert_eq!(mixed.usage.cache_write_input_tokens, Some(6));
+    assert_eq!(mixed.usage.cache_write_1h_input_tokens, Some(2));
 }
 
 #[tokio::test]

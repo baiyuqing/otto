@@ -204,6 +204,7 @@ fn store_snapshot_tracks_context_input_across_compaction() {
                 input_tokens: 40,
                 output_tokens: 8,
                 cached_input_tokens: 10,
+                ..Default::default()
             },
         ))
         .expect("append");

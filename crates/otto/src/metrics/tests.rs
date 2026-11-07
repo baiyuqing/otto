@@ -306,6 +306,7 @@ fn rendering_is_deterministic() {
         input_tokens: 5,
         output_tokens: 3,
         cached_input_tokens: 1,
+        ..Default::default()
     });
     let process_sample = process::sample();
     assert_eq!(

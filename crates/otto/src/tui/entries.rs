@@ -179,9 +179,17 @@ pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
     let mut pending: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
     let mut usage = Usage::default();
+    let mut usage_present = false;
 
     for (message_index, message) in history.iter().enumerate() {
-        usage = add_usage_totals(usage, message.usage.as_ref());
+        if let Some(report) = message.usage {
+            usage = if usage_present {
+                usage.saturating_add(report)
+            } else {
+                report
+            };
+            usage_present = true;
+        }
         if message.role == Role::Context && !message.display {
             continue;
         }
@@ -496,28 +504,6 @@ fn pair_tool_result(
         entry.tool_name = block.tool_name.clone();
     }
     true
-}
-
-/// Saturating, negative-clamped accumulation. Saturating, non-negative addition
-/// of usage totals, in the `i64` `otto_core::model::Usage` uses.
-fn add_usage_totals(total: Usage, usage: Option<&Usage>) -> Usage {
-    let Some(usage) = usage else { return total };
-    Usage {
-        input_tokens: saturating_add_non_negative(total.input_tokens, usage.input_tokens),
-        output_tokens: saturating_add_non_negative(total.output_tokens, usage.output_tokens),
-        cached_input_tokens: saturating_add_non_negative(
-            total.cached_input_tokens,
-            usage.cached_input_tokens,
-        ),
-    }
-}
-
-fn saturating_add_non_negative(total: i64, delta: i64) -> i64 {
-    let total = total.max(0);
-    if delta <= 0 {
-        return total;
-    }
-    total.saturating_add(delta)
 }
 
 #[cfg(test)]

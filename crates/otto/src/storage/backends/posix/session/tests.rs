@@ -32,6 +32,7 @@ use crate::faults::files::{FaultyFileDriver, FileOp};
 use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
 use crate::storage::drivers::posix::PosixDriver;
 
+mod cache_usage;
 mod compaction_list;
 mod create_append;
 mod deferred_custom;

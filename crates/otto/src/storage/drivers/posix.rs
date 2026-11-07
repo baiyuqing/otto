@@ -90,19 +90,10 @@ pub fn open_no_follow(path: &Path, flags: libc::c_int) -> io::Result<File> {
 /// time the session is open, which is longer than this grace.
 pub(crate) const SESSION_LOCK_SPAWN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Nonblocking shared writer-admission lease on a stable pinned file.
-pub fn try_lock_shared(file: &File) -> io::Result<()> {
-    try_lock(file, libc::LOCK_SH)
-}
-
-/// Nonblocking exclusive freeze on the same writer-admission file.
+/// Nonblocking exclusive advisory lock on `file`.
 pub fn try_lock_exclusive(file: &File) -> io::Result<()> {
-    try_lock(file, libc::LOCK_EX)
-}
-
-fn try_lock(file: &File, mode: libc::c_int) -> io::Result<()> {
     // SAFETY: the borrowed descriptor stays open through this call.
-    if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } < 0 {
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -563,12 +554,6 @@ impl crate::storage::files::JournalFile for File {
     fn lock_exclusive(&self) -> io::Result<()> {
         lock_exclusive(self)
     }
-    fn try_lock_shared(&self) -> io::Result<()> {
-        try_lock_shared(self)
-    }
-    fn try_lock_exclusive(&self) -> io::Result<()> {
-        try_lock_exclusive(self)
-    }
     fn sync_all(&self) -> io::Result<()> {
         File::sync_all(self)
     }
@@ -615,41 +600,6 @@ mod tests {
         std::os::unix::fs::symlink(home.path().join("outside"), home.path().join("pinned/link"))
             .unwrap();
         assert!(root.open_journal("link", JournalOpen::ReadOnly).is_err());
-    }
-
-    #[test]
-    fn writer_admission_is_shared_and_freeze_is_exclusive() {
-        use crate::storage::files::{FileDriver, JournalOpen};
-        let home = tempfile::tempdir().unwrap();
-        let root = PosixDriver.open_root(home.path()).unwrap();
-        let first = root
-            .open_journal("admission", JournalOpen::CreateNew)
-            .unwrap();
-        let second = root
-            .open_journal("admission", JournalOpen::ReadWrite)
-            .unwrap();
-        let freeze = root
-            .open_journal("admission", JournalOpen::ReadWrite)
-            .unwrap();
-        first.try_lock_shared().unwrap();
-        second.try_lock_shared().unwrap();
-        assert_eq!(
-            freeze.try_lock_exclusive().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        drop(first);
-        assert!(freeze.try_lock_exclusive().is_err());
-        drop(second);
-        freeze.try_lock_exclusive().unwrap();
-        let writer = root
-            .open_journal("admission", JournalOpen::ReadWrite)
-            .unwrap();
-        assert_eq!(
-            writer.try_lock_shared().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        drop(freeze);
-        writer.try_lock_shared().unwrap();
     }
 
     #[test]

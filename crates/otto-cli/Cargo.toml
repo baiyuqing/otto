@@ -8,11 +8,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = ["storage-conformance"]
-# Gates the external storage backend conformance test; forwards to `otto`.
-storage-conformance = ["otto/storage-conformance"]
-
 # The shipped binary keeps its name; the package name tells it apart from the
 # `otto` library crate it composes.
 [[bin]]
@@ -29,7 +24,6 @@ chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal", "net"] }
 tokio-util.workspace = true

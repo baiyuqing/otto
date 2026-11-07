@@ -216,15 +216,12 @@ async fn open_current(
     // A lease-managed open can block up to 7*lease_seconds/6 (35s at the
     // default 30s lease) waiting out another host's holder; run it on a
     // blocking thread so it does not stall this async task's runtime worker.
-    let session_root = builder
-        .storage
-        .session_root(&builder.session_root)
-        .map_err(|error| builder.redact_error(&error, None))?;
+    let session_root = builder.session_root.clone();
     let storage = Arc::clone(&builder.storage);
     let workspace = builder.workspace_path.clone();
     let blocking_path = path.to_path_buf();
     let prepared = tokio::task::spawn_blocking(move || {
-        storage.sessions()?.prepare_listed(
+        storage.sessions().prepare_listed(
             &session_root,
             &workspace,
             &blocking_path.to_string_lossy(),

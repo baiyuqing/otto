@@ -29,13 +29,10 @@ impl Controller {
             return self.delete_current_session().await;
         }
         let _admission = self.begin_replacement()?;
-        let session_root = self
-            .builder
-            .storage
-            .session_root(&self.builder.session_root)?;
+        let session_root = self.builder.session_root.clone();
         self.builder
             .storage
-            .sessions()?
+            .sessions()
             .permanent_delete(&session_root, &self.builder.workspace_path, path)
             .map_err(|error| self.builder.redact_error(&error, None))
     }

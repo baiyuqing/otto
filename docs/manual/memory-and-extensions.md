@@ -265,15 +265,12 @@ upgrade. The source database is never modified; delete it yourself.
 
 ### Storage operations
 
-Storage routes cover approvals, workflows, schedule, usage, tasks, skill checks
-and memory advice; **not** `~/.otto/memory/`. The ordinary binary
-provides local SQLite/POSIX storage, not cloud/MySQL/PostgreSQL drivers. Linked
-extensions can register domain factories, configured only in user/managed
-sources. Secrets use endpoint environment bindings, never inline DSNs/options.
-Normal startup opens published namespaces; editing config does not initialize
-an empty replacement. Use `otto storage --help` for init/transfer options.
+Approvals, workflows, schedule, usage, tasks, skill checks and memory advice
+are stored in local SQLite databases under `~/.otto/`; sessions are POSIX
+files under `~/.otto/sessions/`. Memory is stored as files under
+`~/.otto/memory/`.
 
-For linked storage callers, SQLite's regular `execute`, `prepare` and query APIs
+For callers of `storage::Connection`, SQLite's regular `execute`, `prepare` and query APIs
 accept exactly one statement, rejecting stacked SQL and embedded NUL before
 live preparation. Validation uses SQLite's trigger-aware boundary recognizer on
 scratch state, outside the live connection lock. SQL text is limited to **8 MiB**
@@ -286,37 +283,6 @@ should use `execute_batch`, which intentionally permits multiple statements and
 does not provide these single-statement guards. Normal single-statement calls
 within the limits retain existing behavior, including accepted PRAGMA effects.
 
-Stop every affected process and prevent old binaries restarting before transfer:
-local locks cannot fence an uncooperating/distributed writer.
-
-```bash
-otto storage transfer "$HOME" /Volumes/otto-state-new transfer-20261019
-# Repeat the identical command to resume/reconcile an interrupted transfer.
-otto storage abort "$HOME" transfer-20261019
-```
-
-Destination parent must exist on a local volume outside source home; roots
-must not overlap. Transfer stages/verifies state then publishes one route
-generation. Restart using the same source home to follow the published route;
-keep source/staging data until destination startup is verified. Memory files
-are not copied. Abort restores source admission only before publication and
-retains staged bytes/checkpoints; it refuses published/uncertain unreconciled
-state. After publication, use another verified transfer to return, preserving
-new writes. Extension namespace/config/environment must match publication;
-this is coordinated one-host operation, not distributed writer fencing.
-
-For a legacy-schema database of an earlier Otto release,
-`otto storage migrate SOURCE DESTINATION` requires Python 3, a new destination in an existing directory, stopped writers,
-and preserves source bytes. It reconstructs canonical schemas and imports bound,
-typed row values, validating supported schema versions, all table/index definitions
-and row counts before publication; source DDL is never executed. Extra columns,
-indexes, expressions, triggers or modified constraints are rejected even when table
-names match. Previously these modifications could be copied; do not remove them
-blindly to force migration. Keep the original database and use its matching older
-Otto release to export logical records for a supported transfer, or retain that
-release until a compatible migration is available. A failed import does not publish
-the destination; retry to a new path after resolving compatibility. Memory
-databases are not supported. Do not mix old/new writers.
 Read usage peaks without the `sqlite3` tool using
 `otto storage window-peaks ~/.otto/usage.db <session-id>` (read-only JSON).
 

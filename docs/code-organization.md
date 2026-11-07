@@ -22,7 +22,7 @@ guide rather than being copied into those instruction files.
 | `chat-connector/` | Independent Go Telegram and Feishu connector that communicates with Otto through ACP | `chat-connector/cmd/otto-connect/` and `chat-connector/internal/` |
 | `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
-| `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories and logical migration ports | `runtime/storage.rs` composition and route registry |
+| `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories | `runtime/storage.rs` composition |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-tcp.sh` supervises the ACP TCP pair (`otto serve --acp-listen` plus `otto-connect`) | `Makefile` |
@@ -173,17 +173,15 @@ attach client mode, `dispatcher.rs` and `command.rs` route requests, and
 the composition root. Command modules: `acp`, `config_command`,
 `eval_command/`, `flags/`, `mcp/`, `memory_command/`, `memory_eval_command/`,
 `panic_cleanup`, `plugin`, `run/`, `sandbox_setup`, `serve/`, `setup`, `storage`,
-`storage_transfer/`, `terminate`, `trust`, `workflow`, `workspace_command`.
+`terminate`, `trust`, `workflow`, `workspace_command`.
 The crate depends on all four other crates and owns the `[[bin]] name = "otto"`
-target. Feature `storage-conformance` (default) gates
-`tests/external_storage_backend.rs`.
+target.
 
 Its integration tests in `crates/otto-cli/tests/` drive the built binary or
 `otto_cli::run`: `acp_attach`, `acp_stdio`, `binary_e2e`,
 `binary_e2e_unconfined`, `serve_listen`, `sigkill`, `sigterm`,
-`sqlite_migration`, `tui_attach_pty`, `tui_pty`, `version`,
-`external_storage_backend`, `embed_parity`, `plugin_cli`, with support code in
-`binary_harness/` and `external_storage/`. Run one with
+`tui_attach_pty`, `tui_pty`, `version`, `embed_parity`, `plugin_cli`, with
+support code in `binary_harness/`. Run one with
 `cargo test -p otto-cli --test <name>`.
 
 The other modules group native responsibilities:
@@ -192,7 +190,7 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
-  `typesafe/`, `storage/` (drivers, backend repositories, and migration ports),
+  `typesafe/`, `storage/` (drivers and backend repositories),
   `usage/`, `failover/`, `workflow/`, and `schedule/` (typed store port, tools, worker).
 - **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
   package validation and Skills/MCP adaptation with content-bound trust.
@@ -250,10 +248,8 @@ Domain directories own typed repository ports and state semantics. Concrete
 schema, physical row mappings, SQL and file operations live under
 `crates/otto/src/storage/backends/`; the small capability contracts and
 SQLite/POSIX drivers live beside them in `storage/`. `runtime/storage.rs`
-validates routes and capabilities, opens concrete repositories, and injects
-domain ports into consumers. Portable migration record definitions live beside
-their domain owners in `migration.rs` (`skill/check_migration.rs` for skill
-audits); approval envelopes also belong to their domains. Backend packages retain their physical mappings and I/O.
+opens concrete repositories at their local paths and injects domain ports into
+consumers. Backend packages retain their physical mappings and I/O.
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
@@ -263,16 +259,11 @@ audits); approval envelopes also belong to their domains. Backend packages retai
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/sqlite/{schedule,workflow}.rs` |
 | Tasks, usage, skill checks | Their domain repository modules | `storage/backends/sqlite/{tasks,usage,skill_checks}.rs` |
 
-The default registry uses the local SQLite driver for SQL-backed
-state and the confined POSIX file driver for sessions. The repository registry
-has a public extension entry point in `runtime/storage/backend.rs` and
-`otto_cli::run::run_with_backends`. Linked extensions implement `RepositoryFactory`;
-`config/storage.rs` in core supplies pure configuration. The shipped binary
-includes only its existing local backends. `storage/worker.rs` owns optional
-async adapter I/O, `storage/conformance.rs` exposes contract checks, and
-`crates/otto-cli/tests/external_storage_backend.rs` is an independently compiled acceptance
-crate using a different JSON repository. See the [storage contract](development/architecture.md#native-storage-contracts)
-for capability, migration, and compatibility boundaries.
+`runtime::storage::Storage` uses the local SQLite driver for SQL-backed
+state and the confined POSIX file driver for sessions. `storage/worker.rs` owns
+optional async adapter I/O. See the
+[storage contract](development/architecture.md#native-storage-contracts) for
+capability and compatibility boundaries.
 
 `subagent/reports.rs` owns persistent workspace research reports and automatic
 final-answer overflow capture; `subagent/scratch.rs` owns temporary downloads

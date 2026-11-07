@@ -104,22 +104,16 @@ impl Controller {
             .as_ref()
             .map(|current| current.session.path())
             .unwrap_or_default();
-        let session_root = self
-            .builder
-            .storage
-            .session_root(&self.builder.session_root)
-            .map_err(|error| self.builder.redact_error(&error, None))?;
+        let session_root = self.builder.session_root.clone();
         self.builder
             .storage
             .sessions()
-            .and_then(|repository| {
-                repository.list(
-                    &session_root,
-                    &self.builder.workspace_path,
-                    &current_path,
-                    limit,
-                )
-            })
+            .list(
+                &session_root,
+                &self.builder.workspace_path,
+                &current_path,
+                limit,
+            )
             .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 
@@ -274,17 +268,11 @@ impl Controller {
         if is_current {
             return self.archive_current_session().await;
         }
-        let session_root = self
-            .builder
-            .storage
-            .session_root(&self.builder.session_root)
-            .map_err(|error| self.builder.redact_error(&error, None))?;
+        let session_root = self.builder.session_root.clone();
         self.builder
             .storage
             .sessions()
-            .and_then(|repository| {
-                repository.archive(&session_root, &self.builder.workspace_path, path)
-            })
+            .archive(&session_root, &self.builder.workspace_path, path)
             .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 

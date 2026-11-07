@@ -88,11 +88,7 @@ impl Controller {
         cache.retain(|(session, task), _| {
             session == &parent && tasks.iter().any(|item| &item.row.task_id == task)
         });
-        let session_root = self
-            .builder
-            .storage
-            .session_root(&self.builder.session_root)
-            .ok();
+        let session_root = Some(self.builder.session_root.clone());
         for task in &mut tasks {
             if !live_ids.contains(&task.row.task_id) {
                 let key = (parent.clone(), task.row.task_id.clone());

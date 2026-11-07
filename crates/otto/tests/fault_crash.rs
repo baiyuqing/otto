@@ -233,12 +233,9 @@ fn workflow_store(
     address: &str,
     driver: Arc<dyn otto::storage::SqlDriver>,
 ) -> Arc<dyn otto::workflow::WorkflowStore> {
-    use otto::runtime::storage::{Endpoint, RepositoryFactory, SqlRepositories};
+    use otto::runtime::storage::SqlRepositories;
     SqlRepositories::new(driver)
-        .workflow(Endpoint {
-            address,
-            policy: otto::storage::OpenPolicy::CreateIfMissing,
-        })
+        .workflow(std::path::Path::new(address))
         .expect("open workflow store")
 }
 

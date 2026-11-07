@@ -128,21 +128,6 @@ fn status_reports_configured_memory() {
 }
 
 #[test]
-fn has_store_is_true_only_after_the_identity_file_exists() {
-    let home = tempfile::tempdir().expect("home");
-    let file = otto_core::config::File::default();
-    let lookup = lookup(home.path());
-    let home_text = home.path().to_string_lossy().into_owned();
-    assert!(!has_store(&file, &lookup, &home_text));
-    otto::memory::files::FileStore::open(
-        &store_dir(home.path()),
-        otto::memory::repository::MemoryOptions::default(),
-    )
-    .expect("create store");
-    assert!(has_store(&file, &lookup, &home_text));
-}
-
-#[test]
 fn status_lists_skipped_files_without_their_content() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");

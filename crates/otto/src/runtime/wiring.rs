@@ -662,7 +662,7 @@ fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) 
         let name = format!("{task_id}-{}", header.id);
         let (store, path) =
             storage
-                .sessions()?
+                .sessions()
                 .create_child_lazy(&parent_path, &name, header, parent.lease())?;
         let transcript: Transcript = store;
         Ok(Some((transcript, path)))

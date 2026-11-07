@@ -33,6 +33,10 @@ impl MemoryHandle {
 
 #[async_trait::async_trait]
 impl Session for MemoryHandle {
+    fn session_id(&self) -> Option<String> {
+        Some(self.header().id)
+    }
+
     fn memory_references(&self) -> Vec<otto_core::session::TurnMemoryReferences> {
         self.inner.memory_references()
     }

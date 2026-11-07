@@ -7,10 +7,11 @@ use super::*;
 pub type Transcript = Arc<dyn Session + Send + Sync>;
 
 /// Builds the transcript for the task with the given id and returns it with
-/// its file path. `Ok(None)` keeps the child in memory; an error fails the
+/// its file path. The second argument is the fresh session ID to use in its
+/// header. `Ok(None)` keeps the child in memory; an error fails the
 /// task before it starts.
 pub type ChildSession =
-    Arc<dyn Fn(&str) -> Result<Option<(Transcript, String)>, String> + Send + Sync>;
+    Arc<dyn Fn(&str, &str) -> Result<Option<(Transcript, String)>, String> + Send + Sync>;
 
 /// Builds the durable mailbox for the child whose transcript is at the given
 /// path, restoring the parent messages it had not read when it stopped.
@@ -20,6 +21,10 @@ pub(super) struct SharedTranscript(pub(super) Transcript);
 
 #[async_trait::async_trait]
 impl Session for SharedTranscript {
+    fn session_id(&self) -> Option<String> {
+        self.0.session_id()
+    }
+
     fn memory_references(&self) -> Vec<otto_core::session::TurnMemoryReferences> {
         self.0.memory_references()
     }
@@ -119,6 +124,7 @@ pub struct ChildTools {
     pub(super) write_paths: Vec<String>,
     pub(super) parent_inbox: Arc<dyn Mailbox>,
     pub(super) task_id: String,
+    pub(super) session_id: String,
     pub(super) max_output_bytes: usize,
     /// Remaining `agent_report` calls; see [`REPORT_BUDGET`] and
     /// [`ChildTools::report`].
@@ -266,11 +272,22 @@ impl ToolExecutor for ChildTools {
             .into_iter()
             .filter(|definition| self.permits(&definition.name))
             .collect();
+        if self.permits("session_info") {
+            definitions.push(
+                crate::tool::session_info::SessionInfo {
+                    session_id: self.session_id.clone(),
+                }
+                .definition(),
+            );
+        }
         definitions.push(Self::agent_report_definition());
         definitions
     }
 
     fn retry_safety(&self, name: &str) -> otto_core::model::RetrySafety {
+        if name == "session_info" && self.permits(name) {
+            return otto_core::model::RetrySafety::ReadOnly;
+        }
         if name == AGENT_REPORT_RETRY.0 {
             return AGENT_REPORT_RETRY.1;
         }
@@ -310,6 +327,18 @@ impl ToolExecutor for ChildTools {
                     });
             ToolExecution { result, outcome }
         };
+        if call.name == "session_info" && self.permits(call.name) {
+            if control.admission_stop_reason().is_some() {
+                return local(error_result(CONTEXT_CANCELED));
+            }
+            return local(
+                crate::tool::session_info::SessionInfo {
+                    session_id: self.session_id.clone(),
+                }
+                .execute(call.arguments, control.cancellation_token())
+                .await,
+            );
+        }
         if call.name == "agent_report" {
             match control.admission_stop_reason() {
                 Some(OperationStopReason::Deadline) => {

@@ -240,7 +240,10 @@ async fn resume_announces_a_changed_tool_set_once_before_the_prompt() {
     let notice = &request.messages[index];
     assert_eq!(notice.role, Role::Context);
     let text = notice.text();
-    assert!(text.lines().any(|line| line == "Added: read"), "{text}");
+    assert!(
+        text.lines().any(|line| line == "Added: read, session_info"),
+        "{text}"
+    );
     assert!(
         text.lines().any(|line| line == "Removed: retired_tool"),
         "{text}"
@@ -257,7 +260,8 @@ async fn resume_announces_a_changed_tool_set_once_before_the_prompt() {
 
 #[tokio::test]
 async fn resume_with_an_unchanged_tool_set_adds_no_notice() {
-    let request = resume_with_recorded_tools(&["agent_report", "grep", "read"]).await;
+    let request =
+        resume_with_recorded_tools(&["agent_report", "grep", "read", "session_info"]).await;
 
     assert!(
         request

@@ -17,6 +17,8 @@ pub(crate) struct View {
     pub fields: Vec<Field>,
     pub actions: Vec<Action>,
     pub default_action: Option<String>,
+    /// Use Up/Down for action selection instead of document scrolling.
+    pub vertical_actions: bool,
     pub loading: bool,
     pub error: Option<String>,
     /// One line drawn under the title in the queued-input banner style.
@@ -243,6 +245,7 @@ impl State {
             Intent::Move(delta) => match focus {
                 Focus::Rows => self.move_row(view, delta),
                 Focus::Actions if !view.rows.is_empty() => self.move_row(view, delta),
+                Focus::Actions if view.vertical_actions => self.move_action(view, delta),
                 Focus::Actions => self.scroll_document(delta),
                 Focus::Field(id) => self.move_cursor(&id, &Intent::Move(delta)),
             },

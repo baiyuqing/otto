@@ -196,6 +196,7 @@ async fn parent_message_grants_one_more_report() {
         write_paths: Vec::new(),
         parent_inbox: parent_inbox.clone(),
         task_id: task.id.clone(),
+        session_id: "test-child-session".to_string(),
         max_output_bytes: 16384,
         reports_left,
     };
@@ -256,7 +257,7 @@ async fn child_registry_excludes_control_and_memory_tools() {
     let (runner, _) = runner(test_config(&provider, &tasks, parent));
     assert_eq!(
         tool_names(&runner.child_definitions()).join(","),
-        "read,write,grep"
+        "read,write,grep,session_info"
     );
 }
 

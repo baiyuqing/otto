@@ -12,6 +12,7 @@ mod authorization;
 mod memory_proposals;
 mod provider_turns;
 mod runtime_info;
+mod session_identity;
 mod session_resources_sharing;
 mod session_shutdown;
 mod tool_sets;

@@ -8,7 +8,7 @@ fn children_of_an_in_memory_parent_stay_in_memory() {
         SharedSession::memory(otto_core::session::Header::default()),
         Arc::new(Default::default()),
     );
-    assert!(build("t1").expect("build").is_none());
+    assert!(build("t1", "fresh-child-id").expect("build").is_none());
 }
 
 #[tokio::test]
@@ -34,7 +34,10 @@ async fn a_child_store_refuses_to_append_after_the_parent_lease_is_lost() {
         Arc::new(Default::default()),
     );
 
-    let (child, _path) = build("t1").expect("build").expect("persisted");
+    let (child, _path) = build("t1", "fresh-child-id")
+        .expect("build")
+        .expect("persisted");
+    assert_eq!(child.session_id().as_deref(), Some("fresh-child-id"));
 
     lease.mark_lost_for_test("test fence");
 
@@ -72,7 +75,9 @@ async fn children_of_a_session_file_are_written_beside_it() {
         Arc::new(Default::default()),
     );
 
-    let (_, path) = build("t1").expect("build").expect("persisted");
+    let (_, path) = build("t1", "fresh-child-id")
+        .expect("build")
+        .expect("persisted");
 
     let prefix = std::path::Path::new(&parent_path)
         .with_extension("")

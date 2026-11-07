@@ -83,7 +83,9 @@ pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
 /// because a child's plan would be shown nowhere; and delivery, which only a
 /// parent may start and which would otherwise let a child reach another
 /// workspace.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 20] = [
+pub const EXCLUDED_CHILD_TOOLS: [&str; 21] = [
+    // Bound independently by each ChildTools, never inherited from a parent catalog.
+    "session_info",
     "workflow_list",
     "workflow_inspect",
     "workflow_start",
@@ -489,14 +491,21 @@ impl Runner {
 
     /// The tool definitions a child with no named definition would see.
     pub fn child_definitions(&self) -> Vec<ToolDefinition> {
-        self.child_registry.definitions()
+        let mut definitions = self.child_registry.definitions();
+        // Discovery needs the schema only; no catalog binds a runner identity.
+        definitions.push(
+            crate::tool::session_info::SessionInfo {
+                session_id: String::new(),
+            }
+            .definition(),
+        );
+        definitions
     }
 
     fn allowed_tools(&self, definition: &Definition) -> Option<BTreeSet<String>> {
         let wanted = definition.tools.as_ref()?;
         let available: BTreeSet<String> = self
-            .child_registry
-            .definitions()
+            .child_definitions()
             .into_iter()
             .map(|tool| tool.name)
             .collect();
@@ -534,6 +543,8 @@ pub enum StartError {
     Registry(#[from] TaskError),
     #[error("resume needs a saved session")]
     ResumeNoSession,
+    #[error("create child session identity: {0}")]
+    SessionIdentity(String),
     #[error("no sub-agent task {0} in this session")]
     ResumeNotFound(String),
     #[error(

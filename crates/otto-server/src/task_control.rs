@@ -16,6 +16,8 @@ const MAX_TEXT_BYTES: usize = 32_000;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TextInput {
+    #[serde(default)]
+    client_source: Option<otto_core::model::InputSource>,
     text: String,
     /// The client's stable id for this input, so a retry is admitted once.
     #[serde(default)]
@@ -54,7 +56,14 @@ pub async fn admit_input(
         return response;
     }
     let input_id = input.input_id.as_deref();
-    match session.ctrl.admit_active_input_with(&input.text, input_id) {
+    match session.ctrl.admit_active_input_with_provenance(
+        &input.text,
+        input_id,
+        Some(otto_core::model::InputProvenance::remote(
+            otto_core::model::InputTransport::Http,
+            input.client_source,
+        )),
+    ) {
         Ok(disposition) => json_response(StatusCode::OK, &disposition),
         Err(message) => input_error(&message, "input_admission_failed"),
     }
@@ -129,7 +138,14 @@ pub async fn steer(
         return response;
     }
     let input_id = input.input_id.as_deref();
-    match session.ctrl.steer_input(&input.text, input_id) {
+    match session.ctrl.steer_input_with_provenance(
+        &input.text,
+        input_id,
+        Some(otto_core::model::InputProvenance::remote(
+            otto_core::model::InputTransport::Http,
+            input.client_source,
+        )),
+    ) {
         Ok(message) => json_response(StatusCode::OK, &message),
         Err(message) => input_error(&message, "task_steer_failed"),
     }

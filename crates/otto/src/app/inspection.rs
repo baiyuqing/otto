@@ -178,6 +178,12 @@ impl Controller {
 
     /// Records the client's input id for the next turn's user message; see
     /// `Agent::set_next_input_id`.
+    pub fn set_next_input_provenance(&self, provenance: Option<otto_core::model::InputProvenance>) {
+        if let Some(runner) = self.current_runner() {
+            runner.set_next_input_provenance(provenance);
+        }
+    }
+
     pub fn set_next_input_id(&self, input_id: Option<String>) {
         if let Some(runner) = self.current_runner() {
             runner.set_next_input_id(input_id);

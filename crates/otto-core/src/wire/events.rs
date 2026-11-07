@@ -146,6 +146,10 @@ pub struct WireEvent {
     /// `user_message`: an image was attached. The image data is not repeated.
     #[serde(default, skip_serializing_if = "is_false")]
     pub image: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub input_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_provenance: Option<crate::model::InputProvenance>,
     /// `turn_end`: `ok`, `error` or `canceled`.
     #[serde(default, skip_serializing_if = "is_empty")]
     pub status: String,
@@ -311,8 +315,15 @@ pub fn to_wire(event: &Event) -> WireEvent {
         Event::Notification {
             kind: Some(crate::agent::inbox::NotificationKind::UserMessage),
             text,
+            input_id,
+            input_provenance,
             ..
-        } => return WireEvent::user_message(text, false),
+        } => {
+            let mut user = WireEvent::user_message(text, false);
+            user.input_id = input_id.clone();
+            user.input_provenance = *input_provenance;
+            return user;
+        }
         Event::Notification {
             kind: _,
             task_id,
@@ -320,6 +331,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
             usage,
             present,
             cached_input_tokens_present,
+            ..
         } => {
             wire.task_id = task_id.clone();
             wire.text = text.clone();
@@ -506,6 +518,8 @@ mod tests {
     fn delivered_guidance_is_a_user_message_not_a_system_notification() {
         assert_eq!(
             json(&Event::Notification {
+                input_id: String::new(),
+                input_provenance: None,
                 kind: Some(crate::agent::inbox::NotificationKind::UserMessage),
                 task_id: String::new(),
                 text: "我发的 queued input 又看不到了".into(),
@@ -521,6 +535,8 @@ mod tests {
     fn notification_carries_task_id_text_usage_and_cache_breakdown_presence() {
         assert_eq!(
             json(&Event::Notification {
+                input_id: String::new(),
+                input_provenance: None,
                 kind: None,
                 task_id: "t1".into(),
                 text: "done".into(),
@@ -541,6 +557,8 @@ mod tests {
     fn a_notification_without_usage_reports_no_cache_breakdown() {
         assert_eq!(
             json(&Event::Notification {
+                input_id: String::new(),
+                input_provenance: None,
                 kind: None,
                 task_id: "t1".into(),
                 text: "done".into(),

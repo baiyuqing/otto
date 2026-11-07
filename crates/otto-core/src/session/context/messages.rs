@@ -85,6 +85,7 @@ pub fn pi_entry_to_context_messages(entry: &PiEntry) -> Result<Vec<Message>, PiE
             );
             if let Some(details) = decode_pi_otto_details(custom.details.as_deref())? {
                 message.input_id = details.input_id;
+                message.input_provenance = details.input_provenance;
                 message.usage = details.usage;
                 if !details.task_id.is_empty() {
                     message.context_metadata = Some(ContextMetadata {
@@ -118,6 +119,7 @@ fn pi_message_to_context_message(
             message.blocks = blocks;
             if let Some(details) = decode_pi_otto_details(wire.details.as_deref())? {
                 message.input_id = details.input_id;
+                message.input_provenance = details.input_provenance;
             }
         }
         "assistant" => {

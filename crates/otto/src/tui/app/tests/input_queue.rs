@@ -13,6 +13,8 @@ fn delivered_queued_input_is_visible_after_steering_read_clears_banner() {
         app.apply_steering(vec![steer(1, text, Status::Delivered)]);
         assert!(app.queued_steer.is_none());
         let event = otto_core::wire::events::to_wire(&otto_core::agent::Event::Notification {
+            input_id: String::new(),
+            input_provenance: None,
             kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
             task_id: String::new(),
             text: text.into(),

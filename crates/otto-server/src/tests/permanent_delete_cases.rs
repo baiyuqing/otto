@@ -212,6 +212,7 @@ async fn permanent_delete_refuses_waiting_approval_and_saved_queue() {
     let journal = session.ctrl.turn_queue().unwrap();
     journal
         .save(&app::turn_queue::QueuedPrompt {
+            input_provenance: None,
             input_id: "saved".into(),
             turn_id: "saved-turn".into(),
             text: "not delivered".into(),

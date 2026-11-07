@@ -196,6 +196,7 @@ impl Server {
                     channel: prompt.channel,
                     origin: prompt.origin,
                     input_id: Some(prompt.input_id),
+                    input_provenance: prompt.input_provenance,
                 });
             }
         }
@@ -227,6 +228,7 @@ impl Server {
                     channel: queued.channel,
                     origin: queued.origin.clone(),
                     image_dropped: false,
+                    input_provenance: queued.input_provenance,
                 })
                 .collect();
             for queued in restored.into_iter().rev() {
@@ -421,6 +423,7 @@ impl Server {
     /// one whose `input_id` the transcript already holds fails with
     /// [`DUPLICATE_INPUT`].
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn start_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
@@ -430,6 +433,30 @@ impl Server {
         queue: bool,
         request_id: &str,
         input_id: Option<String>,
+    ) -> Result<Arc<Turn>, String> {
+        self.start_turn_with_provenance(
+            session,
+            text,
+            image,
+            (channel, origin),
+            queue,
+            request_id,
+            input_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_turn_with_provenance(
+        self: &Arc<Self>,
+        session: &Arc<OpenSession>,
+        text: String,
+        image: Option<Block>,
+        (channel, origin): (Option<Channel>, Option<otto::schedule::Origin>),
+        queue: bool,
+        request_id: &str,
+        input_id: Option<String>,
+        mut input_provenance: Option<otto_core::model::InputProvenance>,
     ) -> Result<Arc<Turn>, String> {
         let (turn, running) = {
             let mut state = session.lock();
@@ -455,6 +482,11 @@ impl Server {
             let cancel = self.cancel.child_token();
             let session_id = session.ctrl.info().session_id;
             let log = Arc::clone(&self.log);
+            if busy {
+                if let Some(origin) = &mut input_provenance {
+                    origin.delivery = otto_core::model::InputDelivery::Queued;
+                }
+            }
             let (turn, running) = if busy {
                 // The saved copy needs an input id so a restore can tell
                 // whether the turn already started.
@@ -463,6 +495,7 @@ impl Server {
                     journal
                         .save(&app::turn_queue::QueuedPrompt {
                             input_id: queued_input_id.clone(),
+                            input_provenance,
                             turn_id: id.clone(),
                             text: text.clone(),
                             channel,
@@ -483,6 +516,7 @@ impl Server {
                     channel,
                     origin,
                     input_id: Some(queued_input_id),
+                    input_provenance,
                 });
                 (turn, None)
             } else {
@@ -493,7 +527,17 @@ impl Server {
                 ));
                 turn.start_running(session.ctrl.history().len());
                 state.turn = Some(Arc::clone(&turn));
-                (turn, Some((text, image, channel, origin, input_id.clone())))
+                (
+                    turn,
+                    Some((
+                        text,
+                        image,
+                        channel,
+                        origin,
+                        input_id.clone(),
+                        input_provenance,
+                    )),
+                )
             };
             if let Some(input_id) = input_id {
                 if state.inputs.len() >= MAX_REMEMBERED_INPUTS {
@@ -505,7 +549,7 @@ impl Server {
         };
         session.touch();
         self.bump_status();
-        if let Some((text, image, channel, origin, input_id)) = running {
+        if let Some((text, image, channel, origin, input_id, input_provenance)) = running {
             self.spawn_user_turn(
                 session,
                 Arc::clone(&turn),
@@ -513,6 +557,7 @@ impl Server {
                 image,
                 (channel, origin),
                 input_id,
+                input_provenance,
             );
         }
         Ok(turn)
@@ -548,6 +593,7 @@ impl Server {
                 next.image,
                 (next.channel, next.origin),
                 next.input_id,
+                next.input_provenance,
             );
         }
     }
@@ -561,8 +607,12 @@ impl Server {
         image: Option<Block>,
         (channel, origin): (Option<Channel>, Option<otto::schedule::Origin>),
         input_id: Option<String>,
+        input_provenance: Option<otto_core::model::InputProvenance>,
     ) {
-        turn.push_event(WireEvent::user_message(&text, image.is_some()));
+        let mut user_event = WireEvent::user_message(&text, image.is_some());
+        user_event.input_id = input_id.clone().unwrap_or_default();
+        user_event.input_provenance = input_provenance;
+        turn.push_event(user_event);
         self.metrics.turn_started();
         let mut fields = turn.log_ids();
         fields.push(("trigger", TRIGGER_USER.to_string()));
@@ -575,6 +625,7 @@ impl Server {
                 None => Step::Text(&text),
             };
             session.ctrl.set_next_input_id(input_id.clone());
+            session.ctrl.set_next_input_provenance(input_provenance);
             server
                 .run_turn(&session, &turn, first, TRIGGER_USER, channel, origin)
                 .await;

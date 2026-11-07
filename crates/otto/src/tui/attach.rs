@@ -90,7 +90,7 @@ pub(crate) struct Remote {
 impl Remote {
     fn new(client: Client, workspace: &str) -> Self {
         Self {
-            client,
+            client: client.with_input_source(otto_core::model::InputSource::Tui),
             workspace: workspace.to_string(),
             state: Mutex::new(State::default()),
         }

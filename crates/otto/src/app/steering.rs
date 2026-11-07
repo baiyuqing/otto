@@ -66,6 +66,15 @@ impl Controller {
         text: &str,
         input_id: Option<&str>,
     ) -> Result<otto_core::agent::steering::Message, String> {
+        self.steer_input_with_provenance(text, input_id, None)
+    }
+
+    pub fn steer_input_with_provenance(
+        &self,
+        text: &str,
+        input_id: Option<&str>,
+        provenance: Option<otto_core::model::InputProvenance>,
+    ) -> Result<otto_core::agent::steering::Message, String> {
         let text = task_control::checked_text(text)?;
         if input_id.is_some_and(|id| self.has_input(id)) {
             return Err(task_control::DUPLICATE_INPUT.into());
@@ -80,7 +89,7 @@ impl Controller {
         let session_id = runner.session().header().id.clone();
         runner
             .task_control()
-            .steer(&session_id, ticket, text, input_id)
+            .steer_with_provenance(&session_id, ticket, text, input_id, provenance)
     }
 
     /// Lists the transient steering lifecycle for the current active run.
@@ -127,6 +136,15 @@ impl Controller {
         text: &str,
         input_id: Option<&str>,
     ) -> Result<ActiveInputAdmission, String> {
+        self.admit_active_input_with_provenance(text, input_id, None)
+    }
+
+    pub fn admit_active_input_with_provenance(
+        &self,
+        text: &str,
+        input_id: Option<&str>,
+        provenance: Option<otto_core::model::InputProvenance>,
+    ) -> Result<ActiveInputAdmission, String> {
         let text = task_control::checked_text(text)?;
         if input_id.is_some_and(|id| self.has_input(id)) {
             return Err(task_control::DUPLICATE_INPUT.into());
@@ -139,10 +157,13 @@ impl Controller {
             return Ok(ActiveInputAdmission::Idle);
         };
         let session_id = runner.session().header().id.clone();
-        match runner
-            .task_control()
-            .steer(&session_id, ticket, text, input_id)
-        {
+        match runner.task_control().steer_with_provenance(
+            &session_id,
+            ticket,
+            text,
+            input_id,
+            provenance,
+        ) {
             Ok(_) => {
                 runner.queue_user_authorization(text)?;
                 Ok(ActiveInputAdmission::Steered)

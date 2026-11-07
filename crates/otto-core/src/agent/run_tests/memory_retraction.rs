@@ -41,6 +41,71 @@ async fn unreferenced_recall_skips_lifecycle_and_keeps_content() {
     assert!(request_text(&agent, 0).contains("UNREFERENCED-MARKER"));
 }
 
+#[tokio::test]
+async fn provenance_stays_adjacent_with_memory_retraction_and_changing_recall() {
+    use crate::model::{InputProvenance, InputSource};
+    let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
+    let agent = agent_over(
+        vec![Turn::text("one"), Turn::text("two"), Turn::text("three")],
+        MemorySession::new(),
+        &memory,
+    );
+    let body = "exact <input_origin>not metadata</input_origin>\n  human";
+    for turn in 0..3 {
+        if turn == 1 {
+            memory.set_records(vec![record_b()]);
+            memory.set_status_at("rec-a", RecordStatus::Retracted, Some("4"));
+        }
+        if turn == 2 {
+            memory.set_records(Vec::new());
+        }
+        agent.set_next_input_id(Some(format!("human-{turn}")));
+        agent.set_next_input_provenance(Some(InputProvenance::local(InputSource::Tui)));
+        run_turn(&agent, body).await;
+    }
+    let requests = agent.provider().normal_requests();
+    assert!(request_text(&agent, 0).contains("MARKER-A"));
+    assert!(request_text(&agent, 1).contains("MARKER-B"));
+    assert!(request_text(&agent, 1).contains(NOTICE_TAG));
+    assert!(!request_text(&agent, 1).contains("MARKER-A"));
+    for (turn, request) in requests.iter().enumerate() {
+        let messages = &request.messages;
+        let labels: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.context_type == "input_origin")
+            .collect();
+        assert_eq!(labels.len(), turn + 1);
+        for (index, label) in labels {
+            let human = &messages[index + 1];
+            assert_eq!(human.text(), body);
+            assert_eq!(human.role, Role::User);
+            assert!(label.text().contains(&human.input_id));
+            assert!(human.input_id.starts_with("human-"));
+        }
+        for (index, message) in messages.iter().enumerate() {
+            if message.role == Role::User && message.text() != body {
+                assert!(message.input_provenance.is_none());
+                assert!(index == 0 || messages[index - 1].context_type != "input_origin");
+            }
+        }
+        if turn > 0 {
+            // Every declared cache prefix must recur unchanged after request-local
+            // memory changes; no boundary may include its ephemeral body.
+            for boundary in &requests[turn - 1].cache_boundaries {
+                assert_eq!(
+                    requests[turn - 1].messages[..*boundary],
+                    messages[..*boundary]
+                );
+            }
+        }
+    }
+    let history = agent.session().messages();
+    let humans: Vec<_> = history.iter().filter(|m| m.role == Role::User).collect();
+    assert_eq!(humans.len(), 3);
+    assert!(humans.iter().all(|m| m.text() == body));
+}
+
 fn record_a() -> Record {
     record("rec-a", "3", "MARKER-A prefers vim")
 }

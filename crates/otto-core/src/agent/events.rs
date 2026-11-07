@@ -232,6 +232,8 @@ pub enum Event {
     },
     /// One inbox notification was delivered into the transcript.
     Notification {
+        input_id: String,
+        input_provenance: Option<crate::model::InputProvenance>,
         kind: Option<NotificationKind>,
         task_id: String,
         text: String,
@@ -495,6 +497,8 @@ mod tests {
             }
             .name(),
             Event::Notification {
+                input_id: String::new(),
+                input_provenance: None,
                 kind: None,
                 task_id: String::new(),
                 text: String::new(),

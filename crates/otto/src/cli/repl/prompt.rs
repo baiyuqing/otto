@@ -13,6 +13,7 @@ impl<'a> Repl<'a> {
             stderr,
             program_status,
             delete_confirmation,
+            input_source: _,
         } = self;
         *delete_confirmation = None;
         let wake = controller.prepare_wake().map_err(|message| Error::Turn {
@@ -98,12 +99,14 @@ impl<'a> Repl<'a> {
         line: &str,
         cancel: &CancellationToken,
     ) -> Result<(), Error> {
+        let input_source = self.input_source;
         let Self {
             controller,
             stdout,
             stderr,
             program_status,
             delete_confirmation,
+            input_source: _,
         } = self;
         *delete_confirmation = None;
         if let Some(reporter) = program_status {
@@ -120,6 +123,9 @@ impl<'a> Repl<'a> {
                     error_rendered = true;
                 }
             };
+            controller.set_next_input_provenance(Some(otto_core::model::InputProvenance::local(
+                input_source,
+            )));
             controller.prompt(line, &mut sink, &turn).await
         };
         if let Some(reporter) = program_status {
@@ -158,6 +164,7 @@ impl<'a> Repl<'a> {
         cancel: &CancellationToken,
         lines: &mut tokio::sync::mpsc::Receiver<Result<String, Error>>,
         queue: &mut std::collections::VecDeque<String>,
+        delivery: otto_core::model::InputDelivery,
     ) -> Result<(), Error> {
         let controller = self.controller;
         if let Some(reporter) = &self.program_status {
@@ -168,6 +175,9 @@ impl<'a> Repl<'a> {
         let mut sink = |event| {
             let _ = send.send(event);
         };
+        let mut provenance = otto_core::model::InputProvenance::local(self.input_source);
+        provenance.delivery = delivery;
+        controller.set_next_input_provenance(Some(provenance));
         let run = controller.prompt(line, &mut sink, &turn);
         tokio::pin!(run);
         let mut waiting = false;

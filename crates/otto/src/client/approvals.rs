@@ -202,6 +202,9 @@ impl Client {
         channel: Option<Channel>,
     ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
         let mut body = json!({"text": text});
+        if let Some(source) = self.client_source {
+            body["client_source"] = json!(source);
+        }
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }
@@ -224,6 +227,9 @@ impl Client {
         input_id: Option<&str>,
     ) -> Result<ActiveInputAdmission, Error> {
         let mut body = json!({"text": text});
+        if let Some(source) = self.client_source {
+            body["client_source"] = json!(source);
+        }
         if let Some(input_id) = input_id {
             body["input_id"] = json!(input_id);
         }
@@ -244,7 +250,7 @@ impl Client {
         let response = self
             .send(self.post(
                 &format!("{BASE}/v1/sessions/{session_id}/tasks/steer"),
-                &json!({"text": text}),
+                &json!({"text": text, "client_source": self.client_source}),
             ))
             .await?;
         decode(response).await
@@ -305,6 +311,9 @@ impl Client {
         channel: Option<Channel>,
     ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
         let mut body = json!({"text": text});
+        if let Some(source) = self.client_source {
+            body["client_source"] = json!(source);
+        }
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }

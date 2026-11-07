@@ -88,6 +88,7 @@ fn press(app: &mut App, remote: &Remote, code: KeyCode) {
 
 fn steer(id: u64, text: &str, status: otto_core::agent::steering::Status) -> SteerMessage {
     SteerMessage {
+        input_provenance: None,
         id,
         text: text.into(),
         status,

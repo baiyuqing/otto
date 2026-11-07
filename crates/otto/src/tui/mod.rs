@@ -296,6 +296,11 @@ async fn run_app<B: Backend>(
                 }
                 Action::CancelTurn => {}
                 Action::Prompt(line) => {
+                    let mut provenance = otto_core::model::InputProvenance::local(
+                        otto_core::model::InputSource::Tui,
+                    );
+                    provenance.delivery = app.next_input_delivery.take().unwrap_or_default();
+                    controller.set_next_input_provenance(Some(provenance));
                     let result = run_turn(&mut app, terminal, keys, controller, cancel, line).await;
                     if let Err(error) = result {
                         propagate_turn_error(error)?;

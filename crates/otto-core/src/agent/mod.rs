@@ -197,6 +197,7 @@ pub struct Agent<P, T, S> {
     /// The client input id of the next run's user message; taken by every
     /// run, used or not. See [`Agent::set_next_input_id`].
     next_input_id: std::sync::Mutex<Option<String>>,
+    next_input_provenance: std::sync::Mutex<Option<crate::model::InputProvenance>>,
 }
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
@@ -209,6 +210,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .next_input_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = input_id;
+    }
+
+    /// Sets origin facts for only the next input; never grants authority.
+    pub fn set_next_input_provenance(&self, provenance: Option<crate::model::InputProvenance>) {
+        *self
+            .next_input_provenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = provenance;
     }
 
     /// An agent that redacts nothing.
@@ -251,6 +260,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             hook_turn_id: std::sync::Mutex::new(String::new()),
             hook_turn_messages: std::sync::Mutex::new(None),
             next_input_id: std::sync::Mutex::new(None),
+            next_input_provenance: std::sync::Mutex::new(None),
             last_memory_context: std::sync::Mutex::default(),
         }
     }

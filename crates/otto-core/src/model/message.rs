@@ -55,6 +55,8 @@ pub struct Message {
     /// the Otto detail `inputId` on user and context messages.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub input_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_provenance: Option<crate::model::InputProvenance>,
 }
 
 /// Whether `id` is a well-formed input id: 1 to 128 bytes of ASCII letters,
@@ -81,6 +83,7 @@ impl Default for Message {
             display: false,
             context_metadata: None,
             input_id: String::new(),
+            input_provenance: None,
         }
     }
 }

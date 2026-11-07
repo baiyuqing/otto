@@ -115,6 +115,7 @@ fn a_compaction_summary_and_mcp_tools_get_their_own_sections() {
     use crate::session::COMPACTION_CONTEXT_TYPE;
     let request = Request {
         cache_key: String::new(),
+        cache_boundaries: Vec::new(),
         model: "m".into(),
         system_prompt: "p".into(),
         thinking: String::new(),

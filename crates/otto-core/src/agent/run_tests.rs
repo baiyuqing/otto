@@ -51,6 +51,7 @@ impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
 
 mod auto_compaction;
 mod capability_plan;
+mod claude_cache_prefix;
 mod context_oneshot;
 mod durable_boundaries;
 mod input_delivery;

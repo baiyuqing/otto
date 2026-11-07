@@ -15,7 +15,7 @@ fn cached_response(
 }
 
 #[test]
-fn anchors_stable_prefixes_and_automatically_caches_the_growing_conversation() {
+fn anchors_the_system_text_and_the_last_message_block_only() {
     let request = Request {
         model: "fixture".into(),
         system_prompt: "stable system".into(),
@@ -40,16 +40,16 @@ fn anchors_stable_prefixes_and_automatically_caches_the_growing_conversation() {
     );
     let body: Value = serde_json::from_slice(&encoded).unwrap();
     let control = json!({"type":"ephemeral"});
-    assert_eq!(body["cache_control"], control);
+    assert!(body.get("cache_control").is_none());
     assert_eq!(
         body["system"][0],
         json!({"type":"text","text":"stable system","cache_control":control})
     );
     assert!(body["tools"][0].get("cache_control").is_none());
-    assert_eq!(body["tools"][1]["cache_control"], control);
+    assert!(body["tools"][1].get("cache_control").is_none());
     assert_eq!(
         body["messages"][0]["content"][0],
-        json!({"type":"text","text":"question"})
+        json!({"type":"text","text":"question","cache_control":control})
     );
     assert_eq!(
         encoded.len(),
@@ -60,7 +60,8 @@ fn anchors_stable_prefixes_and_automatically_caches_the_growing_conversation() {
         serde_json::to_value(protocol::build_request(&Request::default()).unwrap()).unwrap();
     assert!(empty.get("tools").is_none());
     assert!(empty.get("system").is_none());
-    assert_eq!(empty["cache_control"], control);
+    assert!(empty.get("cache_control").is_none());
+    assert_eq!(empty["messages"], json!([]));
 }
 
 #[test]

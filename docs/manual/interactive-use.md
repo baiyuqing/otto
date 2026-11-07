@@ -679,6 +679,10 @@ keeps its own storage root, separate from Pi:
 ~/.otto/sessions/<workspace-key>/<session-id>.jsonl
 ```
 
+For record types, payloads and model-context visibility, see the
+[Session JSONL reference](#session-jsonl-reference). The lifecycle sections below
+cover opening, archiving, forking and recovering sessions.
+
 ### Session credential redaction
 
 New session content is protected by default with local, best-effort credential
@@ -1014,6 +1018,149 @@ OTTO_PI_INTEROP=1 node ./scripts/pi-session-interop.mjs /tmp/otto-session.jsonl
 
 It exits 77 with a `SKIP` message when Pi is unavailable or the gate is unset,
 and exits nonzero for an invalid session.
+
+## Session JSONL reference
+
+A session is an append-only **Pi v3 JSONL** file: one JSON object per line.
+Distinguish three discriminators:
+
+- **`type`** selects the top-level record, such as `message` or `custom`.
+- **`message.role`** selects the message kind inside a `message` record.
+- **`customType`** names an extension inside `custom` or `custom_message`.
+
+A stored record is not necessarily a chat message, and a chat message is not
+necessarily sent unchanged to the provider. Otto reconstructs the active path,
+applies compaction and context edits, and handles internal metadata separately.
+For storage paths, redaction and resume commands, see [Sessions](#sessions).
+
+### Record envelope and top-level types
+
+The first line is a `session` header with `version: 3`, `id`, `timestamp` and
+`cwd`; a child or fork can also record `parentSession`. Subsequent entries carry
+`type`, `id`, `parentId` and `timestamp`. `parentId` associates entries with the
+active history path; file order alone is not a complete context reconstruction.
+The tables below describe supported records, not a promise that every session
+writes every kind. Field lists are representative, not full JSON schemas.
+
+| `type` | Main payload | Meaning and context behavior |
+| --- | --- | --- |
+| `message` | `message.role`, `message.content` | Conversation, tool results or compatible special messages; interpreted by role. |
+| `model_change` | `provider`, `modelId` | Historical model selection; not a chat message and does not override current startup selection on resume. |
+| `thinking_level_change` | `thinkingLevel` | Historical reasoning-level selection, not a chat message. |
+| `compaction` | `summary`, `firstKeptEntryId`, `tokensBefore`, optional `retainedTail`, `details`, `usage` | Local summary/checkpoint used to reconstruct bounded context. |
+| `branch_summary` | `fromId`, `summary`, optional `details`, `usage` | Summary of a branch that can contribute context. |
+| `custom` | `customType`, `data` | Extension state or metadata; `data` is not converted into a conversational message. Recognized types can affect restored state or provider context. |
+| `custom_message` | `customType`, `content`, `display`, optional `details` | Custom context message. `display` is a presentation flag, not a guarantee that content is excluded from the model. |
+| `context_edit` | `targetId`, `replacement` | Changes a target entry's future context contribution; `null` omits it, otherwise a content replacement is applied. Original history stays intact. |
+| `label` | `targetId`, `label` | Entry annotation, not conversational content. |
+| `session_info` | `name` | Session naming metadata, not conversational content. |
+
+Unknown entry types retain their raw representation in the codec; this does not
+mean Otto executes them or understands their semantics.
+
+### Message roles and content blocks
+
+Inside `type: "message"`, the codec supports these roles:
+
+| `message.role` | Purpose |
+| --- | --- |
+| `user` | User input; `content` can be a string or a content-block array. |
+| `assistant` | Model output; content-block array plus provider/model, usage and stop metadata. Tool calls are blocks in this message. |
+| `toolResult` | Tool response; includes `toolCallId`, `toolName`, `content` and `isError`. |
+| `bashExecution` | Pi-compatible shell-execution message with command/output and execution metadata; not the same wire shape as an assistant tool call. |
+| `custom` | Pi-compatible custom context message. |
+| `branchSummary` | Pi-compatible branch-summary message. |
+| `compactionSummary` | Pi-compatible compaction-summary message. |
+
+Content blocks use their own `type`: `text` (`text`), `image` (`data`,
+`mimeType`), `thinking` (`thinking`) or `toolCall` (`id`, `name`, `arguments`).
+For example, a tool call is **not** a top-level `type: "toolCall"` record:
+
+```json
+{"type":"message","id":"entry-example","parentId":null,"timestamp":"2026-11-07T00:00:00Z","message":{"role":"user","content":"Explain this project."}}
+```
+
+An assistant's `toolCall.id` matches the corresponding result's
+`message.toolCallId`. Persisted tool arguments/results are sensitive history,
+not an authorization grant to execute them again.
+
+### Otto custom records
+
+These records use `type: "custom"` with a `customType` and a `data` payload.
+They serve different purposes. Their `data` is not rendered as a conversational
+message, although recognized checkpoints can affect the provider context.
+
+| `customType` | Payload and use |
+| --- | --- |
+| `otto.runtime` | Runtime metadata, including active provider, model and profile. |
+| `otto.capabilities` | Tool names sent by the latest run; updates capability state. |
+| `otto.turn` | Turn start/end, status and failure information; identifies interrupted turns. |
+| `otto.operation` | Versioned operation lifecycle facts: `event`, `operationId`, attempt/tool identity, retry safety or terminal outcome. |
+| `otto.provider_call` | Versioned provider-request timing, usage and retry facts; no prompt, tool-argument or tool-result text. |
+| `otto.provider_recovery` | Provider recovery and partial-output details, distinct from a session compaction checkpoint. |
+| `otto.plan` | Saved task checklist, restored as plan state. |
+| `otto.input_submissions` | Append-only local TUI input intent/status events keyed by stable ID, with session/workspace, sanitized text and provenance; supports `/inputs` and draft-only `/recover <id>`, not automatic replay. |
+| `otto.memory_recall` | IDs and revisions of memory rendered for a turn; no memory text. |
+| `otto.remote_compaction` | Provider-owned encrypted context checkpoint; affects provider context, not ordinary transcript text. |
+| `otto.fork` | Fork provenance; relates the new session to the source history. |
+| `otto.local_command` | Human-only local command history, including command, parameters, status, summary and output. |
+| `otto.task_spec` | Child task identity, description, model, context mode and optional agent definition. |
+| `otto.task_result` | Child task terminal status and error information. |
+| `otto.authorization` | Authorization review context: `trusted_user_messages`, `instructions`, `evidence_digest`, `policy_digest`; restored as authorization evidence, not ordinary model transcript context. |
+
+`otto.authorization` is **not an approval decision or a full execution
+checkpoint**. It preserves the original user evidence and applicable constraints
+used by authorization setup. A remembered instruction, assistant summary or tool
+result cannot turn itself into a new user authorization. Approval decisions and
+application outcomes are separate; see [Unified approvals](safety-and-tools.md#unified-approvals).
+
+`custom.data` is skipped by the conversational message converter, including for
+unrecognized custom types. Recognized records can still affect internal state,
+authorization review or provider-managed context. This differs from
+`custom_message`, whose **content** can become a context message decorated with
+`[Custom context: TYPE]`. Notification types such as `task_notification`,
+`parent_message` and `capability_update` use their own presentation without that
+generic decoration.
+
+The storage sanitizer also recognizes `otto.hook.arguments` and
+`otto.hook.result` audit payload names. This is a recording policy, not a
+promise that every installed runtime emits these records, and not a model
+visibility rule.
+
+### Compaction, process recovery and memory retraction
+
+These are separate mechanisms:
+
+- **Local compaction** appends a `compaction` summary/checkpoint. It changes the
+  context projection without deleting original lines.
+- **Remote compaction** appends `otto.remote_compaction` for provider-managed
+  encrypted context, rather than a human-readable summary.
+- **Process-loss recovery** uses turn/operation state and unresolved tool calls
+  to continue an interrupted turn. It does not summarize history. A saved tool
+  call is not permission to replay an effectful operation; see
+  [Session lifecycle](#session-lifecycle) for recovery rules.
+- **Memory retraction** changes memory availability and supplies retraction
+  notices; it is not a deletion of the original user message, session log,
+  authorization snapshot or old summary. A fact still present in the current
+  conversation can be known independently of long-term recall. See
+  [Retraction notices](memory-and-extensions.md#retraction-notices).
+
+Session JSONL is sensitive plaintext. Do not treat metadata records as harmless:
+custom authorization, command and hook payloads can contain user text or command
+content. Do not manually rewrite a live session to hide a record; append-only
+history, active-path relationships and recovery state must remain consistent.
+
+### Source of truth
+
+For exact version-specific validation and field definitions, see
+[`pi.rs`](../../crates/otto-core/src/session/pi.rs), the
+[entry codec](../../crates/otto-core/src/session/codec/entries.rs), the
+[content codec](../../crates/otto-core/src/session/codec/content.rs), the
+[context reducer](../../crates/otto-core/src/session/context.rs) and the
+[POSIX session backend](../../crates/otto/src/storage/backends/posix/session/).
+The tables are a format-reading reference, not a second execution API. Records
+from another Otto version may differ; inspect the matching version's writer and
+reader before assigning semantics to an unfamiliar extension.
 
 ## Context compaction
 

@@ -453,6 +453,9 @@ async fn a_child_transcript_write_failure_fails_only_that_task() {
     let done = wait_final(&tasks, &task.id).await;
 
     assert_eq!(done.status, TaskStatus::Interrupted);
-    assert!(done.error.contains("terminal result was not persisted"));
+    assert!(
+        done.error
+            .contains("terminal result persistence was not acknowledged")
+    );
     plan.assert_all_fired();
 }

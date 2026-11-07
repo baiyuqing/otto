@@ -231,10 +231,11 @@ fn sigkill_three_active_children_recover_without_duplicate_external_effects() {
             6,
             "registry hydration must include all durable admissions/children"
         );
-        for id in ["t1", "t2", "t3", "t4", "t5"] {
+        for id in ["t1", "t2", "t3", "t4"] {
             assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Interrupted);
         }
         assert_eq!(tasks.get("t6").unwrap().status, TaskStatus::Succeeded);
+        assert_eq!(tasks.get("t5").unwrap().status, TaskStatus::Unavailable);
         assert!(tasks.get("t5").unwrap().session_path.is_empty());
         assert_eq!(
             inbox.len(),

@@ -349,6 +349,7 @@ mod tests {
 
     fn interrupted_child(task_id: &str) -> ChildRecord {
         ChildRecord {
+            evidence: None,
             attempt_id: String::new(),
             path: std::path::PathBuf::from(format!("/tmp/{task_id}.jsonl")),
             task_id: task_id.to_string(),

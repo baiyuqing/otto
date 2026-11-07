@@ -134,7 +134,7 @@ fn owned_child_repair_failure_stays_visible_and_unresumable() {
     let tasks = Tasks::new();
     let inbox = Inbox::default();
     activate(&path, &tasks, &inbox, &mut Vec::new());
-    assert_eq!(tasks.get("t1").unwrap().status, TaskStatus::Interrupted);
+    assert_eq!(tasks.get("t1").unwrap().status, TaskStatus::Unavailable);
     assert!(
         tasks
             .recovery_diagnostics()

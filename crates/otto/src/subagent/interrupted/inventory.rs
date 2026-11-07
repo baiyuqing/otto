@@ -6,6 +6,55 @@ use std::path::Path;
 
 use super::ChildRecord;
 
+/// Private transcript evidence must never appear in diagnostic output.
+#[derive(PartialEq, Eq)]
+pub(crate) struct Evidence {
+    identity: (u64, u64),
+    bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for Evidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Evidence").finish_non_exhaustive()
+    }
+}
+
+/// Reopen without following links, acquire the write lock, and compare the
+/// descriptor with the exact validated inventory snapshot before any repair.
+pub(crate) fn open_validated(record: &ChildRecord) -> Result<crate::session::Store, String> {
+    use std::io::SeekFrom;
+    let evidence = record
+        .evidence
+        .as_ref()
+        .ok_or("missing pinned recovery evidence")?;
+    let prepared =
+        crate::session::Prepared::prepare(&record.path, None).map_err(|error| error.to_string())?;
+    let (store, _) = prepared
+        .activate_checked(|file, metadata| {
+            let changed = || {
+                otto_core::session::PiError::invalid(
+                    "recovery transcript changed before write admission",
+                )
+            };
+            if crate::fsops::file_identity(metadata) != evidence.identity
+                || metadata.len() != evidence.bytes.len() as u64
+            {
+                return Err(changed());
+            }
+            file.seek(SeekFrom::Start(0)).map_err(|_| changed())?;
+            let mut bytes = Vec::new();
+            file.take(MAX_CHILD_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| changed())?;
+            if bytes != evidence.bytes {
+                return Err(changed());
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(store)
+}
+
 const MAX_CHILDREN: usize = 4096;
 const MAX_CHILD_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
@@ -18,6 +67,8 @@ pub struct Inventory {
     pub diagnostics: Vec<String>,
     pub complete: bool,
     pub directory_missing: bool,
+    /// Highest observed filename counter, not an upper bound if incomplete.
+    pub highest_counter: u64,
 }
 
 /// Scans only the selected parent's direct child directory using pinned POSIX
@@ -64,9 +115,17 @@ pub fn inventory(parent: &Path) -> Inventory {
         if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
             continue;
         }
+        if let Some(counter) = name
+            .strip_prefix('t')
+            .and_then(|name| name.split_once('-'))
+            .and_then(|(digits, _)| digits.parse::<u64>().ok())
+        {
+            result.highest_counter = result.highest_counter.max(counter);
+        }
         let checked = (|| -> Result<ChildRecord, String> {
-            let file = crate::fsops::open_at_no_follow(&dir, &name, libc::O_RDONLY)
-                .map_err(|error| error.to_string())?;
+            let file =
+                crate::fsops::open_at_no_follow(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)
+                    .map_err(|error| error.to_string())?;
             let metadata = file.metadata().map_err(|error| error.to_string())?;
             if !metadata.is_file() || metadata.len() > MAX_CHILD_BYTES {
                 return Err("not a regular bounded transcript".into());
@@ -145,7 +204,7 @@ pub fn inventory(parent: &Path) -> Inventory {
                 return Err("parentSession does not match selected parent".into());
             }
             let child_id = &decoded.header.id;
-            let record = super::record_from_entries(&path, &decoded.entries, &messages)
+            let mut record = super::record_from_entries(&path, &decoded.entries, &messages)
                 .ok_or("missing/invalid task spec")?;
             let counter = record
                 .task_id
@@ -158,6 +217,10 @@ pub fn inventory(parent: &Path) -> Inventory {
             {
                 return Err("task/header/filename identity mismatch".into());
             }
+            record.evidence = Some(std::sync::Arc::new(Evidence {
+                identity: crate::fsops::file_identity(&metadata),
+                bytes,
+            }));
             if !task_ids.insert(record.task_id.clone()) {
                 conflicts.insert(record.task_id.clone());
             }

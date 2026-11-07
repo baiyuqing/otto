@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 mod inventory;
+pub(crate) use inventory::open_validated;
 pub use inventory::{Inventory, inventory};
 
 use otto_core::model::{Message, Role};
@@ -32,6 +33,7 @@ pub const INTERRUPTED_STATUS: &str = "interrupted";
 #[derive(Debug, Clone)]
 pub struct ChildRecord {
     pub path: PathBuf,
+    pub(crate) evidence: Option<std::sync::Arc<inventory::Evidence>>,
     pub task_id: String,
     pub attempt_id: String,
     pub name: String,
@@ -149,6 +151,7 @@ fn record_from_entries(
 
     Some(ChildRecord {
         path: path.to_path_buf(),
+        evidence: None,
         task_id: spec.id,
         attempt_id: raw_entries
             .iter()
@@ -188,8 +191,29 @@ fn record_from_entries(
 /// appending a stand-in tool result, and appends an `otto.task_result` entry
 /// with status [`INTERRUPTED_STATUS`] and an empty error.
 pub fn mark_interrupted(path: &Path) -> Result<(), String> {
-    let (store, _warnings) =
-        crate::session::Store::open(path).map_err(|error| error.to_string())?;
+    let parent = path
+        .parent()
+        .ok_or("child has no parent directory")?
+        .with_extension("jsonl");
+    let record = inventory(&parent)
+        .records
+        .into_iter()
+        .find(|record| record.path == path)
+        .ok_or("child unavailable in validated inventory")?;
+    mark_interrupted_with_writer(&record, None)
+}
+
+pub(crate) fn mark_interrupted_with_writer(
+    record: &ChildRecord,
+    writer: Option<std::sync::Arc<dyn crate::session::WriterOwnership>>,
+) -> Result<(), String> {
+    if let Some(writer) = &writer {
+        writer.check()?;
+    }
+    let store = inventory::open_validated(record)?;
+    if let Some(writer) = writer {
+        store.set_lease_check(writer);
+    }
     let result_json = serde_json::to_string(&TaskResultData {
         status: INTERRUPTED_STATUS,
         error: "",

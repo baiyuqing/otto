@@ -181,13 +181,40 @@ impl Runner {
         // No process snapshot or uncertain external effect is replayed.
         let attempt_id = crate::runtime::builder::random_id()
             .map_err(|error| StartError::SessionIdentity(error.to_string()))?;
-        self.config.tasks.set_attempt_id(&task.id, &attempt_id);
+        // Keep the last acknowledged attempt until the append succeeds.
+        // Exact inventory evidence distinguishes a clean pre-write failure from
+        // uncertain partial/sync failure; the latter must not pretend rollback.
+        let prior = resume_id.as_ref().and_then(|_| {
+            let path = std::path::PathBuf::from(self.config.tasks.get(&task.id)?.session_path);
+            let parent = path.parent()?.with_extension("jsonl");
+            interrupted::inventory(&parent)
+                .records
+                .into_iter()
+                .find(|record| record.path == path)
+        });
         let attempt = serde_json::json!({"version": 1, "taskId": task.id, "attemptId": attempt_id,
             "lineage": if resume_id.is_some() { "resumed" } else { "admitted" }});
         if let Err(error) = append_task_custom(&transcript, "otto.task_attempt", &attempt).await {
+            self.config
+                .tasks
+                .freeze_recovery_history(&task.id, transcript.messages());
+            let unchanged = prior.as_ref().is_some_and(|prior| {
+                let Some(parent) = prior.path.parent() else {
+                    return false;
+                };
+                interrupted::inventory(&parent.with_extension("jsonl"))
+                    .records
+                    .into_iter()
+                    .find(|record| record.path == prior.path)
+                    .is_some_and(|record| record.evidence == prior.evidence)
+            });
             self.finish_without_transcript(
                 &task.id,
-                TaskStatus::Interrupted,
+                if resume_id.is_some() && !unchanged {
+                    TaskStatus::Unavailable
+                } else {
+                    TaskStatus::Interrupted
+                },
                 now,
                 &[],
                 Some(&error.to_string()),
@@ -197,6 +224,8 @@ impl Runner {
                 "attempt boundary was not persisted: {error}"
             )));
         }
+
+        self.config.tasks.set_attempt_id(&task.id, &attempt_id);
 
         if let Some(executable) = definition
             .is_none()
@@ -589,7 +618,7 @@ impl Runner {
             .await
             {
                 self.config.tasks.finish(task_id, TaskStatus::Interrupted, finished_at,
-                    &result, &format!("terminal result was not persisted; inspect transcript and uncertain effects before resume: {error}"));
+                    &result, &format!("terminal result persistence was not acknowledged; inspect transcript and uncertain effects before resume: {error}"));
                 self.notify_finished(task_id, Some(&error.to_string()));
                 return;
             }

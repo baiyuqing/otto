@@ -36,7 +36,7 @@ impl Builder {
             let children_dir = PathBuf::from(session.path()).with_extension("");
             let tasks = (subagents_enabled || !self.no_session).then(|| {
                 Arc::new(
-                    self.new_tasks(session, &children_dir)
+                    self.new_tasks(session)
                         .with_admission_transcript(Arc::clone(session.handle())),
                 )
             });
@@ -84,8 +84,11 @@ impl Builder {
     /// The task registry. A task id stays unique within the session across
     /// resumes, so the counter starts after the highest `t<k>` already used by
     /// a child transcript file.
-    fn new_tasks(&self, session: &SharedSession, children_dir: &Path) -> Tasks {
-        let starting_counter = subagent::tasks::highest_task_counter(children_dir);
+    fn new_tasks(&self, session: &SharedSession) -> Tasks {
+        // Activation's bounded inventory advances the counter and fences new
+        // admission if its upper bound is unknown; never perform a silent,
+        // unbounded filename scan here.
+        let starting_counter = 0;
         match &self.task_recorder {
             Some(store) => {
                 let (pid, process_started_at) = subagent::record::current_process();

@@ -14,6 +14,9 @@ pub enum TaskStatus {
     Canceled,
     /// Execution stopped at a durable boundary and may be explicitly resumed.
     Interrupted,
+    /// Durable evidence exists, but ownership/spec/repair is not usable.
+    /// Non-running and terminal for observation; never execution authority.
+    Unavailable,
 }
 
 impl TaskStatus {
@@ -26,6 +29,7 @@ impl TaskStatus {
             Self::Failed => "failed",
             Self::Canceled => "canceled",
             Self::Interrupted => "interrupted",
+            Self::Unavailable => "unavailable",
         }
     }
 
@@ -33,7 +37,7 @@ impl TaskStatus {
     pub fn is_final(self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed | Self::Canceled | Self::Interrupted
+            Self::Succeeded | Self::Failed | Self::Canceled | Self::Interrupted | Self::Unavailable
         )
     }
 }

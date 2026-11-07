@@ -40,6 +40,7 @@ pub(super) struct Pane {
     scroll: Option<u16>,
     max_scroll: Cell<u16>,
     page_rows: Cell<u16>,
+    collapsed: Option<bool>,
 }
 
 impl Observer {
@@ -77,6 +78,7 @@ impl Observer {
                     scroll: None,
                     max_scroll: Cell::new(0),
                     page_rows: Cell::new(1),
+                    collapsed: None,
                 });
             }
         }
@@ -147,6 +149,7 @@ impl Observer {
         }
         if !self.panes.is_empty() {
             match key.code {
+                KeyCode::Enter => self.toggle_focused(),
                 KeyCode::Tab => self.focused = (self.focused + 1) % self.panes.len(),
                 KeyCode::BackTab => {
                     self.focused = (self.focused + self.panes.len() - 1) % self.panes.len()
@@ -165,6 +168,42 @@ impl Observer {
             }
         }
         true // Never forward typing, submission or task-control keys to the composer.
+    }
+
+    pub fn toggle_at(&mut self, col: u16, row: u16) -> bool {
+        let found = self
+            .geometry
+            .borrow()
+            .iter()
+            .find(|(_, rect)| rect.y == row && rect.x <= col && col < rect.right())
+            .map(|(index, _)| *index);
+        if let Some(index) = found {
+            self.focused = index;
+            let collapsed = self.is_collapsed(index);
+            self.set_collapsed(index, !collapsed);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn toggle_focused(&mut self) {
+        let index = self.focused.min(self.panes.len().saturating_sub(1));
+        let collapsed = self.is_collapsed(index);
+        self.set_collapsed(index, !collapsed);
+    }
+
+    fn is_collapsed(&self, index: usize) -> bool {
+        self.panes.get(index).is_some_and(|pane| {
+            pane.collapsed
+                .unwrap_or_else(|| terminal_status(&pane.row.status))
+        })
+    }
+
+    fn set_collapsed(&mut self, index: usize, collapsed: bool) {
+        if let Some(pane) = self.panes.get_mut(index) {
+            pane.collapsed = Some(collapsed);
+        }
     }
 
     pub fn focus_at(&mut self, col: u16, row: u16) {
@@ -223,23 +262,41 @@ impl Observer {
                 notice,
             );
         }
-        let capacity = (area.height.saturating_sub(2 + notice_rows) / 5).max(1) as usize;
-        let page = self.focused / capacity;
-        let start = page * capacity;
-        let count = self.panes.len().saturating_sub(start).min(capacity);
-        let pages = self.panes.len().div_ceil(capacity).max(1);
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Tab/Shift+Tab: panes/pages · PgUp/PgDn: scroll · Home/End · {}/{pages}",
-                page + 1
-            )),
-            footer,
-        );
         let content = Rect {
             y: area.y.saturating_add(1 + notice_rows),
             height: area.height.saturating_sub(2 + notice_rows),
             ..area
         };
+        let pane_height = |index: usize| if self.is_collapsed(index) { 1u16 } else { 5u16 };
+        let mut page_ranges = Vec::new();
+        let mut page_start = 0usize;
+        let mut used = 0u16;
+        for index in 0..self.panes.len() {
+            let height = pane_height(index).min(content.height.max(1));
+            if used > 0 && used.saturating_add(height) > content.height {
+                page_ranges.push((page_start, index));
+                page_start = index;
+                used = 0;
+            }
+            used = used.saturating_add(height);
+        }
+        if page_start < self.panes.len() {
+            page_ranges.push((page_start, self.panes.len()));
+        }
+        let (page_index, &(start, end)) = page_ranges
+            .iter()
+            .enumerate()
+            .find(|(_, (start, end))| self.focused >= *start && self.focused < *end)
+            .unwrap_or((0, &(0, 0)));
+        let count = end.saturating_sub(start);
+        let pages = page_ranges.len().max(1);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Tab/Shift+Tab: panes · Enter: toggle · PgUp/PgDn: scroll · Home/End · {}/{pages}",
+                page_index + 1
+            )),
+            footer,
+        );
         if count == 0 {
             let back = &self.bindings.back_label;
             let notice = if !connected {
@@ -257,35 +314,91 @@ impl Observer {
             frame.render_widget(Paragraph::new(notice), content);
             return;
         }
-        for (slot, pane) in self.panes.iter().enumerate().skip(start).take(count) {
-            let relative = (slot - start) as u16;
-            let top = content.height as u32 * relative as u32 / count as u32;
-            let bottom = content.height as u32 * (relative + 1) as u32 / count as u32;
+        let visible: Vec<usize> = self
+            .panes
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(count)
+            .map(|(index, _)| index)
+            .collect();
+        let compact = visible
+            .iter()
+            .filter(|&&index| self.is_collapsed(index))
+            .count() as u16;
+        let expanded = visible.len() as u16 - compact;
+        let expanded_height = content.height.saturating_sub(compact);
+        let mut y = content.y;
+        let mut expanded_index = 0u16;
+        for slot in visible {
+            let pane = &self.panes[slot];
+            let collapsed = self.is_collapsed(slot);
+            let height = if collapsed {
+                1
+            } else {
+                let top = expanded_height as u32 * expanded_index as u32 / expanded.max(1) as u32;
+                let bottom =
+                    expanded_height as u32 * (expanded_index + 1) as u32 / expanded.max(1) as u32;
+                expanded_index += 1;
+                (bottom - top) as u16
+            };
             let rect = Rect {
-                y: content.y.saturating_add(top as u16),
-                height: (bottom - top) as u16,
+                y,
+                height: height.min(content.bottom().saturating_sub(y)),
                 ..content
             };
+            y = y.saturating_add(rect.height);
+            if rect.height == 0 {
+                continue;
+            }
             self.geometry.borrow_mut().push((slot, rect));
             let status = if !connected {
                 "disconnected"
             } else {
                 &pane.row.status
             };
+            let task_name = if pane.row.name.is_empty() {
+                pane.row.agent.as_str()
+            } else {
+                pane.row.name.as_str()
+            };
             let title = escape_single_line_text(&format!(
-                "{} · {} · {}",
-                pane.row.task_id, status, pane.row.description
+                "{} {}{} · {} · {}",
+                if collapsed { "▸" } else { "▾" },
+                pane.row.task_id,
+                if task_name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {task_name}")
+                },
+                status,
+                pane.row.description
             ));
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(if slot == self.focused {
+            if collapsed {
+                let style = Style::default().fg(if slot == self.focused {
                     Color::Cyan
                 } else {
                     Color::DarkGray
-                }));
+                });
+                frame.render_widget(Paragraph::new(title).style(style), rect);
+                pane.max_scroll.set(0);
+                pane.page_rows.set(1);
+                continue;
+            }
+            let border_style = Style::default().fg(if slot == self.focused {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            });
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(border_style);
             let inner = block.inner(rect);
             frame.render_widget(block, rect);
+            if rect.height < 3 {
+                continue;
+            }
             let mut lines = transcript::lines(&pane.entries, true, inner.width as usize);
             if lines.is_empty() {
                 let notice = if pane.missing {
@@ -324,3 +437,7 @@ impl Observer {
 
 #[cfg(test)]
 mod tests;
+
+fn terminal_status(status: &str) -> bool {
+    matches!(status, "succeeded" | "failed" | "canceled" | "interrupted")
+}

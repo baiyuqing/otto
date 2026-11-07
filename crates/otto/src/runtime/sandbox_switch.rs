@@ -530,12 +530,12 @@ mod tests {
 
         let mut ok = reloader(
             &home,
-            "[sandbox]\nnetwork = 'allow'\nexcluded_commands = ['lark-cli *']\n",
+            "[sandbox]\nnetwork = 'allow'\nexcluded_commands = ['acme-cli *']\n",
             Arc::clone(&control),
         );
         ok.excluded = Some(list.clone());
         SandboxControl::reload(&ok).await.expect("reload");
-        assert!(list.matches("lark-cli x"));
+        assert!(list.matches("acme-cli x"));
         assert!(!list.matches("old x"));
 
         let mut bad = reloader(
@@ -545,7 +545,7 @@ mod tests {
         );
         bad.excluded = Some(list.clone());
         SandboxControl::reload(&bad).await.expect_err("invalid");
-        assert!(list.matches("lark-cli x"));
+        assert!(list.matches("acme-cli x"));
         control.close().await.expect("close");
     }
 
@@ -686,7 +686,7 @@ mod tests {
         };
 
         let reloader =
-            reload_with("[sandbox]\nnetwork = 'allow'\nexcluded_commands = ['lark-cli *']\n");
+            reload_with("[sandbox]\nnetwork = 'allow'\nexcluded_commands = ['acme-cli *']\n");
         let info = SandboxControl::reload(&reloader).await.expect("reload");
         assert_eq!(
             info.network,
@@ -708,7 +708,7 @@ mod tests {
         )
         .await;
         assert_eq!(output, "reloaded");
-        assert!(list.matches("lark-cli x"));
+        assert!(list.matches("acme-cli x"));
 
         let reloader = reload_with(
             "[sandbox]\nnetwork = 'allow'\nallow_env = ['GH_TOKEN']\nexcluded_commands = ['other *']\n",
@@ -717,7 +717,7 @@ mod tests {
             .await
             .expect_err("an allow_env change is refused");
         assert_eq!(error, RELOAD_ENVIRONMENT);
-        assert!(list.matches("lark-cli x"), "a failed reload keeps the list");
+        assert!(list.matches("acme-cli x"), "a failed reload keeps the list");
         let output = run_in(&control, &fixture.workspace, &environment, "printf ok").await;
         assert_eq!(output, "ok");
 

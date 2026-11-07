@@ -43,12 +43,12 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 				guidance string
 			}{
 				{"telegram", "help me plan my day", "The user is communicating through Telegram chat"},
-				{"feishu", "write a short invitation", "The user is communicating through Feishu (Lark) chat"},
+				{"telegram", "write a short invitation", "The user is communicating through Telegram chat"},
 			} {
 				h := newHarness(t, setup{platform: turn.platform, agent: &agent.Options{
 					Command: options.Command, Address: options.Address, Token: options.Token, Dir: options.Dir, Env: options.Env,
 				}, store: store})
-				// Reuse the Telegram session from Feishu to check that the current
+				// Reuse the first turn's session to check that the current
 				// transport is supplied even when the session already has history.
 				if sid != "" {
 					if err := h.store.SetSession(turn.platform+":c1", sid); err != nil {
@@ -97,7 +97,7 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 				t.Fatalf("persisted user texts = %q", got)
 			}
 			system := systemText([]byte(body))
-			if strings.Contains(system, "Telegram chat") || strings.Contains(system, "Feishu (Lark) chat") {
+			if strings.Contains(system, "Telegram chat") {
 				t.Fatalf("non-chat turn retained channel context: %s", system)
 			}
 		})

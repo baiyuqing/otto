@@ -4,7 +4,7 @@
 
 Otto helps with research, writing, planning, coding and practical tasks. Use it
 from a terminal, [otto-plus](https://github.com/baiyuqing/otto-plus) browser client,
-or Telegram and Feishu through `otto-connect`. Connecting to `otto serve` lets
+or Telegram through `otto-connect`. Connecting to `otto serve` lets
 clients share server-side sessions.
 
 - **Keep context:** persistent sessions, memory and reusable skills.
@@ -70,7 +70,7 @@ one-off CLI flags, the launcher script and Docker setup.
 | --- | --- |
 | Terminal interaction, sessions and headless scripts | [Interactive use](docs/manual/interactive-use.md) |
 | Approvals, sandboxing, tools and sub-agents | [Safety and tools](docs/manual/safety-and-tools.md) |
-| Browser/API server, ACP, Telegram or Feishu | [Servers and connectors](docs/manual/servers-and-connectors.md) |
+| Browser/API server, ACP or Telegram | [Servers and connectors](docs/manual/servers-and-connectors.md) |
 | Durable workflows and workspace identity | [Automation](docs/manual/automation.md) |
 | Memory, skills, MCP and extensions | [Memory and extensions](docs/manual/memory-and-extensions.md) |
 | Embed Otto in a Rust application | [Embedding API](docs/development/architecture.md#embedding-api) |

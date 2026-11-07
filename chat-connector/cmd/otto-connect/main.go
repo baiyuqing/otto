@@ -17,7 +17,6 @@ import (
 	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
 	"github.com/baiyuqing/otto/chat-connector/internal/config"
-	"github.com/baiyuqing/otto/chat-connector/internal/feishu"
 	"github.com/baiyuqing/otto/chat-connector/internal/manage"
 	"github.com/baiyuqing/otto/chat-connector/internal/metrics"
 	"github.com/baiyuqing/otto/chat-connector/internal/ottoconfig"
@@ -51,10 +50,7 @@ func run() error {
 	}
 
 	m := metrics.New()
-	platforms, access, secretVars, err := platformsFor(cfg, store, m)
-	if err != nil {
-		return err
-	}
+	platforms, access, secretVars := platformsFor(cfg, store)
 
 	management, managementErr := manage.FromCommand(cfg.Agent.Command, home)
 	if managementErr != nil {
@@ -102,7 +98,7 @@ func run() error {
 // admission lists by platform name, and the names of the environment
 // variables that hold their secrets. config.Load fails when no platform is
 // configured.
-func platformsFor(cfg *config.Config, store *state.Store, m *metrics.Metrics) ([]bridge.Platform, map[string]bridge.Access, []string, error) {
+func platformsFor(cfg *config.Config, store *state.Store) ([]bridge.Platform, map[string]bridge.Access, []string) {
 	var platforms []bridge.Platform
 	access := map[string]bridge.Access{}
 	var secretVars []string
@@ -115,16 +111,7 @@ func platformsFor(cfg *config.Config, store *state.Store, m *metrics.Metrics) ([
 		access[bot.Name()] = bridge.Access{Chats: t.Chats, Senders: t.Senders}
 		secretVars = append(secretVars, t.TokenEnv)
 	}
-	if f := cfg.Feishu; f != nil {
-		p, err := feishu.New(feishu.Options{AppID: f.AppID, AppSecret: f.AppSecret, Domain: f.Domain, Chats: f.Chats, Senders: f.Senders, Metrics: m})
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		platforms = append(platforms, p)
-		access[p.Name()] = bridge.Access{Chats: f.Chats, Senders: f.Senders}
-		secretVars = append(secretVars, f.AppSecretEnv)
-	}
-	return platforms, access, secretVars, nil
+	return platforms, access, secretVars
 }
 
 // withoutVars returns env without the entries named in names.

@@ -9,6 +9,10 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- The F6 sub-agent observer keeps queued/running task panes expanded by default and
+  compacts succeeded, failed, canceled and interrupted panes; Enter or clicking a
+  title toggles a pane, with the manual choice retained during snapshot refreshes.
+
 - `/session` offers Copy Session ID (the default) and Copy all displayed details.
   Up/Down selects, Enter copies and Esc closes; the popup remains open with copy
   feedback. Attached sessions copy on the terminal client, not the server.

@@ -18,7 +18,7 @@ func TestChatInputIDKeepsOttoAlphabetAndBounds(t *testing.T) {
 		m    Message
 		want string
 	}{
-		{Message{Platform: "feishu", ChatID: "oc_1", MessageID: "om_2"}, "chat:feishu:oc_1:om_2"},
+		{Message{Platform: "telegram", ChatID: "c_1", MessageID: "m_2"}, "chat:telegram:c_1:m_2"},
 		{Message{Platform: "telegram", ChatID: "-100", MessageID: "7"}, "chat:telegram:-100:7"},
 		{Message{Platform: "telegram", ChatID: "a b", MessageID: "x/y"}, "chat:telegram:a_b:x_y"},
 		{Message{Platform: "telegram", ChatID: "c1"}, ""},

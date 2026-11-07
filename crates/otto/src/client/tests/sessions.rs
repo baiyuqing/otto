@@ -39,10 +39,10 @@ async fn start_turn_sends_the_image_as_data_and_mime_type() {
             "s1",
             "chat text",
             None,
-            Some(Channel::Feishu),
-            Some(&Origin::chat("feishu", "oc_1").unwrap()),
+            Some(Channel::Telegram),
+            Some(&Origin::chat("telegram", "c_1").unwrap()),
             None,
-            Some("chat:feishu:oc_1:m1"),
+            Some("chat:telegram:c_1:m1"),
         )
         .await
         .unwrap();
@@ -67,9 +67,9 @@ async fn start_turn_sends_the_image_as_data_and_mime_type() {
         json!({
             "text": "chat text",
             "queue": true,
-            "channel": "feishu",
-            "origin": "chat:feishu:oc_1",
-            "input_id": "chat:feishu:oc_1:m1"
+            "channel": "telegram",
+            "origin": "chat:telegram:c_1",
+            "input_id": "chat:telegram:c_1:m1"
         })
     );
 }

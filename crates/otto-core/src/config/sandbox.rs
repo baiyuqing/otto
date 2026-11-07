@@ -112,8 +112,8 @@ pub fn resolve_sandbox(
 /// An entry `prefix *` matches `prefix` alone or `prefix` followed by a space
 /// or tab and anything else; any other entry matches only a command equal to
 /// it. Leading and trailing whitespace of `command` is ignored. A command that
-/// is not [simple](is_simple_command) never matches, so `lark-cli *` does not
-/// cover `lark-cli x && rm -rf y`.
+/// is not [simple](is_simple_command) never matches, so `acme-cli *` does not
+/// cover `acme-cli x && rm -rf y`.
 pub fn excluded_command_matches(entries: &[String], command: &str) -> bool {
     let command = command.trim();
     if !is_simple_command(command) {
@@ -416,25 +416,25 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn excluded_commands_match_a_prefix_or_the_exact_command() {
-        let list = entries(&["lark-cli *", "gh auth status"]);
+        let list = entries(&["acme-cli *", "gh auth status"]);
         for command in [
-            "lark-cli",
-            "lark-cli auth status",
-            "  lark-cli\tim +messages-send --text 'a; b | c > d $(e) `f` # g'\n",
-            "lark-cli --text \"a; b & c\"",
-            "lark-cli --text \"two\nlines\"",
-            "lark-cli --text a\\;b",
+            "acme-cli",
+            "acme-cli auth status",
+            "  acme-cli\tim +messages-send --text 'a; b | c > d $(e) `f` # g'\n",
+            "acme-cli --text \"a; b & c\"",
+            "acme-cli --text \"two\nlines\"",
+            "acme-cli --text a\\;b",
             "gh auth status",
         ] {
             assert!(excluded_command_matches(&list, command), "{command:?}");
         }
         for command in [
-            "lark-clix",
-            "lark-cli-other auth",
-            "./lark-cli auth",
+            "acme-clix",
+            "acme-cli-other auth",
+            "./acme-cli auth",
             "gh auth status --show-token",
             "gh auth",
-            "FOO=1 lark-cli auth",
+            "FOO=1 acme-cli auth",
         ] {
             assert!(!excluded_command_matches(&list, command), "{command:?}");
         }
@@ -443,26 +443,26 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn excluded_commands_never_match_a_command_that_runs_something_else() {
-        let list = entries(&["lark-cli *"]);
+        let list = entries(&["acme-cli *"]);
         for command in [
-            "lark-cli auth; rm -rf x",
-            "lark-cli auth && rm -rf x",
-            "lark-cli auth || rm -rf x",
-            "lark-cli auth | sh",
-            "lark-cli auth & rm -rf x",
-            "lark-cli auth > ~/.zshrc",
-            "lark-cli auth < /etc/passwd",
-            "lark-cli auth\nrm -rf x",
-            "lark-cli $(rm -rf x)",
-            "lark-cli ${HOME}",
-            "lark-cli \"$(rm -rf x)\"",
-            "lark-cli `rm -rf x`",
-            "lark-cli \"`rm -rf x`\"",
-            "lark-cli (x)",
-            "lark-cli #'\nrm -rf x #'",
-            "lark-cli 'unterminated",
-            "lark-cli \"unterminated",
-            "lark-cli trailing\\",
+            "acme-cli auth; rm -rf x",
+            "acme-cli auth && rm -rf x",
+            "acme-cli auth || rm -rf x",
+            "acme-cli auth | sh",
+            "acme-cli auth & rm -rf x",
+            "acme-cli auth > ~/.zshrc",
+            "acme-cli auth < /etc/passwd",
+            "acme-cli auth\nrm -rf x",
+            "acme-cli $(rm -rf x)",
+            "acme-cli ${HOME}",
+            "acme-cli \"$(rm -rf x)\"",
+            "acme-cli `rm -rf x`",
+            "acme-cli \"`rm -rf x`\"",
+            "acme-cli (x)",
+            "acme-cli #'\nrm -rf x #'",
+            "acme-cli 'unterminated",
+            "acme-cli \"unterminated",
+            "acme-cli trailing\\",
         ] {
             assert!(!excluded_command_matches(&list, command), "{command:?}");
         }
@@ -473,7 +473,7 @@ mod tests {
     fn excluded_command_entries_are_validated() {
         let mut raw = SandboxConfig {
             excluded_commands: entries(&[
-                "lark-cli *",
+                "acme-cli *",
                 "gh auth status",
                 "/opt/bin/tool *",
                 "git *",
@@ -487,14 +487,14 @@ mod tests {
             "",
             " *",
             "*",
-            "lark-cli*",
-            "lark-* *",
-            " lark-cli *",
-            "lark-cli  *",
+            "acme-cli*",
+            "acme-* *",
+            " acme-cli *",
+            "acme-cli  *",
             "a; b *",
             "a $(b)",
             "a\tb\n",
-            "lark-cli * x",
+            "acme-cli * x",
         ] {
             raw.excluded_commands = entries(&[invalid]);
             let error = resolve_sandbox(&raw, None).expect_err(invalid);
@@ -503,7 +503,7 @@ mod tests {
                 "{invalid:?}"
             );
         }
-        raw.excluded_commands = entries(&["lark-cli *", "lark-cli *"]);
+        raw.excluded_commands = entries(&["acme-cli *", "acme-cli *"]);
         assert!(resolve_sandbox(&raw, None).is_err());
     }
 
@@ -511,8 +511,8 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn approve_always_derives_the_exact_command_entry() {
         assert_eq!(
-            excluded_command_entry("  lark-cli auth status").as_deref(),
-            Ok("lark-cli auth status")
+            excluded_command_entry("  acme-cli auth status").as_deref(),
+            Ok("acme-cli auth status")
         );
 
         let entry = excluded_command_entry("find . -name x").expect("entry");
@@ -534,10 +534,10 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn approve_always_refuses_commands_the_model_could_steer() {
         for (command, reason) in [
-            ("lark-cli auth && rm x", "chains"),
+            ("acme-cli auth && rm x", "chains"),
             ("", "bare program name"),
             ("find . -name '*.rs'", "'*'"),
-            ("lark-cli *", "'*'"),
+            ("acme-cli *", "'*'"),
             ("FOO=1 tool", "bare program name"),
             ("'tool' x", "bare program name"),
             ("./build.sh", "bare program name"),

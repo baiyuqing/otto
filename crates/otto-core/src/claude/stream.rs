@@ -1,9 +1,13 @@
 //! Incremental byte-oriented SSE assembler for Claude Messages. Unknown event,
 //! block and delta types are ignored; known malformed events fail closed.
-//! Errors are content-free. After any error, discard this assembler.
+//! Message deltas update metadata independently of block lifetimes. Only a
+//! message_stop completes the response, finalizing any blocks without an explicit
+//! stop using the same strict tool-input validation. Errors are content-free.
+//! After any error, discard this assembler.
 use super::{json, protocol::finish_reason};
 use crate::model::{Block, BlockType, FinishReason, Message, Role, Usage};
 use crate::provider::{Response, StreamEvent};
+use serde::Deserialize;
 use serde_json::{Value, value::RawValue};
 use std::collections::{BTreeMap, HashSet};
 
@@ -30,9 +34,43 @@ pub enum StreamError {
 struct PendingBlock {
     block: Option<Block>,
     input: String,
-    fragmented: bool,
     stopped: bool,
 }
+impl PendingBlock {
+    /// Explicit block stops and the final message stop share the same checks.
+    fn finish(&mut self) -> Result<(), StreamError> {
+        if self.stopped {
+            return Ok(());
+        }
+        if !self.input.is_empty() {
+            let input =
+                json::parse(self.input.as_bytes()).map_err(|_| StreamError::MalformedArguments)?;
+            if !input.is_object() {
+                return Err(StreamError::MalformedArguments);
+            }
+            if let Some(block) = self.block.as_mut() {
+                block.arguments = Some(
+                    RawValue::from_string(std::mem::take(&mut self.input))
+                        .map_err(|_| StreamError::MalformedArguments)?,
+                );
+            }
+        }
+        self.stopped = true;
+        Ok(())
+    }
+}
+
+// Decode initial arguments from the already validated wire event, preserving
+// decimal and large integer literals rather than serializing a Value again.
+#[derive(Deserialize)]
+struct ToolInputEvent {
+    content_block: ToolInputBlock,
+}
+#[derive(Deserialize)]
+struct ToolInputBlock {
+    input: Box<RawValue>,
+}
+
 #[derive(Debug, Default)]
 pub struct StreamAssembler {
     line: Vec<u8>,
@@ -40,7 +78,6 @@ pub struct StreamAssembler {
     event: String,
     bytes: usize,
     started: bool,
-    delta_seen: bool,
     done: bool,
     id: String,
     blocks: BTreeMap<u64, PendingBlock>,
@@ -104,7 +141,7 @@ impl StreamAssembler {
                 if !self.event.is_empty() && self.event != kind {
                     return Err(StreamError::Decode);
                 }
-                self.consume_event(kind, &value, emit)?;
+                self.consume_event(kind, &value, &data, emit)?;
             }
             self.event.clear();
         } else if let Some(data) = line.strip_prefix(b"data:") {
@@ -133,7 +170,7 @@ impl StreamAssembler {
             ("input_tokens", &mut usage.input_tokens),
             ("output_tokens", &mut usage.output_tokens),
         ] {
-            if let Some(count) = object.get(key) {
+            if let Some(count) = object.get(key).filter(|count| !count.is_null()) {
                 let count = count
                     .as_i64()
                     .filter(|count| *count >= 0)
@@ -147,6 +184,7 @@ impl StreamAssembler {
         &mut self,
         kind: &str,
         value: &Value,
+        raw_event: &[u8],
         emit: &mut dyn FnMut(StreamEvent),
     ) -> Result<(), StreamError> {
         match kind {
@@ -172,12 +210,10 @@ impl StreamAssembler {
                 self.started = true;
             }
             "content_block_start" => {
-                if !self.started || self.delta_seen {
-                    return Err(StreamError::Sequence(if !self.started {
-                        "content_block_start: before message_start"
-                    } else {
-                        "content_block_start: after message_delta"
-                    }));
+                if !self.started {
+                    return Err(StreamError::Sequence(
+                        "content_block_start: before message_start",
+                    ));
                 }
                 let index = value
                     .get("index")
@@ -212,8 +248,7 @@ impl StreamAssembler {
                                 "content_block_start: empty tool id/name or duplicate tool id",
                             ));
                         }
-                        let input = wire
-                            .get("input")
+                        wire.get("input")
                             .filter(|input| input.is_object())
                             .ok_or(StreamError::Decode)?;
                         Some(Block {
@@ -221,8 +256,10 @@ impl StreamAssembler {
                             tool_call_id: id,
                             tool_name: name,
                             arguments: Some(
-                                RawValue::from_string(input.to_string())
-                                    .map_err(|_| StreamError::Decode)?,
+                                serde_json::from_slice::<ToolInputEvent>(raw_event)
+                                    .map_err(|_| StreamError::Decode)?
+                                    .content_block
+                                    .input,
                             ),
                             ..Block::default()
                         })
@@ -234,18 +271,15 @@ impl StreamAssembler {
                     PendingBlock {
                         block,
                         input: String::new(),
-                        fragmented: false,
                         stopped: false,
                     },
                 );
             }
             "content_block_delta" => {
-                if !self.started || self.delta_seen {
-                    return Err(StreamError::Sequence(if !self.started {
-                        "content_block_delta: before message_start"
-                    } else {
-                        "content_block_delta: after message_delta"
-                    }));
+                if !self.started {
+                    return Err(StreamError::Sequence(
+                        "content_block_delta: before message_start",
+                    ));
                 }
                 let index = value
                     .get("index")
@@ -282,7 +316,6 @@ impl StreamAssembler {
                                     "content_block_delta: input_json_delta on non-tool block",
                                 ));
                             }
-                            pending.fragmented = true;
                             pending.input.push_str(fragment);
                             emit(StreamEvent::ToolCallDelta {
                                 tool_call_id: block.tool_call_id.clone(),
@@ -295,12 +328,10 @@ impl StreamAssembler {
                 }
             }
             "content_block_stop" => {
-                if !self.started || self.delta_seen {
-                    return Err(StreamError::Sequence(if !self.started {
-                        "content_block_stop: before message_start"
-                    } else {
-                        "content_block_stop: after message_delta"
-                    }));
+                if !self.started {
+                    return Err(StreamError::Sequence(
+                        "content_block_stop: before message_start",
+                    ));
                 }
                 let index = value
                     .get("index")
@@ -313,46 +344,36 @@ impl StreamAssembler {
                     .ok_or(StreamError::Sequence(
                         "content_block_stop: block missing or already stopped",
                     ))?;
-                if pending.fragmented {
-                    let input = json::parse(pending.input.as_bytes())
-                        .map_err(|_| StreamError::MalformedArguments)?;
-                    if !input.is_object() {
-                        return Err(StreamError::MalformedArguments);
-                    }
-                    if let Some(block) = pending.block.as_mut() {
-                        block.arguments = Some(
-                            RawValue::from_string(std::mem::take(&mut pending.input))
-                                .map_err(|_| StreamError::MalformedArguments)?,
-                        );
-                    }
-                }
-                pending.stopped = true;
+                pending.finish()?;
             }
             "message_delta" => {
-                if !self.started
-                    || self.delta_seen
-                    || self.blocks.values().any(|block| !block.stopped)
-                {
-                    return Err(StreamError::Sequence(if !self.started {
-                        "message_delta: before message_start"
-                    } else if self.delta_seen {
-                        "message_delta: duplicate delta"
-                    } else {
-                        "message_delta: content block still open"
-                    }));
+                if !self.started {
+                    return Err(StreamError::Sequence("message_delta: before message_start"));
                 }
-                let delta = value.get("delta").ok_or(StreamError::Decode)?;
-                self.finish = Some(finish_reason(string(delta, "stop_reason")?));
-                self.usage(value.get("usage").ok_or(StreamError::Decode)?)?;
-                self.delta_seen = true;
+                let delta = value
+                    .get("delta")
+                    .and_then(Value::as_object)
+                    .ok_or(StreamError::Decode)?;
+                if let Some(reason) = delta.get("stop_reason").filter(|reason| !reason.is_null()) {
+                    let reason = reason
+                        .as_str()
+                        .filter(|reason| !reason.is_empty())
+                        .ok_or(StreamError::Decode)?;
+                    self.finish = Some(finish_reason(reason));
+                }
+                if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
+                    self.usage(usage)?;
+                }
             }
             "message_stop" => {
-                if !self.started || !self.delta_seen {
-                    return Err(StreamError::Sequence(if !self.started {
-                        "message_stop: before message_start"
-                    } else {
-                        "message_stop: missing message_delta"
-                    }));
+                if !self.started {
+                    return Err(StreamError::Sequence("message_stop: before message_start"));
+                }
+                if self.finish.is_none() {
+                    return Err(StreamError::Sequence("message_stop: missing stop_reason"));
+                }
+                for pending in self.blocks.values_mut() {
+                    pending.finish()?;
                 }
                 self.done = true;
             }

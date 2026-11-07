@@ -223,6 +223,14 @@ impl Client {
         client
     }
 
+    /// Rejects every request with `message` before anything is sent; used when
+    /// the selected provider has no API key bound, so the process can still
+    /// start and the user can bind a key or switch models.
+    pub fn with_missing_credential(mut self, message: &str) -> Self {
+        self.state = Err(message.to_string());
+        self
+    }
+
     /// Overrides the model-output idle bound; tests use a short one.
     pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
         self.model_idle_timeout = timeout;

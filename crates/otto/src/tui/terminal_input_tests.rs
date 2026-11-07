@@ -40,8 +40,10 @@ fn suspend_does_not_capture_plain_z_or_alt_control_z() {
 
 #[test]
 fn suspend_binding_is_reserved_before_any_observer_screen_can_capture_it() {
-    let mut bindings = otto_core::config::ui::ObserverBindings::default();
-    bindings.toggle = "Ctrl+Z".into();
+    let bindings = otto_core::config::ui::ObserverBindings {
+        toggle: "Ctrl+Z".into(),
+        ..Default::default()
+    };
     let error = match crate::tui::observer::bindings::Bindings::parse(&bindings) {
         Ok(_) => panic!("Ctrl-Z must not be an observer binding"),
         Err(error) => error,

@@ -51,7 +51,7 @@ impl Runner {
             Some(id) => {
                 self.config
                     .tasks
-                    .add_with_id(id, task_template, Some(cancel.clone()), history)?
+                    .begin_resume(&id, task_template, cancel.clone(), history)?
             }
             None => self
                 .config
@@ -65,6 +65,19 @@ impl Runner {
             cancel: cancel.clone(),
             armed: true,
         };
+        if resume_id.is_none() {
+            if let Err(error) = self.config.tasks.persist_admission(&task).await {
+                self.finish_without_transcript(
+                    &task.id,
+                    TaskStatus::Interrupted,
+                    now,
+                    &[],
+                    Some(&error.to_string()),
+                );
+                start_guard.disarm();
+                return Err(error.into());
+            }
+        }
         let transcript = match (transcript, &self.config.child_session) {
             (Some((transcript, path)), _) => {
                 if !path.is_empty() {
@@ -146,6 +159,24 @@ impl Runner {
                 start_guard.disarm();
                 return Ok(self.config.tasks.get(&task.id).unwrap_or(task));
             }
+        }
+
+        // A versioned attempt boundary is durable before any provider/tool work.
+        // Its entry id is the attempt identity; no process snapshot is restored.
+        let attempt = serde_json::json!({"version": 1, "taskId": task.id,
+            "lineage": if resume_id.is_some() { "resumed" } else { "admitted" }});
+        if let Err(error) = append_task_custom(&transcript, "otto.task_attempt", &attempt).await {
+            self.finish_without_transcript(
+                &task.id,
+                TaskStatus::Interrupted,
+                now,
+                &[],
+                Some(&error.to_string()),
+            );
+            start_guard.disarm();
+            return Err(StartError::ResumeFailed(format!(
+                "attempt boundary was not persisted: {error}"
+            )));
         }
 
         if let Some(executable) = definition
@@ -527,7 +558,7 @@ impl Runner {
             } else {
                 status.as_str()
             };
-            let _ = append_task_custom(
+            if let Err(error) = append_task_custom(
                 transcript,
                 TASK_RESULT_CUSTOM_TYPE,
                 &TaskResultData {
@@ -535,7 +566,12 @@ impl Runner {
                     error: &error_text,
                 },
             )
-            .await;
+            .await
+            {
+                self.config.tasks.finish(task_id, TaskStatus::Interrupted, finished_at,
+                    &result, &format!("terminal result was not persisted; inspect transcript and uncertain effects before resume: {error}"));
+                return;
+            }
         }
         self.config
             .tasks

@@ -72,6 +72,7 @@ struct State {
     /// than just "is this registry closed".
     migrating: bool,
     counter: u64,
+    recovery_diagnostics: Vec<String>,
     order: Vec<String>,
     entries: HashMap<String, Entry>,
     names: HashMap<String, String>,
@@ -99,6 +100,7 @@ impl Updates {
 /// The per-session sub-agent task registry.
 pub struct Tasks {
     state: Mutex<State>,
+    admission_transcript: Option<Arc<dyn otto_core::session::Session + Send + Sync>>,
     inbox: Arc<Inbox>,
     /// `inbox` as the port every consumer uses.
     mailbox: Arc<dyn Mailbox>,
@@ -174,6 +176,7 @@ impl Tasks {
             inbox_updates.signal();
         }))));
         Self {
+            admission_transcript: None,
             state: Mutex::new(State {
                 counter: starting_counter,
                 ..State::default()
@@ -694,6 +697,7 @@ impl Tasks {
 
 pub(crate) mod observer;
 mod progress;
+mod recovery;
 mod task;
 mod task_names;
 

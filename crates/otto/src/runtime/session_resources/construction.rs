@@ -34,13 +34,26 @@ impl Builder {
     ) -> Arc<SessionResources> {
         session.resources_or_create(|| {
             let children_dir = PathBuf::from(session.path()).with_extension("");
-            let tasks = subagents_enabled.then(|| Arc::new(self.new_tasks(session, &children_dir)));
+            let tasks = (subagents_enabled || !self.no_session).then(|| {
+                Arc::new(
+                    self.new_tasks(session, &children_dir)
+                        .with_admission_transcript(Arc::new(session.clone())),
+                )
+            });
             let notifications = match &tasks {
                 Some(tasks) => Arc::clone(tasks.notifications_inbox()),
                 None => Arc::new(Inbox::default()),
             };
             self.attach_inbox_sidecar(session, &notifications, warnings);
-            if tasks.is_some() {
+            if let Some(tasks) = &tasks {
+                if !self.no_session && !session.path().is_empty() {
+                    crate::subagent::recovery::activate(
+                        Path::new(&session.path()),
+                        tasks,
+                        notifications.as_ref(),
+                        warnings,
+                    );
+                }
                 self.notify_recovery(
                     session,
                     &notifications,

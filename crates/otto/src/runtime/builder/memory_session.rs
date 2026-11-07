@@ -11,6 +11,7 @@ impl MemoryHandle {
                 header,
                 name: String::new(),
                 custom_data: HashMap::new(),
+                input_submission_events: Vec::new(),
                 local_commands: Vec::new(),
             }),
             writer_ownership: None,
@@ -130,6 +131,13 @@ impl Session for MemoryHandle {
 }
 
 impl SessionHandle for MemoryHandle {
+    fn append_input_submissions(&self, encoded: &str) -> Result<(), String> {
+        self.state().input_submission_events.push(encoded.into());
+        Ok(())
+    }
+    fn input_submission_events(&self) -> Result<Vec<String>, String> {
+        Ok(self.state().input_submission_events.clone())
+    }
     fn append_local_command(&self, encoded: &str) -> Result<(), String> {
         let receipt = serde_json::from_str(encoded).map_err(|error| error.to_string())?;
         self.state().local_commands.push(receipt);

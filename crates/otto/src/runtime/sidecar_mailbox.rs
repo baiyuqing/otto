@@ -19,6 +19,49 @@ use otto_core::agent::inbox::{Entry, Inbox};
 use crate::fsops::{PosixPublish, PublishOps};
 use crate::tool::remind;
 
+/// IDs backed by a recoverable intent in this exact session/workspace.
+pub(crate) fn recoverable_local_ids(
+    session: &crate::runtime::builder::SharedSession,
+) -> std::collections::HashSet<String> {
+    let header = session.header();
+    session
+        .handle()
+        .input_submission_events()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|encoded| {
+            let value: serde_json::Value = serde_json::from_str(encoded).ok()?;
+            if value.get("session")?.as_str()? != header.id
+                || value.get("workspace")?.as_str()? != header.workspace
+            {
+                return None;
+            }
+            value.get("id")?.as_str().map(str::to_owned)
+        })
+        .collect()
+}
+
+/// Local TUI guidance surviving process loss is recoverable intent, not replay authority.
+/// Called only while constructing the mailbox, before producers receive it. The
+/// append-only session submission record retains its text and stable ID.
+pub(crate) fn hold_local_input_recovery(
+    journal: &dyn otto_core::mailbox::Mailbox,
+    recoverable_ids: &std::collections::HashSet<String>,
+) {
+    use otto_core::model::{InputSource, InputTransport};
+    let entries = journal
+        .queued()
+        .into_iter()
+        .filter(|entry| {
+            !(recoverable_ids.contains(&entry.notification.id)
+                && entry.notification.input_provenance.is_some_and(|origin| {
+                    origin.source == InputSource::Tui && origin.transport == InputTransport::Local
+                }))
+        })
+        .collect();
+    journal.load(entries);
+}
+
 /// A fresh input id for a notification enqueued without one: `in_` followed
 /// by 32 random hex digits, or empty when randomness is unavailable (the
 /// notification is then delivered at least once).

@@ -106,7 +106,7 @@ pub(super) async fn run_restored_prompts<B: Backend>(
     for prompt in prompts {
         controller.set_next_input_id(Some(prompt.input_id.clone()));
         controller.set_next_input_provenance(prompt.input_provenance);
-        let result = run_turn(app, terminal, keys, controller, cancel, prompt.text).await;
+        let result = run_turn(app, terminal, keys, controller, cancel, prompt.text, None).await;
         controller.set_next_input_id(None);
         if let Some(journal) = &journal {
             journal.forget(&prompt.input_id);
@@ -123,12 +123,29 @@ pub(super) async fn run_turn<B: Backend>(
     controller: &Controller,
     cancel: &CancellationToken,
     line: String,
+    input_id: Option<&str>,
 ) -> Result<(), ReplError> {
-    match controller.approval_message(&line, cancel).await {
+    let provenance = input_id
+        .and_then(|id| {
+            controller
+                .input_submissions()
+                .ok()?
+                .into_iter()
+                .find(|record| record.id == id)
+                .map(|record| record.provenance)
+        })
+        .unwrap_or_else(|| {
+            otto_core::model::InputProvenance::local(otto_core::model::InputSource::Tui)
+        });
+    match controller
+        .approval_message_with_provenance(&line, None, input_id, Some(provenance), cancel)
+        .await
+    {
         Ok(Some(reply)) => {
             app.push_system(reply.text);
             if reply.queued {
                 app.queued_input = Some(line);
+                app.queued_input_id = input_id.map(str::to_owned);
             }
             return Ok(());
         }

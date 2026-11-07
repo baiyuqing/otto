@@ -197,6 +197,7 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                 Command::Management(request) => {
                     return remote_management(remote, session, request).await;
                 }
+                Command::AdmitLocalInput { .. } => return Err("local input command is unavailable on attached sessions".into()),
                 Command::AdmitInput(text) => match client
                     .admit_input(session, &text, None)
                     .await

@@ -161,6 +161,7 @@ impl<'a> Ui<'a> {
         let remote = self.remote;
         let session = remote.session();
         match action {
+            Action::LocalPrompt { .. } => self.app.push_system("Local submission cannot execute in an attached session; reconnect to its original session and use /inputs"),
             Action::Prompt(line) => {
                 self.pending = None;
                 if self.followed.is_none() && self.compacting.is_none() {

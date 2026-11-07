@@ -27,6 +27,30 @@ use crate::storage::files::FileDriver;
 use otto_core::session::{Header, ListResult, SessionInfo, Warning};
 
 impl SessionHandle for Store {
+    fn append_input_submissions(&self, encoded: &str) -> Result<(), String> {
+        self.append_custom_entry("otto.input_submissions", encoded)
+            .map_err(|error| error.to_string())
+    }
+    fn input_submission_events(&self) -> Result<Vec<String>, String> {
+        let state = self.state.lock().map_err(|_| "session lock poisoned")?;
+        let (index, _) = otto_core::session::context::index_context_entries(&state.entries)
+            .map_err(|error| error.to_string())?;
+        let path = otto_core::session::context::active_context_path(
+            &state.entries,
+            state.leaf_id.as_deref().unwrap_or(""),
+            &index,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(path
+            .iter()
+            .filter_map(|entry| {
+                let custom = entry.custom.as_ref()?;
+                (custom.custom_type == "otto.input_submissions")
+                    .then(|| custom.data.as_ref().map(|data| data.get().to_owned()))
+                    .flatten()
+            })
+            .collect())
+    }
     fn append_local_command(&self, encoded: &str) -> Result<(), String> {
         self.append_custom_entry(
             otto_core::session::local_command::LOCAL_COMMAND_CUSTOM_TYPE,

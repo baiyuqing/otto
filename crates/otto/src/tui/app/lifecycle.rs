@@ -11,6 +11,35 @@ impl App {
             {
                 return;
             }
+            if let Ok(records) = c.input_submissions() {
+                let guidance = c.steering_messages().unwrap_or_default();
+                for record in records {
+                    let terminal_guidance = guidance
+                        .iter()
+                        .find(|message| message.input_id == record.id)
+                        .and_then(|message| match message.status {
+                            otto_core::agent::steering::Status::Withdrawn => Some("withdrawn"),
+                            otto_core::agent::steering::Status::Discarded => {
+                                Some("failed: guidance discarded before delivery")
+                            }
+                            _ => None,
+                        });
+                    let status = if c.has_input(&record.id) {
+                        "delivered"
+                    } else {
+                        terminal_guidance.unwrap_or(&record.state)
+                    };
+                    let marker = format!(
+                        "[{}] {:?} / {:?} / {}",
+                        record.id, record.provenance.source, record.provenance.delivery, status
+                    );
+                    let scoped_id = format!("{}:{}", self.info.session_id, record.id);
+                    if self.input_statuses.get(&scoped_id) != Some(&marker) {
+                        self.input_statuses.insert(scoped_id, marker.clone());
+                        self.push_system(format!("{marker}; /inputs lists session-scoped status; /recover {} restores a draft only (never automatically replayed)", record.id));
+                    }
+                }
+            }
             self.tasks = c.subagent_tasks().map(|t| t.list()).unwrap_or_default();
             self.skill_names = c.skills().skills().iter().map(|s| s.name.clone()).collect();
             self.skill_names.sort();

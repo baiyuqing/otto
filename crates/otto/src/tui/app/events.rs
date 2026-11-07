@@ -110,11 +110,13 @@ impl App {
                 return true;
             }
             USER_MESSAGE => {
-                if let Some(index) = self
-                    .pending_steers
-                    .iter()
-                    .position(|steer| steer.text == event.text)
-                {
+                if let Some(index) = self.pending_steers.iter().position(|steer| {
+                    if event.input_id.is_empty() {
+                        steer.text == event.text
+                    } else {
+                        steer.input_id == event.input_id
+                    }
+                }) {
                     let delivered = self.pending_steers.remove(index);
                     self.delivered_steers.insert(delivered.id);
                 }
@@ -130,14 +132,42 @@ impl App {
                 if let Some(steer) = self
                     .queued_steer
                     .as_ref()
-                    .filter(|steer| steer.text == event.text)
+                    .filter(|steer| {
+                        if event.input_id.is_empty() {
+                            steer.text == event.text
+                        } else {
+                            steer.input_id == event.input_id
+                        }
+                    })
                     .cloned()
                 {
                     self.queued_steer = None;
                     self.recalling_steer = None;
                     self.resolve_steering(&steer);
                 }
-                if self.attached {
+                if !event.input_id.is_empty() {
+                    let entry_id = format!("input-{}", event.input_id);
+                    if !self.entries.iter().any(|entry| entry.id == entry_id) {
+                        let origin = event
+                            .input_provenance
+                            .map(|origin| origin.label())
+                            .unwrap_or_else(|| {
+                                "source=unknown transport=unknown delivery=unknown".into()
+                            });
+                        self.entries.push(Entry {
+                            id: entry_id,
+                            input_id: event.input_id.clone(),
+                            kind: Some(EntryKind::User),
+                            raw: event.text.clone(),
+                            input_label: format!("[{}] {origin} / delivered", event.input_id),
+                            ..Entry::default()
+                        });
+                        self.composer.remember(&event.text);
+                    }
+                    // Identity-bearing events never use text-only optimistic dedup.
+                    self.awaiting_user_echo = None;
+                    self.optimistic_user_echo = None;
+                } else if self.attached {
                     if self.awaiting_user_echo.as_deref() == Some(event.text.as_str()) {
                         self.awaiting_user_echo = None;
                     }

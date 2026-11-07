@@ -125,6 +125,7 @@ struct MemoryState {
     header: Header,
     name: String,
     custom_data: HashMap<String, String>,
+    input_submission_events: Vec<String>,
     local_commands: Vec<otto_core::session::local_command::LocalCommandReceipt>,
 }
 

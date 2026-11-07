@@ -41,11 +41,13 @@ fn catalog_lists_commands_by_workflow_group() {
             "/archive",
             "/delete",
             "/session",
+            "/inputs",
+            "/recover",
             "/exit",
         ]
     );
     assert_eq!(entries[0].group, CommandGroup::Help);
-    assert_eq!(entries[26].group, CommandGroup::Exit);
+    assert_eq!(entries.last().unwrap().group, CommandGroup::Exit);
 }
 
 #[test]

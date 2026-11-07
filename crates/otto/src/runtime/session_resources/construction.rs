@@ -45,6 +45,12 @@ impl Builder {
                 None => Arc::new(Inbox::default()),
             };
             self.attach_inbox_sidecar(session, &notifications, warnings);
+            let recoverable_ids = crate::runtime::sidecar_mailbox::recoverable_local_ids(session);
+            crate::runtime::sidecar_mailbox::hold_local_input_recovery(
+                notifications.as_ref(),
+                &recoverable_ids,
+            );
+
             if let Some(tasks) = &tasks {
                 if !self.no_session && !session.path().is_empty() {
                     crate::subagent::recovery::activate(

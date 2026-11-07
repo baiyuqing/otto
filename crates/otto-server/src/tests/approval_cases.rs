@@ -144,12 +144,30 @@ async fn approval_dialogue_explains_without_deciding_and_none_means_normal_input
         .send(
             "POST",
             &path,
-            Some(r#"{"text":"Why does this need approval?"}"#),
+            Some(r#"{"text":"Why does this need approval?","input_id":"http-approval-input","client_source":"tui"}"#),
         )
         .await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     assert_eq!(response.json()["text"], "done");
     assert_eq!(response.json()["queued"], false);
+    assert_eq!(response.json()["input_id"], "http-approval-input");
+    let controller = &harness.server.lookup(&id).unwrap().ctrl;
+    let notification = controller
+        .notification_mailbox()
+        .unwrap()
+        .queued()
+        .into_iter()
+        .find(|entry| entry.notification.id == "http-approval-input")
+        .expect("HTTP approval human ID")
+        .notification;
+    let origin = notification.input_provenance.unwrap();
+    assert_eq!(origin.source, otto_core::model::InputSource::Http);
+    assert_eq!(
+        origin.client_source,
+        Some(otto_core::model::InputSource::Tui)
+    );
+    assert_eq!(notification.text, "Why does this need approval?");
+
     assert!(harness.server.lookup(&id).unwrap().lock().waiting.is_some());
     assert_eq!(
         decide(&harness, &id, &approval, "deny").await.status,

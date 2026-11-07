@@ -135,9 +135,10 @@ that did not receive `content_block_stop`, matching the official SDK's
 accumulation behavior. Streamed text and tool arguments remain provisional until
 then. Socket EOF alone does not complete a response.
 
-Both completion boundaries validate tool input as one complete JSON object.
-Malformed, truncated or duplicate-key arguments fail; Otto never replaces them
-with empty arguments to execute a tool. Empty input fragments leave the initial
+Tool input must be one complete JSON object. A block stop closes the block and
+retains any validation failure until final message metadata is available.
+Malformed, truncated or duplicate-key arguments never become executable calls;
+Otto never replaces them with empty arguments. Empty input fragments leave the initial
 input object unchanged. Streamed and initial arguments preserve numeric literals.
 
 If an older binary reports `message_delta: content block still open`, update and
@@ -145,6 +146,34 @@ restart the process performing the model request. That check incorrectly treated
 message metadata as a content-completion barrier. See the official
 [streaming protocol](https://platform.claude.com/docs/en/build-with-claude/streaming)
 and [SDK accumulator](https://github.com/anthropics/anthropic-sdk-go/blob/main/messageutil.go).
+
+### Claude reports `malformed Claude tool input`
+
+The error identifies `incomplete_json`, `invalid_json`, `duplicate_key` or
+`non_object`, with the block index, parser line/column, normalized stop reason,
+reported output token count and request `max_tokens`. No argument text, keys,
+values or raw parser messages are included. An unknown upstream stop reason
+appears as `unknown`. A missing `message_stop` remains an incomplete stream,
+not a confirmed token-limit failure.
+
+For known Claude models, requests start at the smaller of 16,384 output tokens
+and the [canonical model limit](../../crates/otto-core/src/config/model_limits.rs).
+The current Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 aliases resolve to their
+published 128,000-token output ceiling. Unknown models keep a conservative 4,096
+budget and do not grow automatically; no limit is guessed from a name prefix.
+
+Only a completed `max_tokens` response with incomplete tool JSON can trigger
+recovery. Each retry doubles the budget up to the known model ceiling. This
+shares the existing four-attempt limit and operation deadline with transport and
+HTTP retries, reports a retry event and discards provisional output. Regeneration
+is billed again. Cancellation stops recovery; no retry is made if the budget
+cannot grow or the remaining operation time is insufficient.
+
+Complete syntax errors, duplicate keys, non-object arguments and incomplete
+arguments with other stop reasons fail without automatic retry. Invalid inputs
+are never repaired or passed to tools. Include the full content-free error and
+session ID when reporting repeated failures. See the official
+[truncated tool-use guidance](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#incomplete-tool-use-blocks).
 
 ## Provider endpoint is not trusted
 

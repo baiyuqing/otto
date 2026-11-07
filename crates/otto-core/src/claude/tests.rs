@@ -1,4 +1,5 @@
 mod stream_tests;
+mod tool_input_tests;
 
 use super::{
     overflow, protocol,
@@ -241,7 +242,10 @@ fn rejects_duplicate_malformed_and_out_of_order_input() {
             json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"[]"}}),
         )
         + &event(json!({"type":"content_block_stop","index":0}));
-    assert_eq!(decode(&bad), Err(StreamError::MalformedArguments));
+    assert!(matches!(
+        decode(&(bad + &stop("tool_use"))),
+        Err(StreamError::MalformedArguments(_))
+    ));
     assert_eq!(
         decode(&event(
             json!({"type":"error","error":{"message":"private"}})
@@ -287,7 +291,10 @@ fn rejects_negative_usage_duplicate_tool_ids_and_argument_keys() {
         + &event(json!({"type":"content_block_delta","index":0,
             "delta":{"type":"input_json_delta","partial_json":"{\"x\":1,\"x\":2}"}}))
         + &event(json!({"type":"content_block_stop","index":0}));
-    assert_eq!(decode(&body), Err(StreamError::MalformedArguments));
+    assert!(matches!(
+        decode(&(body + &stop("tool_use"))),
+        Err(StreamError::MalformedArguments(_))
+    ));
 }
 #[test]
 fn bounds_multiline_event_and_total_stream_work() {

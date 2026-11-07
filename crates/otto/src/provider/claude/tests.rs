@@ -1,3 +1,4 @@
+mod recovery_tests;
 mod stream_tests;
 
 use super::*;

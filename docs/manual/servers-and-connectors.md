@@ -541,6 +541,51 @@ creation returns the original result while that session still exists. An
 idempotent creation writes its session file before acknowledging the request;
 ordinary creation still writes the file on first use.
 
+### Memory management
+
+`/v1/sessions/{id}/memory/...` gives a web or desktop client the
+[memory lifecycle](memory-and-extensions.md#record-states-and-times) of the
+built-in store: the operations of `/memory` and `/remember`, with the same
+scopes (the user scope and the session's workspace scope) and the same
+checks. The bearer token identifies the operator, so a write applies
+immediately as a human change, like `/remember`, and a review is recorded as a
+human decision with the actor `http-client`. The model cannot call these
+routes. Retiring a record here produces the same
+[retraction notices](memory-and-extensions.md#retraction-notices) in later
+requests of every session that saw it. The full schemas are in
+`GET /v1/openapi.yaml`.
+
+| Method and path (under `/v1/sessions/{id}/memory`) | Effect |
+| --- | --- |
+| `GET /records` | One page `{records,next_cursor}`. Query: `scope` (`current`, `user`, `workspace`, `all`), `state` (repeatable; `active`, `needs_review`, `superseded`, `retracted`, `all`; default active), `kind` and `label` (repeatable), `updated_after` and `verified_after` (RFC 3339 or an age such as `30d`), `unverified`, `review_due`, `limit` (1 to 100, default 50), `cursor`. |
+| `POST /records` | Remember `{scope,kind?,key?,text,review_in?}`; `201` with the record. `scope` is `user` or `workspace`; `kind` defaults to `note`. |
+| `GET /records/{record_id}` | The record in any state. |
+| `DELETE /records/{record_id}` | Forget it; returns `{tombstone,previous_revision}`. |
+| `POST /records/{record_id}/state` | `{state,superseded_by?,reason?,expected_revision?}`: retract, flag for review, reactivate, or supersede (`superseded_by` names an active record in the same scope and is required only then). |
+| `POST /records/{record_id}/verify` | `{review_in?,expected_revision?}`: record a human verification; a `needs_review` record becomes active; `review_in` sets the next deadline, omitted clears it. |
+| `GET /records/{record_id}/history` | `{revisions,skipped}`, oldest first. |
+| `GET /records/{record_id}/diff?from=N[&to=M]` | `{from,to}`; `to` defaults to the current revision. |
+| `POST /records/{record_id}/restore` | `{revision,expected_revision?}`: make an earlier revision current as a new revision. |
+| `POST /records/{record_id}/propose` | `{evidence}`: the model proposal of [`/memory propose`](memory-and-extensions.md#memory); returns `{outcome,candidate?,detail?}` with `outcome` `proposed`, `no_change`, `rejected` or `unavailable`. A proposal is only a pending candidate. |
+| `GET /search?q=TEXT` | Active records matching the query, `{records}`. |
+| `GET /candidates` | Candidates awaiting a human decision, `{candidates,next_cursor}`; `limit` 1 to 50 (default 20), `cursor`. Each candidate has its `action` (`create`, `update`, `forget`, `retract`, `supersede`, `correct`, `needs_review`), `target_id`, `reason`, `origin`, optional `advice` and the full `proposed` record. |
+| `POST /candidates/{candidate_id}/review` | `{decision}` (`accept` or `reject`); returns `{decision,candidate,record?,tombstone?}`. |
+
+Records carry `state`, `state_reason`, `superseded_by`, `revision`, the five
+times and two derived flags: `review_due` and `effective` (whether normal
+recall may use the record now). Writes that name a record take an optional
+`expected_revision`; when the record has moved on they fail with `409
+memory_conflict` and change nothing, so two windows cannot overwrite each
+other. Without it the current revision is used, as the slash commands do.
+
+Memory errors: `404 not_found` for an unknown session, record, revision or
+candidate; `409 memory_conflict` for a stale revision or a candidate that was
+already decided; `503 memory_unavailable` when memory is disabled or not
+usable in the session (and for `propose` when no proposal model is
+available); `501 memory_unsupported` when a
+[plugin memory source](memory-and-extensions.md#plugin-memory-source) is
+selected, which manages its own records.
+
 ### Session lifetime
 
 The server keeps only the sessions in play. A session with no request, turn
@@ -674,8 +719,10 @@ Status codes:
 | --- | --- |
 | `400` | Empty or missing turn text, or an invalid JSON body. |
 | `401` | Missing or invalid bearer token (TCP listener only). |
-| `404` | Session, turn, or task not found. |
-| `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `skills_unavailable`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
+| `404` | Session, turn, task, memory record or memory candidate not found. |
+| `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `skills_unavailable`, `sandbox_reload_failed`, `task_done`, and `memory_conflict` name the other conflicts. |
+| `501` | `memory_unsupported`: the selected plugin memory source manages its own records. |
+| `503` | `memory_unavailable`: memory is disabled or not usable in the session. |
 | `500` | Internal error. The response body is a fixed `internal error` message; details go to the server log only. |
 
 ### Observability

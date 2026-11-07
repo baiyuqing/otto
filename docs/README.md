@@ -4,6 +4,7 @@
 | --- | --- |
 | Install and try Otto | [Root README](../README.md) · [简体中文](../README.zh-CN.md) |
 | Use and configure Otto | [User manual](user-manual.md) |
+| Inspect session logs | [Session JSONL reference](manual/interactive-use.md#session-jsonl-reference) |
 | Find code and understand crate boundaries | [Code organization](code-organization.md) |
 | Contribute or embed Otto | [Development guide](development.md) |
 | Review notable changes and upgrade requirements | [Changelog](../CHANGELOG.md) |

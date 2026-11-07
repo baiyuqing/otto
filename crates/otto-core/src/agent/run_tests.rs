@@ -66,6 +66,7 @@ mod progress_recovery;
 mod provider_tools;
 mod recording;
 mod redaction;
+mod redaction_feedback;
 mod step_interrupt;
 mod turn_end_turn;
 mod turn_records;

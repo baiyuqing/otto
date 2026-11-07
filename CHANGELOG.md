@@ -9,6 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Claude tool calls use model-aware output budgets instead of a universal 4,096
+  limit. Confirmed token-truncated JSON retries with a larger budget within the
+  model ceiling, shared attempt limit and deadline. Other malformed inputs fail
+  with content-free parse/stop/budget details and never execute. The current
+  Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 model limits are recognized.
 - Claude streams accept repeated message-level updates and late or missing block
   stops, finalizing content at `message_stop` with strict tool-argument validation.
   Truncated/invalid arguments and streams without a message stop still fail;

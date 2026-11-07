@@ -4,7 +4,11 @@
 //! message_stop completes the response, finalizing any blocks without an explicit
 //! stop using the same strict tool-input validation. Errors are content-free.
 //! After any error, discard this assembler.
-use super::{json, protocol::finish_reason};
+use super::{
+    json,
+    protocol::finish_reason,
+    tool_input::{ToolInputError, ToolInputFailure, ToolInputFailureKind},
+};
 use crate::model::{Block, BlockType, FinishReason, Message, Role, Usage};
 use crate::provider::{Response, StreamEvent};
 use serde::Deserialize;
@@ -25,8 +29,8 @@ pub enum StreamError {
     Limit,
     #[error("Claude stream ended before message_stop")]
     MissingStop,
-    #[error("malformed Claude tool input")]
-    MalformedArguments,
+    #[error(transparent)]
+    MalformedArguments(#[from] ToolInputError),
     #[error("Claude stream reported an API error")]
     Api,
 }
@@ -35,28 +39,26 @@ struct PendingBlock {
     block: Option<Block>,
     input: String,
     stopped: bool,
+    failure: Option<ToolInputFailure>,
 }
 impl PendingBlock {
-    /// Explicit block stops and the final message stop share the same checks.
-    fn finish(&mut self) -> Result<(), StreamError> {
+    /// Close the block immediately, but retain validation failure until final
+    /// message metadata establishes whether the input was token-truncated.
+    fn finish(&mut self) {
         if self.stopped {
-            return Ok(());
-        }
-        if !self.input.is_empty() {
-            let input =
-                json::parse(self.input.as_bytes()).map_err(|_| StreamError::MalformedArguments)?;
-            if !input.is_object() {
-                return Err(StreamError::MalformedArguments);
-            }
-            if let Some(block) = self.block.as_mut() {
-                block.arguments = Some(
-                    RawValue::from_string(std::mem::take(&mut self.input))
-                        .map_err(|_| StreamError::MalformedArguments)?,
-                );
-            }
+            return;
         }
         self.stopped = true;
-        Ok(())
+        if !self.input.is_empty() {
+            match ToolInputFailure::parse(std::mem::take(&mut self.input)) {
+                Ok(arguments) => {
+                    if let Some(block) = self.block.as_mut() {
+                        block.arguments = Some(arguments);
+                    }
+                }
+                Err(failure) => self.failure = Some(failure),
+            }
+        }
     }
 }
 
@@ -84,6 +86,8 @@ pub struct StreamAssembler {
     call_ids: HashSet<String>,
     usage: Option<Usage>,
     finish: Option<FinishReason>,
+    stop_reason: &'static str,
+    reported_output_tokens: Option<i64>,
 }
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, StreamError> {
     value
@@ -177,6 +181,9 @@ impl StreamAssembler {
                     .ok_or(StreamError::Decode)?;
                 *target = count;
             }
+        }
+        if let Some(count) = object.get("output_tokens").and_then(Value::as_i64) {
+            self.reported_output_tokens = Some(count);
         }
         Ok(())
     }
@@ -272,6 +279,7 @@ impl StreamAssembler {
                         block,
                         input: String::new(),
                         stopped: false,
+                        failure: None,
                     },
                 );
             }
@@ -344,7 +352,7 @@ impl StreamAssembler {
                     .ok_or(StreamError::Sequence(
                         "content_block_stop: block missing or already stopped",
                     ))?;
-                pending.finish()?;
+                pending.finish();
             }
             "message_delta" => {
                 if !self.started {
@@ -360,6 +368,16 @@ impl StreamAssembler {
                         .filter(|reason| !reason.is_empty())
                         .ok_or(StreamError::Decode)?;
                     self.finish = Some(finish_reason(reason));
+                    self.stop_reason = match reason {
+                        "end_turn" => "end_turn",
+                        "stop_sequence" => "stop_sequence",
+                        "tool_use" => "tool_use",
+                        "max_tokens" => "max_tokens",
+                        "pause_turn" => "pause_turn",
+                        "refusal" => "refusal",
+                        "model_context_window_exceeded" => "model_context_window_exceeded",
+                        _ => "unknown",
+                    };
                 }
                 if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
                     self.usage(usage)?;
@@ -373,7 +391,23 @@ impl StreamAssembler {
                     return Err(StreamError::Sequence("message_stop: missing stop_reason"));
                 }
                 for pending in self.blocks.values_mut() {
-                    pending.finish()?;
+                    pending.finish();
+                }
+                // A complete malformed input anywhere disqualifies recovery,
+                // even if another block is merely incomplete.
+                let failure = self
+                    .blocks
+                    .iter()
+                    .filter_map(|(index, block)| block.failure.map(|failure| (*index, failure)))
+                    .min_by_key(|(_, failure)| failure.kind == ToolInputFailureKind::Incomplete);
+                if let Some((index, failure)) = failure {
+                    return Err(ToolInputError {
+                        index,
+                        failure,
+                        stop_reason: self.stop_reason,
+                        output_tokens: self.reported_output_tokens,
+                    }
+                    .into());
                 }
                 self.done = true;
             }

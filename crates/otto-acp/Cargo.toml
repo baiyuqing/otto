@@ -23,7 +23,7 @@ tokio-util.workspace = true
 # Schema generation. The crate enables serde_json's `preserve_order`, so every
 # serde_json map in a native workspace build keeps insertion order (see
 # docs/development.md).
-agent-client-protocol-schema = { version = "=1.12.0", default-features = false }
+agent-client-protocol-schema = { version = "=1.15.1", default-features = false }
 
 [dev-dependencies]
 otto = { workspace = true, features = ["fault-injection", "test-support"] }

@@ -33,8 +33,8 @@ serde_json = { version = "=1.0.154", default-features = false, features = ["std"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", default-features = false }
 tokio-util = { version = "=0.7.20", default-features = false }
-wasm-bindgen = "=0.2.129"
-wasm-bindgen-test = "=0.3.79"
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-test = "=0.3.80"
 regex = "=1.13.1"
 # Substring search for the egress secret scan; already in the lockfile through regex.
 memchr = { version = "=2.8.3", default-features = false, features = ["std"] }
@@ -45,7 +45,7 @@ libc = "=0.2.191"
 sha2 = { version = "=0.11.1", default-features = false }
 # base64url for the OAuth PKCE challenge, the state parameter and the JWT
 # payload in `otto::auth`. Already in the lock file as a transitive dependency.
-base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 # Native-only. nix gives the openat/readlinkat walk the workspace boundary needs
 # and the setpgid/killpg process-group control the sandbox drivers need.
 nix = { version = "=0.31.3", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }
@@ -63,11 +63,11 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-n
 futures-util = { version = "=0.3.34", default-features = false }
 # otto-core only parses TOML (config loading is resolution-only there); the
 # native crate adds "display" for Save's serialization.
-toml = { version = "=1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "=1.2.1", default-features = false, features = ["parse", "serde", "std"] }
 # Native-only HTML to Markdown conversion for the `web_fetch` tool.
 htmd = "=0.5.6"
 # Native-only legacy charset decoding (GBK, Shift_JIS, windows-1252) for fetched pages.
-encoding_rs = "=0.8.42"
+encoding_rs = "=0.8.44"
 # WHATWG URL parsing for base_url validation, mirroring net/url's checks.
 url = "=2.5.8"
 # HTTP routing for `otto serve`. hyper and tower arrive transitively at the
@@ -86,7 +86,7 @@ tower = { version = "=0.5.3", features = ["util"] }
 # and its `pki_types` are reached through this crate's re-export.
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 # Embedded SQLite, compiled from the bundled C source.
-rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled", "cache"] }
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }
 otto = { path = "crates/otto" }
 otto-server = { path = "crates/otto-server" }

@@ -205,13 +205,13 @@ mod tests {
     #[test]
     fn update_sandbox_writes_excluded_commands_only_when_present() {
         let settings = SandboxConfig {
-            excluded_commands: vec!["lark-cli *".to_string(), "tool 'a b' *".to_string()],
+            excluded_commands: vec!["acme-cli *".to_string(), "tool 'a b' *".to_string()],
             ..raw()
         };
         let updated = update_sandbox(b"[sandbox]\nnetwork = 'allow'\n", &settings).expect("update");
         let got = String::from_utf8(updated).expect("utf-8");
         assert!(
-            got.ends_with("excluded_commands = ['lark-cli *', \"tool 'a b' *\"]\n"),
+            got.ends_with("excluded_commands = ['acme-cli *', \"tool 'a b' *\"]\n"),
             "{got}"
         );
         let parsed: SandboxConfig = toml::from_str::<toml::Table>(&got).expect("toml")["sandbox"]

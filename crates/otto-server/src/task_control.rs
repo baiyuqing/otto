@@ -173,6 +173,10 @@ fn input_error(message: &str, code: &str) -> Response {
 struct ControlInput {
     text: String,
     #[serde(default)]
+    input_id: Option<String>,
+    #[serde(default)]
+    client_source: Option<otto_core::model::InputSource>,
+    #[serde(default)]
     channel: Option<Channel>,
 }
 
@@ -199,7 +203,16 @@ pub async fn control(
         .map_or_else(|| session.closed.clone(), |turn| turn.cancel_token());
     match session
         .ctrl
-        .control_message_with_channel(&input.text, input.channel, &cancel)
+        .control_message_with_provenance(
+            &input.text,
+            input.channel,
+            input.input_id.as_deref(),
+            Some(otto_core::model::InputProvenance::remote(
+                otto_core::model::InputTransport::Http,
+                input.client_source,
+            )),
+            &cancel,
+        )
         .await
     {
         Ok(reply) => json_response(StatusCode::OK, &reply),

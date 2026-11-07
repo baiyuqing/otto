@@ -247,7 +247,7 @@ impl<'a> Repl<'a> {
                             Err(error) => { let _ = writeln!(self.stderr, "{error}"); }
                         }
                     } else if !trimmed.is_empty() && !trimmed.starts_with('/') {
-                        match controller.approval_message(trimmed, &turn).await {
+                        match controller.approval_message_with_provenance(trimmed, None, None, Some(otto_core::model::InputProvenance::local(self.input_source)), &turn).await {
                             Ok(Some(reply)) => {
                                 let _ = writeln!(self.stdout, "{}", reply.text);
                                 if reply.queued { queue.push_back(input); }

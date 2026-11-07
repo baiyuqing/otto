@@ -168,6 +168,37 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             prompt = Some(c.approve_bash_always(&id).await?);
             format!("Approved {id}.")
         }
+        Command::AdmitLocalInput { text, input_id } => {
+            let mut provenance =
+                otto_core::model::InputProvenance::local(otto_core::model::InputSource::Tui);
+            provenance.delivery = otto_core::model::InputDelivery::Steering;
+            match c.admit_active_input_with_provenance(&text, Some(&input_id), Some(provenance)) {
+                Ok(crate::app::ActiveInputAdmission::Steered) => {
+                    c.update_input_submission(&input_id, "accepted", Some(provenance.delivery))?;
+                    format!(
+                        "[{input_id}] Tui / Steering / accepted; delivery at the next safe boundary"
+                    )
+                }
+                Ok(crate::app::ActiveInputAdmission::Idle) => {
+                    c.update_input_submission(
+                        &input_id,
+                        "accepted",
+                        Some(otto_core::model::InputDelivery::Direct),
+                    )?;
+                    return Ok(Reply::LocalPrompt { text, input_id });
+                }
+                Ok(crate::app::ActiveInputAdmission::ApprovalPending) => {
+                    c.update_input_submission(&input_id, "rejected: approval pending", None)?;
+                    format!(
+                        "[{input_id}] rejected: respond to approval first; /recover {input_id} restores the draft"
+                    )
+                }
+                Err(error) => {
+                    c.update_input_submission(&input_id, "failed admission", None)?;
+                    format!("[{input_id}] admission failed: {error}; /recover {input_id}")
+                }
+            }
+        }
         Command::AdmitInput(text) => match c.admit_active_input_with_provenance(
             &text,
             None,

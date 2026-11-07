@@ -11,6 +11,7 @@ pub(super) fn custom_data(custom_type: &str, raw: &str) -> String {
     if matches!(
         custom_type,
         "otto.local_command"
+            | "otto.input_submissions"
             | "otto.task_spec"
             | "otto.task_result"
             | "otto.hook.arguments"

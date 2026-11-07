@@ -51,6 +51,13 @@ impl App {
         {
             self.steering_generation = None;
         }
+        if let Ok(Reply::LocalPrompt { text, input_id }) = &completion.result {
+            self.actions.push(Action::LocalPrompt {
+                text: text.clone(),
+                input_id: input_id.clone(),
+                delivery: otto_core::model::InputDelivery::Direct,
+            });
+        }
         if let Ok(Reply::Steering(messages)) = &completion.result {
             if t.surface != 0 || self.steering_generation != Some(t.generation) {
                 self.pending.remove(&(t.surface, t.generation));
@@ -186,6 +193,7 @@ impl App {
             // The run that owned the tracked guidance ended with the session.
             self.queued_steer = None;
             self.queued_input = None;
+            self.queued_input_id = None;
             self.pending_steers.clear();
             self.delivered_steers.clear();
             self.new_messages = false;

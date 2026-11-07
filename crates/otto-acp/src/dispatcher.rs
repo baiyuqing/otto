@@ -163,6 +163,8 @@ impl Dispatcher {
                         session_id: String,
                         text: String,
                         #[serde(default)]
+                        input_id: Option<String>,
+                        #[serde(default)]
                         channel: Option<Channel>,
                     }
                     let reply = match serde_json::from_value::<Input>(params) {
@@ -175,7 +177,12 @@ impl Dispatcher {
                         }
                         Ok(input) => {
                             connection
-                                .control_message(&input.session_id, &input.text, input.channel)
+                                .control_message(
+                                    &input.session_id,
+                                    &input.text,
+                                    input.channel,
+                                    input.input_id.as_deref(),
+                                )
                                 .await
                         }
                     };
@@ -190,6 +197,8 @@ impl Dispatcher {
                         session_id: String,
                         text: String,
                         #[serde(default)]
+                        input_id: Option<String>,
+                        #[serde(default)]
                         channel: Option<Channel>,
                     }
                     let reply = match serde_json::from_value::<Input>(params) {
@@ -201,9 +210,11 @@ impl Dispatcher {
                                     let cancel = session.prompt.active_cancel();
                                     match session
                                         .controller
-                                        .approval_message_with_channel(
+                                        .approval_message_with_provenance(
                                             &input.text,
                                             input.channel,
+                                            input.input_id.as_deref(),
+                                            Some(connection.input_provenance()),
                                             &cancel,
                                         )
                                         .await
@@ -213,12 +224,13 @@ impl Dispatcher {
                                     }
                                 }
                             },
-                            Backend::Attach(relay) => match relay
-                                .client
-                                .approval_message_with_channel(
+                            Backend::Attach(relay) => match connection
+                                .input_client(&relay.client)
+                                .approval_message_with_identity(
                                     &input.session_id,
                                     &input.text,
                                     input.channel,
+                                    input.input_id.as_deref(),
                                 )
                                 .await
                             {

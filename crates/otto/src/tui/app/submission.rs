@@ -80,7 +80,7 @@ impl App {
         backend: &Backend<'_>,
         cancel: &CancellationToken,
     ) -> Option<Action> {
-        if self.has_writes() {
+        if self.has_writes() || (self.queued_input_id.is_some() && self.busy()) {
             return None;
         }
         if let Backend::Local(controller) = backend
@@ -93,6 +93,14 @@ impl App {
             return None;
         }
         let line = self.queued_input.take()?;
+        let input_id = self.queued_input_id.take();
+        if let Some(input_id) = input_id {
+            return Some(Action::LocalPrompt {
+                text: line,
+                input_id,
+                delivery: otto_core::model::InputDelivery::Queued,
+            });
+        }
         let action = self.dispatch_line(&line, backend, cancel);
         if !self.attached && matches!(action, Some(Action::Prompt(_))) {
             self.next_input_delivery = Some(otto_core::model::InputDelivery::Queued);
@@ -105,8 +113,74 @@ impl App {
         cancel: &CancellationToken,
     ) -> Option<Action> {
         let current = self.composer.input.iter().collect::<String>();
+        if let Backend::Local(controller) = backend {
+            if current.trim() == "/inputs" {
+                match controller.input_submissions() {
+                    Ok(records) => {
+                        self.push_system(format!("Inputs for session {} in {} (source / delivery / status; recover with /recover <id>):", self.info.session_id, self.info.workspace));
+                        for record in records {
+                            let status = if controller.has_input(&record.id) {
+                                "delivered"
+                            } else {
+                                &record.state
+                            };
+                            self.push_system(format!(
+                                "[{}] {:?} / {:?} / {}",
+                                record.id,
+                                record.provenance.source,
+                                record.provenance.delivery,
+                                status
+                            ));
+                        }
+                    }
+                    Err(error) => self.push_system(error),
+                }
+                self.composer.take();
+                return None;
+            }
+            if let Some(id) = current.trim().strip_prefix("/recover ") {
+                match controller.input_submissions().and_then(|records| {
+                    records
+                        .into_iter()
+                        .find(|record| record.id == id)
+                        .ok_or_else(|| "Input ID not found in this session; use /inputs".into())
+                }) {
+                    Ok(record) => {
+                        self.composer.set_input(&record.text);
+                        self.push_system(format!("[{}] recovered as a draft only; check /inputs and effects before Enter (a new ID). Nothing was replayed.", record.id));
+                    }
+                    Err(error) => self.push_system(error),
+                }
+                return None;
+            }
+        }
         if self.queued_input.is_some() && !current.starts_with('/') {
+            if let Some(id) = &self.queued_input_id {
+                self.push_system(format!("[{id}] still queued; new text retained in the editor. Ctrl+U withdraws the queued input; /inputs shows status."));
+            }
             return None;
+        }
+        let mut local_id = None;
+        if !current.trim().is_empty() && !current.starts_with('/') {
+            if let Backend::Local(controller) = backend {
+                let delivery = if self.has_writes() {
+                    otto_core::model::InputDelivery::Queued
+                } else if self.busy() {
+                    otto_core::model::InputDelivery::Steering
+                } else {
+                    otto_core::model::InputDelivery::Direct
+                };
+                match controller.prepare_input(&current, delivery) {
+                    Ok(record) => {
+                        self.push_system(format!("[{}] Tui / {:?} / pending", record.id, delivery));
+                        local_id = Some(record.id);
+                    }
+                    Err(error) => {
+                        self.push_system(format!("Input NOT sent; original draft retained. {error}. Check session storage/permissions, then retry Enter."));
+                        return None;
+                    }
+                }
+            }
         }
         let line = self.composer.take()?;
         if !line.starts_with('/') {
@@ -116,6 +190,7 @@ impl App {
         }
         if self.has_writes() && !line.starts_with('/') {
             self.queued_input = Some(line);
+            self.queued_input_id = local_id;
             return None;
         }
         if self.busy() && !line.starts_with('/') {
@@ -123,8 +198,22 @@ impl App {
             // that exact turn, never an implicit later queued prompt. The
             // backend resolves the admission race: only an idle result starts
             // a new prompt explicitly.
-            self.enqueue(0, Request::Command(backend::Command::AdmitInput(line)));
+            let command = match local_id {
+                Some(input_id) => backend::Command::AdmitLocalInput {
+                    text: line,
+                    input_id,
+                },
+                None => backend::Command::AdmitInput(line),
+            };
+            self.enqueue(0, Request::Command(command));
             return None;
+        }
+        if let Some(input_id) = local_id {
+            return Some(Action::LocalPrompt {
+                text: line,
+                input_id,
+                delivery: otto_core::model::InputDelivery::Direct,
+            });
         }
         self.dispatch_line(&line, backend, cancel)
     }

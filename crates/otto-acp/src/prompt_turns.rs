@@ -165,6 +165,7 @@ impl Connection {
         session_id: &str,
         text: &str,
         channel: Option<Channel>,
+        input_id: Option<&str>,
     ) -> Reply {
         let reply = match &self.backend {
             Backend::Local(local) => match local.session(session_id) {
@@ -172,15 +173,21 @@ impl Connection {
                     let cancel = session.prompt.active_cancel();
                     session
                         .controller
-                        .control_message_with_channel(text, channel, &cancel)
+                        .control_message_with_provenance(
+                            text,
+                            channel,
+                            input_id,
+                            Some(self.input_provenance()),
+                            &cancel,
+                        )
                         .await
                         .map_err(|message| error(INTERNAL_ERROR, message))?
                 }
                 None => return Err(unknown_session()),
             },
-            Backend::Attach(relay) => relay
-                .client
-                .control_message_with_channel(session_id, text, channel)
+            Backend::Attach(relay) => self
+                .input_client(&relay.client)
+                .control_message_with_identity(session_id, text, channel, input_id)
                 .await
                 .map_err(|failure| relay.task_control_error(failure))?,
         };

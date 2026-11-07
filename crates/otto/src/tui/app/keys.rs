@@ -187,6 +187,20 @@ impl App {
                         Request::Command(backend::Command::WithdrawSteer(steer.id)),
                     );
                 } else if self.queued_input.is_some() {
+                    if let Some(id) = self.queued_input_id.take() {
+                        if let Backend::Local(controller) = backend {
+                            if let Err(error) =
+                                controller.update_input_submission(&id, "withdrawn", None)
+                            {
+                                self.push_system(format!(
+                                    "[{id}] withdrawal status save failed: {error}; /inputs"
+                                ));
+                            }
+                        }
+                        self.push_system(format!(
+                            "[{id}] withdrawn; /recover {id} restores a draft"
+                        ));
+                    }
                     self.queued_input = None;
                     self.awaiting_user_echo = None;
                 }

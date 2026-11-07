@@ -75,6 +75,7 @@ fn project_invocation_identity(
 pub mod approval;
 pub mod approval_control;
 pub mod channel;
+mod input_submissions;
 mod local_commands;
 pub mod management;
 pub mod task_control;

@@ -486,42 +486,26 @@ fn custom_command(args: &str, _: &Info, _: &Catalog) -> Result<Transition, Strin
 }
 
 #[test]
-fn inputs_is_not_recognized_or_listed_locally_or_attached() {
+fn recovery_commands_are_discoverable_locally_and_rejected_when_attached() {
     let catalog = Catalog::default();
-    assert!(
-        catalog
-            .entries()
-            .iter()
-            .all(|entry| entry.name != "/inputs")
-    );
-    for attached in [false, true] {
-        for line in ["/inputs", "/inputs withdraw 12"] {
-            assert_eq!(
-                catalog.open(line, &Info::default(), attached).err(),
-                Some(format!("unknown command: {line}"))
-            );
-        }
-        let Transition::Push(help) = catalog.open("/help", &Info::default(), attached).unwrap()
-        else {
-            panic!("help should open a document");
-        };
-        assert!(!help.view().document.contains("/inputs"));
+    for command in ["/inputs", "/recover"] {
+        assert!(
+            catalog
+                .entries()
+                .iter()
+                .any(|entry| entry.name == command && entry.local_only)
+        );
+        assert!(catalog.open(command, &Info::default(), false).is_ok());
+        assert_eq!(
+            catalog.open(command, &Info::default(), true).err(),
+            Some(format!("{command}: not available with --attach"))
+        );
     }
-
-    let remote = Arc::new(Remote::offline(Vec::new()));
-    let backend = Backend::Attach(&remote);
-    let mut app = crate::tui::app::App::with_catalog(&backend, catalog);
-    app.insert_text("/in");
-    assert!(
-        app.suggestions()
-            .iter()
-            .all(|item| item.replacement != "/inputs")
-    );
-    assert!(
-        app.suggestions()
-            .iter()
-            .any(|item| item.replacement == "/init")
-    );
+    let Transition::Push(help) = catalog.open("/help", &Info::default(), false).unwrap() else {
+        panic!("help document")
+    };
+    assert!(help.view().document.contains("/inputs"));
+    assert!(help.view().document.contains("/recover"));
 }
 
 #[test]

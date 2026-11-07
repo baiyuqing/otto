@@ -335,6 +335,13 @@ impl Builder {
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         if let Some(journal) = self.session_journal(session, "inputs.json", warnings) {
+            // Local TUI intent lives in the session submission journal. Process-loss
+            // guidance is uncertain and must be recovered explicitly, never replayed.
+            let recoverable_ids = crate::runtime::sidecar_mailbox::recoverable_local_ids(session);
+            crate::runtime::sidecar_mailbox::hold_local_input_recovery(
+                journal.as_ref(),
+                &recoverable_ids,
+            );
             task_control.steering().set_journal(journal);
         }
         if let Some(journal) = self.session_journal(session, "followups.json", warnings) {

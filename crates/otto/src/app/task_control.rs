@@ -199,16 +199,6 @@ impl TaskControl {
             .map(|active| active.current_task.clone())
     }
 
-    pub(crate) fn steer(
-        &self,
-        session_id: &str,
-        ticket: u64,
-        text: &str,
-        input_id: Option<&str>,
-    ) -> Result<otto_core::agent::steering::Message, String> {
-        self.steer_with_provenance(session_id, ticket, text, input_id, None)
-    }
-
     pub(crate) fn steer_with_provenance(
         &self,
         session_id: &str,
@@ -354,6 +344,8 @@ pub(crate) async fn control_message(
     text: &str,
     channel: Option<Channel>,
     ticket: u64,
+    input_id: Option<&str>,
+    provenance: Option<otto_core::model::InputProvenance>,
     cancel: &CancellationToken,
 ) -> Result<Option<ControlReply>, String> {
     let text = checked_text(text)?;
@@ -362,7 +354,11 @@ pub(crate) async fn control_message(
     let redaction_values = controller
         .builder()
         .secret_values(Some(&controller.current_runtime()?));
-    let route = Arc::new(ControlRoute::default());
+    let route = Arc::new(ControlRoute(
+        Mutex::new(None),
+        input_id.map(str::to_owned),
+        provenance,
+    ));
     let steer = crate::tool::task_control::TaskSteer::new(
         Arc::clone(&task_control),
         Arc::clone(&route),
@@ -470,14 +466,17 @@ pub(crate) async fn control_message(
         .map_err(|error: AgentError| controller.redact_error(&error.to_string()));
     match (route.route(), answer) {
         (Some(Route::Steered), _) => Ok(Some(ControlReply {
+            input_id: input_id.map(str::to_owned),
             text: "Guidance accepted for the active task; it will be applied at the next safe provider boundary.".into(),
             queued: false,
         })),
         (Some(Route::Queued), _) => Ok(Some(ControlReply {
+            input_id: input_id.map(str::to_owned),
             text: "The original message will run as a follow-up after the active task.".into(),
             queued: true,
         })),
         (Some(Route::Replied), Ok(answer)) if !answer.trim().is_empty() => Ok(Some(ControlReply {
+            input_id: input_id.map(str::to_owned),
             text: answer,
             queued: false,
         })),
@@ -510,7 +509,11 @@ pub const INPUT_NOT_PERSISTED: &str = "the input could not be saved and was not 
 pub const DUPLICATE_INPUT: &str = "an input with this input_id was already delivered";
 
 #[derive(Default)]
-pub(crate) struct ControlRoute(Mutex<Option<Route>>);
+pub(crate) struct ControlRoute(
+    Mutex<Option<Route>>,
+    Option<String>,
+    Option<otto_core::model::InputProvenance>,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Route {
@@ -532,7 +535,7 @@ impl ControlRoute {
         if route.is_some() {
             return Ok(false);
         }
-        match control.steer(session_id, ticket, text, None) {
+        match control.steer_with_provenance(session_id, ticket, text, self.1.as_deref(), self.2) {
             Ok(_) => {
                 *route = Some(Route::Steered);
                 Ok(true)

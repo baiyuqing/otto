@@ -233,6 +233,12 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         "the loopback server was never called"
     );
 
+    assert_local_input_identity(home.path(), PROMPT);
+    master
+        .write_all(b"/inputs\r")
+        .expect("list local input recovery");
+    wait_for_screen_text(&shared, "session-scoped");
+
     master.write_all(b"/rename\r").expect("open rename form");
     wait_for_screen_text(&shared, "Rename session");
     master
@@ -329,5 +335,45 @@ fn a_pty_child_does_not_inherit_the_master_descriptor() {
     assert!(
         raw_contains(&shared, b"MASTER-CLOSED"),
         "the child inherited the PTY master descriptor"
+    );
+}
+
+/// Inspect only the test-owned home, never a developer's real session tree.
+fn assert_local_input_identity(home: &std::path::Path, prompt: &str) {
+    fn collect(directory: &std::path::Path, records: &mut Vec<serde_json::Value>) {
+        for entry in std::fs::read_dir(directory).expect("test session directory") {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, records);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+            {
+                for line in std::fs::read_to_string(path).unwrap().lines() {
+                    if let Ok(record) = serde_json::from_str(line) {
+                        records.push(record);
+                    }
+                }
+            }
+        }
+    }
+    let mut records = Vec::new();
+    collect(home, &mut records);
+    let intent = records
+        .iter()
+        .find(|record| {
+            record.get("customType").and_then(|value| value.as_str())
+                == Some("otto.input_submissions")
+                && record["data"]["text"] == prompt
+        })
+        .expect("PTY Enter persisted recoverable intent");
+    let input_id = intent["data"]["id"].as_str().expect("stable input ID");
+    assert_eq!(intent["data"]["provenance"]["source"], "tui");
+    assert_eq!(intent["data"]["provenance"]["delivery"], "direct");
+    assert!(
+        records
+            .iter()
+            .any(|record| record["message"]["details"]["otto"]["inputId"] == input_id),
+        "PTY Enter must deliver the same stable input ID"
     );
 }

@@ -19,6 +19,14 @@ pub trait WriterOwnership: std::fmt::Debug + Send + Sync {
 
 /// Native session operations used by frontends and runtime composition.
 pub trait SessionHandle: Session + Send + Sync {
+    /// Persist an already-sanitized local submission event before clearing the editor.
+    fn append_input_submissions(&self, _encoded: &str) -> Result<(), String> {
+        Err("input recovery recording is unavailable for this session repository".into())
+    }
+    /// Append-order local submission events; unsupported repositories fail closed.
+    fn input_submission_events(&self) -> Result<Vec<String>, String> {
+        Err("input recovery reading is unavailable for this session repository".into())
+    }
     /// Record an already-scanned independent Pi custom event, synchronously.
     fn append_local_command(&self, _encoded: &str) -> Result<(), String> {
         Err("local command recording is unavailable for this session repository".into())

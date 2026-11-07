@@ -87,10 +87,16 @@ pub(super) fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Lin
                 .fg(Color::Green)
                 .bg(PROMPT_BACKGROUND)
                 .add_modifier(Modifier::BOLD);
-            let text: Vec<Line<'static>> = escape_plain_text(&entry.raw)
+            let mut text: Vec<Line<'static>> = escape_plain_text(&entry.raw)
                 .split('\n')
                 .map(|line| Line::from(Span::styled(line.to_string(), style)))
                 .collect();
+            if !entry.input_label.is_empty() {
+                text.push(Line::from(Span::styled(
+                    escape_plain_text(&entry.input_label),
+                    style.add_modifier(Modifier::DIM),
+                )));
+            }
             // Padded, so the band runs the width of the transcript rather
             // than stopping where the typed text happens to end.
             gutter::pad_rows(gutter::block(&text, USER_MARK, style, width), style, width)

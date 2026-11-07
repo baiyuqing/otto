@@ -124,6 +124,10 @@ pub async fn message(
     struct Input {
         text: String,
         #[serde(default)]
+        input_id: Option<String>,
+        #[serde(default)]
+        client_source: Option<otto_core::model::InputSource>,
+        #[serde(default)]
         channel: Option<Channel>,
     }
     let input: Input = match serde_json::from_slice(&body) {
@@ -140,7 +144,16 @@ pub async fn message(
         .map_or_else(|| session.closed.clone(), |turn| turn.cancel_token());
     match session
         .ctrl
-        .approval_message_with_channel(&input.text, input.channel, &cancel)
+        .approval_message_with_provenance(
+            &input.text,
+            input.channel,
+            input.input_id.as_deref(),
+            Some(otto_core::model::InputProvenance::remote(
+                otto_core::model::InputTransport::Http,
+                input.client_source,
+            )),
+            &cancel,
+        )
         .await
     {
         Ok(reply) => json_response(StatusCode::OK, &reply),

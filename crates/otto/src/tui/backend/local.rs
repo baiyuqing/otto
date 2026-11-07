@@ -27,8 +27,24 @@ pub(super) async fn local(
     let observer_scope = ticket.clone();
     match request {
         Request::Command(command) => {
-            check_scope(&controller.info(), ticket)?;
-            local_command(controller, command).await
+            let input_id = match &command {
+                Command::AdmitLocalInput { input_id, .. } => Some(input_id.clone()),
+                _ => None,
+            };
+            if let Err(error) = check_scope(&controller.info(), ticket) {
+                return Err(input_id.map_or(error.clone(), |id| {
+                    format!(
+                        "[{id}] {error}; recover in original session {} with /inputs",
+                        ticket.session
+                    )
+                }));
+            }
+            let result = local_command(controller, command).await;
+            result.map_err(|error| {
+                input_id.map_or(error.clone(), |id| {
+                    format!("[{id}] {error}; /inputs and /recover {id}; admission may be uncertain")
+                })
+            })
         }
         Request::Management(request) => {
             blocking(controller, move |c| {

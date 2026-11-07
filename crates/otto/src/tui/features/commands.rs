@@ -239,8 +239,34 @@ const ENTRIES: &[Entry] = &[
         false,
         session
     ),
+    entry!(
+        Sessions,
+        "/inputs",
+        "list local input IDs, source, delivery and recovery status",
+        true,
+        input_recovery
+    ),
+    entry!(
+        Sessions,
+        "/recover",
+        "restore a local input ID as a draft: /recover <id>",
+        true,
+        input_recovery
+    ),
     entry!(Exit, "/exit", "exit Otto", false, exit),
 ];
+
+fn input_recovery(_: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
+    push(Document {
+        key: "input-recovery".into(),
+        title: "Local input recovery".into(),
+        text: concat!(
+            "Use /inputs in the main composer to list this session's IDs, source, direct/queued/steering delivery and status. ",
+            "/recover <id> restores a draft only. Inspect effects before sending again. ",
+            "Uncertain local inputs are never automatically replayed; --no-session records last only until exit."
+        ).into(),
+    })
+}
 
 fn push(p: impl Presenter + 'static) -> Result<Transition, String> {
     Ok(Transition::Push(Box::new(p)))

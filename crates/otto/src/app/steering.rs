@@ -183,8 +183,26 @@ impl Controller {
         channel: Option<Channel>,
         cancel: &CancellationToken,
     ) -> Result<Option<approval_control::ControlReply>, String> {
+        self.control_message_with_provenance(text, channel, None, None, cancel)
+            .await
+    }
+
+    /// Restricted routing with the actual ingress identity, independent of generated replies.
+    pub async fn control_message_with_provenance(
+        &self,
+        text: &str,
+        channel: Option<Channel>,
+        input_id: Option<&str>,
+        provenance: Option<otto_core::model::InputProvenance>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<approval_control::ControlReply>, String> {
+        let input_id = match input_id {
+            Some(id) if !otto_core::model::is_input_id(id) => return Err("invalid input_id".into()),
+            Some(id) => id.to_owned(),
+            None => crate::runtime::builder::random_id().map_err(|error| error.to_string())?,
+        };
         if let Some(reply) = self
-            .approval_message_with_channel(text, channel, cancel)
+            .approval_message_with_provenance(text, channel, Some(&input_id), provenance, cancel)
             .await?
         {
             return Ok(Some(reply));
@@ -201,7 +219,13 @@ impl Controller {
         if self.pending_approval().is_some() {
             drop(_serial);
             return self
-                .approval_message_with_channel(text, channel, cancel)
+                .approval_message_with_provenance(
+                    text,
+                    channel,
+                    Some(&input_id),
+                    provenance,
+                    cancel,
+                )
                 .await;
         }
         let is_current = self
@@ -216,7 +240,17 @@ impl Controller {
             .record_user_authorization(text)
             .await
             .map_err(|error| error.to_string())?;
-        task_control::control_message(self, &runner, text, channel, ticket, cancel).await
+        task_control::control_message(
+            self,
+            &runner,
+            text,
+            channel,
+            ticket,
+            Some(&input_id),
+            provenance,
+            cancel,
+        )
+        .await
     }
 
     /// The current runner's timer registry, or `None` when the timer tools

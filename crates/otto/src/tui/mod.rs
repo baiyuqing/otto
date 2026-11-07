@@ -295,13 +295,88 @@ async fn run_app<B: Backend>(
                     return Ok(());
                 }
                 Action::CancelTurn => {}
-                Action::Prompt(line) => {
+                action @ (Action::Prompt(_) | Action::LocalPrompt { .. }) => {
+                    let (line, input_id, delivery) = match action {
+                        Action::Prompt(line) => (
+                            line,
+                            None,
+                            app.next_input_delivery.take().unwrap_or_default(),
+                        ),
+                        Action::LocalPrompt {
+                            text,
+                            input_id,
+                            delivery,
+                        } => (text, Some(input_id), delivery),
+                        _ => unreachable!(),
+                    };
                     let mut provenance = otto_core::model::InputProvenance::local(
                         otto_core::model::InputSource::Tui,
                     );
-                    provenance.delivery = app.next_input_delivery.take().unwrap_or_default();
+                    provenance.delivery = delivery;
                     controller.set_next_input_provenance(Some(provenance));
-                    let result = run_turn(&mut app, terminal, keys, controller, cancel, line).await;
+                    controller.set_next_input_id(input_id.clone());
+                    if let Some(id) = &input_id {
+                        match controller.update_input_submission(
+                            id,
+                            "accepted",
+                            Some(provenance.delivery),
+                        ) {
+                            Ok(()) => app.push_system(format!(
+                                "[{id}] Tui / {:?} / accepted",
+                                provenance.delivery
+                            )),
+                            Err(error) => {
+                                app.push_system(format!(
+                                    "[{id}] NOT started: {error}; /recover {id}"
+                                ));
+                                controller.set_next_input_id(None);
+                                controller.set_next_input_provenance(None);
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(id) = &input_id {
+                        app.entries.push(entries::Entry {
+                            id: format!("input-{id}"),
+                            input_id: id.clone(),
+                            kind: Some(entries::EntryKind::User),
+                            raw: line.clone(),
+                            input_label: format!(
+                                "[{id}] {} / accepted (not yet delivery evidence)",
+                                provenance.label()
+                            ),
+                            ..Default::default()
+                        });
+                    }
+                    let result = run_turn(
+                        &mut app,
+                        terminal,
+                        keys,
+                        controller,
+                        cancel,
+                        line,
+                        input_id.as_deref(),
+                    )
+                    .await;
+                    controller.set_next_input_id(None);
+                    if let Some(id) = &input_id {
+                        let status = if controller.has_input(id) {
+                            "delivered"
+                        } else {
+                            "uncertain: turn ended without delivery evidence"
+                        };
+                        if let Err(error) = controller.update_input_submission(id, status, None) {
+                            app.push_system(format!("[{id}] status save failed: {error}; inspect /inputs before retrying"));
+                        }
+                        if let Some(entry) = app
+                            .entries
+                            .iter_mut()
+                            .find(|entry| entry.id == format!("input-{id}"))
+                        {
+                            entry.input_label = format!("[{id}] {} / {status}", provenance.label());
+                        }
+                        app.push_system(format!("[{id}] {status}; /inputs for recovery status"));
+                    }
                     if let Err(error) = result {
                         propagate_turn_error(error)?;
                     }

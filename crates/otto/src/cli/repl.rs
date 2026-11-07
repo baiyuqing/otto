@@ -313,7 +313,17 @@ impl<'a> Repl<'a> {
                 }
                 continue;
             }
-            match self.controller.approval_message(line, cancel).await {
+            match self
+                .controller
+                .approval_message_with_provenance(
+                    line,
+                    None,
+                    None,
+                    Some(otto_core::model::InputProvenance::local(self.input_source)),
+                    cancel,
+                )
+                .await
+            {
                 Ok(Some(reply)) => {
                     let _ = writeln!(self.stdout, "{}", reply.text);
                     if reply.queued {

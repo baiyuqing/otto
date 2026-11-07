@@ -73,6 +73,11 @@ impl Backend<'_> {
 pub(crate) enum Action {
     Exit,
     Prompt(String),
+    LocalPrompt {
+        text: String,
+        input_id: String,
+        delivery: otto_core::model::InputDelivery,
+    },
     Compact(String),
     Login(String),
     McpLogin(String),
@@ -87,6 +92,8 @@ pub(crate) struct App {
     pub info: Info,
     pub composer: Composer,
     pub queued_input: Option<String>,
+    pub(super) queued_input_id: Option<String>,
+    pub(super) input_statuses: std::collections::HashMap<String, String>,
     pub(super) next_input_delivery: Option<otto_core::model::InputDelivery>,
     /// The latest successful model or reasoning selection, kept as one
     /// single-line item per banner row instead of appended to the transcript.
@@ -183,6 +190,8 @@ impl App {
             composer,
             queued_input: None,
             next_input_delivery: None,
+            queued_input_id: None,
+            input_statuses: Default::default(),
             composer_notices: Vec::new(),
             queued_steer: None,
             pending_steers: Vec::new(),

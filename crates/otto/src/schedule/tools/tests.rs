@@ -168,7 +168,10 @@ async fn schedule_repeat_names_the_rule_and_targets() {
             "any running otto terminal (TUI or REPL)",
         ),
         (Origin::web(), "the otto web UI"),
-        (Origin::chat("feishu", "oc1").unwrap(), "this Feishu chat"),
+        (
+            Origin::chat("telegram", "c1").unwrap(),
+            "this Telegram chat",
+        ),
     ];
     for (origin, target) in cases {
         let context = context(Some(origin));

@@ -261,27 +261,19 @@ pub fn parse(text: &str) -> Result<File, ConfigError> {
     }
 }
 
-/// The migration message when `err` rejects a table that earlier releases
-/// accepted: `[inbound]` or `[memory.remote]`. Only a table that the document
-/// really holds matches, so `[server] inbound = 1` keeps the generic error.
+/// The migration message when `err` rejects the `[memory.remote]` table that
+/// earlier releases accepted. Only a table that the document really holds
+/// matches, so an unrelated `remote` key keeps the generic error.
 pub(crate) fn removed_table_error(text: &str, err: &toml::de::Error) -> Option<&'static str> {
-    let message = err.message();
-    let removed_inbound = message.starts_with("unknown field `inbound`");
-    let removed_memory_remote = message.starts_with("unknown field `remote`");
-    if !removed_inbound && !removed_memory_remote {
+    if !err.message().starts_with("unknown field `remote`") {
         return None;
     }
     let table = toml::from_str::<toml::Table>(text).ok()?;
-    if removed_inbound && table.contains_key("inbound") {
-        return Some(
-            "[inbound] was removed: Feishu messages now reach otto through otto-connect (see \"Chat connector\" in the user manual); delete the [inbound] table from config.toml",
-        );
-    }
     let memory_has_remote = table
         .get("memory")
         .and_then(toml::Value::as_table)
         .is_some_and(|memory| memory.contains_key("remote"));
-    (removed_memory_remote && memory_has_remote).then_some(concat!(
+    memory_has_remote.then_some(concat!(
         "[memory.remote] was removed: install the external memory service as an Otto plugin, ",
         "such as otto-mem (https://github.com/baiyuqing/otto-mem), set backend = \"plugin:otto-mem\" ",
         "in [memory], bind its token under [plugins.bindings.otto-mem], and delete [memory.remote] from config.toml"
@@ -337,18 +329,12 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn removed_inbound_table_gets_a_specific_error() {
-        let err = parse("[inbound.feishu]\nenabled = true\nchat_ids = [\"oc_x\"]\n")
-            .expect_err("inbound is removed");
-        let text = err.to_string();
-        assert!(text.contains("[inbound] was removed"), "{text}");
-        assert!(text.contains("otto-connect"), "{text}");
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn other_unknown_inbound_keys_keep_the_generic_error() {
-        for text in ["bogus = 1\n", "[server]\ninbound = 1\n"] {
+    fn unknown_tables_and_keys_keep_the_generic_error() {
+        for text in [
+            "bogus = 1\n",
+            "[inbound]\nenabled = true\n",
+            "[server]\ninbound = 1\n",
+        ] {
             let message = parse(text).expect_err("unknown key").to_string();
             assert!(message.starts_with("unknown field:"), "{message}");
             assert!(!message.contains("was removed"), "{message}");

@@ -109,7 +109,7 @@ fn exact_delivery_metadata_is_validated_and_empty_is_authoritative() {
         json!([7]),
         json!(["telegram:"]),
         json!(["telegram:with space"]),
-        json!(["feishu:a"]),
+        json!(["other:a"]),
     ] {
         assert!(delivery_chats(&params(value), &platforms).is_err());
     }
@@ -121,9 +121,9 @@ fn delivery_platforms_keep_known_platforms_once() {
     let params = |list: Value| json!({"clientCapabilities": {"_meta": {"otto": {"scheduleDelivery": list}}}});
     assert_eq!(
         delivery_platforms(&params(json!([
-            "telegram", "slack", "feishu", "telegram", 7
+            "telegram", "slack", "other", "telegram", 7
         ]))),
-        ["telegram", "feishu"]
+        ["telegram"]
     );
     assert!(delivery_platforms(&params(json!([]))).is_empty());
     assert!(delivery_platforms(&params(json!("telegram"))).is_empty());
@@ -516,8 +516,6 @@ async fn a_prompt_with_chat_metadata_runs_its_turn_with_that_origin() {
 #[tokio::test]
 async fn a_prompt_without_valid_chat_metadata_has_no_origin() {
     assert!(!writes_back_after_prompt(json!({})).await);
-    let mismatch = json!({"otto": {"chat": "telegram:123", "channel": "feishu"}});
-    assert!(!writes_back_after_prompt(mismatch).await);
 }
 
 /// Sends `prompt_text` with `meta` through a relay whose server records

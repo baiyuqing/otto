@@ -104,7 +104,7 @@ func New(opts Options) *Bridge {
 	opts.Agent.SetPlatforms(names)
 	chats := []string{}
 	for _, p := range opts.Platforms {
-		if p.Name() != "telegram" && p.Name() != "feishu" {
+		if p.Name() != "telegram" {
 			continue
 		}
 		access := opts.Access[p.Name()]

@@ -20,7 +20,7 @@ pub use store::{
 };
 
 /// Platforms an otto-connect chat can belong to.
-const CHAT_PLATFORMS: [&str; 2] = ["telegram", "feishu"];
+const CHAT_PLATFORMS: [&str; 1] = ["telegram"];
 const MAX_CHAT_ID_CHARS: usize = 128;
 
 /// Where a user turn came from, and where a scheduled item is delivered.
@@ -37,7 +37,7 @@ impl Origin {
         Self("web".into())
     }
 
-    /// `platform` must be `telegram` or `feishu`; `chat_id` is 1..=128
+    /// `platform` must be `telegram`; `chat_id` is 1..=128
     /// characters with no whitespace or control characters.
     pub fn chat(platform: &str, chat_id: &str) -> std::result::Result<Self, String> {
         if !CHAT_PLATFORMS.contains(&platform) {
@@ -102,8 +102,7 @@ impl Origin {
     /// Used in the `schedule` tool result.
     pub fn target(&self) -> String {
         match self.chat_platform() {
-            Some("telegram") => "this Telegram chat".into(),
-            Some(_) => "this Feishu chat".into(),
+            Some(_) => "this Telegram chat".into(),
             None if self.0 == "web" => "the otto web UI".into(),
             None => "any running otto terminal (TUI or REPL)".into(),
         }
@@ -191,12 +190,7 @@ mod tests {
 
     #[test]
     fn origin_round_trips_and_rejects_other_forms() {
-        for text in [
-            "terminal",
-            "web",
-            "chat:telegram:-100123",
-            "chat:feishu:oc_abc",
-        ] {
+        for text in ["terminal", "web", "chat:telegram:-100123"] {
             assert_eq!(Origin::parse(text).unwrap().as_str(), text);
         }
         for bad in [
@@ -214,8 +208,8 @@ mod tests {
         }
         assert!(Origin::chat("telegram", &"x".repeat(128)).is_ok());
         // The chat id may itself contain colons: only the first splits.
-        let origin = Origin::parse("chat:feishu:a:b").unwrap();
-        assert_eq!(origin.chat_platform(), Some("feishu"));
+        let origin = Origin::parse("chat:telegram:a:b").unwrap();
+        assert_eq!(origin.chat_platform(), Some("telegram"));
         assert!(origin.is_chat());
         assert_eq!(Origin::web().chat_platform(), None);
     }
@@ -223,14 +217,13 @@ mod tests {
     #[test]
     fn scope_matches_by_origin_kind_and_platform() {
         let tg = Origin::chat("telegram", "1").unwrap();
-        let fs = Origin::chat("feishu", "1").unwrap();
         assert!(Scope::Any.matches(&tg) && Scope::Any.matches(&Origin::web()));
         assert!(Scope::Terminal.matches(&Origin::terminal()));
         assert!(!Scope::Terminal.matches(&Origin::web()));
         assert!(Scope::Web.matches(&Origin::web()));
         let chats = Scope::Chats(vec!["telegram".into()]);
         assert!(chats.matches(&tg));
-        assert!(!chats.matches(&fs));
+        assert!(!Scope::Chats(Vec::new()).matches(&tg));
         assert!(!chats.matches(&Origin::terminal()));
     }
 }

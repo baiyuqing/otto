@@ -139,14 +139,14 @@ async fn excluded_command_runs_unconfined_and_compound_does_not() {
     let confined = Arc::new(FakeExecutor::default());
     let unconfined = Arc::new(FakeExecutor::default());
     let tool = bash(&workspace, confined.clone(), &["HOME=/sandbox"], 1024, &[])
-        .with_excluded_commands(excluded(&unconfined, &["lark-cli *"]));
+        .with_excluded_commands(excluded(&unconfined, &["acme-cli *"]));
 
-    run(&tool, "lark-cli doc get").await;
+    run(&tool, "acme-cli doc get").await;
     assert_eq!((confined.calls(), unconfined.calls()), (0, 1));
     assert_eq!(unconfined.requests()[0].env, strings(&["HOME=/real-home"]));
 
     run(&tool, "git status").await;
-    run(&tool, "lark-cli x && rm -rf y").await;
+    run(&tool, "acme-cli x && rm -rf y").await;
     assert_eq!((confined.calls(), unconfined.calls()), (2, 1));
     assert_eq!(confined.requests()[0].env, strings(&["HOME=/sandbox"]));
 }
@@ -162,9 +162,9 @@ async fn excluded_command_with_require_escalated_needs_no_approval() {
     ));
     let tool = bash(&workspace, confined.clone(), &[], 1024, &[])
         .with_approvals("session-1", approvals)
-        .with_excluded_commands(excluded(&unconfined, &["lark-cli *"]));
+        .with_excluded_commands(excluded(&unconfined, &["acme-cli *"]));
 
-    let result = run_escalated(&tool, "lark-cli doc get", "needs keychain").await;
+    let result = run_escalated(&tool, "acme-cli doc get", "needs keychain").await;
     assert!(!result.is_error, "{}", result.content);
     assert_eq!((confined.calls(), unconfined.calls()), (0, 1));
 }
@@ -178,11 +178,11 @@ async fn set_entries_changes_which_commands_are_excluded() {
     let tool =
         bash(&workspace, confined.clone(), &[], 1024, &[]).with_excluded_commands(list.clone());
 
-    run(&tool, "lark-cli doc get").await;
+    run(&tool, "acme-cli doc get").await;
     assert_eq!((confined.calls(), unconfined.calls()), (1, 0));
 
-    list.set_entries(strings(&["lark-cli *"]));
-    run(&tool, "lark-cli doc get").await;
+    list.set_entries(strings(&["acme-cli *"]));
+    run(&tool, "acme-cli doc get").await;
     assert_eq!((confined.calls(), unconfined.calls()), (1, 1));
 }
 
@@ -280,7 +280,7 @@ fn effect_gate_needs_approvals_and_covers_excluded_commands() {
     let plain = bash(&workspace, sandboxed.clone(), &[], 1024, &[]);
     assert!(use_default_spec(&plain, "git push").is_none());
 
-    let list = excluded(&sandboxed, &["git push *", "lark-cli *"]);
+    let list = excluded(&sandboxed, &["git push *", "acme-cli *"]);
     let (tool, _approvals) = gated_tool(&workspace, &sandboxed, &sandboxed);
     let tool = tool.with_excluded_commands(list);
     let spec = use_default_spec(&tool, "git push origin").unwrap();
@@ -295,7 +295,7 @@ fn effect_gate_needs_approvals_and_covers_excluded_commands() {
     let details: serde_json::Value = serde_json::from_str(&spec.details).unwrap();
     assert_eq!(details["sandboxed"], false);
 
-    assert!(use_default_spec(&tool, "lark-cli docs list").is_none());
+    assert!(use_default_spec(&tool, "acme-cli docs list").is_none());
 }
 
 fn excluded_effect_tool(

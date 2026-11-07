@@ -1745,7 +1745,7 @@ dependencies = [
 
 [[package]]
 name = "otto"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "otto-acp"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "otto-cli"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1826,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "otto-core"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "otto-server"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",

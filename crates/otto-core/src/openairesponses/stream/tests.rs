@@ -152,7 +152,8 @@ fn check_text_and_tool_call(response: &Response, events: &[StreamEvent]) {
         Some(Usage {
             input_tokens: 11,
             output_tokens: 7,
-            cached_input_tokens: 4
+            cached_input_tokens: 4,
+            ..Default::default()
         })
     );
     assert_eq!(response.message.blocks.len(), 2);

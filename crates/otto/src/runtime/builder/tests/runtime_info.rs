@@ -316,6 +316,7 @@ fn usage_collector_is_bound_to_the_runtime_and_session() {
                 input_tokens: 10,
                 output_tokens: 2,
                 cached_input_tokens: 4,
+                ..Default::default()
             },
             present: true,
             cached_input_tokens_present: true,

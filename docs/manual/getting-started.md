@@ -59,6 +59,15 @@ version when required. The Claude provider covers the Messages API used by
 Otto; Bedrock, Vertex AI, Foundry, OAuth and workload identity are different
 connections and are not supported by this provider.
 
+Claude prompt caching is enabled by default: Otto caches tool definitions and
+system text and automatically advances the conversation's cache breakpoint.
+It uses the provider's five-minute lifetime; active hits refresh that lifetime.
+The first write and a write after expiry use the provider's cache-write price.
+Prefix changes, small prompts and endpoint/model support affect actual hits.
+A custom Claude endpoint must accept the documented `cache_control` fields;
+Otto surfaces a rejection instead of silently retrying without caching.
+See [Anthropic's caching contract](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+
 Use a model ID supported by your provider. Each OpenAI-compatible request
 carries `prompt_cache_key` set to the session id (a sub-agent uses its own
 transcript id), so an endpoint that routes by this field can serve a session's

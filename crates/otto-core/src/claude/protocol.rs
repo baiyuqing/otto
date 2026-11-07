@@ -9,13 +9,31 @@ use serde_json::{json, value::RawValue};
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRequest {
     pub model: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub system: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<SystemText>,
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<WireTool>,
     pub stream: bool,
     pub max_tokens: u32,
+    pub cache_control: CacheControl,
+}
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+impl Default for CacheControl {
+    fn default() -> Self {
+        Self { kind: "ephemeral" }
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemText {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+    cache_control: CacheControl,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WireMessage {
@@ -44,6 +62,8 @@ pub struct WireTool {
     pub name: String,
     pub description: String,
     pub input_schema: Box<RawValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 fn invalid() -> ProviderError {
     ProviderError::Other("unsupported or malformed Claude request content".into())
@@ -51,8 +71,8 @@ fn invalid() -> ProviderError {
 fn object(raw: &RawValue) -> bool {
     serde_json::from_str::<std::collections::BTreeMap<String, &RawValue>>(raw.get()).is_ok()
 }
-/// Builds a streamed Messages body. No thinking/cache/image or remote compaction
-/// fields are emitted. Adjacent messages of the same role are coalesced.
+/// Builds a streamed Messages body with automatic conversation caching and
+/// stable tool/system cache anchors. Adjacent same-role messages are coalesced.
 pub fn build_request(request: &Request) -> Result<WireRequest, ProviderError> {
     if request.request_remote_compaction || request.remote_compaction.is_some() {
         return Err(invalid());
@@ -121,15 +141,29 @@ pub fn build_request(request: &Request) -> Result<WireRequest, ProviderError> {
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: schema,
+            cache_control: None,
         });
     }
+    if let Some(tool) = tools.last_mut() {
+        tool.cache_control = Some(CacheControl::default());
+    }
+    let system = if request.system_prompt.is_empty() {
+        Vec::new()
+    } else {
+        vec![SystemText {
+            kind: "text",
+            text: request.system_prompt.clone(),
+            cache_control: CacheControl::default(),
+        }]
+    };
     Ok(WireRequest {
         model: request.model.clone(),
-        system: request.system_prompt.clone(),
+        system,
         messages,
         tools,
         stream: true,
         max_tokens: OutputBudget::for_model(&request.model).initial,
+        cache_control: CacheControl::default(),
     })
 }
 /// Exact serialized byte count, sharing validation with the request encoder.

@@ -19,6 +19,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Claude prompt caching is enabled by default for tools, system text and growing
+  conversation history, using five-minute cache entries. Cache reads and writes
+  now count correctly in total input; optional write/lifetime breakdowns survive
+  sessions, compaction, usage storage and API queries. Legacy breakdowns remain
+  unknown. Restart Otto to use the new requests; actual savings depend on the
+  endpoint and cache hits.
+
 - Claude tool calls use model-aware output budgets instead of a universal 4,096
   limit. Confirmed token-truncated JSON retries with a larger budget within the
   model ceiling, shared attempt limit and deadline. Other malformed inputs fail

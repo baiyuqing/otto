@@ -6,6 +6,7 @@ pub mod protocol;
 pub mod stream;
 pub mod tool_input;
 
+mod cache_usage;
 mod json;
 #[cfg(test)]
 mod tests;

@@ -55,22 +55,17 @@ impl App {
                 _ => "Step interrupted.".to_string(),
             }),
             "provider_usage" if event.usage_present == Some(true) => {
+                let first_report =
+                    self.cache_breakdown_complete.is_none() && self.usage == Default::default();
                 let reported = event.cached_input_tokens_present == Some(true);
                 self.cache_breakdown_complete =
                     Some(self.cache_breakdown_complete.unwrap_or(true) && reported);
                 if let Some(usage) = event.usage {
-                    self.usage.input_tokens = self
-                        .usage
-                        .input_tokens
-                        .saturating_add(usage.input_tokens.max(0));
-                    self.usage.output_tokens = self
-                        .usage
-                        .output_tokens
-                        .saturating_add(usage.output_tokens.max(0));
-                    self.usage.cached_input_tokens = self
-                        .usage
-                        .cached_input_tokens
-                        .saturating_add(usage.cached_input_tokens.max(0));
+                    self.usage = if first_report {
+                        usage
+                    } else {
+                        self.usage.saturating_add(usage)
+                    };
                 }
             }
             "tool_call_started" => super::super::entries::reduce_tool_event_at(

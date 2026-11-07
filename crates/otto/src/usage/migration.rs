@@ -3,7 +3,7 @@ use crate::storage::migration::record::RecordSchema;
 
 pub const DOMAIN: &str = "usage";
 pub const FAMILY: &str = "otto.usage";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const RECORDS: &[RecordSchema] = &[
     RecordSchema {
         name: "usage_event",
@@ -22,6 +22,8 @@ pub const RECORDS: &[RecordSchema] = &[
             "cached_input_tokens",
             "usage_present",
             "cached_breakdown_present",
+            "cache_write_input_tokens",
+            "cache_write_1h_input_tokens",
         ],
         keys: &["id"],
         revision: None,

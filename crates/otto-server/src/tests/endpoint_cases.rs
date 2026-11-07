@@ -120,6 +120,8 @@ async fn the_usage_endpoint_returns_persisted_aggregates() {
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_input_tokens": null,
+            "cache_write_input_tokens": null,
+            "cache_write_1h_input_tokens": null,
             "cache_hit_rate": null
         })
     );

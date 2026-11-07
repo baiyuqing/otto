@@ -214,12 +214,18 @@ focused pane, `Home` shows its oldest retained output and `End` resumes followin
 new output. Mouse wheel scrolling and clicking a visible pane change its scroll
 or focus without editing the main conversation.
 
-Each child has a horizontally separated, vertically stacked pane with its task
-name, status, visible messages and tool activity. Completed children remain
-available. The observer has no composer: typing, Enter and pasted text cannot
-submit prompts or steer a child. Approval panels still use the existing
-approval flow and take precedence over the observer; observing a task never
-grants permission or changes its sandbox.
+Each child has a vertically stacked pane with its task ID, name, status and
+description. Queued and running panes start expanded; succeeded, failed,
+canceled and interrupted panes start compact, retaining their header while
+saving transcript rows. Press `Enter` on the focused pane or click its title to
+toggle it. A manual expand/collapse choice remains in effect as task snapshots
+update for the current observer session; without a manual choice, terminal
+status changes automatically compact the pane. Tab focus and height-aware page
+navigation keep visible panes reachable in both local and attached TUIs. Pane
+output remains retained when compacted. The observer has no composer: typing,
+Enter and pasted text cannot submit prompts or steer a child. Approval panels
+still use the existing approval flow and take precedence over the observer;
+observing a task never grants permission or changes its sandbox.
 
 The observer uses bounded, redacted runtime snapshots rather than model-driven
 status queries. Native child text and tool activity can update before the child

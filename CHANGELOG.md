@@ -7,6 +7,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Added
+
+- The F6 sub-agent observer keeps queued/running task panes expanded by default and
+  compacts succeeded, failed, canceled and interrupted panes; Enter or clicking a
+  title toggles a pane, with the manual choice retained during snapshot refreshes.
+
 ### Breaking changes
 
 - `otto storage migrate`, `otto storage init`, `otto storage transfer` and

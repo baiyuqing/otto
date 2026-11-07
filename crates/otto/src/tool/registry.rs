@@ -116,6 +116,12 @@ impl Registry {
             return not_started(ToolResult::unknown_tool(call.name));
         };
 
+        if let Some(message) =
+            otto_core::tool::redaction::argument_error(call.name, call.arguments.get())
+        {
+            return not_started(ToolResult::error(message));
+        }
+
         if let Some(guard) = &self.guard
             && let Err(text) = guard.before()
         {

@@ -8,6 +8,8 @@
 //! concurrently on a shared executor. Executors report cancellation and the
 //! certainty of any externally visible effects in the typed outcome.
 
+pub mod redaction;
+
 use crate::operation::OperationControl;
 use serde_json::value::RawValue;
 

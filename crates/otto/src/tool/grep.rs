@@ -72,14 +72,14 @@ pub fn grep_definition() -> ToolDefinition {
         "Search workspace file contents with a regular expression (read-only). \
             Returns at most 4 KiB (or the smaller configured cap); narrow \
             path/glob/pattern to inspect omitted matches. Files the workspace's \
-            .gitignore excludes are skipped unless no_ignore is set",
+            .gitignore excludes are skipped unless no_ignore is set. Returns No matches when no lines match",
         json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "RE2 regular expression"
+                    "description": "RE2 regular expression; redaction placeholders are not search terms"
                 },
                 "path": {
                     "type": "string",
@@ -165,7 +165,12 @@ impl Tool for GrepTool {
             Err(error) => return error_result(error),
         };
         match search_root_inside_git(&self.workspace, search_path, &root) {
-            Ok(true) => return ToolResult::default(),
+            Ok(true) => {
+                return ToolResult {
+                    content: "No matches (.git is excluded).".into(),
+                    ..ToolResult::default()
+                };
+            }
             Ok(false) => {}
             Err(error) => return error_result(error),
         }
@@ -236,6 +241,9 @@ impl Tool for GrepTool {
             return error_result(error);
         }
         let mut result = capped_collector_result(&collector, truncation_marker);
+        if match_count == 0 && truncation_marker.is_empty() {
+            result.content = "No matches.".into();
+        }
         if !truncation_marker.is_empty() {
             result.content.push_str("\nNarrow path, glob or pattern to inspect omitted matches; do not repeat the same broad search.");
         }
@@ -502,6 +510,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_search_with_zero_matches_returns_an_explicit_status() {
+        let root = tempfile::tempdir().unwrap();
+        write_search_file(
+            root.path(),
+            "source.rs",
+            "let mut api_key = String::new();\n",
+        );
+        let tool = GrepTool::new(workspace(root.path()), MAX_OUTPUT_BYTES);
+        let result = run(&tool, r#"{"pattern":"not_present_anywhere"}"#).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "No matches.");
+    }
+
+    #[tokio::test]
     async fn a_root_inside_the_git_directory_returns_nothing() {
         let root = tempfile::tempdir().unwrap();
         write_search_file(root.path(), ".git/config", "match secret\n");
@@ -514,7 +536,7 @@ mod tests {
             )
             .await;
             assert!(
-                !result.is_error && result.content.is_empty(),
+                !result.is_error && result.content == "No matches (.git is excluded).",
                 "{search_path}: {result:?}"
             );
         }

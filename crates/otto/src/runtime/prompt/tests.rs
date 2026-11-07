@@ -640,3 +640,32 @@ fn the_base_prompt_is_an_open_xml_document() {
     assert!(prompt.starts_with("<otto_system_prompt version=\"1\">\n<identity>"));
     assert!(!prompt.contains("</otto_system_prompt>"));
 }
+
+#[test]
+fn redaction_policy_explains_hidden_content_and_prevents_placeholder_workarounds() {
+    let prompt = system_prompt_for(
+        &definitions(&["grep", "read", "write", "edit", "bash"]),
+        off(),
+        "",
+        "",
+        "",
+    );
+    assert_eq!(prompt.matches("<redaction_policy>").count(), 1);
+    for instruction in [
+        "otto_redaction",
+        "partial redaction",
+        "withheld content",
+        "not literal",
+        "Never copy",
+        "search patterns",
+        "before execution",
+        "character codes",
+        "non-sensitive context",
+        "explain when withholding blocks",
+    ] {
+        assert!(
+            prompt.contains(instruction),
+            "missing redaction policy: {instruction}"
+        );
+    }
+}

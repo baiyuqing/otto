@@ -158,7 +158,15 @@ where
 pub fn definition(name: &str, description: &str, parameters: serde_json::Value) -> ToolDefinition {
     ToolDefinition {
         name: name.to_owned(),
-        description: description.to_owned(),
+        description: if otto_core::tool::redaction::guards_arguments(name) {
+            format!(
+                "{}. {}",
+                description.trim_end_matches('.'),
+                otto_core::tool::redaction::ARGUMENT_POLICY
+            )
+        } else {
+            description.to_owned()
+        },
         parameters: Some(
             RawValue::from_string(parameters.to_string()).expect("schema literal is valid JSON"),
         ),

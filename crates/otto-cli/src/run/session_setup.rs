@@ -66,7 +66,7 @@ pub(super) fn prepare_session_backend(
     let prepared = if listed {
         repository.prepare_listed(root, workspace, reference, create_lease)
     } else {
-        repository.prepare_in(root, reference, create_lease)
+        repository.prepare(reference, create_lease)
     }?;
     if let Err(error) =
         otto::runtime::builder::validate_session_workspace(&prepared.info().cwd, workspace)

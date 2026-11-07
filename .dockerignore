@@ -9,7 +9,6 @@
 !docs
 !docs/user-manual.md
 !scripts
-!scripts/export-legacy-storage.py
 !testdata
 !testdata/server
 !testdata/server/openapi.yaml

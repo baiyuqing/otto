@@ -20,7 +20,6 @@ pub mod sandbox_setup;
 pub mod serve;
 pub mod setup;
 pub mod storage;
-mod storage_transfer;
 pub mod terminate;
 pub mod trust;
 pub mod workflow;

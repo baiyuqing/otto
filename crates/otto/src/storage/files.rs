@@ -23,8 +23,6 @@ pub trait JournalFile: Debug + Read + Write + Seek + Send {
     fn is_close_on_exec(&self) -> io::Result<bool>;
     fn lock_exclusive(&self) -> io::Result<()>;
     /// Nonblocking lifetime admission locks; dropping the handle releases them.
-    fn try_lock_shared(&self) -> io::Result<()>;
-    fn try_lock_exclusive(&self) -> io::Result<()>;
     fn sync_all(&self) -> io::Result<()>;
     fn set_len(&self, len: u64) -> io::Result<()>;
 }

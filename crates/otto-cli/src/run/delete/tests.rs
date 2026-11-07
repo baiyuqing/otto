@@ -75,7 +75,6 @@ impl Fixture {
         let session = self
             .storage
             .sessions()
-            .unwrap()
             .create_lazy(
                 &self.root,
                 Header {
@@ -97,7 +96,7 @@ impl Fixture {
     fn invoke(&self, target: &str, force: bool, answer: &str) -> (i32, String, String) {
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let code = run(
-            self.storage.sessions().unwrap(),
+            self.storage.sessions(),
             &self.root,
             &self.workspace,
             target,
@@ -153,7 +152,6 @@ fn force_id_deletes_active_and_archived_without_confirmation() {
             path = fixture
                 .storage
                 .sessions()
-                .unwrap()
                 .archive(&fixture.root, &fixture.workspace, &path)
                 .unwrap()
                 .path;
@@ -175,7 +173,6 @@ fn ambiguity_and_force_names_never_delete() {
     let archived_path = fixture
         .storage
         .sessions()
-        .unwrap()
         .archive(&fixture.root, &fixture.workspace, &first_path)
         .unwrap()
         .path;
@@ -205,7 +202,6 @@ fn archived_exact_name_can_be_confirmed() {
     let archived = fixture
         .storage
         .sessions()
-        .unwrap()
         .archive(&fixture.root, &fixture.workspace, &path)
         .unwrap()
         .path;
@@ -284,7 +280,7 @@ fn busy_and_io_failures_are_actionable_and_not_successes() {
     std::fs::write(fixture.temp.path().join("blocker"), b"not a directory").unwrap();
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let code = run(
-        fixture.storage.sessions().unwrap(),
+        fixture.storage.sessions(),
         &fixture.temp.path().join("blocker"),
         &fixture.workspace,
         "busy-id",

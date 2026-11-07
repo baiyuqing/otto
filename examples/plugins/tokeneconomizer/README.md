@@ -72,7 +72,7 @@ env = { TE_PLUGIN_ROOT = "${TE_PLUGIN_ROOT}" }
   look like credentials are rejected.
 - The default sandbox read denylist does not block an ordinary checkout or
   `~/.otto/sessions`; neither needs a blanket `read_paths` grant. If your
-  checkout or configured session-storage route is under an additional denied
+  checkout is under an additional denied
   path, diagnose the actual refusal and grant only the required directory
   ([sandbox policy](../../../docs/manual/safety-and-tools.md#bash-sandbox-policy)).
 - Restart Otto after changing the configuration, then start a new session.

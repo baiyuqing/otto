@@ -71,11 +71,9 @@ Forking leaves old state untouched and requires stopped workspace processes.
 ## Native storage contracts
 
 `storage/{contracts,sql,files}.rs` define guarantees; drivers implement I/O;
-`storage/backends/` owns schemas/codecs. `runtime/storage.rs` validates routes
-and capabilities before opening repositories and injects domain-owned ports.
-Shipped storage uses local SQLite (bundled through `rusqlite`) and POSIX
-session files; no
-MySQL, PostgreSQL or cloud service implementation is shipped.
+`storage/backends/` owns schemas and row mappings. `runtime/storage.rs` opens
+repositories at their local paths and injects domain-owned ports. Storage is
+local SQLite (bundled through `rusqlite`) and POSIX session files.
 
 Domain services own validation, state transitions and recovery. Repositories
 own atomic mutations, revisions/claims, codecs and schemas. SQL drivers must
@@ -83,48 +81,13 @@ validate dialect, immediate serializable transactions, durability and writer
 concurrency. An uncertain commit is `CommitUnknown`, not rollback. Never replay
 an uncertain external effect. Async session writes preserve append-only Pi v3.
 
-Migration contracts live in `storage/migration/`: bounded snapshots/chunks,
-isolated staging, verification, receipts, journal and route cutover. Migration
-never executes pending tools. Offline `otto storage transfer` resumes by ID,
-keeps original files and publishes destination routes for the same source home.
-Abort cannot undo committed or uncertain publication; roots must not overlap.
-Use the [storage manual](../manual/memory-and-extensions.md#storage-operations) for operational commands.
-The legacy-schema importer (`otto storage migrate`) is separate from route transfer.
-
-### External storage backends
-
-Extension binaries register `RepositoryFactory` implementations with
-`runtime::storage::BackendRegistry` before route validation, through
-`otto_cli::run::run_with_backends`. Ordinary startup retains local defaults.
-Factories bind immutable non-secret options, then validate every namespace
-against `RepositoryRequirements`. Version-one profiles mean the whole domain
-port contract, not just a SQL dialect.
-
-Endpoints are absolute local paths or opaque service descriptors obtained
-from named environment variables. Debug output must redact descriptors;
-persisted routes contain instance references and verified namespace identity,
-never resolved service addresses. Reject unsupported capabilities before writer
-admission; do not simulate a backend with fictitious SQLite PRAGMAs.
-
-Preserve synchronous domain ports. Network adapters may use the bounded
-`storage::worker::Worker`; async callers await `call`, while `call_blocking`
-requires a multi-thread runtime or a separate blocking thread. Accepted work
-is not withdrawn by cancellation; close/drop drain owned work. Lost acknowledgements
-retain existing command/receipt and unknown-effect rules.
-
-Import preparation is read-only and returns an isolated stage identity.
-Verification reads actual staged logical records through `verification_chunk`,
-not destination SQL. Canonical record ordering/digests and portable reference
-closure cover cross-domain provenance, aliases, pending approvals and receipts.
-The portable verifier enforces its configured materialization bound; larger
-backends need another bounded validation strategy. Local transfers retain their streaming
-verifier and existing encoding compatibility.
-
-Every backend runs `storage::conformance` in isolated namespaces (default-on
-`storage-conformance` feature), plus backend-specific loss, concurrency and
-transport tests. An acceptance adapter proves the extension seam, not a live
-service's durability. Run `otto_core::conformance::{session,mailbox}` against
-every implementation and wrapper, with reopen support for durable state.
+Preserve synchronous domain ports. Adapters that need async I/O may use the
+bounded `storage::worker::Worker`; async callers await `call`, while
+`call_blocking` requires a multi-thread runtime or a separate blocking thread.
+Accepted work is not withdrawn by cancellation; close/drop drain owned work.
+Lost acknowledgements retain existing command/receipt and unknown-effect rules.
+Run `otto_core::conformance::{session,mailbox}` against every implementation
+and wrapper, with reopen support for durable state.
 
 ## Core contracts
 

@@ -36,7 +36,7 @@ func (a *Agent) ControlMessageWithChannel(
 		return nil, ErrNotOpen
 	}
 	params := map[string]any{"sessionId": id, "text": text}
-	if channel == "telegram" || channel == "feishu" {
+	if channel == "telegram" {
 		params["channel"] = channel
 	}
 	raw, err := p.conn.CallExtension(ctx, "_otto/tasks/control", params)

@@ -213,7 +213,7 @@ async fn sandbox_exclude_writes_the_entry_and_reloads() {
     let (controller, calls) = reloading_controller(workspace.path(), sessions.path(), None).await;
 
     let (_, stderr, result) = session(
-        "/sandbox exclude 'lark-cli *'\n/sandbox exclude lark-cli *\n/exit\n",
+        "/sandbox exclude 'acme-cli *'\n/sandbox exclude acme-cli *\n/exit\n",
         &controller,
     )
     .await;
@@ -223,7 +223,7 @@ async fn sandbox_exclude_writes_the_entry_and_reloads() {
     assert_eq!(*calls.lock().expect("calls"), 2);
     let written = std::fs::read_to_string(workspace.path().join("config.toml")).expect("config");
     assert!(
-        written.contains("excluded_commands = ['lark-cli *']"),
+        written.contains("excluded_commands = ['acme-cli *']"),
         "{written}"
     );
 }

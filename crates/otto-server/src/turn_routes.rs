@@ -82,7 +82,6 @@ pub(super) async fn start_turn(
     if let (Some(channel), Some(platform)) = (parsed.channel, origin.chat_platform()) {
         let expected = match channel {
             Channel::Telegram => "telegram",
-            Channel::Feishu => "feishu",
         };
         if platform != expected {
             return bad_request("origin platform does not match channel");

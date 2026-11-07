@@ -238,7 +238,7 @@ func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, 
 	}
 	request := acp.PromptRequest{SessionId: acp.SessionId(id), Prompt: []acp.ContentBlock{acp.TextBlock(text)}}
 	meta := map[string]any{}
-	if p.channelContext && (channel == "telegram" || channel == "feishu") {
+	if p.channelContext && (channel == "telegram") {
 		meta["channel"] = channel
 		if chat != "" {
 			meta["chat"] = chat

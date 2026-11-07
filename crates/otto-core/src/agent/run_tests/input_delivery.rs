@@ -510,7 +510,7 @@ async fn a_notification_without_a_generated_task_id_still_persists() {
     inbox.push(Notification {
         task_id: String::new(),
         kind: Some(NotificationKind::Message),
-        text: "[feishu] hello".into(),
+        text: "[telegram] hello".into(),
         usage: None,
         ..Default::default()
     });

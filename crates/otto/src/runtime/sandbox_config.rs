@@ -90,7 +90,7 @@ pub fn parse_exclude_entry(rest: &str) -> Result<String, String> {
         .trim();
     if entry.is_empty() {
         return Err(
-            "usage: /sandbox exclude <entry>, for example /sandbox exclude lark-cli *".to_string(),
+            "usage: /sandbox exclude <entry>, for example /sandbox exclude gh *".to_string(),
         );
     }
     Ok(entry.to_string())
@@ -280,7 +280,7 @@ mod tests {
         let home = TempDir::new().expect("home");
         let path = home.path().join("config.toml");
         std::fs::write(&path, PRESERVED).expect("write config");
-        let change = SandboxChange::ExcludeCommand("lark-cli *".to_string());
+        let change = SandboxChange::ExcludeCommand("acme-cli *".to_string());
 
         amend_sandbox_config(&path, &change).expect("amend");
         let first = std::fs::read(&path).expect("read");
@@ -289,10 +289,10 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("read"), first);
         let text = String::from_utf8(first).expect("utf8");
         assert!(
-            text.contains("excluded_commands = ['lark-cli *']"),
+            text.contains("excluded_commands = ['acme-cli *']"),
             "{text}"
         );
-        assert_eq!(change.summary(), "excluded command \"lark-cli *\"");
+        assert_eq!(change.summary(), "excluded command \"acme-cli *\"");
     }
 
     #[test]
@@ -314,20 +314,20 @@ mod tests {
     #[test]
     fn the_exclude_entry_drops_one_pair_of_matching_quotes() {
         assert_eq!(
-            parse_exclude_entry("  lark-cli *  "),
-            Ok("lark-cli *".to_string())
+            parse_exclude_entry("  acme-cli *  "),
+            Ok("acme-cli *".to_string())
         );
         assert_eq!(
-            parse_exclude_entry("'lark-cli *'"),
-            Ok("lark-cli *".to_string())
+            parse_exclude_entry("'acme-cli *'"),
+            Ok("acme-cli *".to_string())
         );
         assert_eq!(
-            parse_exclude_entry("\"lark-cli *\""),
-            Ok("lark-cli *".to_string())
+            parse_exclude_entry("\"acme-cli *\""),
+            Ok("acme-cli *".to_string())
         );
         assert_eq!(
-            parse_exclude_entry("'lark-cli *\""),
-            Ok("'lark-cli *\"".to_string())
+            parse_exclude_entry("'acme-cli *\""),
+            Ok("'acme-cli *\"".to_string())
         );
         assert!(parse_exclude_entry("").is_err());
         assert!(parse_exclude_entry("''").is_err());

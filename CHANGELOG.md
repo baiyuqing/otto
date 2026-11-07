@@ -7,6 +7,18 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Breaking changes
+
+- `otto storage migrate`, `otto storage init`, `otto storage transfer` and
+  `otto storage abort` are removed, as are external storage backends: the
+  `[storage]` backend instances and routes in `config.toml` (a config file
+  that still has a `[storage]` table fails to load as an unknown field) and
+  repository factories registered by embedders (`BackendRegistry`,
+  `RepositoryFactory`, `otto_cli::run::run_with_backends`). Otto uses local
+  SQLite and POSIX storage only. `~/.otto/storage/authority.json` and
+  `~/.otto/storage/writer-admission.lock` are no longer read and can be
+  deleted. Only `otto storage window-peaks` remains.
+
 ## 0.5.0 - 2026-11-07
 
 ### Added
@@ -628,9 +640,8 @@ commit ledger; Git and release tags retain the full history. See the
   database. Recall injects standing preferences and bounded in-scope records;
   search uses case-insensitive substrings. Invalid files are reported by
   `otto memory status`. Memory databases of earlier releases are not imported
-  (see the SQLite entry under Breaking changes); remove
-  `[storage.routes].memory` from configuration. Memory is no longer a storage
-  domain and is not moved by `otto storage transfer`. ([#491](https://github.com/baiyuqing/otto/pull/491))
+  (see the SQLite entry under Breaking changes).
+  ([#491](https://github.com/baiyuqing/otto/pull/491))
 - Approval content is no longer secret-scanned. It may be displayed and
   persisted: **do not include actual secrets**. Policy, permissions, human
   checkpoints, model redaction and non-approval protections are unchanged.
@@ -814,9 +825,6 @@ commit ledger; Git and release tags retain the full history. See the
 
 - Session history remains append-only Pi v3 JSONL. Custom metadata must not be
   rewritten into older transcripts or exposed as ordinary model messages.
-- Storage transfer is offline, resumable and explicit; it preserves original
-  files and does not automatically clean them up. It is not a cloud backend.
-  Consult the [storage manual](docs/manual/memory-and-extensions.md#storage-operations) before migration or downgrade.
 - Only `openai-compatible` and `chatgpt` are supported providers. ChatGPT
   credentials come from `otto login`; API keys and connector secrets remain
   environment-only. macOS Seatbelt is the supported sandbox; Linux runs without it.

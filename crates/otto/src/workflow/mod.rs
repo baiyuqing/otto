@@ -1,7 +1,6 @@
 //! Durable, workspace-scoped multi-agent workflows.
 pub mod contracts;
 pub mod error;
-pub mod migration;
 pub(crate) mod provenance;
 pub mod repository;
 pub mod service;

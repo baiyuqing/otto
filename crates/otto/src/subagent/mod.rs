@@ -18,7 +18,6 @@ pub mod definition;
 pub mod format;
 pub mod inherit;
 pub mod interrupted;
-pub mod migration;
 pub mod prompt;
 pub mod record;
 mod reports;

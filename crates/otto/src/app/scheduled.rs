@@ -101,11 +101,11 @@ pub async fn inherit_authority(
     item: &crate::schedule::Item,
 ) -> Result<(), String> {
     let builder = controller.builder();
-    let repository = builder.storage.sessions()?;
-    let root = builder.storage.session_root(&builder.session_root)?;
-    let authority_json = repository
+    let authority_json = builder
+        .storage
+        .sessions()
         .custom_data_for(
-            &root,
+            &builder.session_root,
             &item.workspace,
             &item.session_id,
             &format!("otto.schedule.{}", item.label()),

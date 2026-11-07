@@ -106,14 +106,11 @@ impl Builder {
         let failover_seconds = self
             .create_lease()
             .map_err(|error| self.redact_error(&error, Some(runtime)))?;
-        let session_root = self
-            .storage
-            .session_root(&self.session_root)
-            .map_err(|error| self.redact_error(&error, Some(runtime)))?;
+        let session_root = self.session_root.clone();
         let handle = self
             .storage
             .sessions()
-            .and_then(|repository| repository.create_lazy(&session_root, header, failover_seconds))
+            .create_lazy(&session_root, header, failover_seconds)
             .map_err(|error| self.redact_error(&error, Some(runtime)))?;
         Ok(SharedSession::new(handle))
     }
@@ -141,12 +138,8 @@ impl Builder {
         id: &str,
         request_id: Option<&str>,
     ) -> Result<crate::session::Forked, otto_core::session::ForkError> {
-        let failed = |message: String| {
-            otto_core::session::ForkError::Session(otto_core::session::PiError::other(message))
-        };
         self.storage
             .sessions()
-            .map_err(failed)?
             .fork(reference, before, id, request_id)
     }
 
@@ -155,7 +148,7 @@ impl Builder {
         &self,
         reference: &str,
     ) -> Result<Vec<otto_core::session::ForkPoint>, String> {
-        self.storage.sessions()?.fork_points(reference)
+        self.storage.sessions().fork_points(reference)
     }
 }
 

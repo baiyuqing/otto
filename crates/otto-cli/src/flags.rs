@@ -340,9 +340,6 @@ const USAGE: &str = r"Usage: otto [options]
                                           (active and archived; --force requires an ID)
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
-       otto storage transfer <source-home> <destination-root> <migration-id>
-       otto storage abort <source-home> <migration-id>
-       otto storage migrate <legacy.db> <new.db>
        otto storage window-peaks <usage.db> <session-id>
        otto workspace status|fork [--cwd PATH]
        otto memory status|list|show|forget|history|diff|restore|state|verify ...

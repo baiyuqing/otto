@@ -146,12 +146,7 @@ pub async fn start(
         &options.cwd,
         &options.overrides.base_url,
     )?;
-    let storage = open_storage(
-        &loaded,
-        &lookup,
-        &crate::runtime::storage::BackendRegistry::default(),
-    )
-    .await?;
+    let storage = Arc::new(crate::runtime::storage::Storage::default());
     let configured = configure(
         &mut loaded,
         &host_entries,
@@ -163,7 +158,7 @@ pub async fn start(
     // does not depend on the disabled components.
     options.disabled.apply(&mut loaded.config);
     let workspace_path = canonical_workspace(&options.cwd, &loaded.boundary)?;
-    let prepared = prepare_workspace(&loaded, &configured.environment, &storage, &workspace_path)?;
+    let prepared = prepare_workspace(&loaded, &configured.environment, &workspace_path)?;
     let composed = compose(
         ComposeOptions {
             memory_extension: options.memory_extension,

@@ -1,6 +1,5 @@
 //! Usage collection and aggregate query contracts.
 
-pub mod migration;
 pub mod repository;
 
 use std::fmt;

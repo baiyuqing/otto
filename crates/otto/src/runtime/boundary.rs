@@ -95,15 +95,6 @@ pub fn boundary_secret_values(
     runtime: Option<&Runtime>,
 ) -> (Vec<String>, bool) {
     let mut collect = Collect::new(inputs.sandbox_secrets_complete);
-    for name in inputs.config.storage.credential_variables() {
-        let descriptor = environment_value(inputs, name);
-        if !collect.add(name) || !collect.add(descriptor) {
-            return (collect.values(), false);
-        }
-        if descriptor.contains("://") {
-            collect.add_url(descriptor);
-        }
-    }
     for value in inputs.sandbox_secrets {
         if !collect.add(value) {
             return (collect.values(), false);

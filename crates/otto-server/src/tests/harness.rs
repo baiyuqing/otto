@@ -70,6 +70,8 @@ pub(super) struct HarnessOptions {
     /// `[server].max_open_sessions` for the harness's server. `None` (the
     /// default) keeps every open session.
     pub(super) max_open_sessions: Option<usize>,
+    /// Wires a file memory store in this directory into every session.
+    pub(super) memory_store: Option<std::path::PathBuf>,
 }
 
 pub(super) struct Harness {
@@ -150,6 +152,9 @@ impl Harness {
             std::fs::write(&builder.shared.config_path, config_text).expect("write config fixture");
         }
         builder.shared_mut().schedule = options.schedule.clone();
+        if let Some(store) = &options.memory_store {
+            fixtures::wire_file_memory(&mut builder, &canonical_workspace, store);
+        }
         let builder = Arc::new(builder);
         let provider = ScriptedProvider::new(options.script);
         // Production always sets `Options.info.workspace` from the same

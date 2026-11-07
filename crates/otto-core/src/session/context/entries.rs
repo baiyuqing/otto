@@ -36,12 +36,13 @@ pub fn model_message_to_pi_entry(
                     "user message contains assistant-only metadata",
                 ));
             }
-            if !message.input_id.is_empty() {
-                if !crate::model::is_input_id(&message.input_id) {
+            if !message.input_id.is_empty() || message.input_provenance.is_some() {
+                if !message.input_id.is_empty() && !crate::model::is_input_id(&message.input_id) {
                     return Err(PiError::invalid("invalid input id"));
                 }
                 wire.details = Some(encode_pi_otto_details(&PiOttoDetails {
                     input_id: message.input_id.clone(),
+                    input_provenance: message.input_provenance,
                     ..PiOttoDetails::default()
                 })?);
             }
@@ -174,7 +175,10 @@ fn model_context_message_to_pi_entry(
     if !message.input_id.is_empty() && !crate::model::is_input_id(&message.input_id) {
         return Err(PiError::invalid("invalid input id"));
     }
-    if message.context_metadata.is_some() || !message.input_id.is_empty() || message.usage.is_some()
+    if message.context_metadata.is_some()
+        || !message.input_id.is_empty()
+        || message.usage.is_some()
+        || message.input_provenance.is_some()
     {
         custom.details = Some(encode_pi_otto_details(&PiOttoDetails {
             task_id: message
@@ -183,6 +187,7 @@ fn model_context_message_to_pi_entry(
                 .map(|metadata| metadata.task_id.clone())
                 .unwrap_or_default(),
             input_id: message.input_id.clone(),
+            input_provenance: message.input_provenance,
             // `piCustomMessage` has no usage field in the Pi v3 format, so a
             // notification's token cost (such as a finished sub-agent task's)
             // travels in the Otto extension instead of being dropped.
@@ -207,6 +212,7 @@ fn model_context_message_to_pi_entry(
         display: message.display,
         context_metadata: message.context_metadata.clone(),
         input_id: message.input_id.clone(),
+        input_provenance: message.input_provenance,
         usage: message.usage,
         ..Message::default()
     };

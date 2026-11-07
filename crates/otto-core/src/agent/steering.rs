@@ -55,6 +55,8 @@ pub struct Message {
     /// id (tests and sessions without a journal).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub input_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_provenance: Option<crate::model::InputProvenance>,
 }
 
 #[derive(Default)]
@@ -172,6 +174,16 @@ impl Steering {
         text: &str,
         request_id: Option<&str>,
     ) -> Result<Message, SubmitError> {
+        self.submit_input_with_provenance(ticket, text, request_id, None)
+    }
+
+    pub fn submit_input_with_provenance(
+        &self,
+        ticket: u64,
+        text: &str,
+        request_id: Option<&str>,
+        provenance: Option<crate::model::InputProvenance>,
+    ) -> Result<Message, SubmitError> {
         if text.len() > MAX_BYTES {
             return Err(SubmitError::TooLong);
         }
@@ -206,6 +218,10 @@ impl Steering {
             text: text.to_owned(),
             status: Status::Queued,
             input_id,
+            input_provenance: provenance.map(|mut origin| {
+                origin.delivery = crate::model::InputDelivery::Steering;
+                origin
+            }),
         };
         if let Some(journal) = self.journal.get()
             && !state.turn.is_empty()
@@ -214,6 +230,7 @@ impl Steering {
                 text: message.text.clone(),
                 id: message.input_id.clone(),
                 scope: state.turn.clone(),
+                input_provenance: message.input_provenance,
                 ..Notification::default()
             })
         {
@@ -313,6 +330,7 @@ impl Steering {
                         text: entry.notification.text,
                         status: Status::Queued,
                         input_id: entry.notification.id,
+                        input_provenance: entry.notification.input_provenance,
                     };
                     state.messages.push_back(message);
                 } else if scope != turn {
@@ -505,6 +523,7 @@ mod tests {
                 text: "drop me".into(),
                 status: Status::Discarded,
                 input_id: String::new(),
+                input_provenance: None,
             }]
         );
     }
@@ -770,3 +789,7 @@ mod tests {
         assert!(!token.is_cancelled());
     }
 }
+
+#[cfg(test)]
+#[path = "steering/provenance_tests.rs"]
+mod provenance_tests;

@@ -149,6 +149,7 @@ struct QueuedPrompt {
     /// The input id of its saved copy in the session's turn queue; its user
     /// message carries it.
     input_id: Option<String>,
+    input_provenance: Option<otto_core::model::InputProvenance>,
 }
 
 #[derive(Default)]
@@ -218,7 +219,35 @@ struct Connection {
     wake_loops: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
+fn acp_input_provenance(capabilities: &Value) -> otto_core::model::InputProvenance {
+    let claim = capabilities
+        .pointer("/clientCapabilities/_meta/otto/inputSource")
+        .and_then(|value| {
+            serde_json::from_value::<otto_core::model::InputSource>(value.clone()).ok()
+        });
+    otto_core::model::InputProvenance::remote(otto_core::model::InputTransport::Acp, claim)
+}
+
 impl Connection {
+    fn input_provenance(&self) -> otto_core::model::InputProvenance {
+        let capabilities = self.client_capabilities.lock().expect("ACP capabilities");
+        acp_input_provenance(&capabilities)
+    }
+
+    fn queued_input_provenance(&self) -> otto_core::model::InputProvenance {
+        let mut origin = self.input_provenance();
+        origin.delivery = otto_core::model::InputDelivery::Queued;
+        origin
+    }
+
+    fn input_client(&self, client: &otto::client::Client) -> otto::client::Client {
+        client.clone().with_input_source(
+            self.input_provenance()
+                .client_source
+                .unwrap_or(otto_core::model::InputSource::Acp),
+        )
+    }
+
     fn send(&self, frame: Value) {
         // The writer ends only after every sender is dropped, so a failed
         // send cannot happen while the connection is alive.

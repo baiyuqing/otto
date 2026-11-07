@@ -54,10 +54,11 @@ impl Connection {
             }
             let mut start_worker = false;
             for prompt in &prompts {
-                if let Ok(start) = slot.enqueue(
+                if let Ok(start) = slot.enqueue_with_provenance(
                     prompt.text.clone(),
                     (prompt.channel, prompt.origin.clone()),
                     Some(prompt.input_id.clone()),
+                    prompt.input_provenance,
                 ) {
                     start_worker |= start;
                 }

@@ -129,6 +129,7 @@ pub struct Repl<'a> {
     pub(super) stderr: Box<dyn Write + Send + 'a>,
     program_status: Option<crate::program_status::Reporter>,
     delete_confirmation: Option<String>,
+    input_source: otto_core::model::InputSource,
 }
 
 impl<'a> Repl<'a> {
@@ -143,6 +144,7 @@ impl<'a> Repl<'a> {
             stderr,
             program_status: None,
             delete_confirmation: None,
+            input_source: otto_core::model::InputSource::Repl,
         }
     }
 
@@ -161,6 +163,7 @@ impl<'a> Repl<'a> {
             stderr,
             program_status: Some(reporter),
             delete_confirmation: None,
+            input_source: otto_core::model::InputSource::Repl,
         }
     }
 
@@ -196,8 +199,14 @@ impl<'a> Repl<'a> {
                         return Ok(());
                     }
                 } else {
-                    self.interactive_prompt(&line, cancel, &mut lines, &mut approval_queue)
-                        .await?;
+                    self.interactive_prompt(
+                        &line,
+                        cancel,
+                        &mut lines,
+                        &mut approval_queue,
+                        otto_core::model::InputDelivery::Queued,
+                    )
+                    .await?;
                 }
                 continue;
             }
@@ -319,7 +328,13 @@ impl<'a> Repl<'a> {
                 }
             }
             match self
-                .interactive_prompt(line, cancel, &mut lines, &mut approval_queue)
+                .interactive_prompt(
+                    line,
+                    cancel,
+                    &mut lines,
+                    &mut approval_queue,
+                    otto_core::model::InputDelivery::Direct,
+                )
                 .await
             {
                 Ok(()) => {}
@@ -338,7 +353,10 @@ impl<'a> Repl<'a> {
         prompt: &str,
         cancel: &CancellationToken,
     ) -> Result<(), Error> {
-        self.prompt(prompt, cancel).await?;
+        self.input_source = otto_core::model::InputSource::OneShot;
+        let result = self.prompt(prompt, cancel).await;
+        self.input_source = otto_core::model::InputSource::Repl;
+        result?;
         self.drain_tasks(cancel).await
     }
 }

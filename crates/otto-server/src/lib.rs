@@ -184,6 +184,7 @@ struct QueuedTurn {
     channel: Option<Channel>,
     origin: Option<otto::schedule::Origin>,
     input_id: Option<String>,
+    input_provenance: Option<otto_core::model::InputProvenance>,
 }
 
 /// How many recent `input_id`s each session remembers for answering a client

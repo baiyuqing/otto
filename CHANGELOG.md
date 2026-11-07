@@ -9,6 +9,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- New inputs carry per-message source, transport and delivery metadata through
+  queues, history and resume. Models can distinguish local TUI, REPL/one-shot,
+  HTTP and ACP ingress without rewriting user text. Attached TUI and connector
+  application claims remain explicitly unverified; legacy history stays unknown.
+  Provenance labels stay adjacent to human input when memory is recalled or
+  retracted; attached ACP `/queue` preserves connector claims and input IDs,
+  including queued delivery on idle admission and after queue recovery.
+
 - The F6 sub-agent observer keeps queued/running task panes expanded by default and
   compacts succeeded, failed, canceled and interrupted panes; Enter or clicking a
   title toggles a pane, with the manual choice retained during snapshot refreshes.

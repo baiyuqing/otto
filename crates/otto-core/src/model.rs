@@ -522,6 +522,8 @@ fn deserialize_finish_reason<'de, D: Deserializer<'de>>(
         .map(FinishReason::from))
 }
 
+mod input_provenance;
+pub use input_provenance::*;
 mod message;
 mod operation;
 
@@ -530,3 +532,7 @@ pub use operation::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "model/input_provenance_tests.rs"]
+mod input_provenance_tests;

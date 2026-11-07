@@ -206,6 +206,17 @@ impl TaskControl {
         text: &str,
         input_id: Option<&str>,
     ) -> Result<otto_core::agent::steering::Message, String> {
+        self.steer_with_provenance(session_id, ticket, text, input_id, None)
+    }
+
+    pub(crate) fn steer_with_provenance(
+        &self,
+        session_id: &str,
+        ticket: u64,
+        text: &str,
+        input_id: Option<&str>,
+        provenance: Option<otto_core::model::InputProvenance>,
+    ) -> Result<otto_core::agent::steering::Message, String> {
         let state = self.lock();
         if !state
             .active
@@ -215,7 +226,7 @@ impl TaskControl {
             return Err("the active task changed before guidance was accepted".into());
         }
         self.steering
-            .submit_input(ticket, text, input_id)
+            .submit_input_with_provenance(ticket, text, input_id, provenance)
             .map_err(submit_error)
     }
 

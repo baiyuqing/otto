@@ -308,6 +308,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             self.session.model_messages()
         };
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
+        messages = crate::model::project_input_provenance(messages);
         // Message counts before the request-local memory message is inserted:
         // the prefixes ending before the last two user messages recur in the
         // next requests, which lack that message and any overlay text.
@@ -316,7 +317,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .enumerate()
             .rev()
             .filter(|(_, message)| message.role == Role::User)
-            .map(|(index, _)| index)
+            .map(|(index, _)| {
+                index
+                    .checked_sub(1)
+                    .filter(|previous| messages[*previous].context_type == "input_origin")
+                    .unwrap_or(index)
+            })
             .filter(|index| *index > 0)
             .take(2)
             .collect();
@@ -330,8 +336,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .iter()
                 .rposition(|message| message.role == Role::User)
                 .unwrap_or(messages.len());
+            // Keep the provider-only label immediately adjacent to its input.
+            // The request-local runtime memory must not inherit human attribution.
+            let insertion = current_user
+                .checked_sub(1)
+                .filter(|index| messages[*index].context_type == "input_origin")
+                .unwrap_or(current_user);
             messages.insert(
-                current_user,
+                insertion,
                 Message {
                     role: Role::User,
                     blocks: vec![Block::text(memory_message)],

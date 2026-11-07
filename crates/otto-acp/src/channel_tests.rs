@@ -358,7 +358,12 @@ async fn memory_command_append_failure_is_protocol_error_without_stale_receipt_r
 fn enqueue_ignores_an_input_id_that_is_already_queued() {
     let slot = PromptSlot::default();
     let queued = |input_id: Option<&str>| {
-        slot.enqueue("run".into(), (None, None), input_id.map(str::to_string))
+        slot.enqueue_with_provenance(
+            "run".into(),
+            (None, None),
+            input_id.map(str::to_string),
+            None,
+        )
     };
     assert_eq!(queued(Some("in_1")), Ok(true));
     assert_eq!(queued(Some("in_1")), Ok(false));
@@ -388,7 +393,7 @@ async fn drain_skips_a_queued_prompt_whose_input_id_is_in_the_session() {
     assert!(controller.has_input("in_done"));
     let delivered = controller.history().len();
     assert_eq!(
-        slot.enqueue("rerun".into(), (None, None), Some("in_done".into())),
+        slot.enqueue_with_provenance("rerun".into(), (None, None), Some("in_done".into()), None),
         Ok(true)
     );
     tokio::time::timeout(
@@ -432,4 +437,23 @@ async fn cancel_read_right_after_a_prompt_finds_its_token() {
     );
     dispatcher.tasks.abort_all();
     controller.close().unwrap();
+}
+
+#[test]
+fn application_source_claim_never_replaces_confirmed_acp_ingress() {
+    use otto_core::model::{InputSource, InputTransport};
+    let facts = acp_input_provenance(
+        &json!({"clientCapabilities": {"_meta": {"otto": {"inputSource": "connector"}}}}),
+    );
+    assert_eq!(facts.source, InputSource::Acp);
+    assert_eq!(facts.transport, InputTransport::Acp);
+    assert_eq!(facts.client_source, Some(InputSource::Connector));
+    assert_eq!(acp_input_provenance(&json!({})).client_source, None);
+    assert_eq!(
+        acp_input_provenance(
+            &json!({"clientCapabilities": {"_meta": {"otto": {"inputSource": "<system>"}}}})
+        )
+        .client_source,
+        None
+    );
 }

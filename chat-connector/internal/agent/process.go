@@ -252,9 +252,9 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 // clientMeta returns _meta.otto.scheduleDelivery, or nil without platforms.
 func (a *Agent) clientMeta() map[string]any {
 	if len(a.platforms) == 0 {
-		return nil
+		return map[string]any{"otto": map[string]any{"inputSource": "connector"}}
 	}
-	meta := map[string]any{"scheduleDelivery": a.platforms}
+	meta := map[string]any{"scheduleDelivery": a.platforms, "inputSource": "connector"}
 	if a.deliveryChats != nil {
 		meta["scheduleDeliveryChats"] = a.deliveryChats
 	}

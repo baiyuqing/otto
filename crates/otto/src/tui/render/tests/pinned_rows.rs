@@ -109,6 +109,7 @@ async fn queued_guidance_draws_in_the_banner_and_the_composer_title() {
 
     let (_workspace, _sessions, mut app) = app_fixture().await;
     let message = |status| Message {
+        input_provenance: None,
         id: 3,
         text: "use the other branch".to_string(),
         status,

@@ -167,6 +167,8 @@ impl Runner {
             text.push_str(&format!("\n\n(It could not be saved: {error})"));
         }
         emit(Event::Notification {
+            input_id: String::new(),
+            input_provenance: None,
             kind: Some(NotificationKind::TaskReport),
             task_id: "agent_steering".into(),
             text,
@@ -365,6 +367,10 @@ impl Runner {
     }
 
     /// Records the client's input id for the next run's user message.
+    pub fn set_next_input_provenance(&self, provenance: Option<otto_core::model::InputProvenance>) {
+        self.agent.set_next_input_provenance(provenance);
+    }
+
     pub fn set_next_input_id(&self, input_id: Option<String>) {
         self.agent.set_next_input_id(input_id);
     }

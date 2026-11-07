@@ -326,11 +326,17 @@ impl Dispatcher {
                                     channel,
                                     origin: origin.clone(),
                                     image_dropped: false,
+                                    input_provenance: Some(connection.queued_input_provenance()),
                                 })
                         {
                             return connection.reply(id, Err(error(INTERNAL_ERROR, message)));
                         }
-                        match slot.enqueue(prompt, (channel, origin), Some(saved_id.clone())) {
+                        match slot.enqueue_with_provenance(
+                            prompt,
+                            (channel, origin),
+                            Some(saved_id.clone()),
+                            Some(connection.queued_input_provenance()),
+                        ) {
                             Ok(start_worker) => {
                                 connection.say(
                                 &session_id,
@@ -381,11 +387,13 @@ impl Dispatcher {
                             }
                             let started = relay
                                 .start_queued_prompt(
+                                    &connection,
                                     &session_id,
                                     &prompt,
                                     channel,
                                     origin.as_ref(),
                                     request_id.as_deref(),
+                                    input_id.as_deref(),
                                 )
                                 .await;
                             match started {

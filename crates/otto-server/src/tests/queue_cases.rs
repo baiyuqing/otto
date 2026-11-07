@@ -192,6 +192,7 @@ async fn a_task_turn_does_not_start_while_a_turn_is_queued() {
     let id = harness.create().await;
     let session = harness.server.lookup(&id).expect("session");
     session.lock().queue.push_back(QueuedTurn {
+        input_provenance: None,
         turn: Arc::new(Turn::queued(
             "q1".to_string(),
             turn::TRIGGER_USER,
@@ -259,6 +260,7 @@ fn a_session_with_only_a_queued_turn_is_busy() {
         CancellationToken::new(),
     ));
     state.queue.push_back(QueuedTurn {
+        input_provenance: None,
         turn,
         text: "x".to_string(),
         image: None,

@@ -111,11 +111,12 @@ impl PromptSlot {
             .unwrap_or_default()
     }
 
-    pub(super) fn enqueue(
+    pub(super) fn enqueue_with_provenance(
         &self,
         text: String,
         (channel, origin): (Option<Channel>, Option<Origin>),
         input_id: Option<String>,
+        input_provenance: Option<otto_core::model::InputProvenance>,
     ) -> Result<bool, &'static str> {
         let mut state = self.state.lock().expect("prompt slot");
         if state.queue.len() >= ACP_QUEUE_LIMIT {
@@ -137,6 +138,7 @@ impl PromptSlot {
             channel,
             origin,
             input_id,
+            input_provenance,
         });
         let start_worker = !state.draining;
         state.draining = true;
@@ -196,6 +198,7 @@ impl PromptSlot {
             }
             if let Some(controller) = &controller {
                 controller.set_next_input_id(queued.input_id.clone());
+                controller.set_next_input_provenance(queued.input_provenance);
             }
             let reply = connection
                 .queued_prompt(

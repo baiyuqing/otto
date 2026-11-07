@@ -27,6 +27,7 @@ mod approval_cases;
 mod doubles;
 mod endpoint_cases;
 mod harness;
+mod local_command_cases;
 mod memory_route_cases;
 mod model_config_cases;
 mod observer_cases;

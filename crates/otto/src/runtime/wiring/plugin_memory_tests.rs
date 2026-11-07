@@ -185,7 +185,10 @@ async fn remember_command_sends_a_human_remember_and_opens_no_file_store() {
         .management(Request::parse("remember", "--scope user prefers tabs").unwrap())
         .map_err(|error| error.to_string());
     assert!(
-        matches!(&reply, Ok(Reply::Notice(line)) if line.contains("state=applied")),
+        matches!(&reply, Ok(Reply::MemoryServiceResult {
+            status: otto_core::session::local_command::LocalCommandStatus::Success,
+            text,
+        }) if text.contains("state=applied")),
         "{:?}",
         reply.map(|_| ())
     );

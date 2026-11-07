@@ -775,3 +775,5 @@ impl Session for MemorySession {
 
 #[cfg(test)]
 mod tests;
+
+pub mod local_command;

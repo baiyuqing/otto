@@ -73,7 +73,7 @@ pub(crate) const SKILL_USAGE: &str =
 pub(crate) const MCP_USAGE: &str = "usage: /mcp | /mcp login <server>";
 
 /// Content-only rendering shared by the REPL and TUI management presenters.
-pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> String {
+pub fn format_management_reply(reply: &crate::app::management::Reply) -> String {
     use crate::app::management::Reply;
     match reply {
         Reply::Tasks(rows) => {
@@ -231,9 +231,10 @@ pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> 
                 s
             }
         }
-        Reply::SkillSet(message) | Reply::Notice(message) | Reply::Usage(message) => {
-            message.clone()
-        }
+        Reply::MemoryServiceResult { text: message, .. }
+        | Reply::SkillSet(message)
+        | Reply::Notice(message)
+        | Reply::Usage(message) => message.clone(),
         Reply::SkillDetail {
             skill: found,
             body,
@@ -451,34 +452,7 @@ pub(crate) fn repl_memory_command(
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> Result<(), Error> {
-    use crate::app::management::Request;
-    let request = match Request::parse("memory", args) {
-        Ok(r) => r,
-        Err(usage) => {
-            let _ = writeln!(stderr, "{usage}");
-            return Ok(());
-        }
-    };
-    let command = if controller.memory_manager().is_none() {
-        "/memory"
-    } else {
-        match &request {
-            crate::app::management::Request::MemoryList { .. } => "/memory list",
-            crate::app::management::Request::MemoryShow { .. } => "/memory show",
-            crate::app::management::Request::MemorySearch { .. } => "/memory search",
-            crate::app::management::Request::MemoryForget { .. } => "/memory forget",
-            crate::app::management::Request::MemoryHistory { .. } => "/memory history",
-            crate::app::management::Request::MemoryDiff { .. } => "/memory diff",
-            crate::app::management::Request::MemoryRestore { .. } => "/memory restore",
-            crate::app::management::Request::MemoryState { .. } => "/memory state",
-            crate::app::management::Request::MemoryVerify { .. } => "/memory verify",
-            crate::app::management::Request::MemoryPropose { .. } => "/memory propose",
-            crate::app::management::Request::MemoryReviewList
-            | crate::app::management::Request::MemoryReview { .. } => "/memory review",
-            _ => "/memory",
-        }
-    };
-    match controller.management(request) {
+    match controller.memory_command("memory", args) {
         Ok(crate::app::management::Reply::Usage(message)) => {
             let _ = writeln!(stderr, "{message}");
             Ok(())
@@ -487,7 +461,11 @@ pub(crate) fn repl_memory_command(
             let _ = writeln!(stdout, "{}", format_management_reply(&reply));
             Ok(())
         }
-        Err(message) => Err(command_error(command, message)),
+        Err(error) if error.kind == crate::app::management::ManagementErrorKind::Invalid => {
+            let _ = writeln!(stderr, "{}", error.message);
+            Ok(())
+        }
+        Err(error) => Err(command_error("/memory", error.message)),
     }
 }
 
@@ -527,15 +505,7 @@ pub(crate) fn repl_remember_command(
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> Result<(), Error> {
-    use crate::app::management::Request;
-    let request = match Request::parse("remember", args) {
-        Ok(r) => r,
-        Err(usage) => {
-            let _ = writeln!(stderr, "{usage}");
-            return Ok(());
-        }
-    };
-    match controller.management(request) {
+    match controller.memory_command("remember", args) {
         Ok(crate::app::management::Reply::Usage(message)) => {
             let _ = writeln!(stderr, "{message}");
             Ok(())
@@ -544,7 +514,11 @@ pub(crate) fn repl_remember_command(
             let _ = writeln!(stdout, "{}", format_management_reply(&reply));
             Ok(())
         }
-        Err(message) => Err(command_error("/remember", message)),
+        Err(error) if error.kind == crate::app::management::ManagementErrorKind::Invalid => {
+            let _ = writeln!(stderr, "{}", error.message);
+            Ok(())
+        }
+        Err(error) => Err(command_error("/remember", error.message)),
     }
 }
 

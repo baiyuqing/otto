@@ -73,6 +73,7 @@ struct State {
     migrating: bool,
     counter: u64,
     recovery_diagnostics: Vec<String>,
+    recovery_admission_blocked: bool,
     order: Vec<String>,
     entries: HashMap<String, Entry>,
     names: HashMap<String, String>,
@@ -309,7 +310,13 @@ impl Tasks {
                     id
                 }
                 None => {
-                    state.counter += 1;
+                    if state.recovery_admission_blocked {
+                        return Err(TaskError::Invalid("new task admission unavailable: incomplete child recovery inventory; inspect recovery diagnostics, repair storage/linkage and reopen".into()));
+                    }
+                    state.counter = state
+                        .counter
+                        .checked_add(1)
+                        .ok_or_else(|| TaskError::Invalid("task id counter exhausted".into()))?;
                     format!("t{}", state.counter)
                 }
             };

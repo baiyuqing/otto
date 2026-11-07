@@ -104,6 +104,7 @@ impl Tasks {
                 "task {id} is not interrupted or is already resuming"
             )));
         }
+        task.attempt_id = entry.task.attempt_id.clone();
         task.id = entry.task.id.clone();
         task.name = entry.task.name.clone();
         task.session_path = entry.task.session_path.clone();
@@ -125,6 +126,19 @@ impl Tasks {
         Ok(task)
     }
 
+    /// Retain readable history without retaining a failed store's writer lock.
+    pub(crate) fn freeze_recovery_history(&self, id: &str, messages: Vec<Message>) {
+        if let Some(entry) = self.lock().entries.get_mut(id) {
+            entry.history = Some(Arc::new(move || messages.clone()));
+        }
+    }
+
+    pub(crate) fn recovery_writer(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+        self.admission_transcript
+            .as_ref()
+            .and_then(|transcript| transcript.lease())
+    }
+
     pub(crate) fn has_delivered_input(&self, id: &str) -> bool {
         self.admission_transcript
             .as_ref()
@@ -135,6 +149,12 @@ impl Tasks {
         if let Some(entry) = self.lock().entries.get_mut(id) {
             entry.task.attempt_id = attempt_id.to_owned();
         }
+    }
+
+    pub(crate) fn set_recovery_coverage(&self, complete: bool, highest_counter: u64) {
+        let mut state = self.lock();
+        state.recovery_admission_blocked = !complete;
+        state.counter = state.counter.max(highest_counter);
     }
 
     pub(crate) fn set_recovery_diagnostics(&self, diagnostics: Vec<String>) {

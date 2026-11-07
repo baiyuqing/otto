@@ -1,4 +1,10 @@
 use super::*;
+
+#[test]
+fn unavailable_recovered_task_is_terminal_not_live() {
+    assert!(terminal_status("unavailable"));
+    assert!(!terminal_status("running"));
+}
 use crate::{
     app::tasks::{ObserverEntry, ObserverTask},
     tui::{

@@ -45,12 +45,14 @@ pub(crate) fn activate(
     warnings: &mut dyn Write,
 ) {
     let inventory = interrupted::inventory(parent);
+    let mut complete = inventory.complete;
+    tasks.set_recovery_coverage(complete, inventory.highest_counter);
     let mut diagnostics = inventory.diagnostics;
     let mut known = std::collections::HashSet::new();
     for mut child in inventory.records {
         known.insert(child.task_id.clone());
         if child.final_status.is_none() {
-            match interrupted::mark_interrupted(&child.path) {
+            match interrupted::mark_interrupted_with_writer(&child, tasks.recovery_writer()) {
                 Ok(()) => child.final_status = Some(interrupted::INTERRUPTED_STATUS.into()),
                 Err(error) => diagnostics.push(format!(
                     "recovery: {} repair failed; resume unavailable: {error}",
@@ -67,7 +69,11 @@ pub(crate) fn activate(
             ));
             continue;
         }
-        let task = snapshot(&child);
+        let mut task = snapshot(&child);
+        if child.final_status.is_none() {
+            task.status = TaskStatus::Unavailable;
+            task.error = "Child ownership or durable repair unavailable; no lost-owner claim is made. Resume unavailable; inspect recovery diagnostics.".into();
+        }
         if let Err(error) = tasks.import_recovered(task) {
             diagnostics.push(format!("recovery: {error}"));
             continue;
@@ -124,15 +130,25 @@ pub(crate) fn activate(
                     continue;
                 }
                 let Some(data) = custom.data else {
+                    complete = false;
+                    diagnostics.push("recovery: admission missing payload".into());
                     continue;
                 };
                 let Ok(data) = serde_json::from_str::<serde_json::Value>(data.get()) else {
+                    complete = false;
                     diagnostics.push("recovery: malformed admission receipt".into());
                     continue;
                 };
                 let Some(id) = data.get("id").and_then(|id| id.as_str()) else {
+                    complete = false;
+                    diagnostics.push("recovery: admission missing task id".into());
                     continue;
                 };
+                if data.get("version").and_then(|value| value.as_u64()) != Some(1) {
+                    complete = false;
+                    diagnostics.push(format!("recovery: {id}: unsupported admission version; task counter upper bound unknown"));
+                    continue;
+                }
                 if known.contains(id) {
                     continue;
                 }
@@ -141,7 +157,7 @@ pub(crate) fn activate(
                 diagnostics.push(format!("recovery: {id}: {error}"));
                 let task = Task {
                     id: id.into(),
-                    status: TaskStatus::Interrupted,
+                    status: TaskStatus::Unavailable,
                     error: error.into(),
                     description: data
                         .get("description")
@@ -151,18 +167,26 @@ pub(crate) fn activate(
                     ..Task::default()
                 };
                 if let Err(error) = tasks.import_recovered(task) {
+                    complete = false;
                     diagnostics.push(format!("recovery: {error}"));
                 }
             }
         }
-        Err(error) => diagnostics.push(format!("recovery: parent admissions unavailable: {error}")),
+        Err(error) => {
+            complete = false;
+            diagnostics.push(format!("recovery: parent admissions unavailable: {error}"));
+        }
     }
-    if !inventory.complete || !diagnostics.is_empty() {
+    tasks.set_recovery_coverage(complete, inventory.highest_counter);
+    if !complete {
+        diagnostics.push("recovery: task counter upper bound unknown; NEW admission blocked; validated interrupted tasks may still be explicitly resumed".into());
+    }
+    if !complete || !diagnostics.is_empty() {
         diagnostics.insert(
             0,
             format!(
                 "recovery coverage: {}; {} recovered task snapshots; no execution restarted",
-                if inventory.complete {
+                if complete {
                     "complete with diagnostics"
                 } else {
                     "incomplete"

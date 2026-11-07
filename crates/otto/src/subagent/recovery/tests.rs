@@ -1,7 +1,9 @@
 //! Offline recovery acceptance: durable state, never process replay.
 
+mod admission_coverage;
 mod crash_process;
 mod recovery_edges;
+mod write_admission;
 
 use super::*;
 use crate::session::Store;
@@ -198,7 +200,7 @@ async fn admission_before_spec_remains_visible_but_not_executable() {
     let recovered = Tasks::new();
     activate(&path, &recovered, &Inbox::default(), &mut Vec::new());
     let task = recovered.get("t1").expect("admission must not disappear");
-    assert_eq!(task.status, TaskStatus::Interrupted);
+    assert_eq!(task.status, TaskStatus::Unavailable);
     assert!(task.session_path.is_empty());
     assert!(task.error.contains("no usable child spec"));
     assert_eq!(recovered.add(Task::default(), None, None).unwrap().id, "t2");

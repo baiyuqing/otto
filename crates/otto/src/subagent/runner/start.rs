@@ -160,18 +160,23 @@ impl Runner {
 
         let parent = children_dir.with_extension("jsonl");
         let inventory = interrupted::inventory(&parent);
-        if !inventory.complete {
-            return Err(StartError::ResumeFailed(format!(
-                "child inventory incomplete; inspect recovery diagnostics: {}",
-                inventory.diagnostics.join("; ")
-            )));
-        }
+        // Incomplete coverage blocks new ids, not a validated known child.
+        // Conflicting/corrupt children are excluded from records by inventory.
         let records = inventory.records;
         let record = records
             .iter()
             .find(|record| record.task_id == target)
             .or_else(|| records.iter().find(|record| record.name == target))
-            .ok_or_else(|| StartError::ResumeNotFound(target.to_string()))?;
+            .ok_or_else(|| {
+                if inventory.complete {
+                    StartError::ResumeNotFound(target.to_string())
+                } else {
+                    StartError::ResumeFailed(format!(
+                        "task unavailable in incomplete child inventory: {}",
+                        inventory.diagnostics.join("; ")
+                    ))
+                }
+            })?;
         if super::external::adapter(&record.agent).is_some() {
             return Err(StartError::ResumeFailed(
                 "resuming external ACP agents is not supported".into(),
@@ -188,8 +193,15 @@ impl Runner {
                 .tasks
                 .import_recovered(crate::subagent::recovery::snapshot(record))?;
         }
-        let (store, _warnings) = crate::session::Store::open(&record.path)
-            .map_err(|error| StartError::ResumeFailed(error.to_string()))?;
+        let current = self
+            .config
+            .tasks
+            .get(&record.task_id)
+            .ok_or_else(|| StartError::ResumeNotFound(record.task_id.clone()))?;
+        if current.status != TaskStatus::Interrupted || current.attempt_id != record.attempt_id {
+            return Err(StartError::ResumeNotInterrupted(record.task_id.clone()));
+        }
+        let store = interrupted::open_validated(record).map_err(StartError::ResumeFailed)?;
         if let Some(lease) = self.config.lease.as_ref().and_then(|source| source()) {
             store.set_lease_check(lease);
         }

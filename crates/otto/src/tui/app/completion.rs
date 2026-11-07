@@ -164,6 +164,7 @@ impl App {
                 self.writes.remove(&tag);
             }
             let (mut entries, usage) = entries::entries_from_history(&history);
+            entries::project_local_commands(&mut entries, &self.info.local_commands);
             if old == (self.info.workspace.clone(), self.info.session_id.clone()) {
                 crate::tui::approval_display::retain(&mut entries, &self.entries);
             }

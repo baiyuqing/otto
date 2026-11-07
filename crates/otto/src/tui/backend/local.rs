@@ -103,30 +103,21 @@ pub(super) async fn local(
                 }
                 Request::Reviews => {
                     let snapshot = c.approval_snapshot().map_err(|error| error.to_string())?;
-                    let (service, user, workspace) = c
-                        .memory_manager()
-                        .ok_or_else(|| "Memory review is unavailable.".to_string())?;
-                    service
-                        .list_candidates(&CandidateListRequest {
-                            scopes: vec![user, workspace],
-                            states: vec![CandidateState::Pending],
-                            limit: 20,
-                            cursor: String::new(),
-                        })
-                        .map(|page| {
-                            Reply::Reviews(
-                                page.candidates
-                                    .into_iter()
-                                    .filter(|candidate| {
-                                        crate::approval::memory::is_human_pending(
-                                            candidate,
-                                            &snapshot.requests,
-                                        )
-                                    })
-                                    .collect(),
-                            )
-                        })
-                        .map_err(|error| error.to_string())
+                    let crate::app::management::Reply::MemoryCandidates(rows) =
+                        c.management(crate::app::management::Request::MemoryReviewList)?
+                    else {
+                        return Err("unexpected memory review reply".into());
+                    };
+                    Ok(Reply::Reviews(
+                        rows.into_iter()
+                            .filter(|candidate| {
+                                crate::approval::memory::is_human_pending(
+                                    candidate,
+                                    &snapshot.requests,
+                                )
+                            })
+                            .collect(),
+                    ))
                 }
                 Request::ApprovalSnapshot => c
                     .approval_snapshot()

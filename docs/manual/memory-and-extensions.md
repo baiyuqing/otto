@@ -307,6 +307,48 @@ the [HTTP memory routes](servers-and-connectors.md#memory-management). `show` re
 `/remember` and `/memory forget <id>` apply immediately. Model writes create
 candidates; `/memory review <id> accept|reject` decides pending human reviews.
 
+### Local command history
+
+Every `/memory` subcommand and `/remember` records a **LOCAL COMMAND** receipt
+in the current workspace conversation. The terminal timeline uses a distinct
+`›_` gutter, not a user, assistant or tool bubble: `✓` means success, `✗` means
+failure and `!` means the outcome is pending. Full memory IDs, scope and revision
+are retained when available. Parameters and query output are collapsed by
+default; use the transcript details toggle to expand them. Remember, state and
+forget receipts summarize metadata without copying the remembered/retracted body
+or fetching forgotten text. Usage errors, empty results and unavailable memory
+also leave receipts. A command interrupted before its terminal observation stays
+pending: reconcile memory state before retrying rather than assuming rollback.
+Plugin remember receipts report failed items as errors and unknown outcomes as
+pending; pending/running service completion never claims success.
+
+Receipts are scanned for secrets at recording boundaries and stored as independent
+append-only Pi `custom` entries (`otto.local_command`). Reopening a conversation
+replays them without executing commands. They never become model messages, enter
+compaction summaries or inherited child context, trigger plugin turn observations,
+or feed automatic memory learning. `--no-session` keeps receipts only in memory.
+Historical query details are conversation history: forgetting a memory does **not**
+erase earlier command receipts or their details.
+
+Local and attached terminal clients support these commands. Session HTTP responses
+include additive `local_commands` history; `POST /v1/sessions/{id}/local-commands`
+accepts `{"name":"memory","args":"list"}` (or `"remember"`) and returns output,
+an error flag and receipts without starting a model turn. Existing session-scoped
+HTTP memory routes record the same receipts. Non-session memory management does
+not claim ownership of a conversation. ACP advertises both commands and emits
+independent `_otto/local_commands/update` notifications with `sessionId` and
+`receipts`, including replay on session load; ACP clients must render that extension
+separately from agent messages. If command recording fails, ACP returns a protocol
+error (including reconciliation guidance) rather than an agent message or a replay
+of the previous receipt; session HTTP returns a non-success response for recording
+failures so attached clients also stop before replay. A failed initial append
+prevents command execution, while
+a failed terminal append can leave an executed command pending.
+The in-repo chat connector displays live receipts
+as plain-text `›_ LOCAL COMMAND` results without prompting the model and suppresses
+historical replay broadcasts. The separate `otto-plus` browser client needs its
+own receipt rendering; Otto does not turn receipts into chat bubbles for it.
+
 A candidate has one action. Accepting it with `/memory review <id> accept`
 does the following:
 

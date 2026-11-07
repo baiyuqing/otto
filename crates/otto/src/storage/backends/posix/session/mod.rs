@@ -27,6 +27,38 @@ use crate::storage::files::FileDriver;
 use otto_core::session::{Header, ListResult, SessionInfo, Warning};
 
 impl SessionHandle for Store {
+    fn append_local_command(&self, encoded: &str) -> Result<(), String> {
+        self.append_custom_entry(
+            otto_core::session::local_command::LOCAL_COMMAND_CUSTOM_TYPE,
+            encoded,
+        )
+        .map_err(|error| error.to_string())
+    }
+    fn local_commands(&self) -> Vec<otto_core::session::local_command::LocalCommandReceipt> {
+        use otto_core::session::local_command::{LOCAL_COMMAND_CUSTOM_TYPE, fold_local_commands};
+        let Ok(state) = self.state.lock() else {
+            return Vec::new();
+        };
+        let Ok((index, _)) = otto_core::session::context::index_context_entries(&state.entries)
+        else {
+            return Vec::new();
+        };
+        let Ok(path) = otto_core::session::context::active_context_path(
+            &state.entries,
+            state.leaf_id.as_deref().unwrap_or(""),
+            &index,
+        ) else {
+            return Vec::new();
+        };
+        fold_local_commands(path.iter().filter_map(|entry| {
+            let custom = entry.custom.as_ref()?;
+            if custom.custom_type != LOCAL_COMMAND_CUSTOM_TYPE {
+                return None;
+            }
+            serde_json::from_str(custom.data.as_ref()?.get()).ok()
+        }))
+    }
+
     fn custom_data(&self, custom_type: &str) -> Option<String> {
         let state = self.state.lock().ok()?;
         let (index, _) = otto_core::session::context::index_context_entries(&state.entries).ok()?;

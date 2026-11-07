@@ -5,6 +5,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 struct Recorder {
     requests: Mutex<Vec<port::RememberRequest>>,
+    observations: Mutex<usize>,
+    outcome: Mutex<Option<(port::Completion, port::ItemState)>>,
+    close_on_remember: Mutex<Option<Arc<dyn crate::session::SessionHandle>>>,
 }
 
 #[async_trait::async_trait]
@@ -20,6 +23,14 @@ impl port::MemoryService for Recorder {
         description.capabilities.push(capability);
         description
     }
+    async fn observe(
+        &self,
+        _: &port::ObserveRequest,
+        _: &dyn OperationControl,
+    ) -> port::Result<port::Receipt> {
+        *self.observations.lock().unwrap() += 1;
+        Err(port::Error::new(port::ErrorKind::Unsupported))
+    }
     async fn recall(
         &self,
         _: &port::RecallRequest,
@@ -33,11 +44,19 @@ impl port::MemoryService for Recorder {
         _: &dyn OperationControl,
     ) -> port::Result<port::Receipt> {
         self.requests.lock().unwrap().push(request.clone());
+        if let Some(session) = self.close_on_remember.lock().unwrap().take() {
+            session.close().unwrap();
+        }
+        let (completion, state) = self
+            .outcome
+            .lock()
+            .unwrap()
+            .unwrap_or((port::Completion::Complete, port::ItemState::Applied));
         Ok(port::Receipt {
             request_id: request.request_id.clone(),
             operation_ref: None,
             admission: port::Admission::Acknowledged,
-            completion: port::Completion::Complete,
+            completion,
             visibility: port::Visibility::Unknown,
             items: vec![port::ItemOutcome {
                 reference: Some(port::MemoryRef {
@@ -47,7 +66,7 @@ impl port::MemoryService for Recorder {
                     id: "item-1".into(),
                     revision: None,
                 }),
-                state: port::ItemState::Applied,
+                state,
                 reason: None,
             }],
             forget_coverage: None,
@@ -93,14 +112,17 @@ async fn remember_reaches_the_memory_service_and_other_memory_requests_stay_unsu
         move || controller.management(Request::parse("remember", args).unwrap())
     };
     let line = match run("--scope user --kind fact --key name hello")() {
-        Ok(Reply::Notice(line)) => line,
+        Ok(Reply::MemoryServiceResult { text, .. }) => text,
         other => panic!("expected a notice, got {:?}", other.map(|_| ())),
     };
     assert_eq!(line, "remembered item-1 (scope=user/u1, state=applied)");
-    assert!(matches!(run("plain text")(), Ok(Reply::Notice(_))));
+    assert!(matches!(
+        run("plain text")(),
+        Ok(Reply::MemoryServiceResult { .. })
+    ));
     assert!(matches!(
         run("--scope organization --key baseline use tabs")(),
-        Ok(Reply::Notice(_))
+        Ok(Reply::MemoryServiceResult { .. })
     ));
     assert!(matches!(run("--scope team x")(), Ok(Reply::Usage(_))));
     let requests = service.requests.lock().unwrap();
@@ -402,4 +424,123 @@ async fn update_history_diff_restore_and_forget_through_the_management_requests(
     );
     assert_eq!(cleanup[cleanup.len() - 2].status, CopyStatus::Unverified);
     assert_eq!(cleanup[cleanup.len() - 1].status, CopyStatus::Present);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_receipts_preserve_failed_unknown_and_incomplete_outcomes() {
+    use otto_core::session::local_command::LocalCommandStatus;
+    let service = Arc::new(Recorder::default());
+    let controller = controller_with_service(service.clone()).await;
+    for (completion, state, expected) in [
+        (
+            port::Completion::Complete,
+            port::ItemState::Applied,
+            LocalCommandStatus::Success,
+        ),
+        (
+            port::Completion::Failed,
+            port::ItemState::Failed,
+            LocalCommandStatus::Error,
+        ),
+        (
+            port::Completion::Unknown,
+            port::ItemState::Unknown,
+            LocalCommandStatus::Pending,
+        ),
+        (
+            port::Completion::Partial,
+            port::ItemState::Failed,
+            LocalCommandStatus::Error,
+        ),
+        (
+            port::Completion::Partial,
+            port::ItemState::Unknown,
+            LocalCommandStatus::Pending,
+        ),
+        (
+            port::Completion::Pending,
+            port::ItemState::Applied,
+            LocalCommandStatus::Pending,
+        ),
+        (
+            port::Completion::Running,
+            port::ItemState::Applied,
+            LocalCommandStatus::Pending,
+        ),
+    ] {
+        *service.outcome.lock().unwrap() = Some((completion, state));
+        controller
+            .memory_command("remember", "test outcome")
+            .unwrap();
+        assert_eq!(
+            controller.info().local_commands.last().unwrap().status,
+            expected
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_pending_receipt_append_prevents_plugin_execution() {
+    let service = Arc::new(Recorder::default());
+    let controller = controller_with_service(service.clone()).await;
+    controller.current_session().handle().close().unwrap();
+    let error = controller
+        .memory_command("remember", "must not execute")
+        .unwrap_err();
+    assert!(error.message.contains("receipt persistence failed"));
+    assert!(service.requests.lock().unwrap().is_empty());
+    assert!(controller.info().local_commands.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_terminal_receipt_append_reports_unresolved_plugin_execution() {
+    use otto_core::session::local_command::LocalCommandStatus;
+    let service = Arc::new(Recorder::default());
+    let controller = controller_with_service(service.clone()).await;
+    *service.close_on_remember.lock().unwrap() =
+        Some(controller.current_session().handle().clone());
+    let error = controller
+        .memory_command("remember", "executed once")
+        .unwrap_err();
+    assert!(error.message.contains("receipt persistence failed"));
+    assert!(error.message.contains("reconcile before retrying"));
+    assert_eq!(service.requests.lock().unwrap().len(), 1);
+    let receipts = controller.info().local_commands;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].status, LocalCommandStatus::Pending);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_commands_do_not_trigger_turn_observation_or_inherited_context() {
+    use otto_core::session::Session;
+    let service = Arc::new(Recorder::default());
+    let controller = controller_with_service(service.clone()).await;
+    let controller = Arc::new(controller);
+    let before = controller.current_session().model_messages();
+    let task_controller = controller.clone();
+    tokio::task::spawn_blocking(move || {
+        task_controller
+            .memory_command("remember", "--scope user human-only-command")
+            .unwrap();
+        assert!(
+            task_controller
+                .memory_command("memory", "show absent")
+                .is_err()
+        );
+        assert!(task_controller.memory_command("memory", "invalid").is_err());
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        *service.observations.lock().unwrap(),
+        0,
+        "human commands must not trigger automatic learning"
+    );
+    assert_eq!(
+        controller.current_session().model_messages(),
+        before,
+        "provider and inherited child snapshot must not change"
+    );
+    assert!(controller.history().is_empty());
+    assert_eq!(controller.info().local_commands.len(), 3);
 }

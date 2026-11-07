@@ -92,6 +92,9 @@ impl Catalog {
         } else if name == "/auto" {
             name = "/permissions";
         }
+        if attached && name == "/memory" && args == "review" {
+            return management("memory", args);
+        }
         let entry = self
             .entries
             .iter()
@@ -191,10 +194,10 @@ const ENTRIES: &[Entry] = &[
         Memory,
         "/memory",
         "search, inspect, forget or review memories",
-        true,
+        false,
         memory
     ),
-    entry!(Memory, "/remember", "remember a record", true, remember),
+    entry!(Memory, "/remember", "remember a record", false, remember),
     entry!(Tasks, "/task", "list, inspect or cancel tasks", true, task),
     entry!(Tasks, "/agents", "browse recorded agents", false, agents),
     entry!(Tasks, "/timers", "list or cancel reminders", true, timers),
@@ -479,6 +482,15 @@ fn sandbox(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
 }
 
 fn management(name: &str, args: &str) -> Result<Transition, String> {
+    if matches!(name, "memory" | "remember") {
+        return query(
+            name,
+            Request::Command(Command::MemoryInvocation {
+                name: name.into(),
+                args: args.into(),
+            }),
+        );
+    }
     use crate::app::management::Request as M;
     let request = M::parse(name, args)?;
     let mutation = matches!(

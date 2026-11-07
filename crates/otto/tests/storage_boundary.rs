@@ -421,23 +421,6 @@ fn driver_violations(source: &str) -> Vec<String> {
     problems
 }
 
-fn migration_core_violations(source: &str) -> Vec<String> {
-    let source = without_line_comments(&non_test(source));
-    let mut problems = Vec::new();
-    for forbidden in [
-        "crate::storage::backends",
-        "crate::storage::drivers",
-        "rusqlite::",
-        "libsql::",
-        "crate::storage::Connection",
-    ] {
-        if source.contains(forbidden) {
-            problems.push(format!("physical storage dependency `{forbidden}`"));
-        }
-    }
-    problems
-}
-
 #[test]
 fn domain_services_and_repositories_use_typed_ports() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -516,24 +499,6 @@ fn sqlite_repositories_open_through_the_injected_driver() {
     );
 }
 
-#[test]
-fn migration_contracts_do_not_depend_on_physical_backends() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/migration");
-    let mut offenders = Vec::new();
-    for path in sources(&root) {
-        let body = std::fs::read_to_string(&path).expect("read migration contract source");
-        for problem in migration_core_violations(&body) {
-            offenders.push(format!("{}: {problem}", path.display()));
-        }
-    }
-    offenders.sort();
-    assert!(
-        offenders.is_empty(),
-        "the migration coordinator owns ordering, not physical storage:\n{}",
-        offenders.join("\n")
-    );
-}
-
 fn core_reexport_violations(source: &str) -> Vec<String> {
     without_line_comments(&non_test(source))
         .lines()
@@ -582,9 +547,6 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     assert!(domain_violations(service, "fn f() { invalid(\"update identity\"); }").is_empty());
     assert!(!driver_violations("use crate::memory::Service;").is_empty());
     assert!(!backend_violations("use crate::runtime::Builder;").is_empty());
-    assert!(
-        !migration_core_violations("use crate::storage::drivers::sqlite::SqliteDriver;").is_empty()
-    );
     assert!(
         domain_violations(
             Path::new("workflow/mod.rs"),

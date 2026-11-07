@@ -9,7 +9,7 @@
 //! `Write` counts calls of [`Write::write`]; a caller that uses `write_all`
 //! issues one call per record unless the inner write is partial. `metadata` and
 //! `is_close_on_exec` are forwarded without a check. `Lock` covers
-//! `lock_exclusive`, `try_lock_shared` and `try_lock_exclusive`.
+//! `lock_exclusive`.
 //!
 //! [`Fault::Hang`] panics: the file boundary is synchronous, so a hang would
 //! block the test thread; a plan that asks for it is a test bug.
@@ -252,18 +252,6 @@ impl JournalFile for FaultyJournal {
     fn lock_exclusive(&self) -> io::Result<()> {
         run(&self.plan, FileOp::Lock, &self.name, || {
             self.inner.lock_exclusive()
-        })
-    }
-
-    fn try_lock_shared(&self) -> io::Result<()> {
-        run(&self.plan, FileOp::Lock, &self.name, || {
-            self.inner.try_lock_shared()
-        })
-    }
-
-    fn try_lock_exclusive(&self) -> io::Result<()> {
-        run(&self.plan, FileOp::Lock, &self.name, || {
-            self.inner.try_lock_exclusive()
         })
     }
 

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Process entry point for host-provided storage and memory services.
+/// Process entry point for host-provided memory services.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_extensions(
     args: &[String],
@@ -13,7 +13,6 @@ pub async fn run_with_extensions(
     terminal: bool,
     cancel: &CancellationToken,
     terminate: &crate::terminate::Terminate,
-    backends: &otto::runtime::storage::BackendRegistry,
     memory_extension: Option<otto::runtime::wiring::MemoryExtension>,
 ) -> i32 {
     if let Some(code) = subcommands::run_subcommand(
@@ -23,7 +22,6 @@ pub async fn run_with_extensions(
         stderr,
         &environment_entries,
         cancel,
-        backends,
         memory_extension.is_some(),
     )
     .await
@@ -102,10 +100,7 @@ pub async fn run_with_extensions(
         Err(message) => return fail(stderr, &message),
     };
     startup_trace.mark("config/load");
-    let storage = match startup::open_storage(&loaded, &lookup, backends).await {
-        Ok(storage) => storage,
-        Err(message) => return fail(stderr, &message),
-    };
+    let storage = Arc::new(otto::runtime::storage::Storage::default());
     if !options.acp_listen.is_empty()
         && loaded
             .config
@@ -184,15 +179,11 @@ pub async fn run_with_extensions(
         )
         .await;
     }
-    let prepared = match startup::prepare_workspace(
-        &loaded,
-        &configured.environment,
-        &storage,
-        &workspace_path,
-    ) {
-        Ok(prepared) => prepared,
-        Err(message) => return fail(stderr, &message),
-    };
+    let prepared =
+        match startup::prepare_workspace(&loaded, &configured.environment, &workspace_path) {
+            Ok(prepared) => prepared,
+            Err(message) => return fail(stderr, &message),
+        };
     let session_root = &prepared.session_root;
     let eval_roots = eval_command.as_ref().map(|_| crate::eval_command::Roots {
         session_root: session_root.clone(),
@@ -206,26 +197,25 @@ pub async fn run_with_extensions(
     }
 
     if let Some(target) = &options.delete_target {
-        return match storage.sessions() {
-            Ok(repository) => delete::run(
-                repository,
-                session_root,
-                &workspace_path,
-                target,
-                options.delete_force,
-                &mut *stdin,
-                stdout,
-                stderr,
-                |text| loaded.boundary.redact(text),
-            ),
-            Err(error) => fail(stderr, &loaded.boundary.redact(&error)),
-        };
+        return delete::run(
+            storage.sessions(),
+            session_root,
+            &workspace_path,
+            target,
+            options.delete_force,
+            &mut *stdin,
+            stdout,
+            stderr,
+            |text| loaded.boundary.redact(text),
+        );
     }
 
     if !options.archive_path.is_empty() {
-        return match storage.sessions().and_then(|repository| {
-            repository.archive(session_root, &workspace_path, &options.archive_path)
-        }) {
+        return match storage.sessions().archive(
+            session_root,
+            &workspace_path,
+            &options.archive_path,
+        ) {
             Ok(result) => {
                 let _ = writeln!(
                     stdout,
@@ -243,7 +233,7 @@ pub async fn run_with_extensions(
     if options.continue_last {
         let listed = match storage
             .sessions()
-            .and_then(|repository| repository.list(session_root, &workspace_path, "", 1))
+            .list(session_root, &workspace_path, "", 1)
         {
             Ok(listed) => listed,
             Err(error) => return fail(stderr, &loaded.boundary.redact(&error.to_string())),
@@ -320,10 +310,7 @@ pub async fn run_with_extensions(
             Ok(create_lease) => create_lease,
             Err(error) => return fail(stderr, &builder.redact_error(&error, None)),
         };
-        let repository = match builder.storage.sessions() {
-            Ok(repository) => repository,
-            Err(error) => return fail(stderr, &loaded.boundary.redact(&error)),
-        };
+        let repository = builder.storage.sessions();
         let prepared = prepare_session_backend(
             repository,
             session_root,

@@ -202,7 +202,6 @@ pub fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<St
     }
     let credential_variables = file.plugins.credential_variables();
     keys.extend(credential_variables.iter().map(String::as_str));
-    keys.extend(file.storage.credential_variables());
     keys.extend(["PATH", "TMPDIR", "LANG", "TERM"]);
     keys.into_iter()
         .map(|key| {

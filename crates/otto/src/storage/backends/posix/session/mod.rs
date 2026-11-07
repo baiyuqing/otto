@@ -26,8 +26,6 @@ use crate::storage::backends::posix::lease::Keeper;
 use crate::storage::files::FileDriver;
 use otto_core::session::{Header, ListResult, SessionInfo, Warning};
 
-const MAX_VALIDATED_SESSION_ROOT_ENTRIES: usize = 10_000;
-
 impl SessionHandle for Store {
     fn custom_data(&self, custom_type: &str) -> Option<String> {
         let state = self.state.lock().ok()?;
@@ -204,29 +202,6 @@ impl SessionRepository for PosixSessionRepository {
         fork::fork_context(reference, prompt)
     }
 
-    fn validate_existing_root(&self, root: &Path) -> Result<(), String> {
-        let root_handle = self
-            .driver
-            .open_root(root)
-            .map_err(|error| format!("open session root: {error}"))?;
-        let names = root_handle
-            .list_names(MAX_VALIDATED_SESSION_ROOT_ENTRIES)
-            .map_err(|error| format!("read session root: {error}"))?;
-        if names.iter().any(|name| name == ".dataset-sessions.json") {
-            crate::storage::backends::posix::journal_migration::read_dataset_alias(root, "")
-                .map_err(|error| error.to_string())?;
-            return Ok(());
-        }
-        for name in names {
-            match root_handle.open_directory(&name) {
-                Ok(_) => return Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {}
-                Err(error) => return Err(format!("open session namespace: {error}")),
-            }
-        }
-        Err("configured session root has no existing namespace".into())
-    }
-
     fn create_lazy(
         &self,
         root: &Path,
@@ -263,30 +238,6 @@ impl SessionRepository for PosixSessionRepository {
         Ok(Box::new(prepared))
     }
 
-    fn prepare_in(
-        &self,
-        root: &Path,
-        reference: &str,
-        create_lease: Option<u64>,
-    ) -> Result<Box<dyn PreparedSession>, String> {
-        let resolved =
-            crate::storage::backends::posix::journal_migration::read_dataset_alias(root, reference)
-                .map_err(|error| error.to_string())?;
-        match resolved {
-            Some(relative) => {
-                let prepared = Prepared::prepare_with_driver_and_keeper(
-                    &root.join(relative),
-                    create_lease,
-                    Arc::clone(&self.driver),
-                    Arc::clone(&self.keeper),
-                )
-                .map_err(|error| error.to_string())?;
-                Ok(Box::new(prepared))
-            }
-            None => self.prepare(reference, create_lease),
-        }
-    }
-
     fn create_child_lazy(
         &self,
         parent_reference: &str,
@@ -318,17 +269,11 @@ impl SessionRepository for PosixSessionRepository {
         reference: &str,
         create_lease: Option<u64>,
     ) -> Result<Box<dyn PreparedSession>, String> {
-        let resolved =
-            crate::storage::backends::posix::journal_migration::read_dataset_alias(root, reference)
-                .map_err(|error| error.to_string())?;
-        let path = resolved.map_or_else(
-            || Path::new(reference).to_path_buf(),
-            |relative| root.join(relative),
-        );
+        let path = Path::new(reference);
         let prepared = Prepared::prepare_listed_with_driver_and_keeper(
             root,
             workspace,
-            &path,
+            path,
             create_lease,
             Arc::clone(&self.driver),
             Arc::clone(&self.keeper),
@@ -353,17 +298,11 @@ impl SessionRepository for PosixSessionRepository {
         workspace: &str,
         reference: &str,
     ) -> Result<ArchiveResult, String> {
-        let resolved =
-            crate::storage::backends::posix::journal_migration::read_dataset_alias(root, reference)
-                .map_err(|error| error.to_string())?;
-        let path = resolved.map_or_else(
-            || Path::new(reference).to_path_buf(),
-            |relative| root.join(relative),
-        );
+        let path = Path::new(reference);
         prepared::archive_with_driver_and_keeper(
             root,
             workspace,
-            &path,
+            path,
             Arc::clone(&self.driver),
             Arc::clone(&self.keeper),
         )

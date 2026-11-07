@@ -33,7 +33,7 @@ func TestScheduleDeliverRefusals(t *testing.T) {
 	h := newHarness(t, setup{platform: "telegram", chats: []string{"c1"}, senders: []string{"u1"}})
 	for _, params := range []string{
 		`{"chat":"telegram:c2","text":"x"}`, // chat not in allowlist
-		`{"chat":"feishu:c1","text":"x"}`,   // platform not configured
+		`{"chat":"other:c1","text":"x"}`,    // platform not configured
 		`{"chat":"telegram:","text":"x"}`,   // empty chat id
 		`{"chat":"c1","text":"x"}`,          // no platform
 		`{"chat":"telegram:c1","text":""}`,  // empty text

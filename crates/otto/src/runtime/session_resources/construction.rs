@@ -22,9 +22,9 @@ impl Builder {
     ///
     /// Creation installs the `<session>.inbox.json` sidecar, restores the
     /// unread notifications from it, appends the failover recovery notice and
-    /// picks the next sub-agent task id after the highest one already used by
-    /// a child transcript. `subagents_enabled` decides whether the task and
-    /// timer registries exist.
+    /// reconstructs non-running child snapshots on every saved activation.
+    /// Saved sessions retain diagnostic task inventory even when no executor
+    /// is enabled; no child is spawned by resource creation.
     pub(crate) fn session_resources(
         &self,
         session: &SharedSession,
@@ -37,7 +37,7 @@ impl Builder {
             let tasks = (subagents_enabled || !self.no_session).then(|| {
                 Arc::new(
                     self.new_tasks(session, &children_dir)
-                        .with_admission_transcript(Arc::new(session.clone())),
+                        .with_admission_transcript(Arc::clone(session.handle())),
                 )
             });
             let notifications = match &tasks {

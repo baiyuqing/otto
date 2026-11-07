@@ -130,9 +130,9 @@ const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-ag
     starting a new one: prompt is the next user message delivered to it, \
     and agent, model, name, description, and fork_before must be absent or \
     empty, and context absent or \"fresh\"; the task keeps its recorded \
-    values. For completed tasks, use agent_status and read the saved report \
+    values. Resume atomically admits one new attempt; inspect uncertain tool effects first. It never replays a suspended process. \
+    For completed tasks, use agent_status and read the saved report \
     instead. External ACP tasks cannot be resumed.";
-
 /// Parent agent tools, including explicit nonblocking `agent_yield`,
 /// without a built [`Runner`]. The redaction boundary check needs the tool set
 /// a real runner would register, and none of the definitions read runner state.

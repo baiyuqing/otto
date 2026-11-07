@@ -181,8 +181,8 @@ impl Session for OrderCheckingTranscript {
                         && notification.kind == Some(NotificationKind::TaskFinished)
                 });
             assert!(
-                pushed,
-                "otto.task_result for {} was appended before its completion notification was pushed",
+                !pushed,
+                "otto.task_result for {} must be durable before its completion notification is pushed",
                 self.task_id
             );
         }

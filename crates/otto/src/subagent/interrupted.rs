@@ -33,6 +33,7 @@ pub const INTERRUPTED_STATUS: &str = "interrupted";
 pub struct ChildRecord {
     pub path: PathBuf,
     pub task_id: String,
+    pub attempt_id: String,
     pub name: String,
     /// The definition name, empty for the default sub-agent.
     pub agent: String,
@@ -82,9 +83,16 @@ fn task_counter(id: &str) -> u64 {
 
 fn scan_one(path: &Path) -> Option<ChildRecord> {
     let (raw_entries, messages) = crate::session::Store::read_entries(path).ok()?;
+    record_from_entries(path, &raw_entries, &messages)
+}
 
+fn record_from_entries(
+    path: &Path,
+    raw_entries: &[otto_core::session::pi::PiEntry],
+    messages: &[Message],
+) -> Option<ChildRecord> {
     let mut spec: Option<TaskSpecData> = None;
-    for entry in &raw_entries {
+    for entry in raw_entries {
         let Some(custom) = entry.custom.as_ref() else {
             continue;
         };
@@ -142,6 +150,19 @@ fn scan_one(path: &Path) -> Option<ChildRecord> {
     Some(ChildRecord {
         path: path.to_path_buf(),
         task_id: spec.id,
+        attempt_id: raw_entries
+            .iter()
+            .rev()
+            .filter_map(|entry| entry.custom.as_ref())
+            .find(|custom| custom.custom_type == "otto.task_attempt")
+            .and_then(|custom| custom.data.as_ref())
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(data.get()).ok())
+            .and_then(|data| {
+                data.get("attemptId")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default(),
         name: spec.name,
         agent: if spec.agent.is_empty() {
             spec.definition

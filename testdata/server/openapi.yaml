@@ -57,6 +57,163 @@ components:
             The input id the delivered user message carries: the client's
             input_id, or steer:<turn id>:<n>. Absent when the session keeps no
             journal.
+    MemoryScope:
+      type: object
+      properties:
+        namespace: {type: string, description: "user or workspace"}
+        id: {type: string}
+      required: [namespace, id]
+    MemoryRecord:
+      type: object
+      properties:
+        id: {type: string}
+        scope: {$ref: "#/components/schemas/MemoryScope"}
+        kind: {type: string}
+        key: {type: string}
+        text: {type: string}
+        labels: {type: array, items: {type: string}}
+        metadata: {type: object, additionalProperties: {type: string}}
+        origin: {type: string, enum: [human, model, extractor, import, migration, unknown]}
+        confidence: {type: number}
+        revision: {type: integer}
+        state: {type: string, enum: [active, needs_review, superseded, retracted]}
+        state_reason: {type: string, description: "Why the record left the active state, else empty"}
+        superseded_by: {type: string, description: "Replacement record id when superseded, else empty"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time, description: "Last content change; lifecycle writes keep it"}
+        verified_at: {type: [string, "null"], format: date-time}
+        review_at: {type: [string, "null"], format: date-time}
+        expires_at: {type: [string, "null"], format: date-time}
+        review_due: {type: boolean}
+        effective: {type: boolean, description: "Active, unexpired and not due for review: normal recall may use it"}
+      required: [id, scope, kind, key, text, labels, metadata, origin, confidence, revision, state, state_reason, superseded_by, created_at, updated_at, verified_at, review_at, expires_at, review_due, effective]
+    MemoryRecordPage:
+      type: object
+      properties:
+        records: {type: array, items: {$ref: "#/components/schemas/MemoryRecord"}}
+        next_cursor: {type: string, description: "Empty on the last page"}
+      required: [records, next_cursor]
+    MemorySearchResult:
+      type: object
+      properties:
+        records: {type: array, items: {$ref: "#/components/schemas/MemoryRecord"}}
+      required: [records]
+    MemoryRememberInput:
+      type: object
+      additionalProperties: false
+      properties:
+        scope: {type: string, enum: [user, workspace]}
+        kind: {type: string, default: note}
+        key: {type: string}
+        text: {type: string, minLength: 1}
+        review_in: {type: string, description: "Review deadline as an age from now: 30d, 12h or 45m"}
+      required: [scope, text]
+    MemoryStateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        state: {type: string, enum: [active, needs_review, superseded, retracted]}
+        superseded_by: {type: string, description: "Required for superseded and only for it; an active record in the same scope"}
+        reason: {type: string}
+        expected_revision: {type: integer, minimum: 1}
+      required: [state]
+    MemoryVerifyInput:
+      type: object
+      additionalProperties: false
+      properties:
+        review_in: {type: string, description: "Next review deadline as an age; omitted clears the deadline"}
+        expected_revision: {type: integer, minimum: 1}
+    MemoryRestoreInput:
+      type: object
+      additionalProperties: false
+      properties:
+        revision: {type: integer, minimum: 1}
+        expected_revision: {type: integer, minimum: 1}
+      required: [revision]
+    MemoryProposeInput:
+      type: object
+      additionalProperties: false
+      properties:
+        evidence: {type: string, minLength: 1, description: "One evidence item with user trust; whitespace is collapsed"}
+      required: [evidence]
+    MemoryReviewInput:
+      type: object
+      additionalProperties: false
+      properties:
+        decision: {type: string, enum: [accept, reject]}
+      required: [decision]
+    MemoryTombstone:
+      type: object
+      properties:
+        id: {type: string}
+        scope: {$ref: "#/components/schemas/MemoryScope"}
+        revision: {type: integer}
+        forgotten_at: {type: string, format: date-time}
+      required: [id, scope, revision, forgotten_at]
+    MemoryForgotten:
+      type: object
+      properties:
+        tombstone: {$ref: "#/components/schemas/MemoryTombstone"}
+        previous_revision: {type: integer}
+      required: [tombstone, previous_revision]
+    MemoryHistory:
+      type: object
+      properties:
+        revisions: {type: array, items: {$ref: "#/components/schemas/MemoryRecord"}}
+        skipped:
+          type: array
+          items:
+            type: object
+            properties:
+              file: {type: string}
+              reason: {type: string}
+            required: [file, reason]
+      required: [revisions, skipped]
+    MemoryDiff:
+      type: object
+      properties:
+        from: {$ref: "#/components/schemas/MemoryRecord"}
+        to: {$ref: "#/components/schemas/MemoryRecord"}
+      required: [from, to]
+    MemoryCandidate:
+      type: object
+      properties:
+        id: {type: string}
+        action: {type: string, enum: [create, update, forget, retract, supersede, correct, needs_review]}
+        state: {type: string, enum: [pending, accepted, rejected]}
+        target_id: {type: string, description: "The record the action changes; empty for create"}
+        base_revision: {type: integer}
+        kind: {type: string}
+        key: {type: string}
+        text: {type: string}
+        reason: {type: string}
+        origin: {type: string}
+        scope: {$ref: "#/components/schemas/MemoryScope"}
+        created_at: {type: string, format: date-time}
+        advice: {type: string, description: "One-line review advice; omitted when there is none"}
+        proposed: {$ref: "#/components/schemas/MemoryRecord"}
+      required: [id, action, state, target_id, base_revision, kind, key, text, reason, origin, scope, created_at, proposed]
+    MemoryCandidatePage:
+      type: object
+      properties:
+        candidates: {type: array, items: {$ref: "#/components/schemas/MemoryCandidate"}}
+        next_cursor: {type: string}
+      required: [candidates, next_cursor]
+    MemoryProposal:
+      type: object
+      properties:
+        outcome: {type: string, enum: [proposed, no_change, rejected, unavailable]}
+        candidate: {$ref: "#/components/schemas/MemoryCandidate"}
+        detail: {type: string, description: "Explanation for no_change, or why it was rejected or unavailable"}
+      required: [outcome]
+    MemoryReviewResult:
+      type: object
+      properties:
+        decision: {type: string, enum: [accept, reject]}
+        candidate: {$ref: "#/components/schemas/MemoryCandidate"}
+        record: {$ref: "#/components/schemas/MemoryRecord"}
+        tombstone: {$ref: "#/components/schemas/MemoryTombstone"}
+      required: [decision, candidate]
     Error:
       type: object
       properties:
@@ -1166,6 +1323,12 @@ components:
             $ref: "#/components/schemas/WorkspaceEntry"
       required: [startup, roots, workspaces]
   parameters:
+    memoryRecordID:
+      name: record_id
+      in: path
+      required: true
+      schema:
+        type: string
     sessionID:
       name: id
       in: path
@@ -2471,6 +2634,602 @@ paths:
                 $ref: "#/components/schemas/McpServerList"
         "404":
           description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List memory records of the session's scopes; active records only unless state is given
+      parameters:
+        - name: scope
+          in: query
+          description: Scopes to list; current is the user and the session workspace scope, all is every stored scope.
+          schema: {type: string, enum: [current, user, workspace, all], default: current}
+        - name: state
+          in: query
+          description: Lifecycle state; repeatable; all selects every state.
+          schema: {type: string, enum: [active, needs_review, superseded, retracted, all]}
+        - name: kind
+          in: query
+          description: Record kind; repeatable.
+          schema: {type: string}
+        - name: label
+          in: query
+          description: Record label; repeatable.
+          schema: {type: string}
+        - name: updated_after
+          in: query
+          description: RFC 3339 time or an age such as 30d, 12h or 45m counted back from now.
+          schema: {type: string}
+        - name: verified_after
+          in: query
+          description: RFC 3339 time or an age; not combinable with unverified.
+          schema: {type: string}
+        - name: unverified
+          in: query
+          description: Only records never verified.
+          schema: {type: boolean}
+        - name: review_due
+          in: query
+          description: Only records whose review deadline has passed.
+          schema: {type: boolean}
+        - name: limit
+          in: query
+          description: Page size, 1 to 100.
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+        - name: cursor
+          in: query
+          description: next_cursor of the previous page.
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryRecordPage"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      summary: Remember a record as the human operator (applied immediately, no review)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryRememberInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryRecord"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records/{record_id}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/memoryRecordID"
+    get:
+      summary: Read one record in any lifecycle state
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryRecord"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Forget a record; it becomes a tombstone and later requests carry a forgotten retraction notice
+      parameters:
+        - name: expected_revision
+          in: query
+          description: Fail with 409 unless the record is at this revision.
+          schema: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryForgotten"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: expected_revision is stale, or the candidate was already decided (memory_conflict)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records/{record_id}/state:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/memoryRecordID"
+    post:
+      summary: Set the lifecycle state (retract, supersede, flag for review or reactivate) as a new revision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryStateInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryRecord"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: expected_revision is stale, or the candidate was already decided (memory_conflict)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records/{record_id}/verify:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/memoryRecordID"
+    post:
+      summary: Record a human verification; returns a needs_review record to active and sets or clears the review deadline
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryVerifyInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryRecord"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: expected_revision is stale, or the candidate was already decided (memory_conflict)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records/{record_id}/history:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/memoryRecordID"
+    get:
+      summary: Every stored revision of a record, oldest first, current last
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryHistory"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records/{record_id}/diff:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/memoryRecordID"
+    get:
+      summary: Two revisions of a record
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: {type: integer, minimum: 1}
+        - name: to
+          in: query
+          description: Defaults to the current revision.
+          schema: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryDiff"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records/{record_id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/memoryRecordID"
+    post:
+      summary: Make an earlier revision current again, as a new revision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryRestoreInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryRecord"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: expected_revision is stale, or the candidate was already decided (memory_conflict)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/records/{record_id}/propose:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/memoryRecordID"
+    post:
+      summary: Ask the model which lifecycle change the evidence supports; a change is queued as a pending candidate, never applied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryProposeInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryProposal"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/search:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: Search active records of the user and session workspace scopes
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemorySearchResult"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/candidates:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: Candidates awaiting a human decision (those not owned by a pending approval)
+      parameters:
+        - name: limit
+          in: query
+          description: Page size, 1 to 50.
+          schema: {type: integer, minimum: 1, maximum: 50, default: 20}
+        - name: cursor
+          in: query
+          description: next_cursor of the previous page.
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryCandidatePage"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/memory/candidates/{candidate_id}/review:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: candidate_id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      summary: Accept or reject one candidate as a human review (actor http-client)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryReviewInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryReviewResult"
+        "400":
+          description: Invalid query or body (bad_request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: expected_revision is stale, or the candidate was already decided (memory_conflict)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown session, record or candidate (not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Memory is not available in the session (memory_unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The selected memory source manages its own records (memory_unsupported)
           content:
             application/json:
               schema:

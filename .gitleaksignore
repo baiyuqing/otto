@@ -11,7 +11,7 @@ b3c4f426b8fc65cd873bc405691276812f63a07b:crates/otto/src/tool/web/tests.rs:gener
 b3c4f426b8fc65cd873bc405691276812f63a07b:crates/otto/src/tool/web/tests.rs:generic-api-key:596
 b3c4f426b8fc65cd873bc405691276812f63a07b:crates/otto/src/tool/web/tests.rs:aws-access-token:334
 
-# Prose "Bot API adapter" causes internal/feishu to be mistaken for an API key.
+# Prose "Bot API adapter" next to a package path is mistaken for an API key.
 c0fd7cf9cfd2c81812ef872afd7a970c81efe6e1:docs/development.md:generic-api-key:48
 
 # Synthetic AWS, JWT and Slack positive cases for secret rejection.

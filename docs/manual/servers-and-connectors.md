@@ -339,7 +339,7 @@ While approval waits, you can ask why it is needed or ask Otto to withdraw it.
 This conversation has only help, approval query/withdrawal and queue tools;
 normal tasks keep waiting in the frontend's queue. In the TUI, press `Esc` to
 dismiss the panel without deciding; `/approve` opens pending requests again.
-Telegram and Feishu support this with Otto; other ACP agents keep the ordinary
+Telegram supports this with Otto; other ACP agents keep the ordinary
 queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
 
@@ -369,7 +369,7 @@ Where it appears:
 
 ### Active-task guidance and model follow-ups
 
-In Telegram and Feishu, speak naturally while Otto is working: “investigate
+In Telegram, speak naturally while Otto is working: “investigate
 first, do not change files yet” can guide the active task; “after this, write a
 report” can become a separate follow-up; a progress question can get a read-only
 answer. This is enabled by default. A short, isolated model dialogue chooses
@@ -472,7 +472,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
 | `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](servers-and-connectors.md#approvals-inside-a-turn). |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `input_id` (1 to 128 ASCII letters, digits, `.`, `_`, `:`, `-`) makes a retry safe: the same `input_id` in the same session returns the turn it already started while the server remembers it (its 256 most recent per session), and `409 duplicate_input` once only the transcript holds it, for example after a restart. It is unrelated to the `X-Request-Id` log-correlation header. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](servers-and-connectors.md#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](safety-and-tools.md#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued; `503 input_not_persisted` when a queued turn could not be saved. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `input_id` (1 to 128 ASCII letters, digits, `.`, `_`, `:`, `-`) makes a retry safe: the same `input_id` in the same session returns the turn it already started while the server remembers it (its 256 most recent per session), and `409 duplicate_input` once only the transcript holds it, for example after a restart. It is unrelated to the `X-Request-Id` log-correlation header. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](servers-and-connectors.md#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](safety-and-tools.md#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued; `503 input_not_persisted` when a queued turn could not be saved. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
@@ -489,7 +489,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/tasks/steer` | Lists transient steering items and their `queued`, `delivered`, `withdrawn`, or `discarded` status for the active run. |
 | `DELETE /v1/sessions/{id}/tasks/steer/{message_id}` | Withdraws exactly one still-`queued` steer. Delivered guidance is append-only session history and cannot be removed; a non-queued or unknown item returns `409 task_steer_withdraw_failed`. |
 | `POST /v1/sessions/{id}/tasks/steer/interrupt` | Stops the running provider or tool call and delivers every `queued` steer inside the current turn, which then continues with the next model call. No body. Returns `{"queued_guidance": N}`, the number of messages delivered. The stopped tool call is recorded `cancelled`; the remaining tool calls of that response are settled `not_started`; a stopped model call appends no assistant message. The stream carries `step_interrupted` before the delivered `user_message` frames. `409 no_queued_guidance` when the active run has nothing queued or no turn runs; `409 approval_pending` while an approval waits. |
-| `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
+| `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/trace` | Return the session's turns, provider requests, tool calls, compactions and sub-agent tasks as nested spans with start and end times, status, provider timing and token usage. The JSON holds no message or result text; tool labels carry an argument preview of at most 60 characters and sub-agent labels the first 40 characters of the task description. `404` for an unknown session; `409 trace_unavailable` when the redaction boundary is closed, the session has no file (`--no-session`), or the session file cannot be read. |
 | `GET /v1/sessions/{id}/trace/{span_id}` | Return the text of one span from the trace as titled sections: a turn's `input`; a provider request's `input`, `request` (token estimates) and `reply`; a tool's `arguments` and `result`; a compaction's `summary`; a sub-agent's `prompt` and `result`. Empty sections are omitted. The text is the session content as stored, which the agent redacts before writing it. `404` for an unknown session or span; `409 trace_unavailable` as above. |
@@ -880,11 +880,11 @@ is rejected.
 
 | Method | Behavior |
 | --- | --- |
-| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. `_meta.otto.channelContext` advertises structured per-turn channel metadata. `agentCapabilities._meta.otto.scheduleDelivery: true` advertises delivery of [`schedule`](safety-and-tools.md#schedule) items; a client that lists platforms (`telegram`, `feishu`) in `clientCapabilities._meta.otto.scheduleDelivery` receives them (see below). Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
+| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. `_meta.otto.channelContext` advertises structured per-turn channel metadata. `agentCapabilities._meta.otto.scheduleDelivery: true` advertises delivery of [`schedule`](safety-and-tools.md#schedule) items; a client that lists platforms (`telegram`) in `clientCapabilities._meta.otto.scheduleDelivery` receives them (see below). Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
 | `session/new` | Creates a session. No session file is written until the first prompt. |
 | `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
-| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](safety-and-tools.md#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Optional `_meta.otto.inputId` is the prompt's [`input_id`](servers-and-connectors.md#agent-server): a retry with the same value in the same session runs once, and a malformed value is rejected; `_meta.otto.requestId` only correlates logs. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](safety-and-tools.md#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Optional `_meta.otto.inputId` is the prompt's [`input_id`](servers-and-connectors.md#agent-server): a retry with the same value in the same session runs once, and a malformed value is rejected; `_meta.otto.requestId` only correlates logs. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
 | `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}` plus an optional string `advice` (the one-line advice, omitted when there is none); `nextCursor` is `""` on the last page. |
@@ -1087,7 +1087,7 @@ See [Chat connector](servers-and-connectors.md#chat-connector).
 
 ## Chat connector
 
-`otto-connect` connects Telegram and Feishu (Lark) chats to Otto through ACP.
+`otto-connect` connects Telegram chats to Otto through ACP.
 It is a separate Go program in `chat-connector/`: it starts one `otto acp` child by
 default or connects directly to `otto serve` over authenticated ACP TCP,
 and maps each chat to one Otto session. Provider selection and authentication
@@ -1096,13 +1096,12 @@ in the environment of `otto acp` or `otto serve`, never in `connect.toml` or the
 connector process when it connects to an existing server. Restart the Otto
 runtime after changing its model configuration or credentials; restarting only the
 connector does not update a running server.
-Telegram and Feishu can be enabled in the same process.
 
 Otto is a general-purpose personal agent for research, writing, planning,
 coding, and practical tasks, using the tools and permissions available in
 the session. The connector sends the current channel separately from the
 user's text, including after a session is resumed or shared. Otto adds fixed
-Telegram or Feishu guidance to that turn's system context, so it can adapt
+Telegram guidance to that turn's system context, so it can adapt
 replies without assuming you can see its local terminal. This context does
 not change tool availability or permissions and does not carry over to a
 later turn from another frontend. With an older ACP agent that does not
@@ -1120,18 +1119,14 @@ Building requires Go at the version in `chat-connector/go.mod`.
 ```bash
 make connect-build                 # writes target/otto-connect
 export OTTO_CONNECT_TELEGRAM_TOKEN=<bot token from @BotFather>   # for [telegram]
-export OTTO_CONNECT_FEISHU_APP_SECRET=<app secret>               # for [feishu]
 target/otto-connect [--config PATH]
 ```
 
 `otto-connect` runs in the foreground and logs to stderr. `SIGINT` or
 `SIGTERM` sends `session/cancel` for every running prompt, stops polling
-Telegram and closes the Feishu connection, closes the agent's stdin, and
-kills the agent if it has not exited 10 s later. A config error, a token that
-Telegram rejects (HTTP 401 or 404 from `getMe`), or an app id or secret that
-Feishu rejects exits with status 1 and `otto-connect: <message>`. A Feishu
-connection that fails for another reason, such as no network, is retried by
-the SDK and each failure is logged as `feishu connection error`.
+Telegram, closes the agent's stdin, and kills the agent if it has not exited
+10 s later. A config error or a token that Telegram rejects (HTTP 401 or 404
+from `getMe`) exits with status 1 and `otto-connect: <message>`.
 
 ### Chat connector configuration
 
@@ -1147,28 +1142,18 @@ token_env = "OTTO_CONNECT_TELEGRAM_TOKEN"
 chats = ["123456789"]
 senders = ["123456789"]
 
-[feishu]
-app_id = "cli_xxx"
-app_secret_env = "OTTO_CONNECT_FEISHU_APP_SECRET"
-domain = "feishu"                  # the default; "lark" for Lark (larksuite.com)
-chats = ["oc_xxx"]
-senders = ["ou_xxx"]
-
 [metrics]
 listen = "127.0.0.1:9465"          # the default; "" turns the endpoint off
 ```
 
-- A platform is enabled when its section is present. At least one of
-  `[telegram]` and `[feishu]` is required.
+- The `[telegram]` section is required.
 - The agent process starts with `workspace` as its working directory, and
   every session uses it as `cwd`. Otto flags go into `command`, for example
   `["otto", "acp", "--model", "claude/MODEL_ID"]`.
 - The Telegram bot token is read from the environment variable that
-  `token_env` names, and the Feishu app secret from the one that
-  `app_secret_env` names; an empty or unset variable fails startup. A `token`
-  or `app_secret` key in the file, like any unknown key, fails the config
-  load. `app_id` is not a secret and is required. The agent process is
-  started without these variables, so tools run by Otto cannot read them.
+  `token_env` names; an empty or unset variable fails startup. A `token` key
+  in the file, like any unknown key, fails the config load. The agent process
+  is started without this variable, so tools run by Otto cannot read it.
 - `otto acp` inherits the rest of the environment and reads its provider key
   as usual (the provider's `api_key_env` variable or `OTTO_API_KEY`), or uses
   the `chatgpt` provider after `otto login`. For Claude, export the selected
@@ -1183,22 +1168,6 @@ listen = "127.0.0.1:9465"          # the default; "" turns the endpoint off
   `metrics_listen_failed` and runs without the endpoint.
 - Log lines contain chat ids, sender ids, and errors. Message text is not
   logged. See [Logs, metrics, and request correlation](servers-and-connectors.md#logs-metrics-and-request-correlation).
-
-### Feishu app
-
-In the Feishu (or Lark) developer console:
-
-1. Create a self-built app and enable the bot capability.
-2. Grant the message permissions, at least `im:message` and
-   `im:message:send_as_bot`.
-3. Under events and callbacks, select long connection mode and subscribe to
-   `im.message.receive_v1`, and enable the `card.action.trigger` card callback.
-4. Publish the app version; publish again after changing permissions or
-   events.
-5. Add the bot to a group, or open a private chat with it.
-
-`otto-connect` opens the long connection itself, so no public address or
-`lark-cli` is needed.
 
 ### Sharing sessions with `otto serve`
 
@@ -1233,7 +1202,7 @@ through your secret manager), then start:
 otto serve --cwd /Users/me/work --acp-listen 127.0.0.1:9001
 ```
 
-Use this agent section in `connect.toml`; keep the Telegram or Feishu section:
+Use this agent section in `connect.toml`; keep the Telegram section:
 
 ```toml
 [agent]
@@ -1331,14 +1300,6 @@ to one of the bot's messages, or be a command addressed to it
 (`/stop@BotName`). With BotFather's privacy mode on (the default), Telegram
 delivers only such messages to the bot.
 
-Feishu chat ids start with `oc_` and sender ids (open ids) with `ou_`. A
-private chat with the bot has its own `oc_` chat id, which must be in
-`chats` as well. In a Feishu group, a message must mention the bot; the
-mention is removed from the prompt, so `@Bot /stop` is the `/stop` command.
-The Feishu SDK applies the same lists before `otto-connect` sees a message;
-the messages it rejects are logged with the same `chat_rejected` event and
-the SDK's `reason`. A group message that does not mention the bot is ignored without
-a log line.
 
 ### Messages and replies
 
@@ -1355,7 +1316,7 @@ a log line.
   not align. Raw HTML such as `<id>` is shown as written. Messages from the
   connector itself (command output, errors, permission requests) stay plain
   text. If Telegram rejects a formatted part with status 400, that part is
-  resent as plain text. Feishu renders the Markdown itself and is unchanged.
+  resent as plain text.
 - Each chat has one Otto session. The first message creates it. At startup
   `otto-connect` loads the session of each chat of a configured platform,
   once per session, so timers armed before a restart fire again; a session
@@ -1393,24 +1354,16 @@ a log line.
   are not sent, and text before and after a tool call is separated by a
   blank line. Telegram replies are plain text, split at line boundaries into
   parts of at most 4096 characters, and the chat shows "typing" while the
-  turn runs. Feishu replies are Markdown, split by the Feishu SDK into parts
-  of at most 3500 characters with code blocks kept closed; Feishu shows no
-  typing indicator.
+  turn runs.
 - Only text is sent to Otto. A photo, file, or other attachment gets
   "Attachments are not supported and were ignored."; a Telegram caption is
-  sent as the prompt. In Feishu, images, files, audio, video and stickers get
-  the same notice; the text of a rich-text message is sent and its images are
-  not.
+  sent as the prompt.
 - A message received by the platform more than 30 minutes before
   `otto-connect` reads it is not run; the chat gets a notice with the
   message's time.
-- Each Telegram message is acknowledged once it is queued or rejected; each
-  Feishu message is acknowledged when the SDK receives it, before it is
-  queued. A crash therefore does not run a message twice; a message
-  acknowledged but not yet run when `otto-connect` stops is not run.
-- Feishu messages that arrive close together are delivered one by one, each
-  with its own sender and reply target; the SDK's merging of messages is
-  turned off.
+- Each Telegram message is acknowledged once it is queued or rejected. A
+  crash therefore does not run a message twice; a message acknowledged but
+  not yet run when `otto-connect` stops is not run.
 
 ### Commands
 
@@ -1526,7 +1479,7 @@ reply "This agent does not support memory review." when the agent does not
 advertise it, as `otto acp --attach` does not. An id that is not a unique
 pending prefix gets "No single pending candidate starts with \"`<id>`\"."; other
 arguments get "Usage: /memory | /memory accept <id> | /memory reject <id>".
-After each successful turn, Telegram and Feishu show pending memory candidates
+After each successful turn, Telegram shows pending memory candidates
 as cards with **Approve / Deny** buttons, including create, update, and forget
 proposals. `/memory` refreshes the cards; old buttons become inactive. Buttons
 are bound to the original chat session and candidate, and use the same chat and
@@ -1552,7 +1505,7 @@ process-local; attached/web/chat clients use their own refresh behavior.
 When Otto asks to run an unsandboxed `bash` command (see
 [Elevated Bash permission requests](#elevated-bash-uses-sessionrequest_permission)),
 the chat gets the command with **Approve** and **Deny** buttons (Telegram inline
-keyboard or Feishu interactive card). The first button click or `/allow` or
+keyboard). The first button click or `/allow` or
 `/deny` from an admitted sender in that chat answers it once. Buttons are bound
 to that request; old cards cannot answer a newer request. After a decision,
 cancellation, or expiry, the connector replaces the buttons with the final status.
@@ -1708,7 +1661,7 @@ schedule, workflow, and MCP events are also written by `otto acp` and
   `schedule_store_error` line (`WARN`) is written instead.
 - `schedule_delivery_finished`: `outcome` is `ok` or `error` (`WARN`, with the
   same error text the schedule store records). `channel` is `telegram`,
-  `feishu`, `terminal`, or `web`.
+  `terminal`, or `web`.
 - `workflow_step_finished`: `status` is `succeeded`, `failed`, `canceled`, or
   `interrupted` (the run's deadline passed). `workflow_run_finished` is
   written once, when the run ends as `succeeded`, `failed`, or `canceled`; its
@@ -1742,8 +1695,7 @@ schedule, workflow, and MCP events are also written by `otto acp` and
 `connector_stopping` has `reason=signal` or `reason=error`. `chat_reply_sent`
 is written for agent replies only; `chat_reply_failed` is written for every
 failed send, with an empty `request_id` when the text was a connector notice
-(for example `Stopped.`). The Feishu adapter writes `chat_rejected` itself for
-messages its SDK refuses, with the SDK's reason.
+(for example `Stopped.`).
 
 ### Following one chat message
 

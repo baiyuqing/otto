@@ -121,6 +121,17 @@ The remote memory backend no longer exists. Delete `[memory.remote]` and
 install it as a plugin package and set `backend = "plugin:<package>"`; see
 [plugin memory source](memory-and-extensions.md#plugin-memory-source).
 
+### Claude reports `invalid Claude stream sequence`
+
+Otto rejected an unexpected Claude streaming event order or block/delta pairing.
+The error suffix identifies the event and violated rule, for example
+`message_delta: content block still open`. It contains no response text, tool
+names or arguments. Include the complete error and session ID when reporting
+this issue; HTTP 200 alone does not establish that the stream was valid.
+Older binaries report only the generic error: update and restart Otto to obtain
+the detailed reason on a subsequent failure. This diagnostic does not relax
+protocol validation or repair an invalid upstream stream.
+
 ## Provider endpoint is not trusted
 
 This is a local policy error, not a provider/API-key failure. No rejected request

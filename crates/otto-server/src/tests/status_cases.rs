@@ -84,7 +84,7 @@ async fn migrate_cancels_a_running_child_task_and_releases_the_lease() {
         otto::fixtures::subagent_doubles::test_config(&child_provider, &tasks, Vec::new());
     child_config.max_parallel = 1;
     let parent_path = PathBuf::from(&session_path);
-    child_config.child_session = Some(Arc::new(move |task_id: &str| {
+    child_config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         Ok(Some(child_store(&parent_path, task_id)))
     }));
     let (subagents, _) = otto::subagent::runner::Runner::new(child_config).expect("valid config");

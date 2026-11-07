@@ -2,6 +2,17 @@
 
 Previous: [Getting started](getting-started.md) · [Documentation index](../README.md) · Next: [Safety and tools](safety-and-tools.md)
 
+## Copy session details
+
+`/session` opens the current session's details with **Copy Session ID** selected
+by default. Use Up/Down to select **Copy all displayed details**, Enter to copy,
+and Esc to close. Copying leaves the popup open with success or failure feedback;
+Ctrl-C keeps its existing behavior. A failed copy can be retried after fixing the
+terminal host's clipboard helper (`pbcopy` on macOS, or `wl-copy`, `xclip` or `xsel`
+on Linux). In `--attach` mode, copying runs on the terminal client, not the server.
+No OSC 52 fallback is used. Restart the rebuilt/reinstalled terminal client to use
+the updated popup.
+
 ## Frontends
 
 Selection:

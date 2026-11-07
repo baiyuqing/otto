@@ -232,7 +232,13 @@ const ENTRIES: &[Entry] = &[
         true,
         delete
     ),
-    entry!(Sessions, "/session", "show session details", false, session),
+    entry!(
+        Sessions,
+        "/session",
+        "show and copy session details",
+        false,
+        session
+    ),
     entry!(Exit, "/exit", "exit Otto", false, exit),
 ];
 
@@ -310,23 +316,7 @@ fn permissions(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> 
 
 fn session(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
-    push(Document {
-        key: "session".into(),
-        title: "Session".into(),
-        text: format!(
-            "{}\nID: {}\nWorkspace: {}\nModel: {} (type {})\nReasoning: {}{}",
-            info.session_name,
-            info.session_id,
-            info.workspace,
-            info.model_selector,
-            info.provider_type,
-            info.thinking,
-            info.forked_from
-                .as_ref()
-                .map(|origin| format!("\nForked from: {}", origin.session_id))
-                .unwrap_or_default()
-        ),
-    })
+    push(super::session_details::SessionDetails::new(info))
 }
 fn resume(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     if args.is_empty() {

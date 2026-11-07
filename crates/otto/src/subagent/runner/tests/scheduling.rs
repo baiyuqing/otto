@@ -348,7 +348,7 @@ async fn chatgpt_stream_recovery_completes_child_and_persists_safe_attempt_facts
         "test-account",
     ));
     let parent = dir.path().join("parent.jsonl");
-    config.child_session = Some(Arc::new(move |task_id: &str| {
+    config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         Ok(Some(child_store(&parent, task_id, None)))
     }));
     let (runner, _) = runner(config);

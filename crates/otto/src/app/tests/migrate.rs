@@ -45,7 +45,7 @@ async fn migrate_releases_the_lease_after_cancelling_subagent_tasks() {
         crate::fixtures::subagent_doubles::test_config(&child_provider, &tasks, Vec::new());
     child_config.max_parallel = 1;
     let parent_path = PathBuf::from(&session_path);
-    child_config.child_session = Some(Arc::new(move |task_id: &str| {
+    child_config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         Ok(Some(child_store(&parent_path, task_id)))
     }));
     let (subagents, _) = crate::subagent::runner::Runner::new(child_config).expect("valid config");

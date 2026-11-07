@@ -1,5 +1,17 @@
 # Safety and tools
 
+## Runner identity
+
+The built-in read-only `session_info` tool takes exactly `{}` and returns only
+`{"session_id":"..."}`. It reports the executing runner's own runtime identity,
+not a task ID: main runners use their session header ID; each child has its own
+ID, matching its transcript header when persisted. Resuming an interrupted child
+retains that child's existing ID. With `--no-session`, main and child IDs remain
+stable for that runtime but do not imply a saved or resumable session. The tool
+exposes no paths, history or credentials and needs no approval or configuration.
+It is enabled by default; named child tool allowlists still apply. Rebuild/reinstall
+and restart Otto to make a newly added built-in available in an existing process.
+
 Previous: [Interactive use](interactive-use.md) · [Documentation index](../README.md) · Next: [Servers and connectors](servers-and-connectors.md)
 
 Approval titles, reasons, proposal details, reviewer context/reasons and decision

@@ -1,7 +1,7 @@
 //! Delivery of scheduled items to an ACP client.
 //!
 //! A client that sets `clientCapabilities._meta.otto.scheduleDelivery` in
-//! `initialize` (an array of `telegram` / `feishu`) receives due items of
+//! `initialize` (an array that may contain `telegram`) receives due items of
 //! those platforms as the agent-to-client request `_otto/schedule/deliver`
 //! with params `{"chat": "<platform>:<chat id>", "text": ...}`. A JSON-RPC
 //! `result` acknowledges the delivery; an `error` or no answer within
@@ -32,7 +32,7 @@ pub(super) fn delivery_platforms(params: &Value) -> Vec<String> {
         .pointer("/clientCapabilities/_meta/otto/scheduleDelivery")
         .and_then(Value::as_array);
     for platform in listed.into_iter().flatten().filter_map(Value::as_str) {
-        if matches!(platform, "telegram" | "feishu") && !platforms.iter().any(|p| p == platform) {
+        if platform == "telegram" && !platforms.iter().any(|p| p == platform) {
             platforms.push(platform.to_string());
         }
     }

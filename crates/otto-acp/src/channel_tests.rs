@@ -250,11 +250,10 @@ fn chat_metadata_becomes_an_origin_only_when_valid_and_consistent() {
         "chat:telegram:123"
     );
     assert_eq!(
-        chat(json!("feishu:oc:1"), None).unwrap().as_str(),
-        "chat:feishu:oc:1"
+        chat(json!("telegram:oc:1"), None).unwrap().as_str(),
+        "chat:telegram:oc:1"
     );
     assert!(chat(json!("telegram:123"), telegram).is_some());
-    assert_eq!(chat(json!("feishu:oc_1"), telegram), None);
     assert_eq!(chat(json!("telegram123"), None), None);
     assert_eq!(chat(json!("slack:1"), None), None);
     assert_eq!(chat(json!("telegram:"), None), None);

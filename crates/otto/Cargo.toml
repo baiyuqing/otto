@@ -47,7 +47,7 @@ tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Validate custom tool schemas offline, including local references and constraints.
-jsonschema = { version = "=0.59.0", default-features = false }
+jsonschema = { version = "=0.60.2", default-features = false }
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal", "net"] }
@@ -57,7 +57,7 @@ tokio-util.workspace = true
 toml = { workspace = true, features = ["display"] }
 # The terminal frontend (`otto::tui`). Native-only; otto-core must stay
 # wasm32-buildable so these are not workspace dependencies.
-pulldown-cmark = { version = "=0.13.4", default-features = false }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 # `all-widgets`/`macros`/`underline-color` are dropped: this TUI uses only the
 # widgets ratatui-widgets ships unconditionally (Paragraph, Block, List,
 # Table, Scrollbar), not the calendar widget or the `layout!` macro.
@@ -70,7 +70,7 @@ crossterm = "=0.29.0"
 # The composer wraps and places its caret by display width (see
 # `tui::render::composer_lines`). Already in the tree as ratatui's own
 # width source; depending on it directly keeps the two in agreement.
-unicode-width = "=0.2.2"
+unicode-width = "=0.2.3"
 tower.workspace = true
 tokio-rustls.workspace = true
 

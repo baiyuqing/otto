@@ -46,6 +46,6 @@ nix = { workspace = true, features = ["term"] }
 tokio = { workspace = true, features = ["test-util", "net"] }
 reqwest.workspace = true
 # The PTY harness measures rendered columns by display width.
-unicode-width = "=0.2.2"
+unicode-width = "=0.2.3"
 # Self-signed certificates for the `otto serve --listen` TLS tests.
 rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }

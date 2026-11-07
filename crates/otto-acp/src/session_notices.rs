@@ -119,3 +119,16 @@ impl Connection {
         );
     }
 }
+
+impl Connection {
+    pub(super) fn local_command_receipts(
+        &self,
+        session_id: &str,
+        receipts: &[otto_core::session::local_command::LocalCommandReceipt],
+    ) {
+        self.send(
+            json!({"jsonrpc":"2.0", "method":"_otto/local_commands/update",
+            "params":{"sessionId":session_id, "receipts":receipts}}),
+        );
+    }
+}

@@ -60,6 +60,7 @@ pub(super) struct SessionWire {
     forked_from: Option<app::ForkedFrom>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plan: Vec<otto_core::session::PlanStep>,
+    local_commands: Vec<otto_core::session::local_command::LocalCommandReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +121,7 @@ impl Server {
             turn,
             forked_from: info.forked_from,
             plan: info.plan,
+            local_commands: info.local_commands,
         }
     }
 }

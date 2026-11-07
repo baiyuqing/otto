@@ -315,6 +315,46 @@ fn local_test_connection(
     (connection, slot, id)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_command_append_failure_is_protocol_error_without_stale_receipt_replay() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller = Arc::new(otto::fixtures::controller(workspace.path(), sessions.path()).await);
+    assert!(controller.memory_command("memory", "list").is_err());
+    let previous = controller.info().local_commands;
+    assert_eq!(previous.len(), 1);
+    let before = controller.history();
+    controller.current_session().handle().close().unwrap();
+    let (mut connection, _, session_id) = local_test_connection(workspace.path(), &controller);
+    let (out, mut frames) = mpsc::unbounded_channel();
+    Arc::get_mut(&mut connection).unwrap().out = out;
+    let error = connection
+        .prompt(
+            &session_id,
+            "/remember must not execute".into(),
+            None,
+            None,
+            (None, None),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    let error = serde_json::to_value(error).unwrap();
+    assert_eq!(error["code"], INTERNAL_ERROR);
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("receipt persistence failed")
+    );
+    assert!(
+        frames.try_recv().is_err(),
+        "neither agent message nor old receipt notification"
+    );
+    assert_eq!(controller.info().local_commands, previous);
+    assert_eq!(controller.history(), before);
+}
+
 #[test]
 fn enqueue_ignores_an_input_id_that_is_already_queued() {
     let slot = PromptSlot::default();

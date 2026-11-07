@@ -18,6 +18,7 @@ pub mod delivery;
 pub mod diff;
 pub mod fs;
 pub mod listen;
+mod local_commands;
 pub mod mcp;
 mod memory_dto;
 pub mod memory_routes;
@@ -553,6 +554,10 @@ impl Server {
             .route("/v1/sessions/{id}/model", post(set_session_model))
             .route("/v1/sessions/{id}/fork-points", get(fork_points))
             .route("/v1/sessions/{id}/history", get(history))
+            .route(
+                "/v1/sessions/{id}/local-commands",
+                post(local_commands::execute),
+            )
             .route("/v1/sessions/{id}/context", get(context))
             .route("/v1/sessions/{id}/trace", get(trace))
             .route("/v1/sessions/{id}/trace/{span_id}", get(trace_span))

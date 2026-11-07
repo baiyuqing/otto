@@ -11,9 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::attach::Remote;
 use crate::app::{Controller, Info, ModelSummary};
-use crate::memory::{
-    Candidate, CandidateListRequest, CandidateRef, CandidateState, ReviewDecision, ReviewRequest,
-};
+use crate::memory::{Candidate, ReviewDecision};
 use crate::runtime::sandbox_config::SandboxChange;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
@@ -62,6 +60,10 @@ pub(crate) enum Request {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Command {
+    MemoryInvocation {
+        name: String,
+        args: String,
+    },
     NewSession,
     Resume(String),
     Archive(String),

@@ -101,6 +101,7 @@ impl Controller {
             })
             .unwrap_or_default();
         Info {
+            local_commands: current.session.handle().local_commands(),
             session_id: header.id,
             session_name: current.session.name(),
             session_path: current.path(),

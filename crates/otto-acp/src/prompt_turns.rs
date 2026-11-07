@@ -195,6 +195,22 @@ impl Connection {
             (Backend::Local(local), command) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
                 match command {
+                    command::Command::Memory { name, args } => {
+                        let controller = session.controller.clone();
+                        let name = name.to_owned();
+                        let args = args.to_owned();
+                        tokio::task::spawn_blocking(move || {
+                            controller.memory_command(&name, &args)
+                        })
+                        .await
+                        .map_err(|error| super::error(INTERNAL_ERROR, error.to_string()))?
+                        .map_err(|error| super::error(INTERNAL_ERROR, error.message))?;
+                        self.local_command_receipts(
+                            session_id,
+                            &session.controller.info().local_commands,
+                        );
+                        end_turn()
+                    }
                     command::Command::Permissions { args } => {
                         let text = session
                             .controller
@@ -299,6 +315,20 @@ impl Connection {
                         "nested /queue is not supported; submit a top-level /queue prompt",
                     )),
                 }
+            }
+            (Backend::Attach(relay), command::Command::Memory { name, args }) => {
+                relay
+                    .client
+                    .memory_command(session_id, name, args)
+                    .await
+                    .map_err(|error| super::error(INTERNAL_ERROR, error.to_string()))?;
+                let info = relay
+                    .client
+                    .session(session_id)
+                    .await
+                    .map_err(|error| super::error(INTERNAL_ERROR, error.to_string()))?;
+                self.local_command_receipts(session_id, &info.local_commands);
+                end_turn()
             }
             (Backend::Attach(relay), command) => {
                 let text = relay.run_command(command, session_id, cancel).await?;

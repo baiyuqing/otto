@@ -278,6 +278,11 @@ impl Relay {
         };
         let call = async {
             match command {
+                Command::Memory { name, args } => self
+                    .client
+                    .memory_command(session_id, name, args)
+                    .await
+                    .map(Some),
                 Command::Permissions { args } => self
                     .client
                     .permissions_command(session_id, args)

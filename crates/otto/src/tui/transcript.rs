@@ -60,6 +60,21 @@ pub(super) fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Lin
     if let Some(request) = &entry.approval {
         return super::approval_display::lines(request, width);
     }
+    if entry.kind == Some(EntryKind::LocalCommand) {
+        let style = Style::default().add_modifier(Modifier::DIM);
+        let mut text = vec![Line::from(escape_plain_text(&entry.raw))];
+        if details {
+            text.extend(
+                escape_plain_text(&format!(
+                    "Parameters: {}\n{}",
+                    entry.tool_args, entry.tool_output
+                ))
+                .lines()
+                .map(|line| Line::from(line.to_owned())),
+            );
+        }
+        return gutter::block(&text, "›_", style, width);
+    }
     if entry.kind == Some(EntryKind::Tool) {
         return tool_lines(entry, details, width);
     }

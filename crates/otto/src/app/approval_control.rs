@@ -13,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 pub struct ControlReply {
     pub text: String,
     pub queued: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<String>,
 }
 impl Controller {
     pub fn pending_approval(&self) -> Option<(String, String, String)> {
@@ -56,6 +58,25 @@ impl Controller {
         channel: Option<Channel>,
         cancel: &CancellationToken,
     ) -> Result<Option<ControlReply>, String> {
+        self.approval_message_with_provenance(text, channel, None, None, cancel)
+            .await
+    }
+
+    /// Restricted dialogue retaining the actual ingress identity and provenance.
+    /// Generated answers remain context, never a second human authorization.
+    pub async fn approval_message_with_provenance(
+        &self,
+        text: &str,
+        channel: Option<Channel>,
+        input_id: Option<&str>,
+        provenance: Option<otto_core::model::InputProvenance>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ControlReply>, String> {
+        let input_id = match input_id {
+            Some(id) if !otto_core::model::is_input_id(id) => return Err("invalid input_id".into()),
+            Some(id) => id.to_owned(),
+            None => crate::runtime::builder::random_id().map_err(|error| error.to_string())?,
+        };
         let scope = self.approval_scope();
         let pending = self
             .approval_service()
@@ -63,7 +84,7 @@ impl Controller {
             .map_err(|e| e.to_string())?;
         if let Some(request) = pending.requests.into_iter().find(|r| r.blocking) {
             return self
-                .shared_approval_message(request, text, channel, cancel)
+                .shared_approval_message(request, text, channel, &input_id, provenance, cancel)
                 .await
                 .map(Some);
         }
@@ -149,8 +170,13 @@ impl Controller {
                         .mailbox()
                         .push(otto_core::agent::inbox::Notification {
                             kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
-                            text: self
-                                .redact_error(&format!("Regarding pending approval {id}:\n{text}")),
+                            text: self.redact_error(&if provenance.is_some() {
+                                text.to_owned()
+                            } else {
+                                format!("Regarding pending approval {id}:\n{text}")
+                            }),
+                            id: input_id.clone(),
+                            input_provenance: provenance,
                             ..Default::default()
                         });
                     runner
@@ -165,12 +191,14 @@ impl Controller {
                 return Ok(Some(ControlReply {
                     text: message,
                     queued,
+                    input_id: Some(input_id.clone()),
                 }));
             }
         };
         let reply = ControlReply {
             text: answer,
             queued: queued.load(Ordering::SeqCst),
+            input_id: Some(input_id.to_owned()),
         };
         // Only the existing runner appends the dialogue summary at its next
         // checkpoint. Never open a second writer on the original transcript.
@@ -179,7 +207,13 @@ impl Controller {
                 .mailbox()
                 .push(otto_core::agent::inbox::Notification {
                     kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
-                    text: self.redact_error(&format!("Regarding pending approval {id}:\n{text}")),
+                    text: self.redact_error(&if provenance.is_some() {
+                        text.to_owned()
+                    } else {
+                        format!("Regarding pending approval {id}:\n{text}")
+                    }),
+                    id: input_id.clone(),
+                    input_provenance: provenance,
                     ..Default::default()
                 });
             runner
@@ -196,6 +230,8 @@ impl Controller {
         request: otto_core::approval::Request,
         text: &str,
         channel: Option<Channel>,
+        input_id: &str,
+        provenance: Option<otto_core::model::InputProvenance>,
         cancel: &CancellationToken,
     ) -> Result<ControlReply, String> {
         if text.trim().is_empty() || text.len() > 32000 {
@@ -256,13 +292,20 @@ impl Controller {
         let reply = ControlReply {
             text: answer,
             queued: queued.load(Ordering::SeqCst),
+            input_id: Some(input_id.to_owned()),
         };
         if !reply.queued {
             runner
                 .mailbox()
                 .push(otto_core::agent::inbox::Notification {
                     kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
-                    text: self.redact_error(&format!("Regarding approval {}: {text}", request.id)),
+                    text: self.redact_error(&if provenance.is_some() {
+                        text.to_owned()
+                    } else {
+                        format!("Regarding approval {}: {text}", request.id)
+                    }),
+                    id: input_id.to_owned(),
+                    input_provenance: provenance,
                     ..Default::default()
                 });
             runner
@@ -409,13 +452,17 @@ mod tests {
             let before = session.messages();
             let channel = (!queue).then_some(Channel::Telegram);
             let reply = controller
-                .approval_message_with_channel(
+                .approval_message_with_provenance(
                     if queue {
                         "Do another task"
                     } else {
                         "撤销待审批请求"
                     },
                     channel,
+                    Some("approval-human-input"),
+                    Some(otto_core::model::InputProvenance::local(
+                        otto_core::model::InputSource::Tui,
+                    )),
                     &CancellationToken::new(),
                 )
                 .await
@@ -423,6 +470,27 @@ mod tests {
                 .unwrap();
             assert_eq!(reply.text, "handled");
             assert_eq!(reply.queued, queue);
+            assert_eq!(reply.input_id.as_deref(), Some("approval-human-input"));
+            if !queue {
+                let queued = controller.runner().unwrap().mailbox().queued();
+                let human = queued
+                    .iter()
+                    .find(|entry| entry.notification.id == "approval-human-input")
+                    .expect("human input keeps stable ID");
+                assert_eq!(human.notification.text, "撤销待审批请求");
+                assert_eq!(
+                    human.notification.input_provenance.unwrap().source,
+                    otto_core::model::InputSource::Tui
+                );
+                assert!(
+                    queued
+                        .iter()
+                        .filter(|entry| entry.notification.kind
+                            != Some(otto_core::agent::inbox::NotificationKind::UserMessage))
+                        .all(|entry| entry.notification.input_provenance.is_none())
+                );
+            }
+
             assert_eq!(script.calls.load(Ordering::SeqCst), 2);
             assert_eq!(session.messages(), before);
             assert_eq!(controller.pending_approval().is_some(), queue);

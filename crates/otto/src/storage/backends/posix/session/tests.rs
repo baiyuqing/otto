@@ -268,3 +268,5 @@ fn assert_close_on_exec(store: &Store) {
     let file = guard.file.as_ref().expect("open session file");
     assert!(file.is_close_on_exec().expect("check CLOEXEC"));
 }
+
+mod input_submissions;

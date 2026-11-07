@@ -201,7 +201,25 @@ impl Client {
         text: &str,
         channel: Option<Channel>,
     ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
+        self.approval_message_with_identity(session_id, text, channel, None)
+            .await
+    }
+
+    pub async fn approval_message_with_identity(
+        &self,
+        session_id: &str,
+        text: &str,
+        channel: Option<Channel>,
+        input_id: Option<&str>,
+    ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
         let mut body = json!({"text": text});
+        if let Some(id) = input_id {
+            body["input_id"] = json!(id);
+        }
+        if let Some(source) = self.client_source {
+            body["client_source"] = json!(source);
+        }
+
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }
@@ -307,7 +325,25 @@ impl Client {
         text: &str,
         channel: Option<Channel>,
     ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
+        self.control_message_with_identity(session_id, text, channel, None)
+            .await
+    }
+
+    pub async fn control_message_with_identity(
+        &self,
+        session_id: &str,
+        text: &str,
+        channel: Option<Channel>,
+        input_id: Option<&str>,
+    ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
         let mut body = json!({"text": text});
+        if let Some(id) = input_id {
+            body["input_id"] = json!(id);
+        }
+        if let Some(source) = self.client_source {
+            body["client_source"] = json!(source);
+        }
+
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }

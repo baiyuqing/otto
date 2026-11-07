@@ -13,6 +13,61 @@ on Linux). In `--attach` mode, copying runs on the terminal client, not the serv
 No OSC 52 fallback is used. Restart the rebuilt/reinstalled terminal client to use
 the updated popup.
 
+## Local input IDs and recovery
+
+The default local TUI records natural-language Enter submissions **before clearing
+its composer**. No flag or new permission is required: rebuild/reinstall with
+`make install`, stop the old process, and restart `otto` normally. A failed session
+write leaves the original draft in the editor, sends nothing, and reports the
+storage/permission error; fix the reported storage problem and press Enter again.
+
+Every submission gets a distinct stable input ID, even when its text is identical
+to an earlier input. Status notices show `[ID] source / delivery / status`:
+
+- `pending`: a recoverable intent was saved, not proof of admission or execution.
+- `accepted`: handed to the current task or a prompt action, not proof of effects.
+- `delivered`: the canonical session contains the user message with that ID. This
+  means model-context delivery, **not** successful completion of requested work.
+- `rejected`, `failed`, `withdrawn`, or `uncertain`: inspect the ID and any effects
+  before retrying. A crash can leave `pending` or `accepted` even if work began.
+
+Delivery metadata uses the existing `direct`, `queued`, and `steering` values.
+`direct` is a new immediate prompt; `queued` waits behind a pending backend write;
+`steering` is guidance for the exact active turn at its next safe boundary. These
+are separate from source and lifecycle status. The runtime resolves busy-to-idle
+admission races explicitly; it never silently turns guidance into another task.
+If a local next input is already waiting, another Enter leaves the new text in
+the editor rather than replacing the waiting submission. Ctrl+U withdraws a
+waiting input; its recoverable record remains available by ID.
+
+After a crash or restart:
+
+1. Open the original workspace and resume the original session (`/resume`).
+2. Run `/inputs` in the main composer. It lists full IDs, source, delivery, and
+   current evidence in that session/workspace; restart notices also point here.
+3. Run `/recover <full-id>` to restore its saved text **as a draft only**. Check
+   history and external effects before sending it again. Enter creates a new ID.
+
+Unresolved local intents and locally journaled active-turn guidance are never
+replayed automatically on restart. Recovery is not an execution retry. The
+records are append-only native session custom events, outside model history,
+and receive the normal credential sanitization; a recovered draft can therefore
+contain redactions. Session switches do not move a pending input to another
+session. Forks do not adopt the original session's recoverable intents.
+`--no-session` keeps the same identity/status behavior in memory only: closing the
+process loses those records and drafts, and there is no restart recovery.
+
+User-message rows also display their stable ID and persisted origin when known.
+Confirmed human ingress sources are local `tui`, `repl`, `one_shot`, `http`, and
+`acp`; attached TUI and connector application names are unverified `client_source`
+claims under the observed HTTP/ACP transport, never promoted to confirmed source.
+Legacy origin/identity stays `unknown`. Runtime notifications and generated
+approval-dialogue answers remain context, not newly attributed human input.
+Restricted approval dialogues preserve the actual human ID/provenance separately
+from generated context. The local pre-clear recovery journal does not apply to
+external ACP/HTTP editors; see [servers and connectors](servers-and-connectors.md)
+for their admission/queue semantics and client-visible receipts.
+
 ## Frontends
 
 Selection:
@@ -85,9 +140,10 @@ capability.
   the main conversation as temporary `[Queued for current turn]` user rows;
   queued-next input uses `[Queued next input]`. These rows are not written to
   history: delivery replaces a pending row with the actual user message rather
-  than duplicating it, and withdrawal removes it. Startup, session switching
-  and attached reconnect reload the current turn's pending guidance; a local
-  queued-next input stays scoped to its original session. Local and attached
+  than duplicating it, and withdrawal removes it. Session switching and attached reconnect reload the current turn's pending
+  guidance; after process loss, locally journaled input requires explicit recovery
+  by ID rather than automatic replay. A local queued-next input stays scoped to
+  its original session. Local and attached
   terminals periodically refresh current-session guidance, including full text
   submitted by other clients. A delivered pending row remains visible until its
   actual user-message row arrives. Sending your own text returns the transcript
@@ -1043,6 +1099,7 @@ message, although recognized checkpoints can affect the provider context.
 | `otto.provider_call` | Versioned provider-request timing, usage and retry facts; no prompt, tool-argument or tool-result text. |
 | `otto.provider_recovery` | Provider recovery and partial-output details, distinct from a session compaction checkpoint. |
 | `otto.plan` | Saved task checklist, restored as plan state. |
+| `otto.input_submissions` | Append-only local TUI input intent/status events keyed by stable ID, with session/workspace, sanitized text and provenance; supports `/inputs` and draft-only `/recover <id>`, not automatic replay. |
 | `otto.memory_recall` | IDs and revisions of memory rendered for a turn; no memory text. |
 | `otto.remote_compaction` | Provider-owned encrypted context checkpoint; affects provider context, not ordinary transcript text. |
 | `otto.fork` | Fork provenance; relates the new session to the source history. |

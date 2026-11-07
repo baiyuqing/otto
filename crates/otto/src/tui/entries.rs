@@ -48,6 +48,9 @@ pub struct Entry {
     pub id: String,
     pub kind: Option<EntryKind>,
     pub raw: String,
+    /// Runtime-owned human-input identity; never part of user text.
+    pub input_label: String,
+    pub input_id: String,
     /// Live TUI projection only; never written into session history.
     pub approval: Option<otto_core::approval::Request>,
     pub checkpoint_id: String,
@@ -206,18 +209,33 @@ pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
         let base_id = message_entry_base_id(message, message_index);
         let mut text_ordinal = 0usize;
         let mut text = String::new();
-        let flush_text =
-            |entries: &mut Vec<Entry>, text: &mut String, ordinal: &mut usize, force: bool| {
-                if !force && text.is_empty() {
-                    return;
-                }
-                entries.push(Entry::new(
-                    format!("{base_id}-text-{ordinal}"),
-                    entry_kind_for_role(&message.role),
-                ));
-                entries.last_mut().expect("just pushed").raw = std::mem::take(text);
-                *ordinal += 1;
-            };
+        let flush_text = |entries: &mut Vec<Entry>,
+                          text: &mut String,
+                          ordinal: &mut usize,
+                          force: bool| {
+            if !force && text.is_empty() {
+                return;
+            }
+            entries.push(Entry::new(
+                format!("{base_id}-text-{ordinal}"),
+                entry_kind_for_role(&message.role),
+            ));
+            let entry = entries.last_mut().expect("just pushed");
+            entry.raw = std::mem::take(text);
+            if message.role == Role::User {
+                let identity = if message.input_id.is_empty() {
+                    "unknown"
+                } else {
+                    &message.input_id
+                };
+                let origin = message
+                    .input_provenance
+                    .map(|provenance| provenance.label())
+                    .unwrap_or_else(|| "source=unknown transport=unknown delivery=unknown".into());
+                entry.input_label = format!("[{identity}] {origin} / delivered");
+            }
+            *ordinal += 1;
+        };
 
         if message.blocks.is_empty() {
             flush_text(&mut entries, &mut text, &mut text_ordinal, true);

@@ -9,6 +9,15 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- Local TUI Enter persists a recoverable, sanitized submission before clearing the
+  editor, carries a stable input ID through direct/queued/active-turn guidance,
+  and displays admission/delivery/failure evidence. `/inputs` and `/recover <id>`
+  expose session/workspace-scoped draft recovery without automatically replaying
+  uncertain inputs after restart; `--no-session` remains memory-only. User rows
+  show persisted source/delivery/ID, with legacy origins unknown. HTTP/ACP
+  restricted control/approval dialogues also retain actual ingress IDs and
+  provenance in backward-compatible receipts, separate from generated context.
+
 - The user manual now has a unified session JSONL reference covering record
   types, custom metadata, model-context behavior and recovery distinctions.
 

@@ -23,6 +23,7 @@ impl App {
             &request,
             Request::Command(
                 backend::Command::AdmitInput(_)
+                    | backend::Command::AdmitLocalInput { .. }
                     | backend::Command::WithdrawSteer(_)
                     | backend::Command::InterruptStep
             )
@@ -157,7 +158,18 @@ impl App {
             if self.delivered_steers.contains(&message.id) {
                 continue;
             }
-            if message.status == Status::Delivered
+            if !message.input_id.is_empty() && message.status == Status::Delivered {
+                if self
+                    .entries
+                    .iter()
+                    .any(|entry| entry.input_id == message.input_id)
+                {
+                    self.delivered_steers.insert(message.id);
+                    continue;
+                }
+            }
+            if message.input_id.is_empty()
+                && message.status == Status::Delivered
                 && !previous_ids.contains(&message.id)
                 && let Some(count) = unmatched_rows.get_mut(message.text.as_str())
                 && *count > 0

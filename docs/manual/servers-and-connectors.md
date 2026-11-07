@@ -1785,3 +1785,33 @@ initialization. Otto Connect declares `connector`. This becomes only an
 unverified `client_source`; ACP source and transport remain runtime-confirmed.
 For a full explanation of persistence, legacy unknown provenance and local versus
 attached terminals, see [Per-message input origin](interactive-use.md#per-message-input-origin).
+
+## Input identity, origin, and control dialogue receipts
+
+HTTP and ACP reuse the shared stable input IDs, canonical delivered user messages,
+and `InputProvenance` (`source`, `transport`, `delivery`, optional `client_source`).
+Delivery values are `direct`, `queued`, and `steering`; they do not imply source or
+successful effects. Confirmed HTTP/ACP ingress is never replaced by a client's
+TUI/connector claim. Originless legacy records remain unknown, and generated
+runtime/control answers remain context rather than human messages.
+
+The native local TUI additionally saves a recoverable intent before clearing its
+editor ([local recovery](interactive-use.md#local-input-ids-and-recovery)). This
+local editor guarantee does **not** cover external HTTP/ACP client editors.
+Existing remote durable turn queues and guidance recovery keep their existing
+semantics; they are not replaced with the local journal or new endpoints. Remote
+clients own their display and draft retention. A delivered ID is evidence that
+its user message entered context, not an exactly-once external-effect guarantee.
+
+Existing HTTP `POST /v1/sessions/{id}/approvals/message` and
+`POST /v1/sessions/{id}/tasks/control` accept optional `input_id` and
+`client_source`, just like runtime-owned identity/provenance elsewhere. Their
+non-null control receipts include `input_id`; omitted IDs are allocated by the
+runtime. Existing ACP `_otto/approvals/message` and `_otto/tasks/control` accept
+optional `inputId` and return the same receipt ID. ACP source comes from the
+connection's observed transport; application claims retain their unverified
+meaning. These additions are backward compatible and create no new endpoints.
+Approval messages keep original human text/identity; generated dialogue answers
+are separate context and cannot grant an approval or authorize effects. A queued
+control reply remains an admission instruction to the caller, not delivered
+message evidence. An absent/non-applicable control reply is still `null`.

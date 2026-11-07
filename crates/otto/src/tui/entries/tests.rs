@@ -426,3 +426,5 @@ fn running_history_identity_matches_live_replay() {
     reduce_tool_event(&mut entries, &event);
     assert_eq!(entries.len(), 1);
 }
+
+mod input_origin;

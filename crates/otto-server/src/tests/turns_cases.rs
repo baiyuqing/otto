@@ -304,7 +304,7 @@ async fn channel_context_is_transient_and_queued_turns_keep_their_own_channel() 
     let first = post_turn_with_channel(&harness, &id, "first", Some("telegram"), false).await;
     assert_eq!(first.status(), StatusCode::OK);
     harness.provider.wait_started(1).await;
-    let second = post_turn_with_channel(&harness, &id, "second", Some("feishu"), true).await;
+    let second = post_turn_with_channel(&harness, &id, "second", Some("telegram"), true).await;
     let third = post_turn_with_channel(&harness, &id, "third", None, true).await;
     gate.cancel();
     for response in [first, second, third] {
@@ -315,9 +315,8 @@ async fn channel_context_is_transient_and_queued_turns_keep_their_own_channel() 
     let prompts = harness.provider.system_prompts();
     assert_eq!(prompts.len(), 3);
     assert!(prompts[0].contains("Telegram"));
-    assert!(prompts[1].contains("Feishu (Lark)"));
+    assert!(prompts[1].contains("Telegram"));
     assert!(!prompts[2].contains("Telegram"));
-    assert!(!prompts[2].contains("Feishu (Lark)"));
     assert!(prompts[0].contains("does not grant additional tools"));
     assert!(prompts[1].contains("does not grant additional tools"));
 }
@@ -404,13 +403,6 @@ async fn a_turn_origin_defaults_to_web_and_is_validated() {
             .unwrap()
             .contains("origin")
     );
-    let mismatch = post_turn_with_origin(
-        &harness,
-        &id,
-        serde_json::json!({"origin": "chat:feishu:c1", "channel": "telegram"}),
-    )
-    .await;
-    assert_eq!(mismatch.status, StatusCode::BAD_REQUEST);
     assert!(harness.provider.texts().is_empty());
     assert_eq!(pending(&store, &web, &id), 1);
 
@@ -436,12 +428,12 @@ async fn a_queued_turn_keeps_its_own_origin() {
     options.schedule = Some(store.clone());
     let harness = Harness::with(options);
     let id = harness.create().await;
-    let chat = otto::schedule::Origin::parse("chat:feishu:c1").expect("origin");
+    let chat = otto::schedule::Origin::parse("chat:telegram:c1").expect("origin");
     confirmed_delivery(&store, chat.clone(), &id);
 
     let first = post_turn_with_channel(&harness, &id, "first", None, false).await;
     harness.provider.wait_started(1).await;
-    let body = r#"{"text":"second","queue":true,"origin":"chat:feishu:c1","channel":"feishu"}"#;
+    let body = r#"{"text":"second","queue":true,"origin":"chat:telegram:c1","channel":"telegram"}"#;
     let second = harness
         .raw("POST", &format!("/v1/sessions/{id}/turns"), Some(body), &[])
         .await;

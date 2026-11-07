@@ -176,7 +176,7 @@ async fn a_message_wake_logs_inbox_kind() {
         .notifications()
         .push(otto_core::agent::inbox::Notification {
             kind: Some(otto_core::agent::inbox::NotificationKind::Message),
-            text: "[feishu] hi".to_string(),
+            text: "[telegram] hi".to_string(),
             ..otto_core::agent::inbox::Notification::default()
         });
     tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))

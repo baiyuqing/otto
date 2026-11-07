@@ -20,7 +20,7 @@ impl Runner {
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
         transcript: Option<(Transcript, String)>,
-        resume_id: Option<String>,
+        resume_id: Option<(String, String)>,
         deadline: Deadline,
     ) -> Result<Task, StartError> {
         let fresh_session_id = match transcript
@@ -47,6 +47,10 @@ impl Runner {
             model: model.clone(),
             model_source,
             created_at: Some(now),
+            attempt_id: resume_id
+                .as_ref()
+                .map(|(_, attempt)| attempt.clone())
+                .unwrap_or_default(),
             ..Task::default()
         };
         let history = Some(Arc::new(move || {
@@ -56,11 +60,13 @@ impl Runner {
                 .unwrap_or_default()
         }) as Arc<dyn Fn() -> Vec<Message> + Send + Sync>);
         let task = match resume_id.clone() {
-            Some(id) => {
-                self.config
-                    .tasks
-                    .add_with_id(id, task_template, Some(cancel.clone()), history)?
-            }
+            Some((id, expected_attempt)) => self.config.tasks.begin_resume(
+                &id,
+                &expected_attempt,
+                task_template,
+                cancel.clone(),
+                history,
+            )?,
             None => self
                 .config
                 .tasks
@@ -72,7 +78,21 @@ impl Runner {
             now,
             cancel: cancel.clone(),
             armed: true,
+            interrupted_on_drop: resume_id.is_some(),
         };
+        if resume_id.is_none() {
+            if let Err(error) = self.config.tasks.persist_admission(&task).await {
+                self.finish_without_transcript(
+                    &task.id,
+                    TaskStatus::Interrupted,
+                    now,
+                    &[],
+                    Some(&error.to_string()),
+                );
+                start_guard.disarm();
+                return Err(error.into());
+            }
+        }
         let transcript = match (transcript, &self.config.child_session) {
             (Some((transcript, path)), _) => {
                 if !path.is_empty() {
@@ -156,6 +176,56 @@ impl Runner {
                 return Ok(self.config.tasks.get(&task.id).unwrap_or(task));
             }
         }
+
+        // A versioned attempt boundary is durable before any provider/tool work.
+        // No process snapshot or uncertain external effect is replayed.
+        let attempt_id = crate::runtime::builder::random_id()
+            .map_err(|error| StartError::SessionIdentity(error.to_string()))?;
+        // Keep the last acknowledged attempt until the append succeeds.
+        // Exact inventory evidence distinguishes a clean pre-write failure from
+        // uncertain partial/sync failure; the latter must not pretend rollback.
+        let prior = resume_id.as_ref().and_then(|_| {
+            let path = std::path::PathBuf::from(self.config.tasks.get(&task.id)?.session_path);
+            let parent = path.parent()?.with_extension("jsonl");
+            interrupted::inventory(&parent)
+                .records
+                .into_iter()
+                .find(|record| record.path == path)
+        });
+        let attempt = serde_json::json!({"version": 1, "taskId": task.id, "attemptId": attempt_id,
+            "lineage": if resume_id.is_some() { "resumed" } else { "admitted" }});
+        if let Err(error) = append_task_custom(&transcript, "otto.task_attempt", &attempt).await {
+            self.config
+                .tasks
+                .freeze_recovery_history(&task.id, transcript.messages());
+            let unchanged = prior.as_ref().is_some_and(|prior| {
+                let Some(parent) = prior.path.parent() else {
+                    return false;
+                };
+                interrupted::inventory(&parent.with_extension("jsonl"))
+                    .records
+                    .into_iter()
+                    .find(|record| record.path == prior.path)
+                    .is_some_and(|record| record.evidence == prior.evidence)
+            });
+            self.finish_without_transcript(
+                &task.id,
+                if resume_id.is_some() && !unchanged {
+                    TaskStatus::Unavailable
+                } else {
+                    TaskStatus::Interrupted
+                },
+                now,
+                &[],
+                Some(&error.to_string()),
+            );
+            start_guard.disarm();
+            return Err(StartError::ResumeFailed(format!(
+                "attempt boundary was not persisted: {error}"
+            )));
+        }
+
+        self.config.tasks.set_attempt_id(&task.id, &attempt_id);
 
         if let Some(executable) = definition
             .is_none()
@@ -537,7 +607,7 @@ impl Runner {
             } else {
                 status.as_str()
             };
-            let _ = append_task_custom(
+            if let Err(error) = append_task_custom(
                 transcript,
                 TASK_RESULT_CUSTOM_TYPE,
                 &TaskResultData {
@@ -545,11 +615,20 @@ impl Runner {
                     error: &error_text,
                 },
             )
-            .await;
+            .await
+            {
+                self.config.tasks.finish(task_id, TaskStatus::Interrupted, finished_at,
+                    &result, &format!("terminal result persistence was not acknowledged; inspect transcript and uncertain effects before resume: {error}"));
+                self.notify_finished(task_id, Some(&error.to_string()));
+                return;
+            }
         }
         self.config
             .tasks
             .finish(task_id, status, finished_at, &result, &error_text);
+        if !migrating {
+            self.notify_finished(task_id, None);
+        }
     }
 
     pub(super) fn finish_without_transcript(
@@ -565,13 +644,14 @@ impl Runner {
         self.config
             .tasks
             .finish(task_id, status, finished_at, &result, &error_text);
+        self.notify_finished(task_id, None);
     }
 
     fn prepare_finish(
         &self,
-        task_id: &str,
+        _task_id: &str,
         status: TaskStatus,
-        finished_at: DateTime<Utc>,
+        _finished_at: DateTime<Utc>,
         messages: &[Message],
         run_error: Option<&str>,
     ) -> (String, String, bool) {
@@ -584,12 +664,6 @@ impl Runner {
             _ => String::new(),
         };
 
-        let mut final_task = self.config.tasks.get(task_id).unwrap_or_default();
-        final_task.status = status;
-        final_task.finished_at = Some(finished_at);
-        final_task.result = result.clone();
-        final_task.error = error_text.clone();
-
         // A task cancelled by `Tasks::begin_migration` moved because its
         // process is leaving, not because it failed or was asked to stop:
         // skip the ordinary completion notification (`notify_moved` sends
@@ -597,29 +671,12 @@ impl Runner {
         // transcript's own result as "interrupted" rather than "canceled",
         // matching how a takeover-side scan would classify it.
         let migrating = status == TaskStatus::Canceled && self.config.tasks.is_migrating();
-        if !migrating {
-            self.config.tasks.notifications().push(Notification {
-                task_id: task_id.to_string(),
-                kind: Some(NotificationKind::TaskFinished),
-                text: self.parent_text(&final_task, &completion_text(&final_task, usize::MAX)),
-                usage: final_task.usage_present.then_some(final_task.usage),
-                // The parent's footer adds this task's tokens to the session
-                // totals; it needs to know whether the cached share behind
-                // them is measured or merely unreported.
-                cached_input_tokens_present: final_task.cached_input_tokens_present,
-                ..Default::default()
-            });
-        }
         (result, error_text, migrating)
     }
 }
 
-/// Encodes `data` and appends it to `transcript` as a `custom` entry typed
-/// `custom_type`. A failure to encode or append is dropped, the same way
-/// [`Recorder::upsert`](crate::subagent::record::Recorder::upsert) drops a
-/// task record write failure: in TUI mode a stderr write from a background
-/// task is drawn over the screen. The task's completion notification to the
-/// parent does not depend on these entries.
+/// Encodes and appends a lifecycle fact. Callers must handle failures before
+/// reporting success or allowing execution to cross the durable boundary.
 async fn append_task_custom(
     transcript: &Transcript,
     custom_type: &str,

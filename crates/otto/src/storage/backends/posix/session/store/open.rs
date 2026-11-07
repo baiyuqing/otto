@@ -46,6 +46,34 @@ impl Store {
         Ok((decoded.entries, messages))
     }
 
+    /// Validates a bounded read from a caller-owned pinned descriptor without
+    /// reopening a potentially replaced path. Recovery uses the same store
+    /// state validation as ordinary read-only transcript access.
+    pub(crate) fn decode_recovery_bytes(data: &[u8]) -> Result<(PiFile, Vec<Message>), PiError> {
+        let decoded = match otto_core::session::decode_pi_file(data) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                // Match read-only Store access: only an incomplete final JSON
+                // record can be excluded. Valid-but-invalid lifecycle records
+                // and corruption in any earlier line remain unavailable.
+                let start = data
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+                let incomplete = serde_json::from_slice::<serde_json::Value>(&data[start..])
+                    .err()
+                    .is_some_and(|error| error.is_eof());
+                if start == 0 || start == data.len() || !incomplete {
+                    return Err(error);
+                }
+                otto_core::session::decode_pi_file(&data[..start])?
+            }
+        };
+        let messages = resolve_pi_store_state(&decoded)?.messages;
+        Ok((decoded, messages))
+    }
+
     /// Builds a store around an already-verified descriptor. The descriptor is
     /// consumed either way: on failure it is dropped and closed. `lease` is
     /// the lease [`Prepared::activate`](super::prepared::Prepared::activate)

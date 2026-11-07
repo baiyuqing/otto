@@ -20,6 +20,7 @@ pub mod inherit;
 pub mod interrupted;
 pub mod prompt;
 pub mod record;
+pub(crate) mod recovery;
 mod reports;
 pub mod runner;
 mod scratch;

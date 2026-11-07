@@ -400,6 +400,7 @@ impl StreamAssembler {
                             input_tokens: usage.input_tokens,
                             output_tokens: usage.output_tokens,
                             cached_input_tokens: usage.cached_tokens(),
+                            ..Default::default()
                         });
                     }
                     if let Some(incomplete) = result.incomplete_details {

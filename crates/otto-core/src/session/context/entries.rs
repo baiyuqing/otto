@@ -50,9 +50,16 @@ pub fn model_message_to_pi_entry(
             let stop_reason = model_finish_reason_to_pi(message.finish_reason.clone())?;
             validate_assistant_tool_finish(&message.blocks, message.finish_reason.clone())?;
             let usage = model_usage_to_pi(message.usage.as_ref())?;
-            if message.usage == Some(Usage::default()) {
+            if message.usage == Some(Usage::default())
+                || message
+                    .usage
+                    .is_some_and(|usage| usage.cache_write_input_tokens.is_some())
+            {
                 wire.details = Some(encode_pi_otto_details(&PiOttoDetails {
-                    usage_present: true,
+                    usage_present: message.usage.is_some(),
+                    usage: message
+                        .usage
+                        .filter(|usage| usage.cache_write_input_tokens.is_some()),
                     ..PiOttoDetails::default()
                 })?);
             }
@@ -362,10 +369,13 @@ pub fn model_usage_to_pi(usage: Option<&Usage>) -> Result<Option<PiUsage>, PiErr
         return Err(PiError::invalid("usage token total overflows"));
     }
     Ok(Some(PiUsage {
-        input: usage.input_tokens - usage.cached_input_tokens,
+        input: usage.input_tokens
+            - usage.cached_input_tokens
+            - usage.cache_write_input_tokens.unwrap_or(0),
         output: usage.output_tokens,
         cache_read: usage.cached_input_tokens,
-        cache_write: 0,
+        cache_write: usage.cache_write_input_tokens.unwrap_or(0),
+        cache_write_1h: usage.cache_write_1h_input_tokens,
         total_tokens: usage.input_tokens + usage.output_tokens,
         ..PiUsage::default()
     }))
@@ -406,14 +416,21 @@ pub fn pi_usage_to_model(usage: Option<&PiUsage>) -> Result<Option<Usage>, PiErr
         .checked_add(usage.cache_read)
         .and_then(|sum| sum.checked_add(usage.cache_write))
         .ok_or_else(|| PiError::invalid("assistant usage is outside the supported range"))?;
-    if prompt_input == 0 && usage.output == 0 && usage.cache_read == 0 && usage.cache_write == 0 {
+    if prompt_input == 0 && usage.output == 0 && usage.cache_write_1h.is_none() {
         return Ok(None);
     }
-    Ok(Some(Usage {
+    let converted = Usage {
         input_tokens: prompt_input,
         output_tokens: usage.output,
         cached_input_tokens: usage.cache_read,
-    }))
+        cache_write_input_tokens: (usage.cache_write != 0 || usage.cache_write_1h.is_some())
+            .then_some(usage.cache_write),
+        cache_write_1h_input_tokens: usage.cache_write_1h,
+    };
+    converted
+        .validate()
+        .map_err(|error| PiError::invalid(error.0))?;
+    Ok(Some(converted))
 }
 
 /// Rejects an assistant message whose tool calls and finish reason disagree.

@@ -419,6 +419,12 @@ pub struct Usage {
     pub output_tokens: i64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cached_input_tokens: i64,
+    /// Newly cached input, included in input_tokens; absent if not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<i64>,
+    /// One-hour cache writes, a subset of cache_write_input_tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_input_tokens: Option<i64>,
 }
 
 impl Usage {
@@ -432,7 +438,56 @@ impl Usage {
                 "cached input tokens must not exceed input tokens",
             ));
         }
+        if let Some(written) = self.cache_write_input_tokens
+            && (written < 0 || written > self.input_tokens - self.cached_input_tokens)
+        {
+            return Err(ValidationError(
+                "cache writes must fit within uncached input tokens",
+            ));
+        }
+        if let Some(one_hour) = self.cache_write_1h_input_tokens
+            && (one_hour < 0
+                || self
+                    .cache_write_input_tokens
+                    .is_none_or(|written| one_hour > written))
+        {
+            return Err(ValidationError(
+                "one-hour cache writes must fit within cache writes",
+            ));
+        }
         Ok(())
+    }
+
+    /// Adds two reported usages. A missing breakdown on either side makes its
+    /// aggregate unknown; callers must handle the first report separately.
+    pub fn saturating_add(self, other: Self) -> Self {
+        let mut total = Self {
+            input_tokens: self
+                .input_tokens
+                .max(0)
+                .saturating_add(other.input_tokens.max(0)),
+            output_tokens: self
+                .output_tokens
+                .max(0)
+                .saturating_add(other.output_tokens.max(0)),
+            cached_input_tokens: self
+                .cached_input_tokens
+                .max(0)
+                .saturating_add(other.cached_input_tokens.max(0)),
+            cache_write_input_tokens: self
+                .cache_write_input_tokens
+                .zip(other.cache_write_input_tokens)
+                .map(|(left, right)| left.max(0).saturating_add(right.max(0))),
+            cache_write_1h_input_tokens: self
+                .cache_write_1h_input_tokens
+                .zip(other.cache_write_1h_input_tokens)
+                .map(|(left, right)| left.max(0).saturating_add(right.max(0))),
+        };
+        if total.validate().is_err() {
+            total.cache_write_input_tokens = None;
+            total.cache_write_1h_input_tokens = None;
+        }
+        total
     }
 }
 

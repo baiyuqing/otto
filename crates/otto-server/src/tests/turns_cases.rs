@@ -13,6 +13,7 @@ async fn posting_a_turn_streams_server_sent_events() {
                 input_tokens: 5,
                 output_tokens: 7,
                 cached_input_tokens: 0,
+                ..Default::default()
             }),
             ..Script::default()
         },

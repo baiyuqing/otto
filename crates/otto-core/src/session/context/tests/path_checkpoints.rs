@@ -371,6 +371,8 @@ test!(build_context_frames_branch_and_custom_messages {
             input_tokens: 9,
             output_tokens: 1,
             cached_input_tokens: 3,
+            cache_write_input_tokens: Some(4),
+            ..Default::default()
         }
     );
 });

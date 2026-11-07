@@ -235,6 +235,14 @@ components:
           type: integer
         cached_input_tokens:
           type: integer
+        cache_write_input_tokens:
+          type: integer
+          minimum: 0
+          description: Newly cached input tokens included in input_tokens; omitted when not reported.
+        cache_write_1h_input_tokens:
+          type: integer
+          minimum: 0
+          description: One-hour cache writes, included in cache_write_input_tokens; omitted when not reported.
     UsageSummary:
       type: object
       properties:
@@ -247,10 +255,16 @@ components:
         output_tokens:
           type: integer
         cached_input_tokens:
-          type: integer
+          type: [integer, "null"]
+        cache_write_input_tokens:
+          type: [integer, "null"]
+          description: Sum of cache writes, or null when any reported usage lacks this breakdown.
+        cache_write_1h_input_tokens:
+          type: [integer, "null"]
+          description: Sum of one-hour cache writes, or null when any reported usage lacks this breakdown.
         cache_hit_rate:
-          type: number
-      required: [requests, reported_requests, input_tokens, output_tokens, cached_input_tokens, cache_hit_rate]
+          type: [number, "null"]
+      required: [requests, reported_requests, input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_1h_input_tokens, cache_hit_rate]
     DailyUsage:
       type: object
       properties:
@@ -266,8 +280,14 @@ components:
         output_tokens:
           type: integer
         cached_input_tokens:
-          type: integer
-      required: [date, requests, reported_requests, input_tokens, output_tokens, cached_input_tokens]
+          type: [integer, "null"]
+        cache_write_input_tokens:
+          type: [integer, "null"]
+          description: Sum of cache writes, or null when any reported usage lacks this breakdown.
+        cache_write_1h_input_tokens:
+          type: [integer, "null"]
+          description: Sum of one-hour cache writes, or null when any reported usage lacks this breakdown.
+      required: [date, requests, reported_requests, input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_1h_input_tokens]
     UsageAnalysis:
       type: object
       properties:

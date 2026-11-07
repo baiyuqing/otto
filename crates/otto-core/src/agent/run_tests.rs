@@ -160,6 +160,7 @@ impl Turn {
                         input_tokens: 5,
                         output_tokens: 7,
                         cached_input_tokens: 0,
+                        ..Default::default()
                     }),
                     ..Message::default()
                 },
@@ -178,6 +179,7 @@ impl Turn {
                         input_tokens: 50,
                         output_tokens: 2,
                         cached_input_tokens: 20,
+                        ..Default::default()
                     }),
                     ..Message::default()
                 },

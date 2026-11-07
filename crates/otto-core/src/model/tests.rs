@@ -1,3 +1,5 @@
+mod cache_usage;
+
 use super::*;
 
 fn raw(json: &str) -> Option<Box<RawValue>> {
@@ -123,6 +125,7 @@ fn message_json_round_trip() {
             input_tokens: 11,
             output_tokens: 7,
             cached_input_tokens: 0,
+            ..Default::default()
         }),
         ..Message::default()
     };
@@ -239,6 +242,7 @@ fn usage_validate() {
                 input_tokens: 7,
                 output_tokens: 2,
                 cached_input_tokens: 3,
+                ..Default::default()
             },
             false,
         ),
@@ -248,6 +252,7 @@ fn usage_validate() {
                 input_tokens: 0,
                 output_tokens: 0,
                 cached_input_tokens: 0,
+                ..Default::default()
             },
             false,
         ),
@@ -257,6 +262,7 @@ fn usage_validate() {
                 input_tokens: -1,
                 output_tokens: 1,
                 cached_input_tokens: 0,
+                ..Default::default()
             },
             true,
         ),
@@ -266,6 +272,7 @@ fn usage_validate() {
                 input_tokens: 1,
                 output_tokens: -1,
                 cached_input_tokens: 0,
+                ..Default::default()
             },
             true,
         ),
@@ -275,6 +282,7 @@ fn usage_validate() {
                 input_tokens: 1,
                 output_tokens: 1,
                 cached_input_tokens: -1,
+                ..Default::default()
             },
             true,
         ),
@@ -284,6 +292,7 @@ fn usage_validate() {
                 input_tokens: 1,
                 output_tokens: 1,
                 cached_input_tokens: 2,
+                ..Default::default()
             },
             true,
         ),

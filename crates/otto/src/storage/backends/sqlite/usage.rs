@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS usage_events (
     ),
     usage_present INTEGER NOT NULL CHECK (usage_present IN (0, 1)),
     cached_breakdown_present INTEGER CHECK (cached_breakdown_present IN (0, 1)),
+    cache_write_input_tokens INTEGER CHECK (cache_write_input_tokens IS NULL OR (
+        usage_present=1 AND cache_write_input_tokens >= 0 AND cache_write_input_tokens <= input_tokens - cached_input_tokens)),
+    cache_write_1h_input_tokens INTEGER CHECK (cache_write_1h_input_tokens IS NULL OR (
+        cache_write_input_tokens IS NOT NULL AND cache_write_1h_input_tokens >= 0 AND cache_write_1h_input_tokens <= cache_write_input_tokens)),
     CHECK (usage_present = 1 OR (
         input_tokens = 0 AND output_tokens = 0 AND cached_input_tokens = 0
     )),
@@ -124,7 +128,8 @@ impl Store {
     fn initialize(connection: Connection) -> Result<Self> {
         // The original usage database had no user_version. Detect its shape
         // directly, add only nullable metadata, and never infer history.
-        let has_usage_table: i64 = connection
+        let transaction = connection.unchecked_transaction().map_err(|_| Error)?;
+        let has_usage_table: i64 = transaction
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_events'",
                 (),
@@ -132,24 +137,42 @@ impl Store {
             )
             .map_err(|_| Error)?;
         if has_usage_table != 0 {
-            let mut has_cache_presence = false;
-            for name in connection
+            let mut columns = std::collections::HashSet::new();
+            for name in transaction
                 .prepare("PRAGMA table_info(usage_events)")
                 .map_err(|_| Error)?
                 .query_map((), |row| row.get::<String>(1))
                 .map_err(|_| Error)?
             {
-                has_cache_presence |= name.map_err(|_| Error)? == "cached_breakdown_present";
+                columns.insert(name.map_err(|_| Error)?);
             }
-            if !has_cache_presence {
-                connection
-                    .execute_batch(
-                        "ALTER TABLE usage_events ADD COLUMN cached_breakdown_present INTEGER CHECK (cached_breakdown_present IN (0, 1))",
-                    )
-                    .map_err(|_| Error)?;
+            for (column, declaration) in [
+                (
+                    "cached_breakdown_present",
+                    "INTEGER CHECK (cached_breakdown_present IN (0, 1))",
+                ),
+                (
+                    "cache_write_input_tokens",
+                    "INTEGER CHECK (cache_write_input_tokens IS NULL OR (
+                        usage_present=1 AND cache_write_input_tokens >= 0 AND cache_write_input_tokens <= input_tokens - cached_input_tokens))",
+                ),
+                (
+                    "cache_write_1h_input_tokens",
+                    "INTEGER CHECK (cache_write_1h_input_tokens IS NULL OR (
+                        cache_write_input_tokens IS NOT NULL AND cache_write_1h_input_tokens >= 0 AND cache_write_1h_input_tokens <= cache_write_input_tokens))",
+                ),
+            ] {
+                if !columns.contains(column) {
+                    transaction
+                        .execute_batch(&format!(
+                            "ALTER TABLE usage_events ADD COLUMN {column} {declaration}"
+                        ))
+                        .map_err(|_| Error)?;
+                }
             }
         }
-        connection.execute_batch(SCHEMA).map_err(|_| Error)?;
+        transaction.execute_batch(SCHEMA).map_err(|_| Error)?;
+        transaction.commit().map_err(|_| Error)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -169,8 +192,8 @@ impl Store {
                 "INSERT INTO usage_events (
                     occurred_at, workspace, session_id, task_id, provider, profile, model,
                     kind, input_tokens, output_tokens, cached_input_tokens, usage_present,
-                    cached_breakdown_present
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    cached_breakdown_present, cache_write_input_tokens, cache_write_1h_input_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     record.occurred_at,
                     record.context.workspace,
@@ -187,6 +210,8 @@ impl Store {
                     record
                         .usage_present
                         .then_some(record.cached_input_tokens_present),
+                    record.usage.cache_write_input_tokens,
+                    record.usage.cache_write_1h_input_tokens,
                 ],
             )
             .map_err(|_| Error)?;
@@ -241,10 +266,20 @@ impl Store {
                       WHEN COALESCE(SUM(usage_present),0)=0 THEN NULL
                       WHEN SUM(CASE WHEN usage_present=1 AND cached_breakdown_present IS NOT 1 THEN 1 ELSE 0 END)>0 THEN NULL
                       ELSE COALESCE(SUM(CASE WHEN cached_breakdown_present=1 THEN cached_input_tokens ELSE 0 END),0)
+                    END,
+                    CASE
+                      WHEN COALESCE(SUM(usage_present),0)=0 THEN NULL
+                      WHEN SUM(CASE WHEN usage_present=1 AND cache_write_input_tokens IS NULL THEN 1 ELSE 0 END)>0 THEN NULL
+                      ELSE COALESCE(SUM(cache_write_input_tokens),0)
+                    END,
+                    CASE
+                      WHEN COALESCE(SUM(usage_present),0)=0 THEN NULL
+                      WHEN SUM(CASE WHEN usage_present=1 AND cache_write_1h_input_tokens IS NULL THEN 1 ELSE 0 END)>0 THEN NULL
+                      ELSE COALESCE(SUM(cache_write_1h_input_tokens),0)
                     END
                  FROM usage_events WHERE (?1 IS NULL OR session_id=?1)",
                 [session_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             )
             .map_err(|_| Error)?;
         let operation = connection
@@ -266,6 +301,8 @@ impl Store {
             input_tokens: token.2,
             output_tokens: token.3,
             cached_input_tokens: token.4,
+            cache_write_input_tokens: token.5,
+            cache_write_1h_input_tokens: token.6,
             logical_operations: operation.0,
             actual_attempts: operation.1,
             succeeded_operations: operation.2,
@@ -300,6 +337,16 @@ impl Store {
                       WHEN COALESCE(SUM(usage_present),0)=0 THEN NULL
                       WHEN SUM(CASE WHEN usage_present=1 AND cached_breakdown_present IS NOT 1 THEN 1 ELSE 0 END)>0 THEN NULL
                       ELSE COALESCE(SUM(CASE WHEN cached_breakdown_present=1 THEN cached_input_tokens ELSE 0 END),0)
+                    END,
+                    CASE
+                      WHEN COALESCE(SUM(usage_present),0)=0 THEN NULL
+                      WHEN SUM(CASE WHEN usage_present=1 AND cache_write_input_tokens IS NULL THEN 1 ELSE 0 END)>0 THEN NULL
+                      ELSE COALESCE(SUM(cache_write_input_tokens),0)
+                    END,
+                    CASE
+                      WHEN COALESCE(SUM(usage_present),0)=0 THEN NULL
+                      WHEN SUM(CASE WHEN usage_present=1 AND cache_write_1h_input_tokens IS NULL THEN 1 ELSE 0 END)>0 THEN NULL
+                      ELSE COALESCE(SUM(cache_write_1h_input_tokens),0)
                     END
                  FROM usage_events
                  WHERE occurred_at>=?1 AND (?2 IS NULL OR session_id=?2)
@@ -315,6 +362,8 @@ impl Store {
                     input_tokens: row.get(3)?,
                     output_tokens: row.get(4)?,
                     cached_input_tokens: row.get(5)?,
+                    cache_write_input_tokens: row.get(6)?,
+                    cache_write_1h_input_tokens: row.get(7)?,
                     ..DailyPoint::default()
                 })
             })
@@ -417,6 +466,9 @@ impl UsageRepository for Store {
 }
 
 #[cfg(test)]
+mod cache_usage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -455,5 +507,7 @@ mod tests {
         assert_eq!(summary.input_tokens, 10);
         // A legacy row never recorded whether the breakdown was present.
         assert_eq!(summary.cached_input_tokens, None);
+        assert_eq!(summary.cache_write_input_tokens, None);
+        assert_eq!(summary.cache_write_1h_input_tokens, None);
     }
 }

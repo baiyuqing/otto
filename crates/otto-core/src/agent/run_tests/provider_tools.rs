@@ -19,6 +19,7 @@ async fn text_deltas_and_usage_reach_the_event_sink() {
             input_tokens: 11,
             output_tokens: 3,
             cached_input_tokens: 2,
+            ..Default::default()
         });
     }
     let agent = Agent::new(
@@ -54,6 +55,7 @@ async fn text_deltas_and_usage_reach_the_event_sink() {
             input_tokens: 11,
             output_tokens: 3,
             cached_input_tokens: 2,
+            ..Default::default()
         },
         present: true,
         cached_input_tokens_present: false,
@@ -111,6 +113,7 @@ async fn a_negative_usage_count_is_rejected() {
             input_tokens: -1,
             output_tokens: 0,
             cached_input_tokens: 0,
+            ..Default::default()
         });
     }
     let agent = Agent::new(

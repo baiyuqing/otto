@@ -61,9 +61,11 @@ impl Tasks {
                         } else {
                             entry.task.cached_input_tokens_present && cached_input_tokens_present
                         };
-                        entry.task.usage.input_tokens += usage.input_tokens;
-                        entry.task.usage.output_tokens += usage.output_tokens;
-                        entry.task.usage.cached_input_tokens += usage.cached_input_tokens;
+                        entry.task.usage = if first_report {
+                            usage
+                        } else {
+                            entry.task.usage.saturating_add(usage)
+                        };
                     }
                     entry.task.last_text = text.to_string();
                     true

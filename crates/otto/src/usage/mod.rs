@@ -101,6 +101,8 @@ pub struct Summary {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
+    pub cache_write_1h_input_tokens: Option<i64>,
     pub cache_hit_rate: Option<f64>,
 }
 
@@ -123,6 +125,8 @@ pub struct DailyPoint {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cached_input_tokens: Option<i64>,
+    pub cache_write_input_tokens: Option<i64>,
+    pub cache_write_1h_input_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -160,6 +164,8 @@ impl Analysis {
         let mut summary = Summary::default();
         let mut cache_known = true;
         let mut cached_total = 0_i64;
+        let mut written_total = Some(0_i64);
+        let mut one_hour_total = Some(0_i64);
         for point in &self.daily {
             summary.usage_events = summary.usage_events.saturating_add(point.usage_events);
             summary.reported_usage_events = summary
@@ -200,6 +206,14 @@ impl Analysis {
                 .saturating_add(point.unknown_effect_operations);
             summary.input_tokens = summary.input_tokens.saturating_add(point.input_tokens);
             summary.output_tokens = summary.output_tokens.saturating_add(point.output_tokens);
+            if point.reported_usage_events > 0 {
+                written_total = written_total
+                    .zip(point.cache_write_input_tokens)
+                    .map(|(total, value)| total.saturating_add(value));
+                one_hour_total = one_hour_total
+                    .zip(point.cache_write_1h_input_tokens)
+                    .map(|(total, value)| total.saturating_add(value));
+            }
             match point.cached_input_tokens {
                 Some(value) => cached_total = cached_total.saturating_add(value),
                 None if point.reported_usage_events > 0 => cache_known = false,
@@ -210,6 +224,10 @@ impl Analysis {
             summary.cached_input_tokens = Some(cached_total);
             summary.cache_hit_rate = (summary.input_tokens > 0)
                 .then_some(cached_total as f64 / summary.input_tokens as f64);
+        }
+        if summary.reported_usage_events > 0 {
+            summary.cache_write_input_tokens = written_total;
+            summary.cache_write_1h_input_tokens = one_hour_total;
         }
         self.summary = summary;
     }
@@ -382,6 +400,7 @@ mod tests {
             input_tokens: input,
             output_tokens: output,
             cached_input_tokens: cached,
+            ..Default::default()
         }
     }
 

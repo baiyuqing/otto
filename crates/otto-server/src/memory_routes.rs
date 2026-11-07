@@ -36,9 +36,13 @@ const MAX_CANDIDATE_PAGE: usize = 50;
 
 /// Runs one management request off the async workers: the store does file
 /// I/O and `propose` blocks on a model call.
-async fn run(server: &Arc<Server>, session_id: &str, request: Request) -> Result<Reply, Response> {
+async fn run(
+    server: &Arc<Server>,
+    session_id: &str,
+    request: Request,
+) -> Result<Reply, Box<Response>> {
     let Some(ctrl) = server.controller_for_route(session_id).await else {
-        return Err(not_found("session not found"));
+        return Err(Box::new(not_found("session not found")));
     };
     let joined = tokio::task::spawn_blocking(move || -> Result<Reply, ManagementError> {
         let ctrl: Arc<Controller> = ctrl;
@@ -47,8 +51,8 @@ async fn run(server: &Arc<Server>, session_id: &str, request: Request) -> Result
     .await;
     match joined {
         Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(error)) => Err(error_reply(server, &error)),
-        Err(join) => Err(internal_error(&server.log, &join.to_string())),
+        Ok(Err(error)) => Err(Box::new(error_reply(server, &error))),
+        Err(join) => Err(Box::new(internal_error(&server.log, &join.to_string()))),
     }
 }
 
@@ -69,8 +73,12 @@ fn unexpected(server: &Server) -> Response {
     internal_error(&server.log, "unexpected memory management reply")
 }
 
-fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
-    serde_json::from_slice(body).map_err(|error| bad_request(&format!("invalid body: {error}")))
+fn request_error(message: &str) -> Box<Response> {
+    Box::new(bad_request(message))
+}
+
+fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Box<Response>> {
+    serde_json::from_slice(body).map_err(|error| request_error(&format!("invalid body: {error}")))
 }
 
 fn pairs(query: Option<&str>) -> Vec<(String, String)> {
@@ -79,22 +87,22 @@ fn pairs(query: Option<&str>) -> Vec<(String, String)> {
         .collect()
 }
 
-fn flag(value: &str, name: &str) -> Result<bool, Response> {
+fn flag(value: &str, name: &str) -> Result<bool, Box<Response>> {
     match value {
         "" | "true" | "1" => Ok(true),
         "false" | "0" => Ok(false),
-        _ => Err(bad_request(&format!("{name} must be true or false"))),
+        _ => Err(request_error(&format!("{name} must be true or false"))),
     }
 }
 
-fn page_limit(value: &str, max: usize) -> Result<usize, Response> {
+fn page_limit(value: &str, max: usize) -> Result<usize, Box<Response>> {
     match value.parse::<usize>() {
         Ok(limit) if (1..=max).contains(&limit) => Ok(limit),
-        _ => Err(bad_request(&format!("limit must be 1 to {max}"))),
+        _ => Err(request_error(&format!("limit must be 1 to {max}"))),
     }
 }
 
-fn list_request(query: Option<&str>) -> Result<Request, Response> {
+fn list_request(query: Option<&str>) -> Result<Request, Box<Response>> {
     let mut scope = ScopeSelector::Current;
     let mut limit = DEFAULT_RECORD_PAGE;
     let mut cursor = String::new();
@@ -102,7 +110,7 @@ fn list_request(query: Option<&str>) -> Result<Request, Response> {
     let now = Utc::now();
     let time = |value: &str, name: &str| {
         parse_time_or_age(value, now).ok_or_else(|| {
-            bad_request(&format!(
+            request_error(&format!(
                 "{name} must be an RFC 3339 time or an age like 30d"
             ))
         })
@@ -115,7 +123,11 @@ fn list_request(query: Option<&str>) -> Result<Request, Response> {
                     "user" => ScopeSelector::User,
                     "workspace" => ScopeSelector::Workspace,
                     "all" => ScopeSelector::All,
-                    _ => return Err(bad_request("scope must be current, user, workspace or all")),
+                    _ => {
+                        return Err(request_error(
+                            "scope must be current, user, workspace or all",
+                        ));
+                    }
                 }
             }
             "limit" => limit = page_limit(&value, MAX_RECORD_PAGE)?,
@@ -124,7 +136,9 @@ fn list_request(query: Option<&str>) -> Result<Request, Response> {
             "state" => filters
                 .states
                 .push(RecordState::parse(&value).ok_or_else(|| {
-                    bad_request("state must be active, needs_review, superseded, retracted or all")
+                    request_error(
+                        "state must be active, needs_review, superseded, retracted or all",
+                    )
                 })?),
             "kind" => filters.kinds.push(value),
             "label" => filters.labels.push(value),
@@ -132,11 +146,11 @@ fn list_request(query: Option<&str>) -> Result<Request, Response> {
             "verified_after" => filters.verified_after = Some(time(&value, "verified_after")?),
             "unverified" => filters.unverified_only = flag(&value, "unverified")?,
             "review_due" => filters.review_due_only = flag(&value, "review_due")?,
-            _ => return Err(bad_request(&format!("unknown query parameter {name}"))),
+            _ => return Err(request_error(&format!("unknown query parameter {name}"))),
         }
     }
     if filters.unverified_only && filters.verified_after.is_some() {
-        return Err(bad_request(
+        return Err(request_error(
             "unverified cannot be combined with verified_after",
         ));
     }
@@ -150,11 +164,11 @@ fn list_request(query: Option<&str>) -> Result<Request, Response> {
     })
 }
 
-fn review_at(review_in: Option<&str>) -> Result<Option<chrono::DateTime<Utc>>, Response> {
+fn review_at(review_in: Option<&str>) -> Result<Option<chrono::DateTime<Utc>>, Box<Response>> {
     review_in
         .map(|age| {
             review_deadline(age)
-                .ok_or_else(|| bad_request("review_in must be an age like 30d, 12h or 45m"))
+                .ok_or_else(|| request_error("review_in must be an age like 30d, 12h or 45m"))
         })
         .transpose()
 }
@@ -166,7 +180,7 @@ pub async fn list(
 ) -> Response {
     let request = match list_request(query.as_deref()) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match run(&server, &id, request).await {
         Ok(Reply::MemoryList(page)) => json_response(
@@ -177,7 +191,7 @@ pub async fn list(
             },
         ),
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -201,7 +215,7 @@ pub async fn create(
 ) -> Response {
     let body: RememberBody = match parse_body(&body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if body.scope != "user" && body.scope != "workspace" {
         return bad_request("scope must be user or workspace");
@@ -211,7 +225,7 @@ pub async fn create(
     }
     let review_at = match review_at(body.review_in.as_deref()) {
         Ok(review_at) => review_at,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let request = Request::Remember {
         scope: body.scope,
@@ -229,7 +243,7 @@ pub async fn create(
         }
         Ok(Reply::Usage(message)) => bad_request(&message),
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -242,22 +256,21 @@ pub async fn show(
             json_response(StatusCode::OK, &MemoryRecord::from(&record))
         }
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
-fn expected_revision(query: Option<&str>) -> Result<Option<u64>, Response> {
+fn expected_revision(query: Option<&str>) -> Result<Option<u64>, Box<Response>> {
     let mut expected = None;
     for (name, value) in pairs(query) {
         match name.as_str() {
             "expected_revision" => {
-                expected = Some(
-                    value
-                        .parse()
-                        .map_err(|_| bad_request("expected_revision must be a revision number"))?,
-                )
+                expected =
+                    Some(value.parse().map_err(|_| {
+                        request_error("expected_revision must be a revision number")
+                    })?)
             }
-            _ => return Err(bad_request(&format!("unknown query parameter {name}"))),
+            _ => return Err(request_error(&format!("unknown query parameter {name}"))),
         }
     }
     Ok(expected)
@@ -270,7 +283,7 @@ pub async fn forget(
 ) -> Response {
     let expected_revision = match expected_revision(query.as_deref()) {
         Ok(expected) => expected,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let request = Request::MemoryForget {
         id: record_id,
@@ -289,7 +302,7 @@ pub async fn forget(
             },
         ),
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -312,7 +325,7 @@ pub async fn set_state(
 ) -> Response {
     let body: StateBody = match parse_body(&body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(state) = RecordState::parse(&body.state) else {
         return bad_request("state must be active, needs_review, superseded or retracted");
@@ -353,12 +366,12 @@ pub async fn verify(
     } else {
         match parse_body(&body) {
             Ok(body) => body,
-            Err(response) => return response,
+            Err(response) => return *response,
         }
     };
     let review_at = match review_at(body.review_in.as_deref()) {
         Ok(review_at) => review_at,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let request = Request::MemoryVerify {
         id: record_id,
@@ -369,7 +382,7 @@ pub async fn verify(
 }
 
 /// The record that a state, verify or restore write produced.
-fn record_reply(server: &Server, reply: Result<Reply, Response>) -> Response {
+fn record_reply(server: &Server, reply: Result<Reply, Box<Response>>) -> Response {
     match reply {
         Ok(
             Reply::MemoryStateChanged(record)
@@ -377,7 +390,7 @@ fn record_reply(server: &Server, reply: Result<Reply, Response>) -> Response {
             | Reply::MemoryRestored(record),
         ) => json_response(StatusCode::OK, &MemoryRecord::from(&record)),
         Ok(_) => unexpected(server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -390,7 +403,7 @@ pub async fn history(
             json_response(StatusCode::OK, &MemoryHistory::from(&history))
         }
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -403,11 +416,11 @@ pub async fn diff(
     for (name, value) in pairs(query.as_deref()) {
         let revision = value
             .parse::<u64>()
-            .map_err(|_| bad_request(&format!("{name} must be a revision number")));
+            .map_err(|_| request_error(&format!("{name} must be a revision number")));
         match (name.as_str(), revision) {
             ("from", Ok(revision)) => from = Some(revision),
             ("to", Ok(revision)) => to = Some(revision),
-            ("from" | "to", Err(response)) => return response,
+            ("from" | "to", Err(response)) => return *response,
             _ => return bad_request(&format!("unknown query parameter {name}")),
         }
     }
@@ -428,7 +441,7 @@ pub async fn diff(
             },
         ),
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -447,7 +460,7 @@ pub async fn restore(
 ) -> Response {
     let body: RestoreBody = match parse_body(&body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let request = Request::MemoryRestore {
         id: record_id,
@@ -470,7 +483,7 @@ pub async fn propose(
 ) -> Response {
     let body: ProposeBody = match parse_body(&body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let evidence = body
         .evidence
@@ -489,7 +502,7 @@ pub async fn propose(
             json_response(StatusCode::OK, &MemoryProposal::from(&outcome))
         }
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -516,7 +529,7 @@ pub async fn search(
             },
         ),
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -530,7 +543,7 @@ pub async fn candidates(
         match name.as_str() {
             "limit" => match page_limit(&value, MAX_CANDIDATE_PAGE) {
                 Ok(value) => limit = value,
-                Err(response) => return response,
+                Err(response) => return *response,
             },
             "cursor" => cursor = value,
             _ => return bad_request(&format!("unknown query parameter {name}")),
@@ -545,7 +558,7 @@ pub async fn candidates(
             },
         ),
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -562,7 +575,7 @@ pub async fn review(
 ) -> Response {
     let body: ReviewBody = match parse_body(&body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(decision) = ReviewDecision::parse(&body.decision) else {
         return bad_request("decision must be accept or reject");
@@ -583,6 +596,6 @@ pub async fn review(
             },
         ),
         Ok(_) => unexpected(&server),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }

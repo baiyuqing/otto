@@ -142,6 +142,7 @@ mod tests {
                             input_tokens: 7,
                             output_tokens: 3,
                             cached_input_tokens: 0,
+                            ..Default::default()
                         }),
                         ..Message::default()
                     },

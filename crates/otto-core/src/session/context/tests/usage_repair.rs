@@ -37,6 +37,7 @@ test!(build_context_usage_comes_from_the_full_active_path {
             input_tokens: 20,
             output_tokens: 6,
             cached_input_tokens: 0,
+            ..Default::default()
         }
     );
 });
@@ -56,6 +57,7 @@ test!(build_context_counts_a_task_notification_usage {
         input_tokens: 40,
         output_tokens: 5,
         cached_input_tokens: 30,
+        ..Default::default()
     };
     let mut notification = entry("custom_message", "91000002", Some("91000001"));
     notification.custom_message = Some(Box::new(PiCustomMessage {
@@ -82,6 +84,7 @@ test!(build_context_counts_a_task_notification_usage {
             input_tokens: 50,
             output_tokens: 8,
             cached_input_tokens: 30,
+            ..Default::default()
         },
         "the sub-agent's tokens belong to the session totals"
     );

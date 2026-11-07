@@ -9,6 +9,7 @@ fn serialized_request_size_matches_the_exact_wire_payload() {
         system_prompt: "system\n\t\\\"界".to_string(),
         thinking: "high".to_string(),
         cache_key: String::new(),
+        cache_boundaries: Vec::new(),
         messages: vec![Message {
             role: Role::User,
             blocks: vec![Block::text("escape-heavy: \\ \" \n \t 界 <>&")],

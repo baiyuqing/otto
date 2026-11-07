@@ -90,6 +90,7 @@ fn model_call(at: i64, op: &str, kind: ProviderCallKind, started: i64, ms: u64) 
             input_tokens: 100,
             output_tokens: 7,
             cached_input_tokens: 0,
+            ..Default::default()
         }),
         request: Some(RequestEstimate {
             system_prompt_tokens: 11,
@@ -415,6 +416,7 @@ fn a_session_without_provider_calls_gets_estimated_provider_spans() {
         input_tokens: 9,
         output_tokens: 1,
         cached_input_tokens: 0,
+        ..Default::default()
     });
     reply.finish_reason = Some(FinishReason::Stop);
     let messages = vec![text(5, Role::User, "hello"), reply];

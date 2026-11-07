@@ -50,6 +50,7 @@ async fn sends_the_expected_request_and_parses_text_and_a_tool_call() {
             input_tokens: 10,
             output_tokens: 5,
             cached_input_tokens: 2,
+            ..Default::default()
         })
     );
     assert!(response.cached_input_tokens_present);

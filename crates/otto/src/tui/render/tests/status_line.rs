@@ -112,6 +112,7 @@ async fn a_long_model_id_keeps_the_token_and_cache_totals_visible() {
         input_tokens: 93_498 + 7_091_584,
         output_tokens: 37_475,
         cached_input_tokens: 7_091_584,
+        ..Default::default()
     };
     app.cache_breakdown_complete = Some(true);
 

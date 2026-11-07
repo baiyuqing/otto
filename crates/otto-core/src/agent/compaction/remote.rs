@@ -40,6 +40,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             cache_key: self.options.cache_key.clone(),
             remote_compaction,
             request_remote_compaction: true,
+            cache_boundaries: Vec::new(),
         };
         let guarded_request = self.redactor.guard_provider_request(&request)?;
         emit(Event::CompactionPlanned {

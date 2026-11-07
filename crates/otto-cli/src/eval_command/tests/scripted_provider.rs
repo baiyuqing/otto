@@ -64,6 +64,7 @@ fn usage() -> Option<Usage> {
         input_tokens: 100,
         output_tokens: 10,
         cached_input_tokens: 40,
+        ..Default::default()
     })
 }
 

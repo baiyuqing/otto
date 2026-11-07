@@ -63,6 +63,7 @@ async fn child_provider_usage_reaches_the_shared_collector() {
                 input_tokens: 20,
                 output_tokens: 4,
                 cached_input_tokens: 10,
+                ..Default::default()
             },
         )],
     );
@@ -104,6 +105,7 @@ async fn task_finished_notification_carries_usage_and_its_cache_breakdown_presen
                 input_tokens: 20,
                 output_tokens: 4,
                 cached_input_tokens: 10,
+                ..Default::default()
             },
         )],
     );
@@ -129,6 +131,7 @@ async fn task_finished_notification_carries_usage_and_its_cache_breakdown_presen
             input_tokens: 20,
             output_tokens: 4,
             cached_input_tokens: 10,
+            ..Default::default()
         }),
         "the parent's session totals include the task's tokens"
     );

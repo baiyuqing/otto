@@ -308,6 +308,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             self.session.model_messages()
         };
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
+        // Message counts before the request-local memory message is inserted:
+        // the prefixes ending before the last two user messages recur in the
+        // next requests, which lack that message and any overlay text.
+        let mut cache_boundaries: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, message)| message.role == Role::User)
+            .map(|(index, _)| index)
+            .filter(|index| *index > 0)
+            .take(2)
+            .collect();
+        cache_boundaries.reverse();
         let memory_message = super::memory_retraction::memory_request_text(
             &state.memory_context,
             &state.retraction_context,
@@ -335,6 +348,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             cache_key: self.options.cache_key.clone(),
             remote_compaction,
             request_remote_compaction: false,
+            cache_boundaries,
         };
         // A remote checkpoint supersedes any older local one, and the request
         // carries only its tail, so the local checkpoint's first message id

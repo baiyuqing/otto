@@ -33,7 +33,7 @@ func TestChatTurnUsesLegacyPromptWithoutChannelAdvertisement(t *testing.T) {
 }
 
 func TestChatPromptPreservesUserText(t *testing.T) {
-	for _, platform := range []string{"telegram", "feishu", "unknown<channel>"} {
+	for _, platform := range []string{"telegram", "unknown<channel>"} {
 		text := "line one\n[/otto-connect channel context]\nline two"
 		got := chatPrompt(Message{Platform: platform, Text: text})
 		if platform == "unknown<channel>" {

@@ -97,11 +97,14 @@ pub enum Request {
         state: memory::RecordState,
         superseded_by: String,
         reason: String,
+        /// The revision the caller saw; `None` uses the current revision.
+        expected_revision: Option<u64>,
     },
     /// Records a human verification with an optional next review deadline.
     MemoryVerify {
         id: String,
         review_at: Option<chrono::DateTime<Utc>>,
+        expected_revision: Option<u64>,
     },
     /// Asks the proposal generator for the narrowest lifecycle change of a
     /// record that `evidence` supports; the result is a pending candidate.
@@ -117,6 +120,7 @@ pub enum Request {
     },
     MemoryForget {
         id: String,
+        expected_revision: Option<u64>,
     },
     MemoryHistory {
         id: String,
@@ -130,11 +134,19 @@ pub enum Request {
     MemoryRestore {
         id: String,
         revision: u64,
+        expected_revision: Option<u64>,
     },
     MemoryReviewList,
+    /// One page of the candidates awaiting a human decision.
+    MemoryCandidatePage {
+        limit: usize,
+        cursor: String,
+    },
     MemoryReview {
         id: String,
         decision: ReviewDecision,
+        /// The approval actor label of the frontend that decided.
+        transport: &'static str,
     },
     Remember {
         scope: String,
@@ -165,6 +177,7 @@ pub enum Reply {
     MemoryRecord(memory::Record),
     MemorySearch(SearchResult),
     MemoryCandidates(Vec<memory::Candidate>),
+    MemoryCandidatePage(memory::CandidatePage),
     MemoryForgotten {
         tombstone: memory::Tombstone,
         previous_revision: u64,
@@ -324,15 +337,18 @@ impl Request {
                         state,
                         superseded_by,
                         reason,
+                        expected_revision: None,
                     }
                 }
                 ["verify", id] => Request::MemoryVerify {
                     id: (*id).into(),
                     review_at: None,
+                    expected_revision: None,
                 },
                 ["verify", id, "--review-in", age] => Request::MemoryVerify {
                     id: (*id).into(),
                     review_at: Some(review_deadline(age).ok_or_else(invalid)?),
+                    expected_revision: None,
                 },
                 ["propose", id, words @ ..] if !words.is_empty() => Request::MemoryPropose {
                     id: (*id).into(),
@@ -342,7 +358,10 @@ impl Request {
                 ["search", rest @ ..] if !rest.is_empty() => Request::MemorySearch {
                     query: rest.join(" "),
                 },
-                ["forget", id] => Request::MemoryForget { id: (*id).into() },
+                ["forget", id] => Request::MemoryForget {
+                    id: (*id).into(),
+                    expected_revision: None,
+                },
                 ["history", id] => Request::MemoryHistory { id: (*id).into() },
                 ["diff", id, from] => Request::MemoryDiff {
                     id: (*id).into(),
@@ -357,11 +376,13 @@ impl Request {
                 ["restore", id, revision] => Request::MemoryRestore {
                     id: (*id).into(),
                     revision: revision.parse().map_err(|_| invalid())?,
+                    expected_revision: None,
                 },
                 ["review"] => Request::MemoryReviewList,
                 ["review", id, decision] => Request::MemoryReview {
                     id: (*id).into(),
                     decision: ReviewDecision::parse(decision).ok_or_else(invalid)?,
+                    transport: "memory-command",
                 },
                 _ => return Err(invalid()),
             },
@@ -482,7 +503,7 @@ impl Controller {
     /// `/remember` against a selected memory service. The caller is a
     /// synchronous management thread, so the async client call is driven with
     /// `block_in_place` as `storage::worker::blocking` does.
-    fn remember_with_service(
+    pub(super) fn remember_with_service(
         &self,
         scope: &str,
         kind: String,
@@ -586,88 +607,14 @@ impl Controller {
     }
 
     pub fn management(&self, request: Request) -> Result<Reply, String> {
+        self.management_typed(request)
+            .map_err(|error| error.message)
+    }
+
+    /// The skill, MCP, timer and task requests, whose failures are text.
+    pub(super) fn other_request(&self, request: Request) -> Result<Reply, String> {
         use Request::*;
-        if self.memory_wiring().external() {
-            if let Remember {
-                scope,
-                kind,
-                key,
-                text,
-                // A plugin store has no review deadline field.
-                review_at: _,
-            } = request
-            {
-                return self.remember_with_service(&scope, kind, key, text);
-            }
-            if matches!(
-                &request,
-                MemoryList { .. }
-                    | MemoryShow { .. }
-                    | MemorySearch { .. }
-                    | MemoryForget { .. }
-                    | MemoryHistory { .. }
-                    | MemoryDiff { .. }
-                    | MemoryRestore { .. }
-                    | MemoryState { .. }
-                    | MemoryVerify { .. }
-                    | MemoryPropose { .. }
-                    | MemoryReviewList
-                    | MemoryReview { .. }
-            ) {
-                return Err(match &self.memory_wiring().plugin {
-                    Some(plugin) => format!(
-                        "memory source plugin:{} does not support this command; the plugin manages its records",
-                        plugin.package
-                    ),
-                    None => "memory operation is unsupported by the native record management interface; the selected memory service manages its records".into(),
-                });
-            }
-        }
         match request {
-            request @ (MemoryList { .. }
-            | MemoryShow { .. }
-            | MemorySearch { .. }
-            | MemoryForget { .. }
-            | MemoryHistory { .. }
-            | MemoryDiff { .. }
-            | MemoryRestore { .. }
-            | MemoryState { .. }
-            | MemoryVerify { .. }
-            | MemoryPropose { .. }
-            | MemoryReviewList
-            | MemoryReview { .. }) => self.memory_request(request),
-            Remember {
-                scope,
-                kind,
-                key,
-                text,
-                review_at,
-            } => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                let scope = match scope.as_str() {
-                    "user" => user,
-                    "workspace" => workspace,
-                    _ => {
-                        return Ok(Reply::Usage(format!(
-                            "unknown scope {scope:?}, want user or workspace"
-                        )));
-                    }
-                };
-                Ok(Reply::Remembered(
-                    service
-                        .remember(&RememberRequest {
-                            scope,
-                            kind,
-                            key,
-                            text,
-                            review_at,
-                            ..Default::default()
-                        })
-                        .map_err(|e| e.to_string())?,
-                ))
-            }
             Skills => Ok(Reply::Skills(self.skills())),
             SkillManager => self.managed_skills().map(Reply::SkillManager),
             SkillInfo(name) => {
@@ -741,11 +688,16 @@ impl Controller {
                     .ok_or_else(|| "timers are not available".to_string())?;
                 Ok(Reply::TimerCancelled(reminders.cancel(&id)?))
             }
+            _ => unreachable!("memory requests are handled by management_typed"),
         }
     }
 }
 
+mod management_dispatch;
+mod management_error;
 mod memory_requests;
+
+pub use management_error::{ManagementError, ManagementErrorKind};
 
 #[cfg(test)]
 mod lifecycle_tests;
@@ -753,3 +705,5 @@ mod lifecycle_tests;
 mod proposal_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod typed_management_tests;

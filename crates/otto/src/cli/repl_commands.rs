@@ -101,6 +101,7 @@ pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> 
         Reply::MemoryRecord(record) => render_list_result(std::slice::from_ref(record), ""),
         Reply::MemorySearch(result) => render_search_result(result),
         Reply::MemoryCandidates(rows) => render_pending_candidates(rows),
+        Reply::MemoryCandidatePage(page) => render_pending_candidates(&page.candidates),
         Reply::MemoryForgotten {
             tombstone,
             previous_revision,

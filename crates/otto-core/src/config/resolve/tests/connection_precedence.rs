@@ -321,15 +321,47 @@ fn legacy_profile_flag_and_environment_select_converted_models() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn missing_named_api_key_environment_variable_is_an_error() {
-    let error = resolve_with(
+fn missing_named_api_key_environment_variable_still_resolves_the_model() {
+    let runtime = resolve_with(
         &HashMap::new(),
         SessionDefaults::default(),
         Overrides::default(),
     )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("api key"), "{error}");
+    .expect("a missing key must not block startup or model selection");
+    assert_eq!(runtime.model_selector.to_string(), "alpha/shared");
+    assert_eq!(runtime.api_key_env, "ALPHA_KEY");
+    assert!(runtime.api_key.is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn a_missing_key_is_not_a_policy_violating_credential_binding() {
+    let mut file = two_providers();
+    file.policy = Some(crate::config::layered::ManagedPolicy {
+        allowed_credential_variables: Some(vec!["ALPHA_KEY".into()]),
+        ..Default::default()
+    });
+    let runtime = resolve(
+        &file,
+        &HashMap::new(),
+        &SessionDefaults::default(),
+        &Overrides::default(),
+    )
+    .expect("an unbound key binds no credential");
+    assert!(runtime.api_key.is_empty());
+    let error = resolve(
+        &file,
+        &HashMap::new(),
+        &SessionDefaults::default(),
+        &Overrides {
+            model: "beta/shared".into(),
+            ..Default::default()
+        },
+    );
+    assert!(
+        error.is_err(),
+        "policy still rejects a disallowed variable name"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

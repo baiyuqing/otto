@@ -180,15 +180,21 @@ impl Builder {
             ProviderClient::Unavailable
         } else if runtime.provider_type == otto_core::config::PROVIDER_CLAUDE {
             ProviderClient::Claude {
-                client: Arc::new(crate::provider::claude::Client::new_trusted(
-                    runtime
-                        .endpoint
-                        .as_ref()
-                        .ok_or_else(|| "missing trusted provider endpoint".to_string())?,
-                    &runtime.api_key,
-                    &runtime.api_version,
-                    &runtime.workspace_id,
-                )),
+                client: {
+                    let client = crate::provider::claude::Client::new_trusted(
+                        runtime
+                            .endpoint
+                            .as_ref()
+                            .ok_or_else(|| "missing trusted provider endpoint".to_string())?,
+                        &runtime.api_key,
+                        &runtime.api_version,
+                        &runtime.workspace_id,
+                    );
+                    Arc::new(match missing_credential_message(runtime) {
+                        Some(message) => client.with_missing_credential(&message),
+                        None => client,
+                    })
+                },
                 timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
             }
@@ -210,16 +216,39 @@ impl Builder {
             }
         } else {
             ProviderClient::Compat {
-                client: Arc::new(Client::new_trusted(
-                    runtime
-                        .endpoint
-                        .as_ref()
-                        .ok_or_else(|| "missing trusted provider endpoint".to_string())?,
-                    &runtime.api_key,
-                )),
+                client: {
+                    let client = Client::new_trusted(
+                        runtime
+                            .endpoint
+                            .as_ref()
+                            .ok_or_else(|| "missing trusted provider endpoint".to_string())?,
+                        &runtime.api_key,
+                    );
+                    Arc::new(match missing_credential_message(runtime) {
+                        Some(message) => client.with_missing_credential(&message),
+                        None => client,
+                    })
+                },
                 timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
             }
         })
     }
+}
+
+/// The request-time error for a provider with no API key bound, naming only the
+/// variable (never a value) and both recovery paths.
+pub(crate) fn missing_credential_message(runtime: &Runtime) -> Option<String> {
+    if !runtime.api_key.is_empty() {
+        return None;
+    }
+    let variable = if runtime.api_key_env.is_empty() {
+        otto_core::config::providers::FALLBACK_API_KEY_ENV
+    } else {
+        runtime.api_key_env.as_str()
+    };
+    Some(format!(
+        "missing api key for provider \"{}\": set {variable} and restart Otto, or switch to a model whose provider has credentials (for example with /model)",
+        runtime.provider_name
+    ))
 }

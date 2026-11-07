@@ -7,9 +7,12 @@ credentials or installed extensions, including `otto serve`/ACP rather than
 only its attaching client. A timeout or lost response does **not** prove an
 external operation did nothing: inspect state before repeating a write.
 
-### `otto: missing api key`
+### `missing api key for provider "<name>"`
 
-Set the active provider's `api_key_env` variable privately in the runtime's
+Otto still starts without a key; this error appears when a turn reaches a
+Claude or OpenAI-compatible provider that has none, and nothing is sent. Either
+switch to a model whose provider has credentials (`/model`, or `--model` on the
+next start), or set the active provider's `api_key_env` variable privately in the runtime's
 environment, then restart. For Claude this is normally `ANTHROPIC_API_KEY`; if
 the key is not scoped to one workspace, also set the variable named by
 `workspace_id_env`. When using `otto-connect`, change the environment of the

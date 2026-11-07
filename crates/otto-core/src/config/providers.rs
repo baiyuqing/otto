@@ -21,6 +21,8 @@ pub const BUILTIN_PROVIDERS: [&str; 3] = [
     PROVIDER_CHATGPT,
 ];
 pub const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+/// The API key variable used when a provider names none or its named variable is unset.
+pub const FALLBACK_API_KEY_ENV: &str = "OTTO_API_KEY";
 pub const CLAUDE_DEFAULT_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 pub fn is_builtin_provider(name: &str) -> bool {

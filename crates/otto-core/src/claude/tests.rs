@@ -1,3 +1,5 @@
+mod stream_tests;
+
 use super::{
     overflow, protocol,
     stream::{MAX_EVENT_BYTES, StreamAssembler, StreamError},
@@ -343,19 +345,10 @@ fn sequence_errors_identify_the_violated_rule_without_response_content() {
     let input_delta = event(json!({"type":"content_block_delta","index":0,
         "delta":{"type":"input_json_delta","partial_json":"private-input-marker"}}));
     let started = start();
-    let ended = started.clone() + &message_delta;
     let mut cases = vec![
         (
-            started.clone() + &message_delta + &message_delta,
-            "message_delta: duplicate delta",
-        ),
-        (
-            started.clone() + &text_block + &message_delta,
-            "message_delta: content block still open",
-        ),
-        (
             started.clone() + &event(json!({"type":"message_stop"})),
-            "message_stop: missing message_delta",
+            "message_stop: missing stop_reason",
         ),
         (
             started.clone() + &text_delta,
@@ -396,25 +389,12 @@ fn sequence_errors_identify_the_violated_rule_without_response_content() {
             "message_stop: before message_start",
         ),
     ];
-    for (wire_event, before, after) in [
-        (
-            text_block,
-            "content_block_start: before message_start",
-            "content_block_start: after message_delta",
-        ),
-        (
-            text_delta,
-            "content_block_delta: before message_start",
-            "content_block_delta: after message_delta",
-        ),
-        (
-            block_stop,
-            "content_block_stop: before message_start",
-            "content_block_stop: after message_delta",
-        ),
+    for (wire_event, before) in [
+        (text_block, "content_block_start: before message_start"),
+        (text_delta, "content_block_delta: before message_start"),
+        (block_stop, "content_block_stop: before message_start"),
     ] {
         cases.push((wire_event.clone(), before));
-        cases.push((ended.clone() + &wire_event, after));
     }
     for (body, reason) in cases {
         let error = decode(&body).unwrap_err();

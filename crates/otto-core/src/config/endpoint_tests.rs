@@ -21,7 +21,7 @@ fn custom_file() -> File {
 }
 
 #[test]
-fn endpoint_upgrade_and_override_fail_before_missing_credential_error() {
+fn endpoint_upgrade_and_override_are_checked_even_without_credentials() {
     let mut file = custom_file();
     let run = |file: &File, overrides: &Overrides| {
         resolve(
@@ -38,11 +38,9 @@ fn endpoint_upgrade_and_override_fail_before_missing_credential_error() {
     );
     file.providers.get_mut("gateway").unwrap().trusted_origins =
         vec!["https://gateway.example".into()];
-    let error = run(&file, &Overrides::default()).unwrap_err().to_string();
-    assert!(
-        !error.contains("not trusted"),
-        "authorized endpoint should reach credential lookup: {error}"
-    );
+    let runtime = run(&file, &Overrides::default())
+        .expect("an authorized endpoint resolves even before a key is bound");
+    assert!(runtime.api_key.is_empty());
     let error = run(
         &file,
         &Overrides {

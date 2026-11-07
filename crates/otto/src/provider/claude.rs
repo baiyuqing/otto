@@ -31,7 +31,8 @@ use tokio_util::sync::CancellationToken;
 
 use otto_core::claude::overflow::{MAX_ERROR_BODY, classify_overflow};
 use otto_core::claude::protocol::{build_request, serialized_request_size};
-use otto_core::claude::stream::StreamAssembler;
+use otto_core::claude::stream::{StreamAssembler, StreamError};
+use otto_core::claude::{output_budget::OutputBudget, tool_input::ToolInputError};
 use otto_core::model::{EffectCertainty, OperationStopReason};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
@@ -65,9 +66,9 @@ const MAX_MODELS_BODY: usize = 8 << 20;
 
 /// Attempts for one completion, shared by the retryable failure classes: a
 /// connection that could not be established, a dispatched request whose
-/// transport failed before any stream event reached the caller, and an
-/// HTTP 429 or 503 status. A `Retry-After` value replaces the backoff delay
-/// and is capped at `retry_after_cap`.
+/// transport failed, HTTP 429/503, and completed token-truncated tool JSON
+/// when a larger known output budget is available. A `Retry-After` value
+/// replaces the backoff delay and is capped at `retry_after_cap`.
 const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
     max_attempts: 4,
     base: Duration::from_secs(1),
@@ -111,6 +112,9 @@ enum AttemptError {
     /// No retry: the failure is not a transient transport failure, a model
     /// idle timeout or a 429/503 status.
     Sent(ProviderError),
+    /// A completed message with invalid tool input; metadata determines
+    /// whether a larger output budget can safely retry this generation.
+    ToolInput(ToolInputError, bool),
 }
 
 /// A usable client: the base URL passed validation and the HTTP client built.
@@ -370,7 +374,10 @@ impl Provider for Client {
     /// `Retry-After` in seconds replaces the delay, capped at 30 s. Any other
     /// HTTP status (including 500, 502 and 504), a stream-codec error, a
     /// response validation failure and a non-transient transport error are
-    /// never retried.
+    /// never retried, except completed max_tokens responses with incomplete
+    /// tool JSON when the request budget can grow within the model ceiling.
+    /// These retries share the same attempt/deadline policy and invalidate
+    /// provisional output; malformed complete arguments are never repaired.
     ///
     async fn complete(
         &self,
@@ -403,7 +410,7 @@ impl Provider for Client {
                     );
                 }
             };
-            let wire = match build_request(request) {
+            let mut wire = match build_request(request) {
                 Ok(wire) => wire,
                 Err(error) => {
                     return ProviderSettlement::failed(
@@ -413,7 +420,7 @@ impl Provider for Client {
                     );
                 }
             };
-            let payload = match serde_json::to_vec(&wire) {
+            let mut payload = match serde_json::to_vec(&wire) {
                 Ok(payload) => payload,
                 Err(error) => {
                     return ProviderSettlement::failed(
@@ -428,6 +435,7 @@ impl Provider for Client {
             if let Err(error) = check_running(control) {
                 return provider_failure(error, 0, EffectCertainty::NotStarted, control);
             }
+            let output_budget = OutputBudget::for_model(&request.model);
             // HTTP requests sent.
             let mut attempts = 0;
             // Failed attempts counted against `RETRY_POLICY`.
@@ -438,14 +446,46 @@ impl Provider for Client {
                 attempts += 1;
                 // Per attempt: only an interruption after output sets it.
                 let mut interrupted_output = false;
+                let mut generation_completed = false;
                 // `dispatched` records whether a retry could repeat provider work,
                 // which the settlement must keep as unknown effect certainty.
-                let (error, reason, dispatched, retry_after, status_retry) = match self
+                let (error, reason, dispatched, retry_after, completed_response) = match self
                     .attempt(ready, &payload, &mut *emit, control, observer)
                     .await
                 {
                     Ok(response) => break Ok(response),
                     Err(AttemptError::Sent(error)) => break Err(error),
+                    Err(AttemptError::ToolInput(input_error, output_emitted)) => {
+                        let error = ProviderError::Other(format!(
+                            "{input_error} (max_tokens={})",
+                            wire.max_tokens
+                        ));
+                        let next_budget = input_error
+                            .is_token_limit_truncation()
+                            .then(|| output_budget.grow(wire.max_tokens))
+                            .flatten();
+                        let Some(next_budget) = next_budget else {
+                            break Err(error);
+                        };
+                        wire.max_tokens = next_budget;
+                        payload = match serde_json::to_vec(&wire) {
+                            Ok(payload) => payload,
+                            Err(_) => {
+                                break Err(ProviderError::Other(
+                                    "encode Claude recovery request".into(),
+                                ));
+                            }
+                        };
+                        interrupted_output = output_emitted;
+                        generation_completed = true;
+                        (
+                            error,
+                            "Claude tool input reached output token limit",
+                            interrupted_seen,
+                            None,
+                            true,
+                        )
+                    }
                     Err(AttemptError::NotSent(error)) => {
                         (error, CONNECT_RETRY_REASON, false, None, false)
                     }
@@ -454,7 +494,7 @@ impl Provider for Client {
                         interrupted_output = output_emitted;
                         (error, reason, true, None, false)
                     }
-                    // A status proves the endpoint answered; only an earlier
+                    // A completed response proves the endpoint answered; only an earlier
                     // interruption leaves the effect unknown.
                     Err(AttemptError::RetryableStatus(error, reason, retry_after)) => {
                         (error, reason, interrupted_seen, retry_after, true)
@@ -472,7 +512,7 @@ impl Provider for Client {
                     let error = self.safe_error(error);
                     return if dispatched {
                         provider_failure(error, attempts, EffectCertainty::Unknown, control)
-                    } else if status_retry {
+                    } else if completed_response {
                         ProviderSettlement::failed(error, attempts, EffectCertainty::Completed)
                     } else {
                         ProviderSettlement::failed(error, attempts, EffectCertainty::NotStarted)
@@ -488,6 +528,15 @@ impl Provider for Client {
                 if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
                     return if dispatched {
                         provider_failure(error, attempts, EffectCertainty::Unknown, control)
+                    } else if generation_completed {
+                        ProviderSettlement::stopped(
+                            error,
+                            attempts,
+                            EffectCertainty::Completed,
+                            control
+                                .stop_reason()
+                                .unwrap_or(OperationStopReason::UserCancellation),
+                        )
                     } else {
                         not_started_stop(error, attempts, control)
                     };

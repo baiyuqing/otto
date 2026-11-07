@@ -72,6 +72,8 @@ struct State {
     /// than just "is this registry closed".
     migrating: bool,
     counter: u64,
+    recovery_diagnostics: Vec<String>,
+    recovery_admission_blocked: bool,
     order: Vec<String>,
     entries: HashMap<String, Entry>,
     names: HashMap<String, String>,
@@ -99,6 +101,7 @@ impl Updates {
 /// The per-session sub-agent task registry.
 pub struct Tasks {
     state: Mutex<State>,
+    admission_transcript: Option<Arc<dyn crate::session::SessionHandle>>,
     inbox: Arc<Inbox>,
     /// `inbox` as the port every consumer uses.
     mailbox: Arc<dyn Mailbox>,
@@ -174,6 +177,7 @@ impl Tasks {
             inbox_updates.signal();
         }))));
         Self {
+            admission_transcript: None,
             state: Mutex::new(State {
                 counter: starting_counter,
                 ..State::default()
@@ -306,7 +310,13 @@ impl Tasks {
                     id
                 }
                 None => {
-                    state.counter += 1;
+                    if state.recovery_admission_blocked {
+                        return Err(TaskError::Invalid("new task admission unavailable: incomplete child recovery inventory; inspect recovery diagnostics, repair storage/linkage and reopen".into()));
+                    }
+                    state.counter = state
+                        .counter
+                        .checked_add(1)
+                        .ok_or_else(|| TaskError::Invalid("task id counter exhausted".into()))?;
                     format!("t{}", state.counter)
                 }
             };
@@ -373,6 +383,8 @@ impl Tasks {
             match state.entries.get_mut(id) {
                 Some(entry) if !entry.task.is_final() => {
                     entry.task.status = status;
+                    entry.cancel = None;
+                    entry.in_tool = false;
                     entry.task.finished_at = Some(finished_at);
                     entry.task.result = result.to_string();
                     entry.task.error = task_error.to_string();
@@ -694,6 +706,7 @@ impl Tasks {
 
 pub(crate) mod observer;
 mod progress;
+mod recovery;
 mod task;
 mod task_names;
 

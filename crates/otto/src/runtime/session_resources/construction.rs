@@ -22,9 +22,9 @@ impl Builder {
     ///
     /// Creation installs the `<session>.inbox.json` sidecar, restores the
     /// unread notifications from it, appends the failover recovery notice and
-    /// picks the next sub-agent task id after the highest one already used by
-    /// a child transcript. `subagents_enabled` decides whether the task and
-    /// timer registries exist.
+    /// reconstructs non-running child snapshots on every saved activation.
+    /// Saved sessions retain diagnostic task inventory even when no executor
+    /// is enabled; no child is spawned by resource creation.
     pub(crate) fn session_resources(
         &self,
         session: &SharedSession,
@@ -34,13 +34,26 @@ impl Builder {
     ) -> Arc<SessionResources> {
         session.resources_or_create(|| {
             let children_dir = PathBuf::from(session.path()).with_extension("");
-            let tasks = subagents_enabled.then(|| Arc::new(self.new_tasks(session, &children_dir)));
+            let tasks = (subagents_enabled || !self.no_session).then(|| {
+                Arc::new(
+                    self.new_tasks(session)
+                        .with_admission_transcript(Arc::clone(session.handle())),
+                )
+            });
             let notifications = match &tasks {
                 Some(tasks) => Arc::clone(tasks.notifications_inbox()),
                 None => Arc::new(Inbox::default()),
             };
             self.attach_inbox_sidecar(session, &notifications, warnings);
-            if tasks.is_some() {
+            if let Some(tasks) = &tasks {
+                if !self.no_session && !session.path().is_empty() {
+                    crate::subagent::recovery::activate(
+                        Path::new(&session.path()),
+                        tasks,
+                        notifications.as_ref(),
+                        warnings,
+                    );
+                }
                 self.notify_recovery(
                     session,
                     &notifications,
@@ -71,8 +84,11 @@ impl Builder {
     /// The task registry. A task id stays unique within the session across
     /// resumes, so the counter starts after the highest `t<k>` already used by
     /// a child transcript file.
-    fn new_tasks(&self, session: &SharedSession, children_dir: &Path) -> Tasks {
-        let starting_counter = subagent::tasks::highest_task_counter(children_dir);
+    fn new_tasks(&self, session: &SharedSession) -> Tasks {
+        // Activation's bounded inventory advances the counter and fences new
+        // admission if its upper bound is unknown; never perform a silent,
+        // unbounded filename scan here.
+        let starting_counter = 0;
         match &self.task_recorder {
             Some(store) => {
                 let (pid, process_started_at) = subagent::record::current_process();

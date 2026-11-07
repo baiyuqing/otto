@@ -18,6 +18,10 @@ pub fn completion_text(task: &Task, max_output_bytes: usize) -> String {
             "[task-notification] task {} {name} failed{model_segment} · {duration} · {calls}\n{}",
             task.id, task.error
         ),
+        TaskStatus::Unavailable => format!(
+            "[task-notification] task {} {name} unavailable; no execution is running; resume unavailable\n{}",
+            task.id, task.error
+        ),
         TaskStatus::Interrupted => format!(
             "[task-notification] task {} {name} interrupted{model_segment} · {duration} · {calls}\n{}",
             task.id, task.error

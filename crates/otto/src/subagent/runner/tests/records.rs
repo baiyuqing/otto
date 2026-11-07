@@ -97,7 +97,7 @@ async fn otto_task_spec_is_written_before_the_child_runs_and_covers_a_queued_tas
 }
 
 #[tokio::test]
-async fn otto_task_result_is_appended_after_the_notification_when_succeeded() {
+async fn otto_task_result_is_appended_before_the_notification_when_succeeded() {
     let dir = tempfile::tempdir().expect("dir");
     let parent_path = dir.path().join("parent.jsonl");
     let provider = FakeProvider::new();
@@ -139,7 +139,7 @@ async fn otto_task_result_is_appended_after_the_notification_when_succeeded() {
 }
 
 #[tokio::test]
-async fn otto_task_result_is_appended_after_the_notification_when_failed() {
+async fn otto_task_result_is_appended_before_the_notification_when_failed() {
     let dir = tempfile::tempdir().expect("dir");
     let parent_path = dir.path().join("parent.jsonl");
     let provider = FakeProvider::new();
@@ -187,7 +187,7 @@ async fn otto_task_result_is_appended_after_the_notification_when_failed() {
 }
 
 #[tokio::test]
-async fn otto_task_result_is_appended_after_the_notification_when_canceled() {
+async fn otto_task_result_is_appended_before_the_notification_when_canceled() {
     let dir = tempfile::tempdir().expect("dir");
     let parent_path = dir.path().join("parent.jsonl");
     let provider = FakeProvider::new();
@@ -452,7 +452,10 @@ async fn a_child_transcript_write_failure_fails_only_that_task() {
         .expect("start succeeds");
     let done = wait_final(&tasks, &task.id).await;
 
-    assert_eq!(done.status, TaskStatus::Failed);
-    assert!(!done.error.is_empty());
+    assert_eq!(done.status, TaskStatus::Interrupted);
+    assert!(
+        done.error
+            .contains("terminal result persistence was not acknowledged")
+    );
     plan.assert_all_fired();
 }

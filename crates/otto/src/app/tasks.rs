@@ -156,7 +156,7 @@ fn wire(task: &crate::subagent::tasks::Task) -> Task {
             SubagentStatus::Queued => TaskStatus::Queued,
             SubagentStatus::Running => TaskStatus::Running,
             SubagentStatus::Succeeded => TaskStatus::Succeeded,
-            SubagentStatus::Failed => TaskStatus::Failed,
+            SubagentStatus::Failed | SubagentStatus::Unavailable => TaskStatus::Failed,
             SubagentStatus::Canceled | SubagentStatus::Interrupted => TaskStatus::Canceled,
         },
         created_at: task.created_at.unwrap_or_default(),
@@ -242,6 +242,19 @@ pub fn task_view(runner: &Runner) -> Option<Arc<dyn TaskView>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_registry_snapshot_maps_to_non_success_wire_diagnostic() {
+        let observed = wire(&crate::subagent::tasks::Task {
+            id: "t1".into(),
+            status: SubagentStatus::Unavailable,
+            error: "ownership unavailable; resume unavailable".into(),
+            ..Default::default()
+        });
+        assert_eq!(observed.status, TaskStatus::Failed);
+        assert!(observed.status.final_status());
+        assert!(observed.error.contains("resume unavailable"));
+    }
 
     #[test]
     fn only_succeeded_failed_and_canceled_are_final() {

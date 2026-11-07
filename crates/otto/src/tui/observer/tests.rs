@@ -94,6 +94,7 @@ fn observer_renders_live_assistant_tools_status_and_description_not_internal_ent
     }
     assert!(!text.contains("hidden internal"));
     assert!(text.contains("F6: toggle"));
+    assert!(text.contains("Enter: toggle"));
 }
 
 #[test]
@@ -156,13 +157,13 @@ fn observer_paginates_stacked_panes_focuses_click_and_retains_completed() {
     let mut observer = observer();
     observer.rows(vec![row("a"), row("b"), row("c")]);
     let first = screen(&observer, 12);
-    assert!(first.contains("a · running"));
-    assert!(first.contains("b · running"));
-    assert!(!first.contains("c · running"));
+    assert!(first.contains("▾ a"), "{first}");
+    assert!(first.contains("▾ b"), "{first}");
+    assert!(!first.contains("▾ c"), "{first}");
     observer.focus_at(3, 8);
     assert_eq!(observer.focused, 1);
     observer.key(key(KeyCode::Tab));
-    assert!(screen(&observer, 12).contains("c · running"));
+    assert!(screen(&observer, 12).contains("▾ c"));
     observer.key(key(KeyCode::BackTab));
     assert_eq!(observer.focused, 1);
     let mut completed = row("a");
@@ -170,7 +171,50 @@ fn observer_paginates_stacked_panes_focuses_click_and_retains_completed() {
     observer.rows(vec![completed]);
     observer.rows(Vec::new());
     assert_eq!(observer.panes.len(), 3);
-    assert!(screen(&observer, 12).contains("a · completed"));
+    observer.focused = 0;
+    let rendered = screen(&observer, 12);
+    assert!(rendered.contains("a · completed"), "{rendered}");
+}
+
+#[test]
+fn observer_terminal_panes_collapse_by_default_and_manual_override_survives_refresh() {
+    let mut observer = observer();
+    let mut completed = row("done");
+    completed.status = "succeeded".into();
+    observer.rows(vec![row("live"), completed]);
+    assert!(!observer.is_collapsed(0));
+    assert!(observer.is_collapsed(1));
+    observer.focused = 1;
+    observer.key(key(KeyCode::Enter));
+    assert!(!observer.is_collapsed(1));
+    let mut refreshed = row("done");
+    refreshed.status = "failed".into();
+    observer.rows(vec![refreshed]);
+    assert!(!observer.is_collapsed(1));
+    observer.focused = 0;
+    observer.key(key(KeyCode::Enter));
+    let mut terminal = row("live");
+    terminal.status = "interrupted".into();
+    observer.rows(vec![terminal]);
+    assert!(observer.is_collapsed(0));
+    observer.focused = 1;
+    for height in [1, 2, 3, 5, 12] {
+        let rendered = screen(&observer, height);
+        assert!(!rendered.is_empty());
+        let geometry = observer.geometry.borrow();
+        assert!(geometry.iter().all(|(_, rect)| rect.height >= 1));
+        assert!(geometry.iter().all(|(_, rect)| rect.bottom() <= height));
+    }
+    let rendered = screen(&observer, 12);
+    assert!(rendered.contains("done"), "{rendered}");
+    let geometry = observer.geometry.borrow();
+    assert!(geometry.iter().all(|(_, rect)| rect.height >= 1));
+    assert!(geometry.iter().all(|(_, rect)| rect.bottom() <= 11));
+    drop(geometry);
+    assert!(
+        rendered.contains("succeeded") || rendered.contains("failed"),
+        "{rendered}"
+    );
 }
 
 #[test]

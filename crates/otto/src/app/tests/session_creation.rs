@@ -208,6 +208,7 @@ async fn a_saved_prompt_that_already_started_is_not_restored() {
     for (input_id, text) in [("in-1", "started"), ("in-2", "waiting")] {
         queue
             .save(&turn_queue::QueuedPrompt {
+                input_provenance: None,
                 input_id: input_id.into(),
                 turn_id: format!("turn-{input_id}"),
                 text: text.into(),

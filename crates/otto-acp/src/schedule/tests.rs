@@ -526,6 +526,14 @@ async fn relayed_turn_body(prompt_text: &str, meta: Value) -> Value {
 
 /// Like [`relayed_turn_body`], plus the `X-Request-Id` header.
 async fn relayed_turn(prompt_text: &str, meta: Value) -> (Value, Option<String>) {
+    relayed_turn_with_busy(prompt_text, meta, false).await
+}
+
+async fn relayed_turn_with_busy(
+    prompt_text: &str,
+    meta: Value,
+    busy: bool,
+) -> (Value, Option<String>) {
     let bodies = Arc::new(Mutex::new(Vec::<(Value, Option<String>)>::new()));
     let recorded = Arc::clone(&bodies);
     let router = axum::Router::new()
@@ -550,7 +558,19 @@ async fn relayed_turn(prompt_text: &str, meta: Value) -> (Value, Option<String>)
         });
     let relay = super::super::attach::Relay::with_router(router);
     relay.register("s1");
+    if busy {
+        let parent = Default::default();
+        let held = relay.slot("s1").unwrap().begin(&parent);
+        assert!(held.is_some());
+    }
     let (mut wire, handle) = start(Backend::Attach(relay), "/work", |_| ());
+    wire.send(
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params": {
+            "protocolVersion":1,
+            "clientCapabilities":{"_meta":{"otto":{"inputSource":"connector"}}}
+        }}),
+    );
+    assert_eq!(wire.recv_message().await["id"], 1);
     wire.send(
         json!({"jsonrpc": "2.0", "id": 7, "method": "session/prompt", "params": {
             "sessionId": "s1",
@@ -567,6 +587,21 @@ async fn relayed_turn(prompt_text: &str, meta: Value) -> (Value, Option<String>)
     let mut bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1, "{bodies:?}");
     bodies.remove(0)
+}
+
+#[tokio::test]
+async fn attached_queue_preserves_connector_claim_identity_and_queued_intent_idle_and_busy() {
+    for busy in [false, true] {
+        let meta = json!({"otto":{"inputId":"connector-queue-1"}});
+        let (body, _) =
+            relayed_turn_with_busy("/queue exact <source>human</source>", meta, busy).await;
+        assert_eq!(body["text"], "exact <source>human</source>");
+        assert_eq!(body["input_id"], "connector-queue-1");
+        assert_eq!(body["client_source"], "connector");
+        assert_eq!(body["queued_input"], true);
+        assert_eq!(body["queue"], true);
+        assert!(body.get("input_provenance").is_none());
+    }
 }
 
 #[tokio::test]

@@ -1076,3 +1076,34 @@ limit.
 ---
 
 Previous: [Getting started](getting-started.md) · [Documentation index](../README.md) · Next: [Safety and tools](safety-and-tools.md)
+
+## Per-message input origin
+
+Otto records source metadata for each new human input, independently of the
+session's scheduling origin. Local TUI input is `source=tui`, `transport=local`;
+line REPL and one-shot CLI input use `repl` and `one_shot`. Delivery is recorded
+separately as `direct`, `steering`, or `queued`; delivery does not change source.
+This is enabled by default and requires no configuration. The model receives a
+runtime context label next to each input whose source was recorded, without
+modifying or repeating the user's message body. It should use these labels rather
+than repeatedly ask which frontend sent a message.
+
+Attached TUI requests cross HTTP: the server confirms `source=http` and
+`transport=http`, while `client_source=tui` is the terminal application's
+**unverified client assertion**, not proof of a local terminal. ACP similarly
+confirms `source=acp`, `transport=acp`; Otto Connect advertises the optional
+`client_source=connector` claim. Relayed ACP uses HTTP transport and keeps the
+application claim unverified. Origins never grant permissions, change instruction
+priority, authenticate a human, or make user-written origin markers authoritative.
+Task/tool notifications and agent followups are not human TUI messages.
+
+Metadata follows the input's stable identity through durable queues, delivery,
+history and resume. Compaction receives source labels associated with their
+original inputs; a generated summary is not relabeled as having one input's
+source. Old history and old queue entries without metadata remain **unknown**,
+not inferred from the frontend that reopens the session. Local command receipts
+remain separate from model context.
+
+After upgrading, rebuild/reinstall and restart Otto and connectors as described
+in Getting started. Existing request formats and session files remain readable;
+old clients need not add metadata. New source labels apply to new inputs only.

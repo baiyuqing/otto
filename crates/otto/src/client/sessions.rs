@@ -105,6 +105,12 @@ impl Client {
         input_id: Option<&str>,
     ) -> Result<TurnStream, Error> {
         let mut body = json!({ "text": text, "queue": true });
+        if self.queued_input {
+            body["queued_input"] = json!(true);
+        }
+        if let Some(source) = self.client_source {
+            body["client_source"] = json!(source);
+        }
         if let Some(input_id) = input_id {
             body["input_id"] = json!(input_id);
         }

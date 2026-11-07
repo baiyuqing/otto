@@ -350,10 +350,11 @@ impl Relay {
         (request_id, input_id): (Option<&str>, Option<&str>),
         cancel: &CancellationToken,
     ) -> Reply {
+        let input_client = connection.input_client(&self.client);
         let stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
-            started = self.client.start_turn_with_channel(session_id, text, None, channel, origin, request_id, input_id) => {
+            started = input_client.start_turn_with_channel(session_id, text, None, channel, origin, request_id, input_id) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };
@@ -364,18 +365,23 @@ impl Relay {
     /// Starts one separately admitted ACP `/queue` follow-up on serve.
     pub(super) async fn start_queued_prompt(
         &self,
+        connection: &Connection,
         session_id: &str,
         text: &str,
         channel: Option<Channel>,
         origin: Option<&Origin>,
         request_id: Option<&str>,
+        input_id: Option<&str>,
     ) -> Result<otto::client::TurnStream, agent_client_protocol_schema::v1::Error> {
         if self.lost.is_cancelled() {
             return Err(error(INTERNAL_ERROR, LOST));
         }
-        let stream = self
-            .client
-            .start_turn_with_channel(session_id, text, None, channel, origin, request_id, None)
+        let stream = connection
+            .input_client(&self.client)
+            .with_queued_input()
+            .start_turn_with_channel(
+                session_id, text, None, channel, origin, request_id, input_id,
+            )
             .await
             .map_err(|failure| self.fail(failure))?;
         Ok(stream)
@@ -545,6 +551,7 @@ pub async fn run(
         Ok(client) => client,
         Err(failure) => return unreachable(stderr, failure),
     };
+    let client = client.with_input_source(otto_core::model::InputSource::Acp);
     if let Err(failure) = client.healthz().await {
         return unreachable(stderr, failure);
     }
@@ -580,7 +587,8 @@ pub(super) async fn serve_in_process(
 ) {
     let lost = CancellationToken::new();
     let relay = Relay {
-        client: Client::in_process(server.socket_router()),
+        client: Client::in_process(server.socket_router())
+            .with_input_source(otto_core::model::InputSource::Acp),
         schedule: server.schedule_store(),
         logger: Arc::clone(server.logger()),
         server: Some(server),

@@ -60,6 +60,9 @@ func fakeAgent(t *testing.T, extra ...string) (*Agent, *recorder, string) {
 
 func TestDeliveryMetadataPreservesExactAndEmptyDeclarations(t *testing.T) {
 	a := New(Options{})
+	if a.clientMeta()["otto"].(map[string]any)["inputSource"] != "connector" {
+		t.Fatal("connector must declare its unverified application source")
+	}
 	a.SetPlatforms([]string{"telegram"})
 	if _, ok := a.clientMeta()["otto"].(map[string]any)["scheduleDeliveryChats"]; ok {
 		t.Fatal("legacy client unexpectedly advertised exact chats")

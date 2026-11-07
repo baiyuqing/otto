@@ -55,6 +55,7 @@ mod claude_cache_prefix;
 mod context_oneshot;
 mod durable_boundaries;
 mod input_delivery;
+mod input_provenance;
 mod manual_compaction;
 mod memory_compaction;
 mod memory_context;

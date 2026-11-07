@@ -155,6 +155,8 @@ fn every_event_renders_to_the_expected_line() {
             outcome: completed(OperationDisposition::Succeeded),
         },
         Event::Notification {
+            input_id: String::new(),
+            input_provenance: None,
             kind: None,
             task_id: "t-1".to_string(),
             text: "[task-notification] done".to_string(),

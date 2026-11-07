@@ -6,6 +6,7 @@ use otto_core::agent::steering::{Message, Status};
 
 fn message(id: u64, text: &str, status: Status) -> Message {
     Message {
+        input_provenance: None,
         id,
         text: text.into(),
         status,
@@ -67,6 +68,8 @@ async fn queued_guidance_is_visible_until_consumed_once_in_local_and_attached_fr
             "pending guidance must not be durable history"
         );
         app.apply_event(&wire_frame(&Event::Notification {
+            input_id: String::new(),
+            input_provenance: None,
             kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
             task_id: String::new(),
             text: "first guidance".into(),

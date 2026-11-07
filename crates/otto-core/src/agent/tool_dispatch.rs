@@ -465,6 +465,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 created_at: (self.options.now)(),
                 usage: notification.usage,
                 context_metadata,
+                input_provenance: notification.input_provenance,
                 blocks: vec![Block::text(text.clone())],
                 ..Message::default()
             };
@@ -492,6 +493,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 continue;
             }
             emit(Event::Notification {
+                input_id: notification.id,
+                input_provenance: notification.input_provenance,
                 kind: notification.kind,
                 task_id: notification.task_id,
                 text,
@@ -584,6 +587,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 role: Role::User,
                 created_at: (self.options.now)(),
                 blocks: vec![Block::text(text.clone())],
+                input_provenance: steering.input_provenance,
                 ..Message::default()
             };
             let appended = if steering.input_id.is_empty() {
@@ -609,6 +613,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 continue;
             }
             emit(Event::Notification {
+                input_id: steering.input_id,
+                input_provenance: steering.input_provenance,
                 kind: Some(inbox::NotificationKind::UserMessage),
                 task_id: String::new(),
                 text,

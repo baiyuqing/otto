@@ -18,6 +18,8 @@ fn turn_summary_preserves_cache_write_counts_and_does_not_invent_missing_breakdo
     });
     assert_eq!(turn.summary().usage, usage);
     emit(Event::Notification {
+        input_id: String::new(),
+        input_provenance: None,
         kind: None,
         task_id: "child".into(),
         text: "done".into(),

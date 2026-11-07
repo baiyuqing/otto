@@ -102,6 +102,8 @@ fn delivered_guidance_remains_a_user_message_in_live_and_replayed_frames() {
     let text = "我发的 queued input 又看不到了";
     let mut emit = turn.emitter(&metrics);
     emit(Event::Notification {
+        input_id: String::new(),
+        input_provenance: None,
         kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
         task_id: String::new(),
         text: text.into(),
@@ -141,6 +143,8 @@ fn emit_accumulates_notification_usage() {
         cached_input_tokens_present: false,
     });
     emit(Event::Notification {
+        input_id: String::new(),
+        input_provenance: None,
         kind: None,
         task_id: "t1".to_string(),
         text: "[task-notification] task t1 succeeded".to_string(),

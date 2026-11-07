@@ -93,7 +93,11 @@ impl App {
             return None;
         }
         let line = self.queued_input.take()?;
-        self.dispatch_line(&line, backend, cancel)
+        let action = self.dispatch_line(&line, backend, cancel);
+        if !self.attached && matches!(action, Some(Action::Prompt(_))) {
+            self.next_input_delivery = Some(otto_core::model::InputDelivery::Queued);
+        }
+        action
     }
     pub(crate) fn submit_input(
         &mut self,

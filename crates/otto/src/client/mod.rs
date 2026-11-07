@@ -145,12 +145,25 @@ pub struct WakeReplies {
     pub last: u64,
 }
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     router: Option<axum::Router>,
+    client_source: Option<otto_core::model::InputSource>,
+    queued_input: bool,
 }
 
 impl Client {
+    /// Sets a descriptive, unverified application claim for input requests.
+    pub fn with_input_source(mut self, source: otto_core::model::InputSource) -> Self {
+        self.client_source = Some(source);
+        self
+    }
+    /// Marks explicit follow-up intent, including when the server is idle.
+    pub fn with_queued_input(mut self) -> Self {
+        self.queued_input = true;
+        self
+    }
     #[cfg(unix)]
     pub fn new(socket: &Path) -> Result<Self, Error> {
         let http = crate::tls_provider::http_client_builder()
@@ -158,7 +171,12 @@ impl Client {
             .no_proxy()
             .build()
             .map_err(unreachable_error)?;
-        Ok(Self { http, router: None })
+        Ok(Self {
+            http,
+            router: None,
+            client_source: None,
+            queued_input: false,
+        })
     }
 
     /// Dispatch against the same serve router without a socket or extra process.
@@ -166,6 +184,8 @@ impl Client {
         Self {
             http: crate::tls_provider::http_client(),
             router: Some(router),
+            client_source: None,
+            queued_input: false,
         }
     }
 

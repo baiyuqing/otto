@@ -87,6 +87,7 @@ pub(crate) struct App {
     pub info: Info,
     pub composer: Composer,
     pub queued_input: Option<String>,
+    pub(super) next_input_delivery: Option<otto_core::model::InputDelivery>,
     /// The latest successful model or reasoning selection, kept as one
     /// single-line item per banner row instead of appended to the transcript.
     pub composer_notices: Vec<String>,
@@ -181,6 +182,7 @@ impl App {
             info: backend.info(),
             composer,
             queued_input: None,
+            next_input_delivery: None,
             composer_notices: Vec::new(),
             queued_steer: None,
             pending_steers: Vec::new(),

@@ -156,6 +156,8 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
 
     pub(super) fn hook_warning(&self, emit: super::EventSink<'_>, message: &str) {
         emit(super::Event::Notification {
+            input_id: String::new(),
+            input_provenance: None,
             kind: None,
             task_id: String::new(),
             text: self.redactor.redact_string(&format!("[hook] {message}")),

@@ -16,6 +16,7 @@ impl<'a> Repl<'a> {
             stderr,
             program_status,
             delete_confirmation,
+            ..
         } = self;
         *delete_confirmation = None;
         if let Some(reporter) = program_status {

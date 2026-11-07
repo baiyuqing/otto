@@ -38,10 +38,13 @@ pub struct QueuedPrompt {
     pub origin: Option<Origin>,
     /// The prompt carried an image that was not saved.
     pub image_dropped: bool,
+    pub input_provenance: Option<otto_core::model::InputProvenance>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_provenance: Option<otto_core::model::InputProvenance>,
     text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     channel: Option<Channel>,
@@ -69,6 +72,7 @@ impl TurnQueue {
     /// not admit the prompt.
     pub fn save(&self, prompt: &QueuedPrompt) -> Result<(), String> {
         let saved = Saved {
+            input_provenance: prompt.input_provenance,
             text: prompt.text.clone(),
             channel: prompt.channel,
             origin: prompt
@@ -117,6 +121,7 @@ impl TurnQueue {
             match saved {
                 Ok(saved) if !entry.notification.id.is_empty() => prompts.push(QueuedPrompt {
                     input_id: entry.notification.id,
+                    input_provenance: saved.input_provenance,
                     turn_id: entry.notification.task_id,
                     text: saved.text,
                     channel: saved.channel,
@@ -161,6 +166,7 @@ mod tests {
 
     fn prompt(input_id: &str, text: &str) -> QueuedPrompt {
         QueuedPrompt {
+            input_provenance: None,
             input_id: input_id.into(),
             turn_id: format!("turn-{input_id}"),
             text: text.into(),
@@ -223,5 +229,23 @@ mod tests {
         );
         assert!(notice.contains("1 of them had an image"), "{notice}");
         assert!(restored_notice(&[prompt("a", "x")]).contains("1 queued prompt could run. It"));
+    }
+    #[test]
+    fn queued_origin_survives_journal_restore_and_legacy_is_unknown() {
+        use otto_core::model::{InputDelivery, InputProvenance, InputSource, InputTransport};
+        let journal = Arc::new(InMemoryMailbox::new(None));
+        let queue = TurnQueue::new(journal.clone());
+        let mut saved = prompt("same1", "identical body");
+        let mut origin = InputProvenance::remote(InputTransport::Http, Some(InputSource::Tui));
+        origin.delivery = InputDelivery::Queued;
+        saved.input_provenance = Some(origin);
+        queue.save(&saved).unwrap();
+        queue.save(&prompt("same2", "identical body")).unwrap();
+        let restored = TurnQueue::new(journal);
+        let pending = restored.pending();
+        assert_eq!(pending[0], saved);
+        assert_eq!(pending[1].input_provenance, None);
+        assert_eq!(pending[1].input_id, "same2");
+        assert_eq!(pending[0].text, pending[1].text);
     }
 }

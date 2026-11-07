@@ -1811,3 +1811,25 @@ No metric has a chat, sender, session, or request label.
 ---
 
 Previous: [Safety and tools](safety-and-tools.md) · [Documentation index](../README.md) · Next: [Automation](automation.md)
+
+### Optional input source claims
+
+HTTP turn creation (`POST /v1/sessions/{id}/turns`) and active input admission
+(`POST /v1/sessions/{id}/inputs`, including the explicit task-steer endpoint)
+accept optional `client_source`: `unknown`, `tui`, `repl`, `one_shot`, `http`,
+`acp`, `connector`, `runtime`, or `agent`. These are descriptive claims only.
+The server always supplies confirmed HTTP source/transport and actual delivery;
+a client cannot supply trusted `tui`, `local`, or security authority. Omitting the
+field preserves existing API behavior; external browser clients need no changes.
+Unknown enum values are rejected. Turn creation also accepts `queued_input: true`
+for explicit follow-up intent (ACP `/queue`); unlike `queue: true`, which only
+permits waiting behind an active turn, this preserves queued delivery even when
+admitted while idle. It grants no source or security authority.
+User-message events additionally expose
+optional `input_id` and `input_provenance` for the accepted input.
+
+ACP clients can declare `_meta.otto.inputSource` in `clientCapabilities` during
+initialization. Otto Connect declares `connector`. This becomes only an
+unverified `client_source`; ACP source and transport remain runtime-confirmed.
+For a full explanation of persistence, legacy unknown provenance and local versus
+attached terminals, see [Per-message input origin](interactive-use.md#per-message-input-origin).

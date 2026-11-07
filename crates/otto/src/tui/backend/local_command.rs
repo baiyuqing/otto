@@ -168,7 +168,13 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             prompt = Some(c.approve_bash_always(&id).await?);
             format!("Approved {id}.")
         }
-        Command::AdmitInput(text) => match c.admit_active_input(&text)? {
+        Command::AdmitInput(text) => match c.admit_active_input_with_provenance(
+            &text,
+            None,
+            Some(otto_core::model::InputProvenance::local(
+                otto_core::model::InputSource::Tui,
+            )),
+        )? {
             crate::app::ActiveInputAdmission::Steered => format!(
                 "Guidance queued for the active task: {text}\nIt will be delivered at the next safe boundary."
             ),

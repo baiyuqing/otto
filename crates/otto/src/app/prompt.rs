@@ -127,6 +127,8 @@ impl Controller {
             .await
             .map_err(|error| AgentError::Other(error.to_string()))?;
         emit(otto_core::agent::Event::Notification {
+            input_id: String::new(),
+            input_provenance: None,
             kind: Some(NotificationKind::TaskReport),
             task_id: "agent_followup".into(),
             text,
@@ -228,6 +230,8 @@ impl Controller {
             .await
             .map_err(|error| AgentError::Other(error.to_string()))?;
         emit(otto_core::agent::Event::Notification {
+            input_id: String::new(),
+            input_provenance: None,
             kind: Some(NotificationKind::TaskReport),
             task_id: "agent_followup".into(),
             text: text.into(),

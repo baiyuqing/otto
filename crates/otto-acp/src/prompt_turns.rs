@@ -31,6 +31,9 @@ impl Connection {
                         .controller
                         .set_next_input_id(Some(input_id.to_string()));
                 }
+                session
+                    .controller
+                    .set_next_input_provenance(Some(self.input_provenance()));
                 let reply = Box::pin(self.local_prompt(
                     local,
                     &session,
@@ -110,10 +113,10 @@ impl Connection {
                 .session(session_id)
                 .ok_or_else(unknown_session)?
                 .controller
-                .admit_active_input_with(text, input_id)
+                .admit_active_input_with_provenance(text, input_id, Some(self.input_provenance()))
                 .map_err(|message| error(INTERNAL_ERROR, message)),
-            Backend::Attach(relay) => relay
-                .client
+            Backend::Attach(relay) => self
+                .input_client(&relay.client)
                 .admit_input(session_id, text, input_id)
                 .await
                 .map_err(|failure| relay.task_control_error(failure)),
@@ -125,12 +128,12 @@ impl Connection {
             Backend::Local(local) => match local.session(session_id) {
                 Some(session) => session
                     .controller
-                    .steer(guidance)
+                    .steer_input_with_provenance(guidance, None, Some(self.input_provenance()))
                     .map_err(|message| error(INTERNAL_ERROR, message)),
                 None => return Err(unknown_session()),
             },
-            Backend::Attach(relay) => relay
-                .client
+            Backend::Attach(relay) => self
+                .input_client(&relay.client)
                 .steer(session_id, guidance)
                 .await
                 .map_err(|failure| relay.task_control_error(failure))

@@ -105,6 +105,7 @@ pub(super) async fn run_restored_prompts<B: Backend>(
     let journal = controller.turn_queue();
     for prompt in prompts {
         controller.set_next_input_id(Some(prompt.input_id.clone()));
+        controller.set_next_input_provenance(prompt.input_provenance);
         let result = run_turn(app, terminal, keys, controller, cancel, prompt.text).await;
         controller.set_next_input_id(None);
         if let Some(journal) = &journal {

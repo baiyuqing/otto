@@ -376,6 +376,12 @@ pub struct PiOttoDetails {
     #[serde(rename = "inputId", default, skip_serializing_if = "String::is_empty")]
     pub input_id: String,
     #[serde(
+        default,
+        rename = "inputProvenance",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input_provenance: Option<crate::model::InputProvenance>,
+    #[serde(
         rename = "usagePresent",
         default,
         skip_serializing_if = "std::ops::Not::not"

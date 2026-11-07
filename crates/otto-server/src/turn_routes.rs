@@ -5,6 +5,8 @@ use super::*;
 #[derive(Debug, Deserialize)]
 pub(super) struct StartTurnBody {
     #[serde(default)]
+    client_source: Option<otto_core::model::InputSource>,
+    #[serde(default)]
     text: String,
     #[serde(default)]
     stream: Option<bool>,
@@ -13,6 +15,9 @@ pub(super) struct StartTurnBody {
     /// Queue behind a running turn instead of answering 409 `turn_active`.
     #[serde(default)]
     queue: bool,
+    /// Explicit follow-up intent, even if admitted while idle. No source authority.
+    #[serde(default)]
+    queued_input: bool,
     /// Per-turn chat channel context.
     #[serde(default)]
     channel: Option<Channel>,
@@ -97,7 +102,7 @@ pub(super) async fn start_turn(
     {
         return bad_request(INVALID_INPUT_ID);
     }
-    let turn = match server.start_turn(
+    let turn = match server.start_turn_with_provenance(
         &session,
         parsed.text,
         image,
@@ -105,6 +110,16 @@ pub(super) async fn start_turn(
         parsed.queue,
         &request_id,
         parsed.input_id,
+        Some({
+            let mut provenance = otto_core::model::InputProvenance::remote(
+                otto_core::model::InputTransport::Http,
+                parsed.client_source,
+            );
+            if parsed.queued_input {
+                provenance.delivery = otto_core::model::InputDelivery::Queued;
+            }
+            provenance
+        }),
     ) {
         Ok(turn) => turn,
         Err(error) if error == DUPLICATE_INPUT => {
@@ -256,3 +271,7 @@ pub(super) async fn cancel_turn(
         Err(message) => not_found(message),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/input_provenance_cases.rs"]
+mod provenance_tests;

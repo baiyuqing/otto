@@ -64,8 +64,8 @@ async fn queued_turns_survive_a_shutdown_and_run_once_in_order_after_reopen() {
         .expect("first turn started");
     let mut queued = Vec::new();
     for body in [
-        r#"{"text":"second","queue":true,"input_id":"req-2"}"#,
-        r#"{"text":"third","queue":true}"#,
+        r#"{"text":"second","queue":true,"queued_input":true,"client_source":"connector","input_id":"req-2"}"#,
+        r#"{"text":"third","queue":true,"queued_input":true,"client_source":"connector","input_id":"req-3"}"#,
     ] {
         let reply = harness.raw("POST", &path, Some(body), &[]).await;
         assert_eq!(reply.status(), StatusCode::OK);
@@ -117,6 +117,34 @@ async fn queued_turns_survive_a_shutdown_and_run_once_in_order_after_reopen() {
         .send("GET", &format!("/v1/sessions/{id}/history"), None)
         .await
         .json();
+    let restored = history
+        .as_array()
+        .expect("history")
+        .iter()
+        .find(|message| message["input_id"] == "req-2")
+        .expect("restored input identity");
+    assert_eq!(restored["blocks"][0]["text"], "second");
+    assert_eq!(restored["input_provenance"]["source"], "http");
+    assert_eq!(restored["input_provenance"]["transport"], "http");
+    assert_eq!(restored["input_provenance"]["client_source"], "connector");
+    assert_eq!(restored["input_provenance"]["delivery"], "queued");
+    let restored_events = harness
+        .raw("GET", &format!("{path}/{}/events", queued[1]), None, &[])
+        .await;
+    let frames = SseReader::new(restored_events).all().await;
+    let user: Value = serde_json::from_str(
+        &frames
+            .iter()
+            .find(|frame| frame.event == "user_message")
+            .expect("restored user event")
+            .data,
+    )
+    .unwrap();
+    assert_eq!(user["input_id"], "req-3");
+    assert_eq!(user["text"], "third");
+    assert_eq!(user["input_provenance"]["transport"], "http");
+    assert_eq!(user["input_provenance"]["client_source"], "connector");
+    assert_eq!(user["input_provenance"]["delivery"], "queued");
     let history: Vec<String> = history
         .as_array()
         .expect("history")

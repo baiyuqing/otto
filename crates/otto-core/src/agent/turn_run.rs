@@ -223,6 +223,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
         followup: bool,
     ) -> Result<(), AgentError> {
+        let input_provenance = self
+            .next_input_provenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         let input_id = self
             .next_input_id
             .lock()
@@ -258,6 +263,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 followup,
                 (&turn_id, resumes.as_deref()),
                 input_id,
+                input_provenance,
             )
             .await;
         self.end_turn(turn_id, &result, control).await;
@@ -355,6 +361,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         followup: bool,
         turn: (&str, Option<&str>),
         input_id: Option<String>,
+        input_provenance: Option<crate::model::InputProvenance>,
     ) -> Result<(), AgentError> {
         let text = trim_go_space(user_text);
         let steering = self.options.steering.begin_turn(turn.0, turn.1);
@@ -438,6 +445,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 created_at: (self.options.now)(),
                 blocks,
                 input_id: input_id.unwrap_or_default(),
+                input_provenance: if followup {
+                    Some(crate::model::InputProvenance::local(
+                        crate::model::InputSource::Agent,
+                    ))
+                } else {
+                    input_provenance
+                },
                 ..Message::default()
             };
             if let Err(source) = self.append_message(user).await {

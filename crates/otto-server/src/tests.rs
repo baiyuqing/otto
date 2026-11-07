@@ -33,6 +33,7 @@ mod model_config_cases;
 mod observer_cases;
 mod permanent_delete_cases;
 mod queue_cases;
+mod queue_provenance_cases;
 mod remote_listener_cases;
 mod scoped_route_cases;
 mod session_lifecycle_cases;

@@ -70,6 +70,8 @@ pub struct Notification {
     /// The `otto.turn` id a turn-scoped input belongs to; empty otherwise.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_provenance: Option<crate::model::InputProvenance>,
 }
 
 /// A mailbox change that could not be made durable.

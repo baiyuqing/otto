@@ -503,6 +503,7 @@ async fn saved_queued_prompts_run_in_order_when_the_tui_opens_the_session() {
     for (input_id, text) in [("in-1", "first saved"), ("in-2", "second saved")] {
         journal
             .save(&crate::app::turn_queue::QueuedPrompt {
+                input_provenance: None,
                 input_id: input_id.into(),
                 turn_id: String::new(),
                 text: text.into(),

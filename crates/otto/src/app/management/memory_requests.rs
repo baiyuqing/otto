@@ -1,6 +1,9 @@
 //! Handlers for the `/memory` management requests over the built-in store.
 
-use super::{Reply, Request, SEARCH_LIMIT, SEARCH_TOKEN_BUDGET, ScopeSelector};
+use super::{
+    ManagementError, ManagementErrorKind, Reply, Request, SEARCH_LIMIT, SEARCH_TOKEN_BUDGET,
+    ScopeSelector,
+};
 use crate::app::Controller;
 use crate::memory::{
     self, CandidateRef, ForgetRequest, ListRequest, RecordRef, ReviewRequest, SearchRequest,
@@ -9,7 +12,7 @@ use chrono::Utc;
 
 impl Controller {
     /// Handles the `Memory*` requests; any other request is a caller bug.
-    pub(super) fn memory_request(&self, request: Request) -> Result<Reply, String> {
+    pub(super) fn memory_request(&self, request: Request) -> Result<Reply, ManagementError> {
         use Request::*;
         match request {
             MemoryList {
@@ -19,7 +22,7 @@ impl Controller {
                 filters,
             } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let (all_scopes, scopes) = match scope {
                     ScopeSelector::All => (true, Vec::new()),
@@ -44,7 +47,7 @@ impl Controller {
                             unverified_only: filters.unverified_only,
                             review_due_only: filters.review_due_only,
                         })
-                        .map_err(|e| e.to_string())?,
+                        .map_err(ManagementError::from)?,
                 ))
             }
             MemoryState {
@@ -52,44 +55,54 @@ impl Controller {
                 state,
                 superseded_by,
                 reason,
+                expected_revision,
             } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let (reference, current) = current_record(&service, [user, workspace], &id)?;
                 service
                     .set_state(&memory::SetStateRequest {
                         reference,
-                        expected_revision: current.revision,
+                        expected_revision: expected_revision.unwrap_or(current.revision),
                         state,
                         superseded_by,
                         reason,
                     })
                     .map(Reply::MemoryStateChanged)
-                    .map_err(|error| error.to_string())
+                    .map_err(ManagementError::from)
             }
-            MemoryVerify { id, review_at } => {
+            MemoryVerify {
+                id,
+                review_at,
+                expected_revision,
+            } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let (reference, current) = current_record(&service, [user, workspace], &id)?;
                 service
                     .verify(&memory::VerifyRequest {
                         reference,
-                        expected_revision: current.revision,
+                        expected_revision: expected_revision.unwrap_or(current.revision),
                         review_at,
                     })
                     .map(Reply::MemoryVerified)
-                    .map_err(|error| error.to_string())
+                    .map_err(ManagementError::from)
             }
             MemoryPropose { id, evidence } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let generator = self
                     .current_runner()
                     .and_then(|runner| runner.memory_proposals.clone())
-                    .ok_or_else(|| "memory proposals are not available".to_string())?;
+                    .ok_or_else(|| {
+                        ManagementError::new(
+                            ManagementErrorKind::Unavailable,
+                            "memory proposals are not available",
+                        )
+                    })?;
                 let (_, target) = current_record(&service, [user, workspace], &id)?;
                 let input = memory::proposals::ProposalInput {
                     target,
@@ -104,10 +117,17 @@ impl Controller {
                 };
                 // The generator is async; the management path is synchronous,
                 // like the selected-memory `/remember` path above it.
-                let handle = tokio::runtime::Handle::try_current()
-                    .map_err(|_| "memory proposals require an async runtime".to_string())?;
+                let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+                    ManagementError::new(
+                        ManagementErrorKind::Internal,
+                        "memory proposals require an async runtime",
+                    )
+                })?;
                 if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
-                    return Err("memory proposals require a multi-thread runtime".into());
+                    return Err(ManagementError::new(
+                        ManagementErrorKind::Internal,
+                        "memory proposals require a multi-thread runtime",
+                    ));
                 }
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let outcome = tokio::task::block_in_place(|| {
@@ -117,7 +137,7 @@ impl Controller {
             }
             MemoryShow { id } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 for scope in [user, workspace] {
                     match service.get(&RecordRef {
@@ -126,14 +146,14 @@ impl Controller {
                     }) {
                         Ok(r) => return Ok(Reply::MemoryRecord(r)),
                         Err(error) if error.kind == memory::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.to_string()),
+                        Err(error) => return Err(error.into()),
                     }
                 }
-                Err(format!("record {id} not found"))
+                Err(ManagementError::not_found(format!("record {id} not found")))
             }
             MemorySearch { query } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 Ok(Reply::MemorySearch(
                     service
@@ -145,12 +165,15 @@ impl Controller {
                             now: Utc::now(),
                             ..Default::default()
                         })
-                        .map_err(|e| e.to_string())?,
+                        .map_err(ManagementError::from)?,
                 ))
             }
-            MemoryForget { id } => {
+            MemoryForget {
+                id,
+                expected_revision,
+            } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let mut last = None;
                 for scope in [user, workspace] {
@@ -164,11 +187,11 @@ impl Controller {
                             let result = service
                                 .forget(&ForgetRequest {
                                     reference,
-                                    expected_revision: revision,
+                                    expected_revision: expected_revision.unwrap_or(revision),
                                     purge_backups: false,
                                     confirm_purge: false,
                                 })
-                                .map_err(|e| e.to_string())?;
+                                .map_err(ManagementError::from)?;
                             return Ok(Reply::MemoryForgotten {
                                 tombstone: result.tombstone,
                                 previous_revision: revision,
@@ -176,24 +199,24 @@ impl Controller {
                             });
                         }
                         Err(e) if e.kind == memory::ErrorKind::NotFound => last = Some(e),
-                        Err(e) => return Err(e.to_string()),
+                        Err(e) => return Err(e.into()),
                     }
                 }
-                Err(format!(
+                Err(ManagementError::not_found(format!(
                     "record {id} not found{}",
                     last.map(|e| format!(": {e}")).unwrap_or_default()
-                ))
+                )))
             }
             MemoryHistory { id } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let history = record_history(&service, [user, workspace], &id)?;
                 Ok(Reply::MemoryHistory(history))
             }
             MemoryDiff { id, from, to } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let history = record_history(&service, [user, workspace], &id)?;
                 let revision_at = |revision: u64| {
@@ -202,25 +225,31 @@ impl Controller {
                         .iter()
                         .find(|record| record.revision == revision)
                         .cloned()
-                        .ok_or_else(|| format!("record {id} has no revision {revision}"))
+                        .ok_or_else(|| {
+                            ManagementError::not_found(format!(
+                                "record {id} has no revision {revision}"
+                            ))
+                        })
                 };
                 let from_record = revision_at(from)?;
                 let to_record = match to {
                     Some(to) => revision_at(to)?,
-                    None => history
-                        .revisions
-                        .last()
-                        .cloned()
-                        .ok_or_else(|| format!("record {id} has no revisions"))?,
+                    None => history.revisions.last().cloned().ok_or_else(|| {
+                        ManagementError::not_found(format!("record {id} has no revisions"))
+                    })?,
                 };
                 Ok(Reply::MemoryDiff {
                     from: Box::new(from_record),
                     to: Box::new(to_record),
                 })
             }
-            MemoryRestore { id, revision } => {
+            MemoryRestore {
+                id,
+                revision,
+                expected_revision,
+            } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
                 let mut last = None;
                 for scope in [user, workspace] {
@@ -234,39 +263,61 @@ impl Controller {
                                 .restore(&memory::RestoreRequest {
                                     reference,
                                     revision,
-                                    expected_revision: current.revision,
+                                    expected_revision: expected_revision
+                                        .unwrap_or(current.revision),
                                 })
-                                .map_err(|e| e.to_string())?;
+                                .map_err(ManagementError::from)?;
                             return Ok(Reply::MemoryRestored(restored));
                         }
                         Err(e) if e.kind == memory::ErrorKind::NotFound => last = Some(e),
-                        Err(e) => return Err(e.to_string()),
+                        Err(e) => return Err(e.into()),
                     }
                 }
-                Err(format!(
+                Err(ManagementError::not_found(format!(
                     "record {id} not found{}",
                     last.map(|e| format!(": {e}")).unwrap_or_default()
-                ))
+                )))
             }
             MemoryReviewList => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
                 };
-                let pending = self
-                    .approval_snapshot()
-                    .map_err(|error| error.to_string())?;
+                let pending = self.approval_snapshot().map_err(|error| {
+                    ManagementError::new(ManagementErrorKind::Internal, error.to_string())
+                })?;
                 let candidates = crate::approval::memory::human_pending_candidates(
                     &service,
                     &[user, workspace],
                     &pending.requests,
                     SEARCH_LIMIT,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(ManagementError::from)?;
                 Ok(Reply::MemoryCandidates(candidates))
             }
-            MemoryReview { id, decision } => {
+            MemoryCandidatePage { limit, cursor } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
+                    return Err(ManagementError::unavailable());
+                };
+                let pending = self.approval_snapshot().map_err(|error| {
+                    ManagementError::new(ManagementErrorKind::Internal, error.to_string())
+                })?;
+                crate::approval::memory::human_pending_candidate_page(
+                    &service,
+                    &[user, workspace],
+                    &pending.requests,
+                    &cursor,
+                    limit,
+                )
+                .map(Reply::MemoryCandidatePage)
+                .map_err(ManagementError::from)
+            }
+            MemoryReview {
+                id,
+                decision,
+                transport,
+            } => {
+                let Some((service, user, workspace)) = self.memory_manager() else {
+                    return Err(ManagementError::unavailable());
                 };
                 let mut reference = None;
                 for scope in [user, workspace] {
@@ -280,10 +331,12 @@ impl Controller {
                             break;
                         }
                         Err(error) if error.kind == memory::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.to_string()),
+                        Err(error) => return Err(error.into()),
                     }
                 }
-                let reference = reference.ok_or_else(|| format!("candidate {id} not found"))?;
+                let reference = reference.ok_or_else(|| {
+                    ManagementError::not_found(format!("candidate {id} not found"))
+                })?;
                 let result = self
                     .review_memory(
                         &ReviewRequest {
@@ -292,9 +345,9 @@ impl Controller {
                             edited: None,
                             target_revision: None,
                         },
-                        "memory-command",
+                        transport,
                     )
-                    .map_err(|e| e.to_string())?;
+                    .map_err(ManagementError::from)?;
                 Ok(Reply::MemoryReviewed(decision, Box::new(result)))
             }
             _ => unreachable!("not a memory request"),
@@ -308,7 +361,7 @@ fn current_record(
     service: &memory::Service,
     scopes: [memory::Scope; 2],
     id: &str,
-) -> Result<(RecordRef, memory::Record), String> {
+) -> Result<(RecordRef, memory::Record), ManagementError> {
     let mut last = None;
     for scope in scopes {
         let reference = RecordRef {
@@ -318,13 +371,13 @@ fn current_record(
         match service.get(&reference) {
             Ok(record) => return Ok((reference, record)),
             Err(error) if error.kind == memory::ErrorKind::NotFound => last = Some(error),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.into()),
         }
     }
-    Err(format!(
+    Err(ManagementError::not_found(format!(
         "record {id} not found{}",
         last.map(|error| format!(": {error}")).unwrap_or_default()
-    ))
+    )))
 }
 
 /// The history of record `id` in the first of `scopes` that holds it.
@@ -332,7 +385,7 @@ fn record_history(
     service: &memory::Service,
     scopes: [memory::Scope; 2],
     id: &str,
-) -> Result<memory::RecordHistory, String> {
+) -> Result<memory::RecordHistory, ManagementError> {
     let mut last = None;
     for scope in scopes {
         match service.history(&RecordRef {
@@ -341,11 +394,11 @@ fn record_history(
         }) {
             Ok(history) => return Ok(history),
             Err(error) if error.kind == memory::ErrorKind::NotFound => last = Some(error),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.into()),
         }
     }
-    Err(format!(
+    Err(ManagementError::not_found(format!(
         "record {id} not found{}",
         last.map(|error| format!(": {error}")).unwrap_or_default()
-    ))
+    )))
 }

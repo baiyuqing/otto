@@ -438,18 +438,15 @@ fn busy_commit_surfaces_typed_and_leaves_the_connection_usable() {
             "{}: next write",
             repo.name
         );
-        assert_eq!(
-            rows(&path, repo.table),
-            i64::from(!stops_after_error(&repo)),
-            "{}: after retry",
-            repo.name
-        );
+        // A busy write does not disable the task recorder: another process
+        // holding the write lock is expected, and the next write succeeds.
+        assert_eq!(rows(&path, repo.table), 1, "{}: after retry", repo.name);
         plan.assert_all_fired();
     }
 }
 
-/// The task recorder disables itself after the first write error, as its
-/// module docs state, so later writes are skipped without an error.
+/// The task recorder disables itself after the first write error other than
+/// busy, so later writes are skipped without an error.
 fn stops_after_error(repo: &Repo) -> bool {
     repo.name == "tasks"
 }

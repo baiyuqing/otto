@@ -191,6 +191,13 @@ async fn delivery_manager_owns_private_receipts_status_and_shutdown() {
         otto::delivery::TaskState::Running
     );
     assert!(home.path().join(".otto/delivery-receipts.db").is_file());
+    // The process that ran the task has exited by the time of the restart.
+    let mut exited = std::process::Command::new("true").spawn().expect("spawn");
+    let exited_pid = i64::from(exited.id());
+    exited.wait().expect("wait");
+    manager
+        .receipts
+        .set_owner_for_test("approval-1", exited_pid, "2020-01-01T00:00:00.000000000Z");
     manager.shutdown().await;
     drop(manager);
 

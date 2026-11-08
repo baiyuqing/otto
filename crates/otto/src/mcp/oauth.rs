@@ -198,6 +198,13 @@ pub async fn login(
     .await
     .map_err(|_| McpLoginError::Exchange)?;
 
+    // The cross-process lock `TokenStore::refresh` takes.
+    let _file_lock = auth::lock_credentials(request.token_path, cancel, None)
+        .await
+        .map_err(|error| match error {
+            auth::AuthError::Cancelled => McpLoginError::Cancelled,
+            _ => McpLoginError::Persistence,
+        })?;
     save_token(
         request.token_path,
         &TokenFile {
@@ -234,6 +241,8 @@ pub struct TokenStore {
     /// cannot both spend the same rotating refresh token. Held across the
     /// whole refresh (load, POST, save); a waiter re-checks the cached
     /// token after acquiring it in case another task already refreshed.
+    /// Refreshes in other processes are serialized by an `flock` on
+    /// `<token file>.lock`, taken after this mutex.
     refresh_lock: tokio::sync::Mutex<()>,
 }
 
@@ -297,7 +306,22 @@ impl BearerSource for TokenStore {
             return Ok(token.access_token);
         }
 
-        let token = self.loaded()?.ok_or(CallError::NeedsLogin)?;
+        // Another process may have rotated the refresh token. Take the
+        // cross-process lock, then re-read the file instead of the cache.
+        let _file_lock = auth::lock_credentials(&self.path, cancel, None)
+            .await
+            .map_err(|error| match error {
+                auth::AuthError::Cancelled => CallError::Cancelled,
+                _ => CallError::NeedsLogin,
+            })?;
+        let token = load_token(&self.path)
+            .map_err(|_| CallError::NeedsLogin)?
+            .ok_or(CallError::NeedsLogin)?;
+        if token.access_token != rejected {
+            let adopted = token.access_token.clone();
+            *self.cached.lock().expect("mcp token cache lock") = Some(token);
+            return Ok(adopted);
+        }
         let refresh_token = token.refresh_token.clone().ok_or(CallError::NeedsLogin)?;
         let client = self.http.as_ref().map_err(|_| CallError::NeedsLogin)?;
         let form = [

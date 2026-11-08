@@ -103,6 +103,83 @@ async fn switching_a_model_while_a_turn_runs_is_409_turn_active() {
 }
 
 #[tokio::test]
+async fn setting_a_session_thinking_level_returns_the_session_and_writes_no_file() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/thinking");
+    let reply = harness
+        .send("POST", &path, Some(r#"{"thinking":"high"}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.json()["thinking"], "high");
+    let reply = harness
+        .send("POST", &path, Some(r#"{"thinking":"unset"}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+        reply.json().get("thinking").is_none_or(|v| v == ""),
+        "{}",
+        reply.body
+    );
+
+    let reply = harness
+        .send(
+            "POST",
+            "/v1/sessions/missing/thinking",
+            Some(r#"{"thinking":"high"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+    assert!(
+        !harness.factory.builder.shared.config_path.exists(),
+        "the thinking change wrote a configuration file"
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_session_thinking_level_is_400_invalid_thinking() {
+    let harness = Harness::new();
+    let id = harness.create().await;
+    for body in [
+        r#"{"thinking":"bogus"}"#,
+        r#"{"thinking":""}"#,
+        "{}",
+        "not json",
+    ] {
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/thinking"), Some(body))
+            .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::BAD_REQUEST,
+            "{body}: {}",
+            reply.body
+        );
+        assert_eq!(reply.json()["error"]["code"], "invalid_thinking", "{body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn setting_thinking_while_a_turn_runs_is_409_turn_active() {
+    let (gate, options) = gated();
+    let harness = Harness::with(options);
+    let id = harness.create().await;
+    let (_stream, _turn_id) = start_stream(&harness, &id).await;
+    harness.provider.wait_started(1).await;
+
+    let reply = harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{id}/thinking"),
+            Some(r#"{"thinking":"high"}"#),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "turn_active");
+    gate.cancel();
+}
+
+#[tokio::test]
 async fn the_old_session_profile_route_is_gone() {
     let harness = Harness::new();
     let id = harness.create().await;

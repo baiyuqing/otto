@@ -106,15 +106,12 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
             message
         }
         Command::SandboxExclude(entry) => {
-            let summary = SandboxChange::ExcludeCommand(entry.clone()).summary();
-            let (message, followup) =
-                amend_sandbox(&c, SandboxChange::ExcludeCommand(entry)).await?;
+            let change = SandboxChange::ExcludeCommand(entry);
+            let (message, followup) = amend_sandbox(&c, change.clone()).await?;
             prompt = followup;
             format!(
-                "{message}\nSaved {summary} in {} and reloaded immediately (existing \
-                    entries are not duplicated). Matching simple commands run outside the \
-                    sandbox; other approval requirements still apply.",
-                c.config_path().display()
+                "{message}\n{}",
+                change.exclude_saved_note(&c.config_path().display().to_string())
             )
         }
         Command::DecideApproval {
@@ -318,18 +315,8 @@ async fn amend_sandbox(
     c: &Controller,
     change: SandboxChange,
 ) -> Result<(String, Option<String>), String> {
-    let widens = match &change {
-        SandboxChange::AllowReadPath(_) | SandboxChange::ExcludeCommand(_) => true,
-        SandboxChange::Network(mode) => mode == "allow",
-    };
     let summary = change.summary();
-    let info = c.amend_sandbox(change).await?;
-    let prompt = widens.then(|| {
-        format!(
-            "The user changed the sandbox configuration: {summary} is now allowed. \
-        Sandbox: {}. If a command failed because of the sandbox, retry it now.",
-            info.summary()
-        )
-    });
+    let info = c.amend_sandbox(change.clone()).await?;
+    let prompt = change.followup_prompt(&info.summary());
     Ok((format!("Sandbox: {} ({summary})", info.summary()), prompt))
 }

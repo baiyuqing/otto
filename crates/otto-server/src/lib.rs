@@ -26,6 +26,7 @@ mod middleware;
 mod registry;
 mod responses;
 pub mod sandbox;
+mod sandbox_changes;
 pub mod schedule;
 mod session_retirement;
 mod session_routes;
@@ -678,6 +679,10 @@ impl Server {
                 post(skills::disable),
             )
             .route("/v1/sandbox/reload", post(sandbox::reload))
+            .route(
+                "/v1/sessions/{id}/sandbox/changes",
+                post(sandbox_changes::apply),
+            )
             .route(
                 "/v1/sessions/{id}/approval-events",
                 get(approvals::session_events),

@@ -9,6 +9,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- `otto --attach` accepts `/sandbox allow|network|exclude` and
+  `/approve <id> always`. `otto serve` adds
+  `POST /v1/sessions/{id}/sandbox/changes`, and the approval decision route
+  accepts `{"decision":"allow","always":true}`. The change is written to the
+  serve process's configuration file and applied to every loaded workspace.
+
 - `otto --attach` accepts `/task`, `/tasks`, `/timers`, `/mcp` (status),
   `/archive` and `/delete`, using the existing `otto serve` session routes.
   The MCP server record is now defined once in `otto-core` for both sides.

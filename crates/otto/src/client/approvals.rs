@@ -186,6 +186,29 @@ impl Client {
         ))
     }
 
+    /// `POST /v1/sessions/{id}/approvals/{approval_id}` with
+    /// `{"decision":"allow","always":true}`: allows the waiting command and
+    /// excludes it from the sandbox. Returns the follow-up prompt the caller
+    /// submits so the model retries the command.
+    pub async fn approve_always(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+    ) -> Result<String, Error> {
+        #[derive(Deserialize)]
+        struct Decided {
+            #[serde(default)]
+            followup: String,
+        }
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/approvals/{approval_id}"),
+                &json!({ "decision": "allow", "always": true }),
+            ))
+            .await?;
+        Ok(decode::<Decided>(response).await?.followup)
+    }
+
     pub async fn approval_message(
         &self,
         session_id: &str,

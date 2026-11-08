@@ -103,15 +103,6 @@ impl Catalog {
         if attached && entry.local_only {
             return Err(format!("{name}: not available with --attach"));
         }
-        if attached
-            && name == "/sandbox"
-            && matches!(
-                args.split_whitespace().next(),
-                Some("allow" | "network" | "exclude")
-            )
-        {
-            return Err(format!("{name}: not available with --attach"));
-        }
         (entry.factory)(args, info, self)
     }
 }

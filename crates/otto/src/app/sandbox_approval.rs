@@ -132,9 +132,7 @@ impl Controller {
         self.amend_sandbox_with_admission(SandboxChange::AllowReadPath(path))
             .await?;
         approvals.approve(session_id, id).map_err(str::to_string)?;
-        Ok(format!(
-            "The user approved {id} for persistent sandbox read access. Retry the same Bash call inside the sandbox now."
-        ))
+        Ok(read_grant_followup(id))
     }
 
     pub fn deny_tool(&self, id: &str) -> Result<(), String> {
@@ -187,6 +185,37 @@ impl Controller {
         {
             return self.approve_tool_for_session(session_id, id).await;
         }
+        self.exclude_and_grant_pending_command(session_id, id).await
+    }
+
+    /// The `always` half of an approval decision made while the turn that
+    /// requested the approval is still waiting for it. That turn holds the
+    /// controller admission and applies the ordinary grant itself when the
+    /// decision arrives, so this method does not take an admission. A command
+    /// request is excluded from the sandbox and granted here, ahead of the
+    /// decision; the turn's own grant afterwards finds the request already
+    /// granted and succeeds again. A read-path request is left to the turn,
+    /// exactly as `/approve <id> always` treats it. Returns the follow-up
+    /// prompt text.
+    pub async fn approve_bash_always_while_waiting(&self, id: &str) -> Result<String, String> {
+        let session_id = self.info().session_id;
+        let approvals = self.bash_approvals()?;
+        if approvals
+            .pending_read_path(&session_id, id)
+            .is_some_and(|path| !path.is_empty())
+        {
+            return Ok(read_grant_followup(id));
+        }
+        self.exclude_and_grant_pending_command(&session_id, id)
+            .await
+    }
+
+    async fn exclude_and_grant_pending_command(
+        &self,
+        session_id: &str,
+        id: &str,
+    ) -> Result<String, String> {
+        let approvals = self.bash_approvals()?;
         let _decision = approvals.decision.lock().await;
         let command = approvals
             .pending_command(session_id, id)
@@ -206,4 +235,10 @@ impl Controller {
     }
 
     // ---- replacement helpers ----
+}
+
+fn read_grant_followup(id: &str) -> String {
+    format!(
+        "The user approved {id} for persistent sandbox read access. Retry the same Bash call inside the sandbox now."
+    )
 }

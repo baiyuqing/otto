@@ -50,6 +50,13 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                 })
                 .collect(),
         )),
+        // The server resolves the path again when the change is applied. Both
+        // processes run on one host, so the TUI's working directory and home
+        // directory give the same preview.
+        Request::SandboxPath(path) => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            crate::runtime::sandbox_config::resolve_read_path(&path, &home).map(Reply::SandboxPath)
+        }
         Request::ForkPoints => Ok(Reply::Sessions(fork_point_choices(
             client
                 .fork_points(session)
@@ -204,6 +211,43 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     "Sandbox: {}",
                     client.reload_sandbox().await.map_err(mutation_error)?
                 ),
+                Command::SandboxAllow(path) => {
+                    let outcome = client
+                        .sandbox_change(session, "allow_read_path", &path)
+                        .await
+                        .map_err(mutation_error)?;
+                    prompt = outcome.followup.clone();
+                    sandbox_change_message(&outcome)
+                }
+                Command::SandboxNetwork(mode) => {
+                    let outcome = client
+                        .sandbox_change(session, "network", &mode)
+                        .await
+                        .map_err(mutation_error)?;
+                    prompt = outcome.followup.clone();
+                    sandbox_change_message(&outcome)
+                }
+                Command::SandboxExclude(entry) => {
+                    let outcome = client
+                        .sandbox_change(session, "exclude_command", &entry)
+                        .await
+                        .map_err(mutation_error)?;
+                    prompt = outcome.followup.clone();
+                    format!(
+                        "{}\n{}",
+                        sandbox_change_message(&outcome),
+                        SandboxChange::ExcludeCommand(entry).exclude_saved_note(&outcome.config_path)
+                    )
+                }
+                Command::ApproveAlways(id) => {
+                    prompt = Some(
+                        client
+                            .approve_always(session, &id)
+                            .await
+                            .map_err(mutation_error)?,
+                    );
+                    format!("Approved {id}.")
+                }
                 Command::DecideApproval {
                     id,
                     allow,
@@ -364,6 +408,10 @@ async fn attached_thinking_message(
         message.push_str(". Not saved: attached sessions change the session only.");
     }
     Ok(message)
+}
+
+fn sandbox_change_message(outcome: &crate::client::SandboxChangeOutcome) -> String {
+    format!("Sandbox: {} ({})", outcome.sandbox_summary, outcome.summary)
 }
 
 fn mutation_error(error: crate::client::Error) -> String {

@@ -5,12 +5,19 @@ package state
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 )
+
+// ErrAlreadyRunning means another process holds the state lock.
+var ErrAlreadyRunning = errors.New("another otto-connect is running")
 
 type file struct {
 	Sessions       map[string]string `json:"sessions"`
@@ -19,30 +26,86 @@ type file struct {
 
 // Store is the state file. Every setter writes the whole file (mode 0600,
 // directory 0700) through a temporary file and a rename before it returns.
-// Store is safe for concurrent use.
+// Store is safe for concurrent use. Open takes an exclusive flock on
+// "<path>.lock"; the lock is held until Close or process exit.
 type Store struct {
 	path string
+	lock *os.File
 	mu   sync.Mutex
 	data file
 }
 
-// Open reads path. A missing file is an empty state.
+// Open locks "<path>.lock" and reads path. A missing file is an empty state.
+// It returns an error wrapping ErrAlreadyRunning when another process (or an
+// open Store) holds the lock.
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, data: file{Sessions: map[string]string{}}}
+	lock, err := acquireLock(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{path: path, lock: lock, data: file{Sessions: map[string]string{}}}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
 	}
 	if err != nil {
+		lock.Close()
 		return nil, err
 	}
 	if err := json.Unmarshal(raw, &s.data); err != nil {
+		lock.Close()
 		return nil, err
 	}
 	if s.data.Sessions == nil {
 		s.data.Sessions = map[string]string{}
 	}
 	return s, nil
+}
+
+// Close releases the lock taken by Open.
+func (s *Store) Close() error {
+	if s.lock == nil {
+		return nil
+	}
+	err := s.lock.Close()
+	s.lock = nil
+	return err
+}
+
+func acquireLock(lockPath string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("create state directory for %s: %w", lockPath, err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		holder := readHolderPid(f)
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			if holder != "" {
+				return nil, fmt.Errorf("%w (pid %s); stop it before starting a new one", ErrAlreadyRunning, holder)
+			}
+			return nil, fmt.Errorf("%w; stop it before starting a new one", ErrAlreadyRunning)
+		}
+		return nil, fmt.Errorf("lock %s: %w", lockPath, err)
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("write lock %s: %w", lockPath, err)
+	}
+	if _, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("write lock %s: %w", lockPath, err)
+	}
+	return f, nil
+}
+
+func readHolderPid(f *os.File) string {
+	buf := make([]byte, 32)
+	n, _ := f.ReadAt(buf, 0)
+	return strings.TrimSpace(string(buf[:n]))
 }
 
 // Session returns the session id of chat ("<platform>:<chat id>"), or "".

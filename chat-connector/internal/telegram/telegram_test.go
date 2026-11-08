@@ -196,6 +196,7 @@ func TestOffsetPersistedAndResumed(t *testing.T) {
 	if len(got) != 2 || got[0].Text != "a" || got[1].Text != "b" {
 		t.Fatalf("delivered %+v", got)
 	}
+	store.Close()
 	reopened, err := state.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -268,6 +269,7 @@ func TestGroupFilterAndTextNormalization(t *testing.T) {
 	if !reflect.DeepEqual(have, want) {
 		t.Errorf("delivered\n got %+v\nwant %+v", have, want)
 	}
+	store.Close()
 	reopened, _ := state.Open(path)
 	if off := reopened.TelegramOffset(); off != 16 {
 		t.Errorf("offset = %d, want 16 (filtered updates advance it)", off)
@@ -306,6 +308,7 @@ func TestMediaAndServiceMessages(t *testing.T) {
 	if got[1].Text != "" || !got[1].Attachment {
 		t.Errorf("sticker: %+v", got[1])
 	}
+	store.Close()
 	reopened, _ := state.Open(path)
 	if off := reopened.TelegramOffset(); off != 23 {
 		t.Errorf("offset = %d, want 23 (service message advances it)", off)

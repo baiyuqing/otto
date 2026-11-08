@@ -23,6 +23,20 @@ impl Client {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::subagent::tasks::Task>, Error> {
+        Ok(self
+            .session_task_records(session_id)
+            .await?
+            .into_iter()
+            .map(crate::app::tasks::from_wire)
+            .collect())
+    }
+
+    /// `GET /v1/sessions/{id}/tasks` as the wire records, which is what
+    /// the management reply `Tasks` carries.
+    pub async fn session_task_records(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::app::tasks::Task>, Error> {
         let response = self
             .send(
                 self.http
@@ -33,12 +47,44 @@ impl Client {
         struct Listed {
             tasks: Vec<crate::app::tasks::Task>,
         }
-        Ok(decode::<Listed>(response)
-            .await?
-            .tasks
-            .into_iter()
-            .map(crate::app::tasks::from_wire)
-            .collect())
+        Ok(decode::<Listed>(response).await?.tasks)
+    }
+
+    /// `GET /v1/sessions/{id}/tasks/{task_id}`: one task record; the
+    /// `history` field of the reply is ignored. `None` on 404.
+    pub async fn session_task_record(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<Option<crate::app::tasks::Task>, Error> {
+        let result = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/tasks/{task_id}")),
+            )
+            .await;
+        match result {
+            Ok(response) => Ok(Some(decode(response).await?)),
+            Err(Error::Http { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `POST /v1/sessions/{id}/tasks/{task_id}/cancel`: the task after the
+    /// cancel. Serve answers 409 `task_done` for a finished task and 404 for
+    /// an unknown one.
+    pub async fn cancel_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<crate::app::tasks::Task, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/tasks/{task_id}/cancel"),
+                &json!({}),
+            ))
+            .await?;
+        decode(response).await
     }
 
     /// `GET /v1/tasks`, from `tasks.db`; only the `Some` fields of `query`

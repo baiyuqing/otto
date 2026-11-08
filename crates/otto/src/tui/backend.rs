@@ -268,6 +268,8 @@ impl Drop for Driver {
 }
 
 #[cfg(test)]
+mod remote_route_tests;
+#[cfg(test)]
 mod remote_tests;
 #[cfg(test)]
 mod tests;

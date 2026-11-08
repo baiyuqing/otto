@@ -172,6 +172,24 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     message.push_str(&thinking);
                     message
                 }
+                Command::Archive(target) => {
+                    let archived_path = client
+                        .archive_session(&target)
+                        .await
+                        .map_err(mutation_error)?;
+                    let mut message = format!("Archived: {archived_path}");
+                    history = retired_current_session(remote, &target, &mut message).await?;
+                    message
+                }
+                Command::Delete(target) => {
+                    client
+                        .delete_session_permanently(&target)
+                        .await
+                        .map_err(mutation_error)?;
+                    let mut message = "Session permanently deleted.".to_string();
+                    history = retired_current_session(remote, &target, &mut message).await?;
+                    message
+                }
                 Command::Rename(name) => {
                     client
                         .rename_session(session, &name)
@@ -290,6 +308,30 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
     }
 }
 
+/// After `/archive` or `/delete` of `target`: when it is the attached session,
+/// opens a new session in the workspace, as `/new` does, and appends its id to
+/// `message`. Returns whether the history was replaced.
+async fn retired_current_session(
+    remote: &Remote,
+    target: &str,
+    message: &mut String,
+) -> Result<bool, String> {
+    if target != remote.session() {
+        return Ok(false);
+    }
+    remote
+        .open(Some(remote.workspace()), None)
+        .await
+        .map_err(|error| {
+            format!(
+                "session retired but opening a new session failed: {}",
+                mutation_error(error)
+            )
+        })?;
+    message.push_str(&format!("\nSession: {}", remote.session()));
+    Ok(true)
+}
+
 fn switched_model_message(info: &crate::app::Info) -> String {
     format!(
         "Switched to model {} (type {}).",
@@ -372,6 +414,53 @@ async fn remote_management(
                 .set_skill_enabled(session, &name, enabled)
                 .await
                 .map_err(mutation_error)?,
+        ),
+        Request::Tasks => ManagementReply::Tasks(
+            remote
+                .client
+                .session_task_records(session)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        Request::Task(id) => ManagementReply::Task(
+            remote
+                .client
+                .session_task_record(session, &id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "task not found".to_string())?,
+        ),
+        Request::TaskCancel(id) => {
+            remote
+                .client
+                .cancel_task(session, &id)
+                .await
+                .map_err(mutation_error)?;
+            ManagementReply::TaskCancelled(id)
+        }
+        Request::Timers => ManagementReply::Timers(
+            remote
+                .client
+                .timers(session)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        Request::TimerCancel(id) => ManagementReply::TimerCancelled(
+            remote
+                .client
+                .cancel_timer(session, &id)
+                .await
+                .map_err(mutation_error)?,
+        ),
+        Request::McpStatus => ManagementReply::McpStatus(
+            remote
+                .client
+                .mcp_servers(session)
+                .await
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(crate::mcp::ServerStatus::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
         ),
         _ => return Err("not available with --attach".into()),
     };

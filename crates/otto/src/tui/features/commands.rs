@@ -149,7 +149,7 @@ const ENTRIES: &[Entry] = &[
         Setup,
         "/mcp",
         "inspect MCP servers or authenticate one",
-        true,
+        false,
         mcp
     ),
     entry!(
@@ -198,9 +198,9 @@ const ENTRIES: &[Entry] = &[
         memory
     ),
     entry!(Memory, "/remember", "remember a record", false, remember),
-    entry!(Tasks, "/task", "list, inspect or cancel tasks", true, task),
+    entry!(Tasks, "/task", "list, inspect or cancel tasks", false, task),
     entry!(Tasks, "/agents", "browse recorded agents", false, agents),
-    entry!(Tasks, "/timers", "list or cancel reminders", true, timers),
+    entry!(Tasks, "/timers", "list or cancel reminders", false, timers),
     entry!(Sessions, "/new", "start a new session", false, new_session),
     entry!(
         Sessions,
@@ -224,12 +224,12 @@ const ENTRIES: &[Entry] = &[
         false,
         rename
     ),
-    entry!(Sessions, "/archive", "archive a session", true, archive),
+    entry!(Sessions, "/archive", "archive a session", false, archive),
     entry!(
         Sessions,
         "/delete",
         "permanently delete a session",
-        true,
+        false,
         delete
     ),
     entry!(

@@ -421,7 +421,9 @@ the tools return an error that names the file.
 
 A prompt item runs in a process that is running when it is due: a TUI or
 REPL opened on the same workspace for terminal items, `otto acp` for its
-chats, or `otto serve` for every origin and workspace. No user is present
+chats, or `otto serve` for every origin in the workspaces it admits. An item
+whose workspace `otto serve` does not admit is left for a TUI or REPL open on
+that workspace. No user is present
 during the run, so approval requests are denied. The run is cancelled after
 10 minutes. Its session stays in the session list. A run that fails before any
 tool call is retried; a failure after a tool call started is delivered as

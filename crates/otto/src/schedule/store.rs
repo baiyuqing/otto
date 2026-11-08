@@ -99,6 +99,9 @@ impl Delivery {
     }
 }
 
+/// Whether a run worker may claim an item created in the given workspace.
+pub type WorkspaceAdmit = dyn Fn(&str) -> bool + Send + Sync;
+
 /// Typed schedule operations; claims and receipts preserve their existing transaction scope.
 pub trait ScheduleStore: Send + Sync {
     fn register_delivery_client(
@@ -119,6 +122,14 @@ pub trait ScheduleStore: Send + Sync {
         &self,
         scope: &Scope,
         workspace: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Item>>;
+    /// `claim_run`, skipping items whose workspace `admit` rejects.
+    fn claim_run_admitting(
+        &self,
+        scope: &Scope,
+        workspace: Option<&str>,
+        admit: Option<&WorkspaceAdmit>,
         now: DateTime<Utc>,
     ) -> Result<Option<Item>>;
     fn finish_run(

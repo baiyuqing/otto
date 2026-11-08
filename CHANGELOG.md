@@ -62,6 +62,16 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Several Otto processes can run at the same time on one `~/.otto`, each on
+  its own sessions. MCP OAuth refresh now takes a cross-process lock and adopts
+  a token another process refreshed; `otto serve` no longer claims scheduled
+  prompts of workspaces it does not admit; startup recovery of Git deliveries
+  skips records owned by a live process; `serve-workspaces.json` updates are
+  locked; a workflow lock held by another process is retried on the next call;
+  concurrent `tasks.db` schema upgrades and busy task writes no longer disable
+  task recording. See
+  [Several Otto processes on one data home](docs/manual/interactive-use.md#several-otto-processes-on-one-data-home).
+
 - The HTTP OpenAPI description (`GET /v1/openapi.yaml`) documents input
   provenance: optional `client_source` on turn, input, steer, control and
   approval-dialogue requests, `queued_input` on turns, `input_id` on the two

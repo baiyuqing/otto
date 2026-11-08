@@ -373,3 +373,31 @@ async fn removing_the_startup_workspace_answers_is_startup() {
         otto_server::WorkspaceRemoveError::IsStartup
     ));
 }
+
+/// A second process adding a path while the first is between its read and
+/// its write must not lose either path. The test plays the first process
+/// by holding the `~/.otto` lock across its own read and write.
+#[test]
+fn concurrent_adds_to_the_workspace_list_keep_both_paths() {
+    let home = tempfile::tempdir().expect("home");
+    let home_str = home.path().to_str().expect("utf-8 home").to_string();
+    let directory = home.path().join(".otto");
+    std::fs::create_dir_all(&directory).expect("otto dir");
+    let handle = otto::fsops::open_dir_no_follow(&directory).expect("open dir");
+    let lock = otto::fsops::lock_directory(&handle).expect("lock");
+    let mut first = read_workspace_list(&home_str).expect("first read");
+    let second = {
+        let home_str = home_str.clone();
+        std::thread::spawn(move || add_to_workspace_list(&home_str, "/second"))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    first.push("/first".into());
+    write_workspace_list(&home_str, first).expect("first write");
+    drop(lock);
+    drop(handle);
+    second.join().expect("second thread").expect("second add");
+    assert_eq!(
+        read_workspace_list(&home_str).expect("read"),
+        vec!["/first".to_string(), "/second".to_string()]
+    );
+}

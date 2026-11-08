@@ -62,6 +62,10 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- The HTTP OpenAPI description (`GET /v1/openapi.yaml`) documents input
+  provenance: optional `client_source` on turn, input, steer, control and
+  approval-dialogue requests, `queued_input` on turns, `input_id` on the two
+  dialogue requests, and `input_id`/`input_provenance` on `user_message` events.
 - Attached ACP and chat connector approval dialogues no longer fail with HTTP 400
   when the client has an application-source claim. Source claims remain on input
   admission requests, not dialogue-control requests. Rebuild/reinstall and restart

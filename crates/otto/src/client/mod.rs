@@ -46,6 +46,8 @@ use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 mod approvals;
 mod mcp;
+mod sandbox;
+pub use sandbox::SandboxChangeOutcome;
 mod session_operations;
 mod sessions;
 mod tasks;

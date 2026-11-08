@@ -407,10 +407,12 @@ Turns:
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/rename`, `/compact`,
-`/context`, `/agents`, `/permissions`, `/sandbox`, `/sandbox reload`,
-`/approve [<id>]`, and `/exit`. Every other command prints
-`/<command>: not available with --attach` and does nothing: `/model`,
-`/thinking`, `/archive`, `/memory`, `/remember`, `/skill`,
+`/context`, `/agents`, `/model`, `/thinking`, `/memory`, `/remember`, `/skill`,
+`/permissions`, `/sandbox`, `/sandbox reload`, `/approve [<id>]`, and `/exit`.
+Under `--attach`, `/model` and `/thinking` change the current session only, and
+`/thinking <level> --save` reports that nothing was saved; neither writes the
+configuration file. Every other command prints
+`/<command>: not available with --attach` and does nothing: `/archive`,
 `/tasks`, `/task`, `/timers`, `/mcp`, `/login`, `/logout`,
 `/sandbox allow|network|exclude`, and `/approve <id> always`.
 

@@ -659,3 +659,105 @@ async fn approval_mode_api_is_session_scoped_and_events_capture_auto_decisions()
         .json();
     assert!(other.as_array().unwrap().is_empty());
 }
+
+// ---- `always` ----
+
+fn always_harness(command: &str) -> Harness {
+    let info = fixtures::seatbelt_info(SandboxNetwork::Denied);
+    let (control, _calls) = fixtures::FakeSandbox::new(info.clone(), info, None);
+    Harness::with(HarnessOptions {
+        script: Script {
+            tool_command: Some(command.to_string()),
+            deltas: vec!["done".to_string()],
+            ..Script::default()
+        },
+        elevate: true,
+        sandbox_control: Some(control),
+        ..HarnessOptions::default()
+    })
+}
+
+async fn decide_always(harness: &Harness, session: &str, approval: &str, decision: &str) -> Reply {
+    let body = serde_json::json!({ "decision": decision, "always": true });
+    harness
+        .send(
+            "POST",
+            &format!("/v1/sessions/{session}/approvals/{approval}"),
+            Some(&body.to_string()),
+        )
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn always_excludes_the_command_and_resumes_the_waiting_turn_once() {
+    let harness = always_harness("echo hi");
+    let id = harness.create().await;
+    let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+    let reply = decide_always(&harness, &id, &approval, "allow").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let body = reply.json();
+    assert_eq!(
+        (&body["decision"], &body["always"]),
+        (&"allow".into(), &true.into())
+    );
+    assert!(
+        body["followup"]
+            .as_str()
+            .is_some_and(|text| text.contains("excluded 'echo hi'")),
+        "{body}"
+    );
+    let decided = frame_named(&mut reader, "approval_decided").await;
+    assert_eq!(decided["decision"], "allow");
+    let (_, last, end) = ends_of(reader).await;
+    assert_eq!((last.as_str(), end.as_str()), ("turn_end", "ok"));
+    assert_eq!(harness.wait_turn_done(&id, &turn_id).await["status"], "ok");
+
+    let config = std::fs::read_to_string(&harness.factory.builder.shared.config_path)
+        .expect("configuration file");
+    assert!(
+        config.contains("excluded_commands") && config.contains("echo hi"),
+        "{config}"
+    );
+    // Same provider calls as a plain allow: the turn resumed once.
+    assert_eq!(harness.provider.system_prompts().len(), 4);
+    let again = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(again.json()["error"]["code"], "approval_decided");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn always_with_deny_is_400_and_the_approval_keeps_waiting() {
+    let harness = always_harness("echo hi");
+    let id = harness.create().await;
+    let (_reader, _turn_id, approval) = waiting_turn(&harness, &id).await;
+    let reply = decide_always(&harness, &id, &approval, "deny").await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    let plain = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(plain.status, StatusCode::OK, "{}", plain.body);
+    assert!(plain.json().get("always").is_none(), "{}", plain.body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn always_for_a_command_that_cannot_be_excluded_is_400_and_keeps_waiting() {
+    let harness = always_harness("make test");
+    let id = harness.create().await;
+    let response = post_turn(&harness, &id, "run it", false).await;
+    let mut reader = SseReader::new(response);
+    let requested = frame_named(&mut reader, "approval_requested").await;
+    let approval = requested["approval_id"].as_str().expect("id").to_string();
+
+    let reply = decide_always(&harness, &id, &approval, "allow").await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.json()["error"]["code"], "approval_always_failed");
+    assert!(
+        reply.json()["error"]["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("cannot exclude this command")),
+        "{}",
+        reply.body
+    );
+    assert!(!harness.factory.builder.shared.config_path.exists());
+    // Still undecided: an ordinary allow is accepted.
+    let plain = decide(&harness, &id, &approval, "allow").await;
+    assert_eq!(plain.status, StatusCode::OK, "{}", plain.body);
+}

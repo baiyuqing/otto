@@ -347,3 +347,26 @@ fn delivery_failures_back_off_to_30_minutes_and_clear_on_success() {
     store.delivered(created.id, created.due_at, at).unwrap();
     assert_eq!(item(&store, created.id).last_error, "");
 }
+
+#[test]
+fn a_rejected_workspace_is_not_claimed_and_stays_claimable_by_others() {
+    let store = store();
+    let now = now_ms();
+    let prompt = store.create(new_item(Kind::Prompt, "p", now), now).unwrap();
+    let reject_all = |_: &str| false;
+    assert!(
+        store
+            .claim_run_admitting(&Scope::Any, None, Some(&reject_all), now)
+            .unwrap()
+            .is_none()
+    );
+    let after = item(&store, prompt.id);
+    assert_eq!(after.claimed_until.timestamp_millis(), 0, "no lease taken");
+    assert_eq!(after.attempts, 0);
+    assert_eq!(after.next_try_at, prompt.next_try_at, "no backoff");
+    let terminal = store
+        .claim_run(&Scope::Any, Some(&prompt.workspace), now)
+        .unwrap()
+        .expect("a worker for that workspace claims it at once");
+    assert_eq!(terminal.id, prompt.id);
+}

@@ -9,6 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- `otto --attach` accepts `/model` and `/thinking`. `otto serve` adds
+  `POST /v1/sessions/{id}/thinking`; under attach both commands change the
+  current session only and never write the configuration file, so
+  `/thinking <level> --save` reports that nothing was saved.
+
 - `otto serve` archives an idle session with `POST /v1/sessions/{id}/archive`,
   the HTTP counterpart of TUI `/archive`, so HTTP clients such as Otto Desktop
   can archive from their session lists. `openapi.yaml` now also documents

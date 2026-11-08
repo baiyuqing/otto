@@ -161,6 +161,18 @@ impl Remote {
     }
 
     #[cfg(test)]
+    pub(crate) fn for_client(client: Client, session: &str) -> Self {
+        let remote = Self::new(client, "/work");
+        {
+            let mut state = remote.state();
+            state.session = session.to_string();
+            state.info.session_id = session.to_string();
+            state.info.workspace = "/work".to_string();
+        }
+        remote
+    }
+
+    #[cfg(test)]
     pub(crate) fn offline(history: Vec<Message>) -> Self {
         let client = Client::new(Path::new("/nonexistent/otto.sock")).expect("client");
         let remote = Self::new(client, "/work");

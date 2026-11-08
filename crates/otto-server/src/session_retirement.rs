@@ -1,4 +1,6 @@
-//! Explicit, irreversible deletion; the existing DELETE route remains a close.
+//! Retiring a session from this server: explicit, irreversible deletion and
+//! archiving. Both close an idle session first, then change its files only
+//! through the native API. The plain `DELETE /v1/sessions/{id}` remains a close.
 use super::*;
 
 #[derive(Deserialize)]
@@ -7,7 +9,16 @@ struct DeleteBody {
     confirm: String,
 }
 
-pub(super) async fn handle(
+/// What happens to the closed session's files.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Retirement {
+    /// Remove history, sub-agent transcripts, sidecars and lease/queue state.
+    Delete,
+    /// Move the session file to the workspace archive, as TUI `/archive` does.
+    Archive,
+}
+
+pub(super) async fn delete_handle(
     State(server): State<Arc<Server>>,
     Path(id): Path<String>,
     body: Bytes,
@@ -19,15 +30,26 @@ pub(super) async fn handle(
     if parsed.confirm != id {
         return bad_request("confirm must exactly match the session id");
     }
+    spawn_retirement(server, id, Retirement::Delete).await
+}
+
+pub(super) async fn archive_handle(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+) -> Response {
+    spawn_retirement(server, id, Retirement::Archive).await
+}
+
+async fn spawn_retirement(server: Arc<Server>, id: String, retirement: Retirement) -> Response {
     // Keep admission and cleanup alive even if the HTTP request is dropped.
     let task_server = Arc::clone(&server);
-    match tokio::spawn(async move { delete(&task_server, &id).await }).await {
+    match tokio::spawn(async move { retire(&task_server, &id, retirement).await }).await {
         Ok(response) => response,
         Err(error) => internal_error(&server.log, &error.to_string()),
     }
 }
 
-fn delete_error(server: &Server, error: &str) -> Response {
+fn retirement_error(server: &Server, error: &str) -> Response {
     if error == SESSION_NOT_FOUND {
         not_found("session not found")
     } else if error == app::PROMPT_ACTIVE
@@ -43,7 +65,7 @@ fn delete_error(server: &Server, error: &str) -> Response {
     }
 }
 
-async fn delete(server: &Arc<Server>, id: &str) -> Response {
+async fn retire(server: &Arc<Server>, id: &str, retirement: Retirement) -> Response {
     let _gate = server.open_gate.lock().await;
     if server.permanently_unavailable(id) {
         return not_found("session not found");
@@ -52,7 +74,7 @@ async fn delete(server: &Arc<Server>, id: &str) -> Response {
         Some(session) => (session, true),
         None => match server.factory.open(id, None).await {
             Ok(ctrl) => (OpenSession::new(ctrl), false),
-            Err(error) => return delete_error(server, &error),
+            Err(error) => return retirement_error(server, &error),
         },
     };
     let info = session.ctrl.info();
@@ -63,7 +85,7 @@ async fn delete(server: &Arc<Server>, id: &str) -> Response {
     // handed to an attached frontend. Registry state alone cannot guard it.
     let admission = match session.ctrl.begin_operation() {
         Ok(admission) => admission,
-        Err(error) => return delete_error(server, &error),
+        Err(error) => return retirement_error(server, &error),
     };
     {
         let mut state = session.lock();
@@ -101,6 +123,8 @@ async fn delete(server: &Arc<Server>, id: &str) -> Response {
             );
         }
         state.deleting = true;
+        // Neither a resume nor an idempotent create retry may bring this id
+        // back in this process while its files change, or after they did.
         server
             .permanent_deletions
             .lock()
@@ -119,28 +143,58 @@ async fn delete(server: &Arc<Server>, id: &str) -> Response {
     drop(admission);
     let ctrl = Arc::clone(&session.ctrl);
     let closed = tokio::task::spawn_blocking(move || ctrl.close()).await;
-    match closed {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return delete_error(server, &error),
-        Err(error) => return internal_error(&server.log, &error.to_string()),
-    }
-    // The target's writer and lease are released. Never synthesize a filesystem
-    // path from an HTTP id, and never remove files outside the native API.
-    let deleter = match server.factory.create(Some(&info.workspace)).await {
-        Ok(ctrl) => ctrl,
-        Err(error) => return delete_error(server, &error),
+    let response = match closed {
+        Ok(Ok(())) => change_files(server, &info, retirement).await,
+        Ok(Err(error)) => retirement_error(server, &error),
+        Err(error) => internal_error(&server.log, &error.to_string()),
     };
-    let result = deleter.delete_session(&info.session_path).await;
-    deleter.close_resources().await;
-    let close_result = tokio::task::spawn_blocking(move || deleter.close()).await;
-    if let Err(error) = result {
-        return delete_error(server, &error);
+    // An archive is one file move, the last and only committed change, so a
+    // failed archive leaves the session intact and it may be resumed again.
+    // A failed delete may be partial, so its id stays unavailable.
+    if retirement == Retirement::Archive && !response.status().is_success() {
+        server
+            .permanent_deletions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(id);
     }
+    response
+}
+
+/// The target's writer and lease are released. Never synthesize a filesystem
+/// path from an HTTP id, and never change files outside the native API.
+async fn change_files(server: &Arc<Server>, info: &app::Info, retirement: Retirement) -> Response {
+    let operator = match server.factory.create(Some(&info.workspace)).await {
+        Ok(ctrl) => ctrl,
+        Err(error) => return retirement_error(server, &error),
+    };
+    let result = match retirement {
+        Retirement::Delete => operator
+            .delete_session(&info.session_path)
+            .await
+            .map(|()| None),
+        Retirement::Archive => operator
+            .archive_session(&info.session_path)
+            .await
+            .map(|archived| Some(archived.path)),
+    };
+    operator.close_resources().await;
+    let close_result = tokio::task::spawn_blocking(move || operator.close()).await;
+    let archived_path = match result {
+        Ok(archived_path) => archived_path,
+        Err(error) => return retirement_error(server, &error),
+    };
     match close_result {
-        Ok(Ok(())) => Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .expect("static response"),
+        Ok(Ok(())) => match archived_path {
+            Some(path) => json_response(
+                StatusCode::OK,
+                &serde_json::json!({ "archived_path": path }),
+            ),
+            None => Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("static response"),
+        },
         Ok(Err(error)) => internal_error(&server.log, &error),
         Err(error) => internal_error(&server.log, &error.to_string()),
     }

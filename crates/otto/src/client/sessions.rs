@@ -341,6 +341,36 @@ impl Client {
         Ok((forked.id, forked.prompt))
     }
 
+    /// `POST /v1/sessions/{id}/archive`: moves an idle session to the
+    /// workspace archive and returns the `archived_path`. Serve answers 409
+    /// `session_busy` for a session with active work.
+    pub async fn archive_session(&self, session_id: &str) -> Result<String, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/archive"),
+                &json!({}),
+            ))
+            .await?;
+        #[derive(Deserialize)]
+        struct Archived {
+            archived_path: String,
+        }
+        Ok(decode::<Archived>(response).await?.archived_path)
+    }
+
+    /// `DELETE /v1/sessions/{id}/permanent` with `{"confirm": id}`: removes
+    /// an idle session's files irreversibly.
+    pub async fn delete_session_permanently(&self, session_id: &str) -> Result<(), Error> {
+        self.send(
+            self.http
+                .delete(format!("{BASE}/v1/sessions/{session_id}/permanent"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(json!({ "confirm": session_id }).to_string()),
+        )
+        .await
+        .map(drop)
+    }
+
     /// `PATCH /v1/sessions/{id}`.
     pub async fn rename_session(&self, session_id: &str, name: &str) -> Result<(), Error> {
         self.send(

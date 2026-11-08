@@ -193,3 +193,64 @@ async fn reload_sandbox_returns_the_summary() {
     assert_eq!(client.reload_sandbox().await.unwrap(), "seatbelt line");
     assert_eq!(request(&seen, 0).0, "POST /v1/sandbox/reload");
 }
+
+#[tokio::test]
+async fn session_task_records_keep_the_wire_fields_and_single_task_ignores_history() {
+    let list = serde_json::to_string(&json!({ "tasks": [sample_task("a1")] })).unwrap();
+    let mut detail = serde_json::to_value(sample_task("a2")).unwrap();
+    detail["history"] = json!([]);
+    let detail = detail.to_string();
+    let (client, seen, _dir) = stub(move |_, target| {
+        if target.ends_with("/tasks") {
+            json_body(StatusCode::OK, &list)
+        } else if target.ends_with("/missing") {
+            json_body(
+                StatusCode::NOT_FOUND,
+                r#"{"error":{"code":"not_found","message":"task not found"}}"#,
+            )
+        } else {
+            json_body(StatusCode::OK, &detail)
+        }
+    });
+    let records = client.session_task_records("s1").await.unwrap();
+    assert_eq!(
+        (records[0].id.as_str(), records[0].error.as_str()),
+        ("a1", "boom")
+    );
+    let one = client
+        .session_task_record("s1", "a2")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(one.id, "a2");
+    assert!(
+        client
+            .session_task_record("s1", "missing")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(request(&seen, 1).0, "GET /v1/sessions/s1/tasks/a2");
+}
+
+#[tokio::test]
+async fn cancel_task_posts_to_the_cancel_route_and_reports_task_done() {
+    let body = serde_json::to_string(&sample_task("a1")).unwrap();
+    let (client, seen, _dir) = stub(move |_, target| {
+        if target.contains("/done/") {
+            json_body(
+                StatusCode::CONFLICT,
+                r#"{"error":{"code":"task_done","message":"task already finished"}}"#,
+            )
+        } else {
+            json_body(StatusCode::OK, &body)
+        }
+    });
+    assert_eq!(client.cancel_task("s1", "a1").await.unwrap().id, "a1");
+    assert_eq!(request(&seen, 0).0, "POST /v1/sessions/s1/tasks/a1/cancel");
+    let error = client.cancel_task("s1", "done").await.unwrap_err();
+    assert!(
+        matches!(&error, Error::Http { status: 409, code, .. } if code == "task_done"),
+        "{error}"
+    );
+}

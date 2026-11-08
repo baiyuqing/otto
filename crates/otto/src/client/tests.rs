@@ -9,6 +9,7 @@ use super::*;
 
 mod sessions;
 mod tasks;
+mod timers_and_mcp;
 
 /// One request as serve saw it: `METHOD /path?query` and the body text.
 type Seen = Arc<Mutex<Vec<(String, String)>>>;

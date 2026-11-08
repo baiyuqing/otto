@@ -33,6 +33,7 @@ pub mod jsonrpc;
 pub mod oauth;
 pub mod sse;
 pub mod stdio;
+mod wire_status;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

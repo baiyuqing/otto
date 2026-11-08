@@ -273,25 +273,38 @@ pub(super) fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::
     std::fs::rename(&temp_path, workspace_list_path(home))
 }
 
-/// Adds `path` to the persisted workspace list (sorted, deduplicated). A
-/// currently unparsable file is treated as an empty list rather than
-/// preserved, matching the spec's "the next successful add ... rewrites it
-/// from the empty list plus the new path".
-pub(super) fn add_to_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
+/// Reads the list, applies `change` and writes it back while holding an
+/// exclusive lock on `~/.otto`, the lock `otto::workspace` takes for
+/// `workspace.json`. The lock is across processes, so two `otto serve`
+/// processes cannot overwrite each other's change. A currently unparsable
+/// file is treated as an empty list rather than preserved, matching the
+/// spec's "the next successful add ... rewrites it from the empty list plus
+/// the new path".
+fn update_workspace_list(home: &str, change: impl FnOnce(&mut Vec<String>)) -> std::io::Result<()> {
+    let directory = Path::new(home).join(".otto");
+    std::fs::create_dir_all(&directory)?;
+    let handle = otto::fsops::open_dir_no_follow(&directory)?;
+    let _lock = otto::fsops::lock_directory(&handle)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let mut workspaces = read_workspace_list(home).unwrap_or_default();
-    if !workspaces.iter().any(|entry| entry == path) {
-        workspaces.push(path.to_string());
-        workspaces.sort();
-    }
+    change(&mut workspaces);
     write_workspace_list(home, workspaces)
+}
+
+/// Adds `path` to the persisted workspace list (sorted, deduplicated).
+pub(super) fn add_to_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
+    update_workspace_list(home, |workspaces| {
+        if !workspaces.iter().any(|entry| entry == path) {
+            workspaces.push(path.to_string());
+            workspaces.sort();
+        }
+    })
 }
 
 /// Removes `path` from the persisted workspace list, preserving the order of
 /// the remaining entries. A path not in the list is a no-op.
 pub(super) fn remove_from_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
-    let mut workspaces = read_workspace_list(home).unwrap_or_default();
-    workspaces.retain(|entry| entry != path);
-    write_workspace_list(home, workspaces)
+    update_workspace_list(home, |workspaces| workspaces.retain(|entry| entry != path))
 }
 
 /// Loads every path in the persisted workspace list into `workspaces`, after

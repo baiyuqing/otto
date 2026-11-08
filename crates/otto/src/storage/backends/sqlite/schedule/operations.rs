@@ -142,13 +142,29 @@ impl SqliteScheduleStore {
         workspace: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<Option<Item>> {
+        self.claim_run_admitting(scope, workspace, None, now)
+    }
+
+    /// Like [`Self::claim_run`], and skips items whose workspace `admit`
+    /// rejects. The check runs inside the claim transaction, so a rejected
+    /// item gets no lease and no attempt, and stays claimable by others.
+    pub fn claim_run_admitting(
+        &self,
+        scope: &Scope,
+        workspace: Option<&str>,
+        admit: Option<&WorkspaceAdmit>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Item>> {
+        // Without a filter the first 50 candidates are enough; with one, rows
+        // it rejects must not crowd out admitted rows behind them.
+        let limit = if admit.is_some() { -1 } else { 50 };
         self.write(|connection| {
             let candidates = query_items(
                 connection,
                 &format!(
                     "SELECT {COLUMNS} FROM items WHERE state = 'waiting' AND kind = 'prompt' \
                      AND next_try_at <= ?1 AND claimed_until <= ?1 \
-                     AND (?3 = 0 OR workspace = ?2) ORDER BY next_try_at, id LIMIT 50"
+                     AND (?3 = 0 OR workspace = ?2) ORDER BY next_try_at, id LIMIT {limit}"
                 ),
                 params![
                     ms(now),
@@ -156,10 +172,17 @@ impl SqliteScheduleStore {
                     i64::from(workspace.is_some())
                 ],
             )?;
-            let Some(mut item) = candidates
-                .into_iter()
-                .find(|item| scope.matches(&item.origin))
-            else {
+            // `admit` may read configuration and resolve paths; evaluate it
+            // once per workspace, not once per candidate row.
+            let mut admitted_by_workspace = std::collections::HashMap::<String, bool>::new();
+            let Some(mut item) = candidates.into_iter().find(|item| {
+                scope.matches(&item.origin)
+                    && admit.is_none_or(|admit| {
+                        *admitted_by_workspace
+                            .entry(item.workspace.clone())
+                            .or_insert_with(|| admit(&item.workspace))
+                    })
+            }) else {
                 return Ok(None);
             };
             item.claimed_until = now + RUN_LEASE;

@@ -418,7 +418,7 @@ impl ParentToolSlot {
 /// tools or wraps the client.
 pub struct Builder {
     /// One controller/lock for every parent runner in this workspace.
-    pub(crate) workflows: tokio::sync::OnceCell<Result<Arc<crate::workflow::Controller>, String>>,
+    pub(crate) workflows: tokio::sync::OnceCell<Arc<crate::workflow::Controller>>,
     /// Everything built once per process. Field access on `Builder` reaches
     /// these through `Deref`, so `self.config`, `self.environment`, and the
     /// rest of `Shared`'s fields read the same as before the split.

@@ -928,6 +928,36 @@ Notes:
   headers, or cookie values, and Otto does not persist private sandbox profile
   paths as runtime metadata.
 
+### Several Otto processes on one data home
+
+Several Otto processes (TUIs, REPLs, `otto serve`, `otto acp`) can run at
+the same time with the same `~/.otto`, each on its own sessions.
+
+- A session is open in one process at a time. The process holds an exclusive
+  lock on the session file while the session is open; opening the same
+  session in a second process fails after 1 s with
+  `file is already locked by another process`. To use one session from
+  several clients, run one `otto serve` and connect the clients to it
+  (see [Agent server](servers-and-connectors.md#agent-server)).
+- Workflows of one workspace run in one process at a time, the first that
+  starts its workflow runtime there (`~/.otto/workflow-locks/<key>.lock`).
+  In a TUI or REPL, a workflow call while another process holds the lock
+  returns `workflow runtime is already active for this workspace`, and the
+  next call tries again. `otto serve` checks the lock when it loads a
+  workspace (see [Agent server](servers-and-connectors.md#agent-server)).
+- Memory records, `config.toml`, ChatGPT and MCP OAuth credentials,
+  `workspace.json`, `serve-workspaces.json` and the plugin registry are
+  written under a file lock and re-read under that lock, so a write from one
+  process does not overwrite a write from another. A token refresh adopts a
+  token that another process refreshed instead of spending the rotated
+  refresh token again.
+- The SQLite databases (`usage.db`, `schedule.db`, `tasks.db`,
+  `approvals.db`, `workflows.db`, `delivery-receipts.db`) wait up to 5 s for
+  another process's write. Startup recovery of pending approvals and Git
+  deliveries changes only records whose owning process has exited.
+- Two `otto-connect` processes on one data home overwrite each other's
+  `~/.otto/connect/state.json`; run one connector per data home.
+
 ### Continuing a session on another host
 
 A session whose directory `~/.otto/sessions/<workspace-key>/` is on a shared

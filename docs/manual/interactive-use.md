@@ -408,15 +408,18 @@ Turns:
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/rename`, `/compact`,
 `/context`, `/agents`, `/model`, `/thinking`, `/memory`, `/remember`, `/skill`,
-`/permissions`, `/sandbox`, `/sandbox reload`, `/approve [<id>]`, `/task`, `/tasks`,
+`/permissions`, `/sandbox`, `/sandbox reload`, `/sandbox allow|network|exclude`,
+`/approve [<id>]`, `/approve <id> always`, `/task`, `/tasks`,
 `/timers`, `/mcp` (status only), `/archive`, `/delete`, and `/exit`.
 Under `--attach`, `/model` and `/thinking` change the current session only, and
 `/thinking <level> --save` reports that nothing was saved; neither writes the
 configuration file. Under `--attach`, `/archive` and `/delete` act on sessions
 by id, and retiring the current session opens a new session in the workspace.
 Every other command prints `/<command>: not available with --attach` and does
-nothing: `/login`, `/logout`, `/mcp login`, `/inputs`, `/recover`,
-`/sandbox allow|network|exclude`, and `/approve <id> always`.
+nothing: `/login`, `/logout`, `/mcp login`, `/inputs`, and `/recover`.
+Under `--attach`, `/sandbox allow|network|exclude` and `/approve <id> always`
+write the change to the serve process's configuration file, and the sandbox
+change is applied to every loaded workspace.
 
 If a request to serve fails to connect, or the status stream or a turn's
 event stream ends without that turn's `turn_end` frame, the transcript shows

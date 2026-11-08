@@ -37,6 +37,7 @@ mod queue_cases;
 mod queue_provenance_cases;
 mod remote_listener_cases;
 mod scoped_route_cases;
+mod session_archive_cases;
 mod session_lifecycle_cases;
 mod sessions_cases;
 mod skills_cases;

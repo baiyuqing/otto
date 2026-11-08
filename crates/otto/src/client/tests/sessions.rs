@@ -393,3 +393,40 @@ async fn fork_calls_post_the_fork_point_and_decode_the_new_session() {
         )
     );
 }
+
+#[tokio::test]
+async fn archive_session_returns_the_archived_path_and_surfaces_session_busy() {
+    let (client, seen, _dir) = stub(|_, target| {
+        if target.contains("/busy/") {
+            json_body(
+                StatusCode::CONFLICT,
+                r#"{"error":{"code":"session_busy","message":"session has active work"}}"#,
+            )
+        } else {
+            json_body(
+                StatusCode::OK,
+                r#"{"archived_path":"/w/.otto/archive/s1.jsonl"}"#,
+            )
+        }
+    });
+    assert_eq!(
+        client.archive_session("s1").await.unwrap(),
+        "/w/.otto/archive/s1.jsonl"
+    );
+    assert_eq!(request(&seen, 0).0, "POST /v1/sessions/s1/archive");
+    let error = client.archive_session("busy").await.unwrap_err();
+    assert!(error.to_string().contains("session_busy"), "{error}");
+}
+
+#[tokio::test]
+async fn delete_session_permanently_sends_the_id_as_confirmation() {
+    let (client, seen, _dir) = stub(|_, _| json_body(StatusCode::NO_CONTENT, ""));
+    client.delete_session_permanently("s1").await.unwrap();
+    assert_eq!(
+        request(&seen, 0),
+        (
+            "DELETE /v1/sessions/s1/permanent".into(),
+            json!({ "confirm": "s1" })
+        )
+    );
+}

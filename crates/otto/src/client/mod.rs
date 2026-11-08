@@ -45,9 +45,11 @@ use crate::schedule::Origin;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 mod approvals;
+mod mcp;
 mod session_operations;
 mod sessions;
 mod tasks;
+mod timers;
 
 const BASE: &str = "http://otto";
 /// The largest SSE frame accepted from serve: a tool result frame carries at

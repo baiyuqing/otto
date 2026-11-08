@@ -15,8 +15,8 @@ pub mod worker;
 
 pub use crate::storage::backends::sqlite::schedule::SqliteScheduleStore as Store;
 pub use store::{
-    CreateError, Delivery, Error, Item, NewItem, Result, ScheduleStore, delivery_text, parse_label,
-    run_text,
+    CreateError, Delivery, Error, Item, NewItem, Result, ScheduleStore, WorkspaceAdmit,
+    delivery_text, parse_label, run_text,
 };
 
 /// Platforms an otto-connect chat can belong to.

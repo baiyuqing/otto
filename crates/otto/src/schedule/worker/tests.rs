@@ -165,6 +165,7 @@ fn start(runner: FakeRunner, deliver_scope: Scope, run_workspace: Option<&str>) 
         run: Some(RunRole {
             scope: Scope::Any,
             workspace: run_workspace.map(str::to_owned),
+            admit: None,
             runner: runner.clone(),
         }),
         deliver: Some(DeliverRole {
@@ -308,6 +309,7 @@ async fn a_store_failure_is_written_as_a_warning() {
         run: Some(RunRole {
             scope: Scope::Any,
             workspace: None,
+            admit: None,
             runner: Arc::new(FakeRunner::default()),
         }),
         deliver: None,

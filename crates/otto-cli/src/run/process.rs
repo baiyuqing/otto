@@ -643,6 +643,7 @@ pub async fn run_with_extensions(
                 run: Some(otto::schedule::worker::RunRole {
                     scope: otto::schedule::Scope::Terminal,
                     workspace: Some(controller.builder().workspace_path.clone()),
+                    admit: None,
                     runner: Arc::new(otto::app::scheduled::ControllerRunner(Arc::clone(
                         &controller,
                     ))),

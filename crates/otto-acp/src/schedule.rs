@@ -101,6 +101,7 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
                     .map(|origins| Scope::Origins(origins.clone()))
                     .unwrap_or_else(|| Scope::Chats(platforms.clone())),
                 workspace: Some(local.config.workspace.to_string_lossy().into_owned()),
+                admit: None,
                 runner: Arc::new(runner),
             };
             (

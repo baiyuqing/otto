@@ -61,6 +61,19 @@ fn route(method: &str, path: &str) -> (StatusCode, serde_json::Value) {
                   "state": "failed", "tools": 0, "error": "spawn failed" },
             ] }),
         ),
+        ("POST", "/v1/sessions/s1/sandbox/changes") => (
+            ok,
+            json!({
+                "summary": "Seatbelt sandbox, network allowed",
+                "change_summary": "network allow",
+                "config_path": "/c/config.toml",
+                "followup": "retry the command",
+            }),
+        ),
+        ("POST", "/v1/sessions/s1/approvals/ap1") => (
+            ok,
+            json!({ "decision": "allow", "always": true, "followup": "retry echo hi" }),
+        ),
         ("POST", "/v1/sessions") => (ok, json!({ "id": "s2" })),
         ("GET", "/v1/sessions/s2/history") => (ok, json!([])),
         ("GET", "/v1/sessions/s1") => (ok, json!({ "id": "s1" })),
@@ -260,4 +273,99 @@ async fn deleting_the_current_session_opens_a_new_one() {
     };
     assert_eq!(message, "Session permanently deleted.\nSession: s2");
     assert!(history.is_some());
+}
+
+#[tokio::test]
+async fn attached_sandbox_changes_post_the_change_and_submit_the_followup() {
+    let cases = [
+        (
+            Command::SandboxAllow("/data".into()),
+            "allow_read_path",
+            "/data",
+        ),
+        (Command::SandboxNetwork("allow".into()), "network", "allow"),
+        (
+            Command::SandboxExclude("git status".into()),
+            "exclude_command",
+            "git status",
+        ),
+    ];
+    for (command, change, value) in cases {
+        // One stand-in per command: each command refreshes the session info.
+        let (remote, log, _dir) = serve_stand_in();
+        let Reply::Operation {
+            message, prompt, ..
+        } = run(&remote, Request::Command(command)).await.unwrap()
+        else {
+            panic!("operation reply")
+        };
+        assert!(
+            message.starts_with("Sandbox: Seatbelt sandbox, network allowed (network allow)"),
+            "{message}"
+        );
+        assert_eq!(prompt.as_deref(), Some("retry the command"));
+        let log = log.lock().unwrap();
+        let (path, sent) = log
+            .iter()
+            .rev()
+            .find(|(path, _)| path.ends_with("/sandbox/changes"))
+            .unwrap();
+        assert_eq!(path, "POST /v1/sessions/s1/sandbox/changes");
+        assert_eq!(sent, &json!({ "change": change, "value": value }));
+        if change == "exclude_command" {
+            assert!(
+                message.contains("in /c/config.toml and reloaded"),
+                "{message}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn attached_approve_always_submits_the_server_followup() {
+    let (remote, log, _dir) = serve_stand_in();
+    let Reply::Operation {
+        message, prompt, ..
+    } = run(
+        &remote,
+        Request::Command(Command::ApproveAlways("ap1".into())),
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("operation reply")
+    };
+    assert_eq!(message, "Approved ap1.");
+    assert_eq!(prompt.as_deref(), Some("retry echo hi"));
+    assert_eq!(
+        log.lock().unwrap()[0],
+        (
+            "POST /v1/sessions/s1/approvals/ap1".to_string(),
+            json!({ "decision": "allow", "always": true })
+        )
+    );
+}
+
+#[tokio::test]
+async fn attached_sandbox_path_preview_resolves_on_the_client() {
+    let (remote, log, _dir) = serve_stand_in();
+    let target = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(target.path()).unwrap();
+    let reply = run(
+        &remote,
+        Request::SandboxPath(target.path().to_string_lossy().into_owned()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(reply, Reply::SandboxPath(path) if path == canonical.to_string_lossy()));
+    let missing = run(
+        &remote,
+        Request::SandboxPath("/nonexistent/otto-preview".into()),
+    )
+    .await;
+    assert!(missing.is_err());
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the preview must not call serve"
+    );
 }

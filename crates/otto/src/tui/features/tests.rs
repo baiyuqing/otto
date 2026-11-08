@@ -330,13 +330,16 @@ fn sandbox_exclude_runs_inline_but_read_grants_still_require_confirmation() {
             .open("/sandbox exclude ''", &Info::default(), false)
             .is_err()
     );
-    assert!(
-        catalog
-            .open("/sandbox exclude 'gh *'", &Info::default(), true)
-            .err()
-            .unwrap()
-            .contains("not available with --attach")
-    );
+    for line in [
+        "/sandbox exclude 'gh *'",
+        "/sandbox network allow",
+        "/sandbox allow /tmp",
+    ] {
+        assert!(
+            catalog.open(line, &Info::default(), true).is_ok(),
+            "{line} must open under --attach"
+        );
+    }
 }
 
 #[test]

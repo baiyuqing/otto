@@ -108,7 +108,7 @@ pub async fn build_controller(
 
 /// Join active workflow boundaries before an owning frontend exits.
 pub async fn close(builder: &Builder) {
-    if let Some(Ok(controller)) = builder.workflows.get() {
+    if let Some(controller) = builder.workflows.get() {
         controller.close().await;
     }
 }
@@ -118,11 +118,13 @@ pub async fn shared_controller(
     runtime: &Runtime,
     stderr: &mut (dyn Write + Send),
 ) -> Result<Arc<Controller>, String> {
+    // An Err is not stored: a lock held by another process may be released
+    // later, so the next call composes again.
     builder
         .workflows
-        .get_or_init(|| Box::pin(compose_controller(builder, runtime, stderr)))
+        .get_or_try_init(|| Box::pin(compose_controller(builder, runtime, stderr)))
         .await
-        .clone()
+        .cloned()
 }
 
 async fn compose_controller(

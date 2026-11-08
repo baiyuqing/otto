@@ -62,6 +62,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- `otto-connect` refuses to start while another `otto-connect` of the same
+  user runs, instead of both polling the same Telegram bot and overwriting
+  `~/.otto/connect/state.json`. See
+  [Building and running](docs/manual/servers-and-connectors.md#building-and-running).
+
 - Several Otto processes can run at the same time on one `~/.otto`, each on
   its own sessions. MCP OAuth refresh now takes a cross-process lock and adopts
   a token another process refreshed; `otto serve` no longer claims scheduled

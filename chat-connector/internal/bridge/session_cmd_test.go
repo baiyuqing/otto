@@ -159,6 +159,7 @@ func TestUseBindingSurvivesRestart(t *testing.T) {
 	h1.say("/use aaaa")
 	h1.waitSent(1)
 	h1.shutdown()
+	store1.Close()
 
 	store2, err := state.Open(statePath)
 	if err != nil {

@@ -40,6 +40,7 @@ func TestStoreRoundTripAndMode(t *testing.T) {
 		t.Fatalf("dir mode = %v, want 0700", dir.Mode().Perm())
 	}
 
+	s.Close()
 	again, err := Open(path)
 	if err != nil {
 		t.Fatal(err)

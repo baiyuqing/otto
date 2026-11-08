@@ -9,6 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- `otto --attach` accepts `/task`, `/tasks`, `/timers`, `/mcp` (status),
+  `/archive` and `/delete`, using the existing `otto serve` session routes.
+  The MCP server record is now defined once in `otto-core` for both sides.
+  Retiring the current session opens a new session in the workspace.
+
 - `otto --attach` accepts `/model` and `/thinking`. `otto serve` adds
   `POST /v1/sessions/{id}/thinking`; under attach both commands change the
   current session only and never write the configuration file, so

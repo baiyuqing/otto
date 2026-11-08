@@ -7,6 +7,7 @@ use axum::response::Response;
 
 use super::*;
 
+mod sandbox_and_approvals;
 mod sessions;
 mod tasks;
 mod timers_and_mcp;

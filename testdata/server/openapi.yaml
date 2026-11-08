@@ -552,6 +552,14 @@ components:
         decision:
           type: string
           enum: [allow, deny]
+        always:
+          type: boolean
+          description: >
+            Valid only with allow (400 with deny). Also excludes the waiting
+            command from the sandbox, writing an excluded_commands entry to the
+            configuration file, as /approve <id> always does. A command that
+            cannot be excluded fails with 400 approval_always_failed and the
+            approval keeps waiting.
       required: [decision]
     ApprovalResponse:
       type: object
@@ -559,7 +567,42 @@ components:
         decision:
           type: string
           enum: [allow, deny]
+        always:
+          type: boolean
+          description: Present and true only when the request set always.
+        followup:
+          type: string
+          description: Present only when the request set always. The prompt a client submits so the model retries the command.
       required: [decision]
+    SandboxChangeRequest:
+      type: object
+      properties:
+        change:
+          type: string
+          enum: [allow_read_path, network, exclude_command]
+        value:
+          type: string
+          description: A path for allow_read_path, allow or deny for network, a command pattern for exclude_command.
+      required: [change, value]
+    SandboxChange:
+      description: >
+        The Sandbox (or SandboxReload) object after the change, with three
+        more fields. change_summary describes the change, config_path is the
+        configuration file that now holds it, and followup is the prompt a
+        client submits so the model retries a command the sandbox refused (null
+        for network deny).
+      allOf:
+        - $ref: "#/components/schemas/Sandbox"
+        - type: object
+          properties:
+            workspaces:
+              type: array
+              items:
+                $ref: "#/components/schemas/WorkspaceReload"
+            change_summary: {type: string}
+            config_path: {type: string}
+            followup: {type: [string, "null"]}
+          required: [change_summary, config_path, followup]
     Compaction:
       type: object
       description: The compaction_completed event payload, also returned by POST /v1/sessions/{id}/compact.
@@ -2632,7 +2675,8 @@ paths:
         The turn that requested the approval (approval_requested frame) is
         waiting for this decision. allow runs the command and continues the
         same turn; deny ends the turn without running it. A turn that gets no
-        decision in 10 minutes records decision timeout and continues as a deny.
+        decision in 10 minutes records decision timeout and continues as a deny. With always set, the command is
+        first excluded from the sandbox (see ApprovalDecision).
       requestBody:
         required: true
         content:
@@ -2647,7 +2691,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApprovalResponse"
         "400":
-          description: Missing or invalid body, or decision is neither allow nor deny
+          description: Missing or invalid body, decision is neither allow nor deny, always with deny, or approval_always_failed (the command cannot be excluded from the sandbox)
           content:
             application/json:
               schema:
@@ -3988,6 +4032,54 @@ paths:
                 $ref: "#/components/schemas/Error"
         "501":
           description: Sandbox reload is not available in this process
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/sandbox/changes:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Write one sandbox configuration change and apply it
+      description: >
+        Adds a read path, sets the network mode or adds an excluded command in
+        the [sandbox] table of the serve process's configuration file, then
+        reloads the sandbox of every loaded workspace as POST /v1/sandbox/reload
+        does. A read path is resolved to an absolute, symlink-free path first.
+        Refused while any session has a turn in flight.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxChangeRequest"
+      responses:
+        "200":
+          description: The change was written and applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxChange"
+        "400":
+          description: invalid_sandbox_change (bad JSON, unknown change, empty value, network other than allow or deny, or an unusable path)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: turn_active, sandbox_change_failed (for example the path is already readable, or the reload failed and the change was rolled back) or sandbox_reload_failed (another workspace failed to reload)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: Sandbox changes are not available in this process
           content:
             application/json:
               schema:

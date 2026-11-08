@@ -354,6 +354,7 @@ pub(super) struct TestFactory {
     /// Canned `Factory::reload_other_sandboxes` answer, one entry per
     /// non-startup workspace with its own reloader.
     pub(super) sandbox_reload_others: Vec<(String, Result<SandboxInfo, String>)>,
+    pub(super) sandbox_control: Option<Arc<dyn otto::app::SandboxControl>>,
     /// Canned `Factory::diff_runner` answer for the startup workspace.
     /// `None` matches a workspace with no usable sandbox (`GET
     /// /v1/workspaces/diff` answers 501).
@@ -432,7 +433,7 @@ impl TestFactory {
         {
             runner.task_control().set_turn_queue_journal(journal);
         }
-        Controller::with_builder(
+        let controller = Controller::with_builder(
             Arc::clone(&self.builder),
             true,
             session,
@@ -446,7 +447,11 @@ impl TestFactory {
                 context_window: 128_000,
                 sandbox: self.builder.sandbox_info.clone(),
             },
-        )
+        );
+        match &self.sandbox_control {
+            Some(control) => controller.with_sandbox_control(Arc::clone(control)),
+            None => controller,
+        }
     }
 }
 

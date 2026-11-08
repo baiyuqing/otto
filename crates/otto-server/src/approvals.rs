@@ -17,11 +17,19 @@ use otto::app::{ApprovalDecision, Channel};
 struct DecisionBody {
     #[serde(default)]
     decision: String,
+    /// With `allow`: also exclude the pending command from the sandbox, as
+    /// `/approve <id> always` does.
+    #[serde(default)]
+    always: bool,
 }
 
 #[derive(Serialize)]
 struct DecisionResponse {
     decision: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    always: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    followup: Option<String>,
 }
 
 pub async fn decide(
@@ -32,10 +40,33 @@ pub async fn decide(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    let (decision, label) = match serde_json::from_slice::<DecisionBody>(&body) {
-        Ok(parsed) if parsed.decision == "allow" => (ApprovalDecision::Allow, "allow"),
-        Ok(parsed) if parsed.decision == "deny" => (ApprovalDecision::Deny, "deny"),
+    let (decision, label, always) = match serde_json::from_slice::<DecisionBody>(&body) {
+        Ok(parsed) if parsed.decision == "allow" => {
+            (ApprovalDecision::Allow, "allow", parsed.always)
+        }
+        Ok(parsed) if parsed.decision == "deny" && parsed.always => {
+            return bad_request("always is valid only with decision \"allow\"");
+        }
+        Ok(parsed) if parsed.decision == "deny" => (ApprovalDecision::Deny, "deny", false),
         _ => return bad_request("decision must be \"allow\" or \"deny\""),
+    };
+    // The waiting turn grants the command itself when the decision reaches it
+    // and, for a read-path request, applies the read grant. `always` writes
+    // the exclusion and grants the command first; a refusal here leaves the
+    // approval waiting so the caller can still decide it.
+    let followup = if always {
+        match session
+            .ctrl
+            .approve_bash_always_while_waiting(&approval_id)
+            .await
+        {
+            Ok(text) => Some(text),
+            Err(message) => {
+                return error_response(StatusCode::BAD_REQUEST, "approval_always_failed", &message);
+            }
+        }
+    } else {
+        None
     };
     if let Ok(request) =
         session
@@ -70,7 +101,12 @@ pub async fn decide(
             }) {
             Ok(request) => {
                 server.bump_status();
-                json_response(StatusCode::OK, &request)
+                let mut body = serde_json::to_value(&request).unwrap_or_default();
+                if let Some(text) = followup {
+                    body["always"] = true.into();
+                    body["followup"] = text.into();
+                }
+                json_response(StatusCode::OK, &body)
             }
             Err(error) => {
                 error_response(StatusCode::CONFLICT, "approval_failed", &error.to_string())
@@ -84,10 +120,16 @@ pub async fn decide(
             .as_ref()
             .is_some_and(|waiting| waiting.id == approval_id)
         {
-            if decision == ApprovalDecision::Allow
-                && let Err(message) = session.ctrl.reserve_approval(&approval_id)
-            {
-                return error_response(StatusCode::CONFLICT, "approval_failed", &message);
+            if decision == ApprovalDecision::Allow {
+                let reserved = session.ctrl.reserve_approval(&approval_id);
+                // A command request an `always` decision granted above is
+                // already protected from withdrawal, and `reserve` accepts
+                // only an ungranted request.
+                if let Err(message) = reserved
+                    && !always
+                {
+                    return error_response(StatusCode::CONFLICT, "approval_failed", &message);
+                }
             }
             let waiting = state.waiting.take().expect("checked above");
             state.remember_decided(&approval_id);
@@ -109,7 +151,14 @@ pub async fn decide(
         }
     }
     server.bump_status();
-    json_response(StatusCode::OK, &DecisionResponse { decision: label })
+    json_response(
+        StatusCode::OK,
+        &DecisionResponse {
+            decision: label,
+            always: followup.is_some().then_some(true),
+            followup,
+        },
+    )
 }
 
 /// Separate from task-turn admission: only the controller's restricted tools

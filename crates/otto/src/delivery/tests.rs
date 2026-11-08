@@ -312,7 +312,7 @@ fn plan_stays_under_target_and_refuses_invalid_id() {
     assert!(plan(target, "bad/id", "agent/test".into()).is_err());
 }
 
-fn binding(approval_id: &str) -> ReceiptBinding {
+pub(super) fn binding(approval_id: &str) -> ReceiptBinding {
     ReceiptBinding {
         approval_id: approval_id.into(),
         source_workspace: "/source".into(),
@@ -600,20 +600,6 @@ fn delivery_task_ledger_is_terminal_once_and_notifies_source_once() {
 }
 
 #[test]
-fn delivery_task_recovery_marks_running_work_unknown() {
-    let store = ReceiptStore::in_memory();
-    let worktree = Path::new("/target/.otto/delivery-worktrees/delivery-1");
-    store.prepare(binding("approval-1")).unwrap();
-    store
-        .begin_task("approval-1", "source-session", "target-session", worktree)
-        .unwrap();
-    assert_eq!(store.mark_running_tasks_unknown().unwrap(), 1);
-    let task = store.task("approval-1").unwrap().unwrap();
-    assert_eq!(task.state, TaskState::Unknown);
-    assert!(task.error.contains("interrupted"));
-}
-
-#[test]
 fn receipt_session_binding_is_durable_and_never_replaced() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("private/delivery-receipts.db");
@@ -642,23 +628,6 @@ fn receipt_session_binding_is_durable_and_never_replaced() {
         reopened.session("approval-1").unwrap(),
         Some(("session-1".into(), worktree.to_string_lossy().into_owned()))
     );
-}
-
-#[test]
-fn receipt_state_machine_never_replays_interrupted_effects() {
-    let store = ReceiptStore::in_memory();
-    store.prepare(binding("approval-1")).unwrap();
-    assert_eq!(
-        store.begin("approval-1").unwrap().state,
-        ReceiptState::Applying
-    );
-    assert_eq!(store.mark_interrupted_unknown().unwrap(), 1);
-    assert_eq!(
-        store.get("approval-1").unwrap().unwrap().state,
-        ReceiptState::Unknown
-    );
-    assert!(store.begin("approval-1").unwrap_err().contains("unknown"));
-    assert!(store.started("approval-1").unwrap_err().contains("unknown"));
 }
 
 #[test]

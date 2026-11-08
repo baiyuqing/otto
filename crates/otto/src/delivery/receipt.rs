@@ -174,12 +174,64 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| "delivery receipt storage is unavailable")?;
-        connection
-            .execute_batch(Self::SCHEMA)
+        Self::initialize_schema(&connection)
             .map_err(|_| "delivery receipt storage is unavailable")?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    /// Creates the tables and adds the owner columns to a database written
+    /// before they existed. `BEGIN IMMEDIATE` serializes two processes that
+    /// open the same file at once, so only one runs each `ALTER TABLE`.
+    fn initialize_schema(connection: &Connection) -> Result<(), crate::storage::Error> {
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            connection.execute_batch(Self::SCHEMA)?;
+            for table in ["delivery_receipts", "delivery_tasks"] {
+                let mut columns = std::collections::HashSet::new();
+                for name in connection
+                    .prepare(&format!("PRAGMA table_info({table})"))?
+                    .query_map((), |row| row.get::<String>(1))?
+                {
+                    columns.insert(name?);
+                }
+                for (column, declaration) in [
+                    ("owner_pid", "INTEGER NOT NULL DEFAULT 0"),
+                    ("owner_started", "TEXT NOT NULL DEFAULT ''"),
+                ] {
+                    if !columns.contains(column) {
+                        connection.execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                        ))?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => connection.execute_batch("COMMIT"),
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Overwrites the recorded owner of a receipt and its task.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_owner_for_test(&self, approval_id: &str, pid: i64, started: &str) {
+        let connection = self.connection.lock().unwrap();
+        for table in ["delivery_receipts", "delivery_tasks"] {
+            connection
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET owner_pid=?2, owner_started=?3 WHERE approval_id=?1"
+                    ),
+                    params![approval_id, pid, started],
+                )
+                .unwrap();
+        }
     }
 
     #[cfg(test)]
@@ -212,7 +264,9 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
         }
         transaction
             .execute(
-                "INSERT INTO delivery_receipts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'prepared')",
+                "INSERT INTO delivery_receipts (approval_id,source_workspace,target_repository,\
+                 target_common_dir,worktree,branch,base,handoff_digest,state) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'prepared')",
                 params![
                     binding.approval_id,
                     binding.source_workspace,
@@ -305,6 +359,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
             return Err("delivery task binding is invalid".into());
         }
         let worktree = worktree.to_string_lossy().into_owned();
+        let (owner_pid, owner_started) = crate::subagent::record::current_process();
         let connection = self
             .connection
             .lock()
@@ -320,8 +375,17 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
         }
         connection
             .execute(
-                "INSERT INTO delivery_tasks VALUES (?1,?2,?3,?4,'running','','',0)",
-                params![approval_id, source_session, target_session, worktree],
+                "INSERT INTO delivery_tasks (approval_id,source_session,target_session,worktree,\
+                 state,result,error,source_notified,owner_pid,owner_started) \
+                 VALUES (?1,?2,?3,?4,'running','','',0,?5,?6)",
+                params![
+                    approval_id,
+                    source_session,
+                    target_session,
+                    worktree,
+                    owner_pid,
+                    owner_started
+                ],
             )
             .map_err(|_| "delivery receipt storage is unavailable")?;
         Self::task_from(&connection, approval_id)?
@@ -393,10 +457,57 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
 
     /// Marks a crash-interrupted target run unknown; it is never resumed
     /// automatically because its provider/tool effects may be ambiguous.
+    /// Only tasks whose recorded owner process is gone are marked; a task
+    /// owned by another live process (or by this one) is left running.
     pub fn mark_running_tasks_unknown(&self) -> Result<usize, String> {
-        self.connection.lock().map_err(|_| "delivery receipt storage is unavailable")?
-            .execute("UPDATE delivery_tasks SET state='unknown',error='delivery runner interrupted' WHERE state='running'", ())
-            .map_err(|_| "delivery receipt storage is unavailable".into())
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "delivery receipt storage is unavailable")?;
+        let dead = Self::dead_owner_ids(
+            &connection,
+            "SELECT approval_id,owner_pid,owner_started FROM delivery_tasks WHERE state='running'",
+        )?;
+        let mut marked = 0;
+        for approval_id in dead {
+            marked += connection
+                .execute(
+                    "UPDATE delivery_tasks SET state='unknown',error='delivery runner interrupted' \
+                     WHERE approval_id=?1 AND state='running'",
+                    [approval_id],
+                )
+                .map_err(|_| "delivery receipt storage is unavailable")?;
+        }
+        Ok(marked)
+    }
+
+    /// Approval ids of the rows `query` returns whose owner process is
+    /// proven gone. A row without a recorded owner counts as gone; a row
+    /// whose liveness cannot be determined counts as alive.
+    fn dead_owner_ids(connection: &Connection, query: &str) -> Result<Vec<String>, String> {
+        let rows = connection
+            .prepare(query)
+            .and_then(|mut statement| {
+                statement
+                    .query_map((), |row| {
+                        Ok((
+                            row.get::<String>(0)?,
+                            row.get::<i64>(1)?,
+                            row.get::<String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(|_| "delivery receipt storage is unavailable")?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, pid, started)| {
+                *pid == 0
+                    || started.is_empty()
+                    || crate::subagent::record::process_matches(*pid, started) == Some(false)
+            })
+            .map(|(approval_id, _, _)| approval_id)
+            .collect())
     }
 
     /// Marks the exact receipt as executing. Retrying a started receipt is
@@ -416,15 +527,28 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
     /// Crash recovery is deliberately conservative: no external Git effect is
     /// replayed. The caller must inspect the recorded worktree before a future
     /// explicit resume feature may continue it.
+    /// Only receipts whose recorded owner process is gone are marked; one
+    /// applying in another live process is left alone.
     pub fn mark_interrupted_unknown(&self) -> Result<usize, String> {
-        self.connection
+        let connection = self
+            .connection
             .lock()
-            .map_err(|_| "delivery receipt storage is unavailable")?
-            .execute(
-                "UPDATE delivery_receipts SET state='unknown' WHERE state='applying'",
-                (),
-            )
-            .map_err(|_| "delivery receipt storage is unavailable".to_string())
+            .map_err(|_| "delivery receipt storage is unavailable")?;
+        let dead = Self::dead_owner_ids(
+            &connection,
+            "SELECT approval_id,owner_pid,owner_started FROM delivery_receipts WHERE state='applying'",
+        )?;
+        let mut marked = 0;
+        for approval_id in dead {
+            marked += connection
+                .execute(
+                    "UPDATE delivery_receipts SET state='unknown' \
+                     WHERE approval_id=?1 AND state='applying'",
+                    [approval_id],
+                )
+                .map_err(|_| "delivery receipt storage is unavailable")?;
+        }
+        Ok(marked)
     }
 
     fn transition(
@@ -445,10 +569,25 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
         let receipt = match receipt.state {
             state if state == next => receipt,
             state if state == expected => {
+                // Entering `applying` records this process as the owner.
+                let (owner_pid, owner_started) = if next == ReceiptState::Applying {
+                    crate::subagent::record::current_process()
+                } else {
+                    (0, String::new())
+                };
                 transaction
                     .execute(
-                        "UPDATE delivery_receipts SET state=?2 WHERE approval_id=?1 AND state=?3",
-                        params![approval_id, next.as_str(), expected.as_str()],
+                        "UPDATE delivery_receipts SET state=?2, \
+                         owner_pid=iif(?2='applying',?4,owner_pid), \
+                         owner_started=iif(?2='applying',?5,owner_started) \
+                         WHERE approval_id=?1 AND state=?3",
+                        params![
+                            approval_id,
+                            next.as_str(),
+                            expected.as_str(),
+                            owner_pid,
+                            owner_started
+                        ],
                     )
                     .map_err(|_| "delivery receipt storage is unavailable")?;
                 StoredReceipt {

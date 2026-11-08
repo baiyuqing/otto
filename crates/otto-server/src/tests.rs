@@ -31,6 +31,7 @@ mod local_command_cases;
 mod memory_route_cases;
 mod model_config_cases;
 mod observer_cases;
+mod openapi_provenance_cases;
 mod permanent_delete_cases;
 mod queue_cases;
 mod queue_provenance_cases;

@@ -34,6 +34,41 @@ components:
         most recent ids per session) the original result is returned; once
         only the session transcript holds it, 409 duplicate_input. Unrelated
         to the X-Request-Id log-correlation header.
+    InputSource:
+      type: string
+      enum: [unknown, tui, repl, one_shot, http, acp, connector, runtime, agent]
+      description: >
+        Application that produced an input. As InputProvenance.source it is
+        confirmed by the accepting runtime; as client_source it is only a
+        client's unverified claim.
+    InputProvenance:
+      type: object
+      required: [source, transport, delivery]
+      description: >
+        Runtime-owned origin metadata for one user input, kept separate from
+        the unchanged input text. It is descriptive only and never grants
+        authority. Inputs recorded before provenance existed carry none.
+      properties:
+        source:
+          $ref: "#/components/schemas/InputSource"
+          description: Confirmed by the accepting runtime; http for every HTTP request.
+        transport:
+          type: string
+          enum: [unknown, local, http, acp]
+          description: Transport observed at the accepting runtime boundary.
+        delivery:
+          type: string
+          enum: [direct, unknown, steering, queued]
+          description: How this input reached its turn.
+        client_source:
+          $ref: "#/components/schemas/InputSource"
+          description: The client's unverified application claim; absent when none was sent.
+    ClientSource:
+      $ref: "#/components/schemas/InputSource"
+      description: >
+        Optional unverified claim of the client application, such as tui for
+        an attached terminal. Recorded as input_provenance.client_source; it
+        never sets the confirmed source and grants no authority.
     SteeringMessage:
       type: object
       required: [id, text, status]
@@ -1253,6 +1288,12 @@ components:
         image:
           type: boolean
           description: user_message only; true when the prompt carried an image.
+        input_id:
+          type: string
+          description: user_message only; the input id recorded with the message, absent when none was recorded.
+        input_provenance:
+          $ref: "#/components/schemas/InputProvenance"
+          description: user_message only; the input's origin, absent for inputs recorded without provenance.
         status:
           type: string
           enum: [ok, error, canceled]
@@ -2195,6 +2236,13 @@ paths:
                   type: string
                   enum: [telegram]
                   description: Transient channel context for this dialogue request.
+                input_id:
+                  $ref: "#/components/schemas/InputId"
+                  description: >
+                    The client's stable id for this message, reused if it is
+                    later recorded as a user input. A malformed id fails with
+                    409 approval_failed. Absent means a server-generated id.
+                client_source: { $ref: "#/components/schemas/ClientSource" }
       responses:
         "200":
           description: Null if none waits, otherwise a dialogue reply; queued asks the client to queue the original message
@@ -2240,6 +2288,7 @@ paths:
                   minLength: 1
                   maxLength: 32000
                 input_id: { $ref: "#/components/schemas/InputId" }
+                client_source: { $ref: "#/components/schemas/ClientSource" }
       responses:
         "200":
           description: Deterministic admission disposition
@@ -2302,6 +2351,7 @@ paths:
                   maxLength: 32000
                   description: Non-whitespace text, limited to 32000 UTF-8 bytes.
                 input_id: { $ref: "#/components/schemas/InputId" }
+                client_source: { $ref: "#/components/schemas/ClientSource" }
       responses:
         "200":
           description: Guidance queued
@@ -2395,6 +2445,13 @@ paths:
                   type: string
                   enum: [telegram]
                   description: Transient channel context for this dialogue request.
+                input_id:
+                  $ref: "#/components/schemas/InputId"
+                  description: >
+                    The client's stable id for this message, reused if it is
+                    recorded as a user input or guidance. A malformed id fails
+                    with 409. Absent means a server-generated id.
+                client_source: { $ref: "#/components/schemas/ClientSource" }
       responses:
         "200":
           description: Null when unhandled, otherwise the control dialogue reply and route
@@ -2507,6 +2564,14 @@ paths:
                     turn are delivered to this origin. A chat origin whose
                     platform differs from channel is rejected with 400.
                 input_id: { $ref: "#/components/schemas/InputId" }
+                client_source: { $ref: "#/components/schemas/ClientSource" }
+                queued_input:
+                  type: boolean
+                  default: false
+                  description: >
+                    The client held this input as a follow-up while a task ran;
+                    records input_provenance.delivery as queued even if the turn
+                    starts immediately. Independent of queue; grants no authority.
               required: [text]
       responses:
         "200":

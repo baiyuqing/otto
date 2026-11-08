@@ -17,7 +17,7 @@ use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use tokio_util::sync::CancellationToken;
 
-use super::store::{Item, delivery_text, run_text};
+use super::store::{Item, WorkspaceAdmit, delivery_text, run_text};
 use super::{Origin, RunOutcome, ScheduleStore, Scope};
 use crate::log::Logger;
 use crate::metrics::Metrics;
@@ -53,6 +53,9 @@ pub struct RunRole {
     pub scope: Scope,
     /// Only items created in this workspace, when set.
     pub workspace: Option<String>,
+    /// Only items whose workspace this accepts are claimed; `None` accepts
+    /// all. A rejected item gets no lease, so another process can claim it.
+    pub admit: Option<Arc<WorkspaceAdmit>>,
     pub runner: Arc<dyn PromptRunner>,
 }
 
@@ -178,7 +181,12 @@ async fn run_loop(
         if let Err(error) = store.sweep(now) {
             telemetry.store_error("sweep", error);
         }
-        let item = match store.claim_run(&role.scope, role.workspace.as_deref(), now) {
+        let item = match store.claim_run_admitting(
+            &role.scope,
+            role.workspace.as_deref(),
+            role.admit.as_deref(),
+            now,
+        ) {
             Ok(Some(item)) => item,
             Ok(None) => return false,
             Err(error) => {

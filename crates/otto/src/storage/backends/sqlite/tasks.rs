@@ -53,6 +53,13 @@ CREATE INDEX IF NOT EXISTS tasks_created_at ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS tasks_workspace ON tasks(workspace, created_at);
 "#;
 
+/// Why a task write failed.
+enum UpsertError {
+    /// The database stayed locked by another connection for the busy timeout.
+    Busy,
+    Failed,
+}
+
 const COLUMNS: &str = "parent_session, task_id, workspace, parent_session_path, name, agent, \
 description, model, context, prompt, status, created_at, started_at, finished_at, steps, \
 tool_calls, last_tool, input_tokens, output_tokens, cached_tokens, result, error, session_path, \
@@ -196,8 +203,8 @@ fn rfc3339_or_empty(value: Option<DateTime<Utc>>) -> String {
 /// `~/.otto/tasks.db`, shared by every otto process on the machine.
 pub struct Store {
     connection: Mutex<Connection>,
-    /// Set after the first write error; [`Recorder::upsert`] then no-ops
-    /// instead of trying the connection again.
+    /// Set after the first write error other than busy; [`Recorder::upsert`]
+    /// then no-ops instead of trying the connection again.
     disabled: AtomicBool,
 }
 
@@ -246,17 +253,7 @@ impl Store {
             .query_row("PRAGMA user_version", (), |row| row.get(0))
             .map_err(|_| Error)?;
         match version {
-            0 => {
-                connection.execute_batch(SCHEMA).map_err(|_| Error)?;
-                connection
-                    .pragma_update("user_version", SCHEMA_VERSION)
-                    .map_err(|_| Error)?;
-            }
-            1 => {
-                connection.execute_batch(
-                    "BEGIN IMMEDIATE; ALTER TABLE tasks ADD COLUMN model_source TEXT NOT NULL DEFAULT 'unknown'; PRAGMA user_version = 2; COMMIT;"
-                ).map_err(|_| Error)?;
-            }
+            0 | 1 => Self::migrate_locked(&connection)?,
             version if version == SCHEMA_VERSION => {}
             _ => return Err(Error),
         }
@@ -264,6 +261,53 @@ impl Store {
             connection: Mutex::new(connection),
             disabled: AtomicBool::new(false),
         })
+    }
+
+    /// Creates or upgrades the schema inside one write transaction. Another
+    /// process can migrate between the unlocked version read in `initialize`
+    /// and `BEGIN IMMEDIATE`, so the version and the column are checked again
+    /// under the write lock.
+    fn migrate_locked(connection: &Connection) -> Result<()> {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| Error)?;
+        let migrated = Self::migrate_in_transaction(connection);
+        if migrated.is_ok() {
+            connection.execute_batch("COMMIT").map_err(|_| Error)
+        } else {
+            let _ = connection.execute_batch("ROLLBACK");
+            migrated
+        }
+    }
+
+    fn migrate_in_transaction(connection: &Connection) -> Result<()> {
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", (), |row| row.get(0))
+            .map_err(|_| Error)?;
+        if version >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        if version == 0 {
+            connection.execute_batch(SCHEMA).map_err(|_| Error)?;
+        } else {
+            let has_model_source: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'model_source'",
+                    (),
+                    |row| row.get(0),
+                )
+                .map_err(|_| Error)?;
+            if has_model_source == 0 {
+                connection
+                    .execute_batch(
+                        "ALTER TABLE tasks ADD COLUMN model_source TEXT NOT NULL DEFAULT 'unknown'",
+                    )
+                    .map_err(|_| Error)?;
+            }
+        }
+        connection
+            .pragma_update("user_version", SCHEMA_VERSION)
+            .map_err(|_| Error)
     }
 
     /// Whether a write error has disabled this store. Read-only queries
@@ -283,10 +327,14 @@ impl Store {
             .execute_batch("DROP TABLE tasks");
     }
 
-    fn upsert_row(&self, context: &TaskContext, task: &Task) -> Result<()> {
+    fn upsert_row(
+        &self,
+        context: &TaskContext,
+        task: &Task,
+    ) -> std::result::Result<(), UpsertError> {
         self.connection
             .lock()
-            .map_err(|_| Error)?
+            .map_err(|_| UpsertError::Failed)?
             .execute(
                 &format!(
                     "INSERT INTO tasks ({COLUMNS}) VALUES (\
@@ -348,7 +396,12 @@ impl Store {
                     task.model_source.as_str(),
                 ],
             )
-            .map_err(|_| Error)?;
+            .map_err(|error| match error {
+                crate::storage::Error::Busy(_) | crate::storage::Error::BusySnapshot(_) => {
+                    UpsertError::Busy
+                }
+                _ => UpsertError::Failed,
+            })?;
         Ok(())
     }
 
@@ -486,8 +539,12 @@ impl Recorder for Store {
         if self.disabled.load(Ordering::Relaxed) {
             return;
         }
-        if self.upsert_row(context, task).is_err() {
-            self.disabled.store(true, Ordering::Relaxed);
+        match self.upsert_row(context, task) {
+            Ok(()) => {}
+            // Another process holds the write lock past the busy timeout.
+            // This write is lost, but the next one may succeed.
+            Err(UpsertError::Busy) => {}
+            Err(UpsertError::Failed) => self.disabled.store(true, Ordering::Relaxed),
         }
     }
 }
@@ -681,5 +738,59 @@ mod model_source_tests {
             .query_row("PRAGMA user_version", (), |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+}
+
+#[cfg(test)]
+mod multi_process_tests {
+    use super::*;
+
+    #[test]
+    fn a_database_already_migrated_by_another_process_opens() {
+        // The state a losing process sees after a concurrent migration: the
+        // column exists but its unlocked version read was 1.
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection.pragma_update("user_version", 1).unwrap();
+        let store = Store::from_connection(connection).unwrap();
+        let version: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA user_version", (), |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_busy_write_does_not_disable_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(20))
+            .unwrap();
+        let context = TaskContext {
+            parent_session: "parent".into(),
+            ..Default::default()
+        };
+        let task = Task {
+            id: "t1".into(),
+            ..Default::default()
+        };
+
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        store.upsert(&context, &task);
+        assert!(!store.is_disabled());
+        assert!(store.get("parent", "t1").unwrap().is_none());
+
+        other.execute_batch("COMMIT").unwrap();
+        store.upsert(&context, &task);
+        assert!(!store.is_disabled());
+        assert!(store.get("parent", "t1").unwrap().is_some());
     }
 }

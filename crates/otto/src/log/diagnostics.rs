@@ -106,6 +106,13 @@ fn cleanup(dir: &fsops::Dir, now: SystemTime, retention: Duration) {
     }
 }
 
+/// Locks the owner file of a new family. Another process's `cleanup` may hold
+/// a non-blocking probe lock on the freshly created file for a moment, so this
+/// retries for the grace period of `fsops::lock_exclusive` before failing.
+fn lock_new_owner(owner: &File) -> io::Result<()> {
+    fsops::lock_exclusive(owner)
+}
+
 impl Writer {
     fn open(home: &Path) -> io::Result<Self> {
         let home = fsops::open_dir_no_follow(&std::fs::canonicalize(home)?)?;
@@ -131,7 +138,7 @@ impl Writer {
             libc::O_RDWR | libc::O_EXCL | libc::O_NONBLOCK,
             0o600,
         )?)?;
-        fsops::try_lock_exclusive(&owner)?;
+        lock_new_owner(&owner)?;
         let file = create(&dir, &format!("{prefix}.jsonl"), true)?;
         Ok(Self {
             dir,
@@ -559,6 +566,21 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    #[test]
+    fn new_owner_lock_waits_for_a_brief_cleanup_probe() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("probe.lock");
+        let owner = File::create(&path).unwrap();
+        let probe = File::open(&path).unwrap();
+        fsops::try_lock_exclusive(&probe).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(probe);
+        });
+        lock_new_owner(&owner).expect("lock acquired after the probe is released");
+        release.join().unwrap();
     }
 
     #[test]

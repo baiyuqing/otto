@@ -597,4 +597,6 @@ pub use receipt::*;
 pub use tool::*;
 
 #[cfg(test)]
+mod receipt_owner_tests;
+#[cfg(test)]
 mod tests;

@@ -658,6 +658,54 @@ async fn refresh_skips_post_when_stored_token_already_differs() {
 }
 
 #[tokio::test]
+async fn refresh_adopts_a_token_rotated_by_another_store_on_the_same_file() {
+    // Two stores on one file model two processes. Store B cached the old
+    // token before store A rotated it; B must read the file under the lock
+    // and adopt A's token instead of posting the old refresh token again.
+    let server = testserver::spawn(|_req| {
+        json_response(
+            &json!({
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_in": 3600,
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("server.json");
+    let current = TokenFile {
+        access_token: "old-access".to_owned(),
+        refresh_token: Some("old-refresh".to_owned()),
+        expiry: Some(Utc::now().fixed_offset() + chrono::TimeDelta::hours(1)),
+        client_id: "client".to_owned(),
+        token_endpoint: format!("{}/token", server.url),
+        resource: format!("{}/mcp", server.url),
+        scope: None,
+    };
+    save_token(&path, &current).unwrap();
+
+    let store_a = TokenStore::new("server".to_owned(), path.clone());
+    let store_b = TokenStore::new("server".to_owned(), path.clone());
+    let cancel = CancellationToken::new();
+    // Loads the old token into store B's cache.
+    assert!(store_b.secrets().contains(&"old-access".to_owned()));
+    assert_eq!(
+        store_a.refresh("old-access", &cancel).await.unwrap(),
+        "new-access"
+    );
+    assert_eq!(server.count(), 1);
+
+    assert_eq!(
+        store_b.refresh("old-access", &cancel).await.unwrap(),
+        "new-access"
+    );
+    assert_eq!(server.count(), 1);
+    assert!(store_b.secrets().contains(&"new-refresh".to_owned()));
+}
+
+#[tokio::test]
 async fn discovery_ignores_a_cross_origin_resource_metadata_url() {
     // A hostile HTTPS server names an attacker-controlled origin in the
     // 401 challenge; discovery must ignore it and fall back to the

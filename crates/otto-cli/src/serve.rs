@@ -248,6 +248,13 @@ pub async fn run(
 
     // Runs due scheduled prompts of every origin; delivery is the web routes
     // and the per-connection ACP workers.
+    // Serve claims only items whose workspace it admits (the check
+    // `FactoryRunner` repeats); other items stay claimable by a TUI or REPL
+    // open on that workspace.
+    let admit_workspace_for_runs: Arc<otto::schedule::WorkspaceAdmit> = {
+        let workspaces = Arc::clone(&workspaces);
+        Arc::new(move |workspace: &str| workspaces.admit(workspace).is_ok())
+    };
     let schedule_worker = builder.schedule.clone().map(|store| {
         tokio::spawn(
             otto::schedule::worker::Worker {
@@ -255,6 +262,7 @@ pub async fn run(
                 run: Some(otto::schedule::worker::RunRole {
                     scope: otto::schedule::Scope::Any,
                     workspace: None,
+                    admit: Some(admit_workspace_for_runs),
                     runner: Arc::new(otto_server::schedule::FactoryRunner(factory)),
                 }),
                 deliver: None,

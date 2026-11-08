@@ -8,5 +8,6 @@
 //! process access.
 
 pub mod events;
+pub mod mcp;
 pub mod sse;
 pub mod transcript;

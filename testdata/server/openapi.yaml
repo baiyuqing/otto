@@ -2311,6 +2311,58 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/thinking:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Run this session with another thinking level
+      description: >-
+        Rebuilds the session's runner with the given thinking level and returns
+        the session. The configuration file is not written, so every other
+        session and the next serve start keep their level. The change makes no
+        model request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                thinking:
+                  type: string
+                  enum: [unset, default, low, medium, high, xhigh, max]
+                  description: >-
+                    The thinking level; `unset` and `default` clear the
+                    session override.
+              required: [thinking]
+      responses:
+        "200":
+          description: Updated session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          description: invalid_thinking (bad JSON, empty or unknown level)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            turn_active (a turn is running), or model_switch_unavailable
+            (the session withholds dynamic content, or policy forbids a
+            dynamic model)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/approvals/message:
     parameters:
       - $ref: "#/components/parameters/sessionID"

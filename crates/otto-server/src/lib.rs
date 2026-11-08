@@ -557,6 +557,7 @@ impl Server {
             )
             .route("/v1/sessions/{id}/fork", post(fork_session))
             .route("/v1/sessions/{id}/model", post(set_session_model))
+            .route("/v1/sessions/{id}/thinking", post(set_session_thinking))
             .route("/v1/sessions/{id}/fork-points", get(fork_points))
             .route("/v1/sessions/{id}/history", get(history))
             .route(

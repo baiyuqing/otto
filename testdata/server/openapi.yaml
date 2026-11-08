@@ -1950,6 +1950,103 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/permanent:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    delete:
+      summary: Permanently delete an idle session
+      description: >-
+        Closes the session and deletes its history, sub-agent transcripts,
+        sidecars and lease/queue state. This cannot be undone. The id stays
+        unavailable in this process afterwards, also when deletion fails part
+        way.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                confirm:
+                  type: string
+                  description: Must equal the session id exactly.
+              required: [confirm]
+      responses:
+        "204":
+          description: Deleted
+        "400":
+          description: Invalid body, or `confirm` does not equal the session id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            `session_busy`: a turn runs or is queued, an approval waits, native
+            work is admitted, the session is pinned or closing, or another process
+            holds its lease
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: I/O failure; the id stays unavailable in this process
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Archive an idle session
+      description: >-
+        Closes the session and moves its file, with sub-agent transcripts, to
+        the `archive/` directory beside it, as TUI `/archive` does; timer,
+        inbox, input, follow-up and turn sidecars are removed. The session no
+        longer appears in GET /v1/sessions and cannot be resumed by id; an
+        idempotent create retry for it answers 404. When archiving fails
+        before the move, the session stays on disk and can be resumed again.
+      responses:
+        "200":
+          description: Archived
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  archived_path:
+                    type: string
+                    description: The session file's path in the archive directory.
+                required: [archived_path]
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            `session_busy`: a turn runs or is queued, an approval waits, native
+            work is admitted, the session is pinned or closing, or another process
+            holds its lease
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: I/O failure, for example an existing file at the archive destination
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/fork:
     parameters:
       - $ref: "#/components/parameters/sessionID"

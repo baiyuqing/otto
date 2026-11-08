@@ -23,11 +23,11 @@ pub mod mcp;
 mod memory_dto;
 pub mod memory_routes;
 mod middleware;
-mod permanent_delete;
 mod registry;
 mod responses;
 pub mod sandbox;
 pub mod schedule;
+mod session_retirement;
 mod session_routes;
 pub mod skills;
 mod status;
@@ -549,7 +549,11 @@ impl Server {
             )
             .route(
                 "/v1/sessions/{id}/permanent",
-                axum::routing::delete(permanent_delete::handle),
+                axum::routing::delete(session_retirement::delete_handle),
+            )
+            .route(
+                "/v1/sessions/{id}/archive",
+                post(session_retirement::archive_handle),
             )
             .route("/v1/sessions/{id}/fork", post(fork_session))
             .route("/v1/sessions/{id}/model", post(set_session_model))

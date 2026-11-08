@@ -296,6 +296,51 @@ async fn switch_model_posts_the_selector_and_models_lists_sorted_selectors() {
 }
 
 #[tokio::test]
+async fn set_thinking_posts_the_level_and_model_summaries_read_provider_rows() {
+    let (client, seen, _dir) = stub(|_, path| {
+        if path == "/v1/config/providers" {
+            json_body(
+                StatusCode::OK,
+                concat!(
+                    r#"{"providers":[{"name":"b","type":"claude","#,
+                    r#""models":[{"selector":"b/y","model_id":"y","thinking":"low"}]},"#,
+                    r#"{"name":"a","type":"openai-compatible","#,
+                    r#""models":[{"selector":"a/x","model_id":"x"}]}]}"#,
+                ),
+            )
+        } else {
+            json_body(
+                StatusCode::OK,
+                r#"{"id":"s1","provider":"a","provider_type":"claude","model":"x","thinking":"high"}"#,
+            )
+        }
+    });
+    let info = client.set_thinking("s1", "high").await.unwrap();
+    assert_eq!(
+        request(&seen, 0),
+        (
+            "POST /v1/sessions/s1/thinking".into(),
+            json!({ "thinking": "high" })
+        )
+    );
+    assert_eq!(info.thinking, "high");
+    let rows = client.model_summaries().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (
+            rows[0].selector.as_str(),
+            rows[0].provider.as_str(),
+            rows[0].provider_type.as_str()
+        ),
+        ("a/x", "a", "openai-compatible")
+    );
+    assert_eq!(
+        (rows[1].model_id.as_str(), rows[1].thinking.as_str()),
+        ("y", "low")
+    );
+}
+
+#[tokio::test]
 async fn session_maps_unknown_sandbox_strings_to_defaults() {
     let body =
         r#"{"id":"s1","sandbox":{"mode":"future","network":"future","bash_available":false}}"#;

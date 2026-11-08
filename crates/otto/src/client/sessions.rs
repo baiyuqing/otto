@@ -194,6 +194,74 @@ impl Client {
         Ok(wire.into_info())
     }
 
+    /// `POST /v1/sessions/{id}/thinking`: run the session with another
+    /// thinking level and return the session's new info. The configuration
+    /// file and every other session are unchanged.
+    pub async fn set_thinking(
+        &self,
+        session_id: &str,
+        thinking: &str,
+    ) -> Result<crate::app::Info, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/thinking"),
+                &json!({ "thinking": thinking }),
+            ))
+            .await?;
+        let wire: SessionWire = decode(response).await?;
+        Ok(wire.into_info())
+    }
+
+    /// `GET /v1/config/providers`: the configured models with their provider,
+    /// provider type and thinking level, sorted by selector.
+    pub async fn model_summaries(&self) -> Result<Vec<crate::app::ModelSummary>, Error> {
+        #[derive(Deserialize)]
+        struct Model {
+            selector: String,
+            model_id: String,
+            #[serde(default)]
+            thinking: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Provider {
+            name: String,
+            #[serde(rename = "type")]
+            provider_type: String,
+            #[serde(default)]
+            models: Vec<Model>,
+        }
+        #[derive(Deserialize)]
+        struct Reply {
+            providers: Vec<Provider>,
+        }
+        let response = self
+            .send(self.http.get(format!("{BASE}/v1/config/providers")))
+            .await?;
+        let mut summaries: Vec<crate::app::ModelSummary> = decode::<Reply>(response)
+            .await?
+            .providers
+            .into_iter()
+            .flat_map(|provider| {
+                let Provider {
+                    name,
+                    provider_type,
+                    models,
+                } = provider;
+                models
+                    .into_iter()
+                    .map(move |model| crate::app::ModelSummary {
+                        selector: model.selector,
+                        provider: name.clone(),
+                        provider_type: provider_type.clone(),
+                        model_id: model.model_id,
+                        thinking: model.thinking.unwrap_or_default(),
+                    })
+            })
+            .collect();
+        summaries.sort_by(|left, right| left.selector.cmp(&right.selector));
+        Ok(summaries)
+    }
+
     /// `GET /v1/config/providers`: the configured model selectors, sorted.
     pub async fn models(&self) -> Result<Vec<String>, Error> {
         #[derive(Deserialize)]

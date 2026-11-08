@@ -297,7 +297,8 @@ pub fn format_permissions(settings: otto_core::approval::ApprovalSettings) -> St
     )
 }
 
-fn validate_thinking_arg(thinking: &str) -> Result<(), String> {
+/// Accepts the thinking levels `/thinking` and the session thinking route take.
+pub fn validate_thinking_arg(thinking: &str) -> Result<(), String> {
     if matches!(
         thinking,
         "" | "unset" | "default" | "low" | "medium" | "high" | "xhigh" | "max"

@@ -417,6 +417,58 @@ pub(super) async fn set_session_model(
 }
 
 #[derive(Debug, Default, Deserialize)]
+pub(super) struct ThinkingBody {
+    /// The thinking level this session should run with.
+    #[serde(default)]
+    thinking: String,
+}
+
+/// `POST /v1/sessions/{id}/thinking`. Rebuilds this session's runner with
+/// another thinking level and answers with the session wire. It never writes
+/// the configuration file.
+pub(super) async fn set_session_thinking(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let invalid =
+        |message: &str| error_response(StatusCode::BAD_REQUEST, "invalid_thinking", message);
+    let parsed: ThinkingBody = match serde_json::from_slice(&body) {
+        Ok(parsed) => parsed,
+        Err(_) => return invalid("invalid JSON body"),
+    };
+    if parsed.thinking.is_empty() {
+        return invalid("thinking must not be empty");
+    }
+    if let Err(message) = app::validate_thinking_arg(&parsed.thinking) {
+        return invalid(&message);
+    }
+    match session.ctrl.set_thinking(&parsed.thinking).await {
+        Ok(()) => {
+            server.logger().info(
+                "thinking_set",
+                &[("session_id", id), ("thinking", parsed.thinking)],
+            );
+            json_response(StatusCode::OK, &server.session_wire(&session))
+        }
+        Err(message) if message == app::PROMPT_ACTIVE => {
+            turn_active("a turn is already active for this session")
+        }
+        Err(message)
+            if message == app::MODEL_SWITCH_UNAVAILABLE
+                || message == app::SESSION_OPERATION_UNAVAILABLE =>
+        {
+            error_response(StatusCode::CONFLICT, "model_switch_unavailable", &message)
+        }
+        // Rebuilding the runner failed; the builder redacts the message.
+        Err(message) => bad_request(&message),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub(super) struct ForkBody {
     /// The turn-opening user message to stop before; absent forks the whole
     /// history up to the last turn boundary.

@@ -159,12 +159,12 @@ const ENTRIES: &[Entry] = &[
         false,
         skill
     ),
-    entry!(DuringTask, "/model", "switch models", true, model),
+    entry!(DuringTask, "/model", "switch models", false, model),
     entry!(
         DuringTask,
         "/thinking",
         "set reasoning effort",
-        true,
+        false,
         thinking
     ),
     entry!(DuringTask, "/context", "inspect context", false, context),

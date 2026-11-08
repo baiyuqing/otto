@@ -181,8 +181,8 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
     wait_for_raw_bytes(&shared, BUSY_TITLE.as_bytes());
     wait_for_screen_text_gone(&shared, BUSY_TITLE);
 
-    master.write_all(b"/model\r").expect("type /model");
-    wait_for_screen_text(&shared, "/model: not available with --attach");
+    master.write_all(b"/login\r").expect("type /login");
+    wait_for_screen_text(&shared, "/login: not available with --attach");
 
     // A turn another client starts over the socket appears with its prompt
     // and its reply.

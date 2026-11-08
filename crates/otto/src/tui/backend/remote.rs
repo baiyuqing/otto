@@ -99,6 +99,11 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                 .map_err(|_| "invalid approval snapshot".into())
         }
         Request::Management(request) => remote_management(remote, session, request).await,
+        Request::Models => client
+            .model_summaries()
+            .await
+            .map(Reply::Models)
+            .map_err(|error| error.to_string()),
         Request::Command(command) => {
             let mut history = false;
             let mut prompt = None;
@@ -136,6 +141,36 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                         history: remote.history(),
                         draft,
                     });
+                }
+                Command::SwitchModel(model) => {
+                    let info = client
+                        .switch_model(session, &model)
+                        .await
+                        .map_err(mutation_error)?;
+                    history = true;
+                    switched_model_message(&info)
+                }
+                Command::SetThinking { thinking, save } => {
+                    attached_thinking_message(client, session, thinking, save).await?
+                }
+                Command::SwitchModelThinking {
+                    model,
+                    thinking,
+                    save,
+                } => {
+                    let info = client
+                        .switch_model(session, &model)
+                        .await
+                        .map_err(mutation_error)?;
+                    history = true;
+                    let mut message = switched_model_message(&info);
+                    let thinking = match attached_thinking_message(client, session, thinking, save).await {
+                        Ok(message) => message,
+                        Err(error) => format!("/thinking: {error}. The model switch was applied."),
+                    };
+                    message.push('\n');
+                    message.push_str(&thinking);
+                    message
                 }
                 Command::Rename(name) => {
                     client
@@ -253,6 +288,40 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
         }
         _ => Err("not available with --attach".into()),
     }
+}
+
+fn switched_model_message(info: &crate::app::Info) -> String {
+    format!(
+        "Switched to model {} (type {}).",
+        info.model_selector, info.provider_type
+    )
+}
+
+/// Applies a non-empty thinking level to the attached session and reports the
+/// level in force. An attached session never writes the configuration file,
+/// so `save` only adds a notice that nothing was saved.
+async fn attached_thinking_message(
+    client: &crate::client::Client,
+    session: &str,
+    thinking: String,
+    save: bool,
+) -> Result<String, String> {
+    let info = if thinking.is_empty() {
+        client.session(session).await
+    } else {
+        client.set_thinking(session, &thinking).await
+    }
+    .map_err(mutation_error)?;
+    let display = if info.thinking.is_empty() {
+        "default"
+    } else {
+        &info.thinking
+    };
+    let mut message = format!("Thinking: {display}");
+    if save && !thinking.is_empty() {
+        message.push_str(". Not saved: attached sessions change the session only.");
+    }
+    Ok(message)
 }
 
 fn mutation_error(error: crate::client::Error) -> String {

@@ -9,6 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- `otto serve` archives an idle session with `POST /v1/sessions/{id}/archive`,
+  the HTTP counterpart of TUI `/archive`, so HTTP clients such as Otto Desktop
+  can archive from their session lists. `openapi.yaml` now also documents
+  `DELETE /v1/sessions/{id}/permanent`.
+
 - Local TUI Enter persists a recoverable, sanitized submission before clearing the
   editor, carries a stable input ID through direct/queued/active-turn guidance,
   and displays admission/delivery/failure evidence. `/inputs` and `/recover <id>`

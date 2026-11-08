@@ -36,6 +36,42 @@ impl SandboxChange {
     }
 }
 
+impl SandboxChange {
+    /// Whether the change widens what a sandboxed command may do, so a command
+    /// that failed before it may now succeed.
+    pub fn widens(&self) -> bool {
+        match self {
+            Self::AllowReadPath(_) | Self::ExcludeCommand(_) => true,
+            Self::Network(mode) => mode == "allow",
+        }
+    }
+
+    /// The prompt a frontend submits after a widening change so the model
+    /// retries a command the sandbox refused; `None` for a change that does
+    /// not widen. `sandbox_summary` is `SandboxInfo::summary()` after the
+    /// reload.
+    pub fn followup_prompt(&self, sandbox_summary: &str) -> Option<String> {
+        self.widens().then(|| {
+            format!(
+                "The user changed the sandbox configuration: {} is now allowed. \
+        Sandbox: {sandbox_summary}. If a command failed because of the sandbox, retry it now.",
+                self.summary()
+            )
+        })
+    }
+
+    /// The sentence a frontend appends after saving an `excluded_commands`
+    /// entry; `config_path` is the file that now holds it.
+    pub fn exclude_saved_note(&self, config_path: &str) -> String {
+        format!(
+            "Saved {} in {config_path} and reloaded immediately (existing \
+                    entries are not duplicated). Matching simple commands run outside the \
+                    sandbox; other approval requirements still apply.",
+            self.summary()
+        )
+    }
+}
+
 /// What one amendment replaced, so a caller whose reload failed can put the
 /// previous configuration back.
 #[derive(Debug, Clone)]

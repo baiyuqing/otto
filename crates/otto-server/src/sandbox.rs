@@ -9,6 +9,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
+use otto::runtime::info::SandboxInfo;
 use serde::Serialize;
 
 use super::{SandboxWire, Server, error_response, json_response, sandbox_wire};
@@ -60,15 +61,36 @@ pub async fn reload(State(server): State<Arc<Server>>) -> Response {
         }
         Some(result) => result,
     };
-    let others = server.factory.reload_other_sandboxes().await;
+    reload_response(&server, startup_result).await
+}
 
+/// Reloads every other loaded workspace's sandbox and builds the response for
+/// the startup workspace's `startup_result`; shared by the reload route and
+/// the sandbox changes route.
+pub(super) async fn reload_response(
+    server: &Server,
+    startup_result: Result<SandboxInfo, String>,
+) -> Response {
+    let others = server.factory.reload_other_sandboxes().await;
+    match reload_body(server, startup_result, others) {
+        Ok(body) => json_response(StatusCode::OK, &body),
+        Err(message) => error_response(StatusCode::CONFLICT, "sandbox_reload_failed", &message),
+    }
+}
+
+/// The success body of a reload: the startup workspace's sandbox, plus
+/// `workspaces` when another workspace has a sandbox of its own. `Err` carries
+/// the `sandbox_reload_failed` message.
+pub(super) fn reload_body(
+    server: &Server,
+    startup_result: Result<SandboxInfo, String>,
+    others: Vec<(String, Result<SandboxInfo, String>)>,
+) -> Result<serde_json::Value, String> {
     // No other workspace has a sandbox of its own: today's exact response,
     // byte for byte, for the single-workspace deployment.
     if others.is_empty() {
-        return match startup_result {
-            Ok(info) => json_response(StatusCode::OK, &sandbox_wire(&info)),
-            Err(error) => error_response(StatusCode::CONFLICT, "sandbox_reload_failed", &error),
-        };
+        return startup_result
+            .map(|info| serde_json::to_value(sandbox_wire(&info)).expect("sandbox wire"));
     }
 
     let mut workspaces = Vec::with_capacity(1 + others.len());
@@ -89,7 +111,7 @@ pub async fn reload(State(server): State<Arc<Server>>) -> Response {
     }
 
     if !failed.is_empty() {
-        let message = format!(
+        return Err(format!(
             "sandbox reload failed for {}; reloaded: {}",
             failed.join(", "),
             if reloaded.is_empty() {
@@ -97,19 +119,16 @@ pub async fn reload(State(server): State<Arc<Server>>) -> Response {
             } else {
                 reloaded.join(", ")
             }
-        );
-        return error_response(StatusCode::CONFLICT, "sandbox_reload_failed", &message);
+        ));
     }
 
     let sandbox = workspaces[0]
         .sandbox
         .clone()
         .expect("every workspace reloaded above");
-    json_response(
-        StatusCode::OK,
-        &SandboxReloadWire {
-            sandbox,
-            workspaces,
-        },
-    )
+    Ok(serde_json::to_value(SandboxReloadWire {
+        sandbox,
+        workspaces,
+    })
+    .expect("sandbox reload wire"))
 }

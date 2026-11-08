@@ -11,7 +11,7 @@ async fn workflow_tools_and_durable_mailbox_exist_with_conversational_agents_dis
     for name in crate::tool::workflow::NAMES {
         assert!(tool_names(&runner).contains(&name.to_string()));
     }
-    let controller = builder.workflows.get().unwrap().as_ref().unwrap();
+    let controller = builder.workflows.get().unwrap();
     assert!(
         controller.inspect("documentation-review").is_ok(),
         "internal workflow agents must still discover named definitions"
@@ -311,7 +311,7 @@ async fn workflow_controller_slot_is_shared_across_parents_and_retains_lock() {
     let lock =
         crate::runtime::workflow::lock_workspace(&builder.home, &builder.workspace_path).unwrap();
     controller.set_guard(Box::new(lock));
-    builder.workflows.set(Ok(controller.clone())).ok().unwrap();
+    builder.workflows.set(controller.clone()).ok().unwrap();
     let first = crate::runtime::workflow::shared_controller(&builder, &runtime(), &mut Vec::new())
         .await
         .unwrap();
@@ -333,6 +333,21 @@ async fn workflow_controller_slot_is_shared_across_parents_and_retains_lock() {
             .is_err()
     );
     drop(second);
+}
+
+#[tokio::test]
+async fn workflow_controller_error_is_not_cached_after_the_lock_is_released() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let builder = builder(dir.path());
+    let held =
+        crate::runtime::workflow::lock_workspace(&builder.home, &builder.workspace_path).unwrap();
+    let blocked =
+        crate::runtime::workflow::shared_controller(&builder, &runtime(), &mut Vec::new()).await;
+    assert!(blocked.is_err());
+    drop(held);
+    let retried =
+        crate::runtime::workflow::shared_controller(&builder, &runtime(), &mut Vec::new()).await;
+    assert!(retried.is_ok(), "{:?}", retried.err());
 }
 
 #[tokio::test]

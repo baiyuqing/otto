@@ -955,8 +955,8 @@ the same time with the same `~/.otto`, each on its own sessions.
   `approvals.db`, `workflows.db`, `delivery-receipts.db`) wait up to 5 s for
   another process's write. Startup recovery of pending approvals and Git
   deliveries changes only records whose owning process has exited.
-- Two `otto-connect` processes on one data home overwrite each other's
-  `~/.otto/connect/state.json`; run one connector per data home.
+- At most one `otto-connect` runs per user; a second one exits at startup
+  (see [Chat connector](servers-and-connectors.md#building-and-running)).
 
 ### Continuing a session on another host
 

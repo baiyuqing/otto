@@ -1129,6 +1129,11 @@ Telegram, closes the agent's stdin, and kills the agent if it has not exited
 10 s later. A config error or a token that Telegram rejects (HTTP 401 or 404
 from `getMe`) exits with status 1 and `otto-connect: <message>`.
 
+At most one `otto-connect` runs per user. At startup it takes an exclusive
+lock on `~/.otto/connect/state.json.lock` and holds it until it exits; a
+second `otto-connect` exits with status 1 and
+`otto-connect: another otto-connect is running (pid <pid>); stop it before starting a new one`.
+
 ### Chat connector configuration
 
 `~/.config/otto/connect.toml`, or the file given with `--config`:

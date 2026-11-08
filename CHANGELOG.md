@@ -67,6 +67,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- `otto-connect` refuses to start while another `otto-connect` of the same
+  user runs, instead of both polling the same Telegram bot and overwriting
+  `~/.otto/connect/state.json`. See
+  [Building and running](docs/manual/servers-and-connectors.md#building-and-running).
+
 - Several Otto processes can run at the same time on one `~/.otto`, each on
   its own sessions. MCP OAuth refresh now takes a cross-process lock and adopts
   a token another process refreshed; `otto serve` no longer claims scheduled
@@ -82,8 +87,9 @@ commit ledger; Git and release tags retain the full history. See the
   approval-dialogue requests, `queued_input` on turns, `input_id` on the two
   dialogue requests, and `input_id`/`input_provenance` on `user_message` events.
 - Attached ACP and chat connector approval dialogues no longer fail with HTTP 400
-  when the client has an application-source claim. Source claims remain on input
-  admission requests, not dialogue-control requests. Rebuild/reinstall and restart
+  when the client has an application-source claim. Approval-dialogue and
+  task-control requests accept the optional, unverified `client_source` claim
+  and `input_id`, like input admission requests. Rebuild/reinstall and restart
   Otto to use the fix.
 - Local acceptance checks support `CARGO_TARGET_DIR` for connector end-to-end
   tests, and core asynchronous tests run under both native and WASM test runners.

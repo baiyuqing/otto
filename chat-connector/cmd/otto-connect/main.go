@@ -48,6 +48,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer store.Close()
 
 	m := metrics.New()
 	platforms, access, secretVars := platformsFor(cfg, store)

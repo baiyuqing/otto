@@ -2,7 +2,7 @@
 use crate::schedule::time::{latest_occurrence, next_occurrence};
 use crate::schedule::{
     CreateError, Delivery, Error, Item, Kind, NewItem, Origin, Repeat, Result, RunOutcome,
-    ScheduleStore, Scope, State,
+    ScheduleStore, Scope, State, WorkspaceAdmit,
 };
 use crate::storage::drivers::sqlite::SqliteDriver;
 use crate::storage::{Connection, params};
@@ -418,6 +418,15 @@ impl ScheduleStore for SqliteScheduleStore {
     }
     fn claim_run(&self, s: &Scope, w: Option<&str>, n: DateTime<Utc>) -> Result<Option<Item>> {
         SqliteScheduleStore::claim_run(self, s, w, n)
+    }
+    fn claim_run_admitting(
+        &self,
+        s: &Scope,
+        w: Option<&str>,
+        a: Option<&WorkspaceAdmit>,
+        n: DateTime<Utc>,
+    ) -> Result<Option<Item>> {
+        SqliteScheduleStore::claim_run_admitting(self, s, w, a, n)
     }
     fn finish_run(
         &self,

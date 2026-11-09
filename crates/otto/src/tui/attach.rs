@@ -43,7 +43,9 @@ use crate::schedule::{Origin, Scope};
 mod event_loop;
 mod frames;
 mod transport;
+mod transport_state;
 use event_loop::*;
+use transport_state::*;
 
 /// Bound on one request. A long call (`/compact`) runs as a future in the
 /// loop instead.
@@ -389,7 +391,6 @@ struct PendingTransport<'a> {
     session: String,
     epoch: u64,
     transcript: u64,
-    mutation: bool,
     call: TransportCall<'a>,
 }
 
@@ -418,16 +419,14 @@ enum TransportResult {
 }
 
 /// Network work is polled beside terminal input, stream frames and driver results.
-/// The attach loop's states: connected or not (`connected`), idle or
-/// following one turn (`followed`), and optionally a `/compact` in flight
-/// (`compacting`). Keys, the followed turn's frames, status snapshots, the
-/// compaction result and the reconnect timer are the events.
+/// Connection and request ownership are explicit; turn following and compaction
+/// remain independent because their events are polled concurrently.
 struct Ui<'a> {
     remote: &'a Remote,
     app: App,
     cancel: &'a CancellationToken,
     followed: Option<Followed>,
-    status: Option<StatusStream>,
+    connection: ConnectionState,
     rows: Vec<StatusRow>,
     /// The row of this session at the last sync, to refresh the sub-agent
     /// panel only when it changes.
@@ -437,12 +436,10 @@ struct Ui<'a> {
     /// in the next one is already in it.
     fresh: bool,
     compacting: Option<CompactCall<'a>>,
-    connected: bool,
-    pending: Option<PendingTransport<'a>>,
+    transport: TransportState<'a>,
     epoch: u64,
     transcript: u64,
     needs_sync: bool,
-    cancel_after_send: bool,
     actions: VecDeque<Action>,
 }
 

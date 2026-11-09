@@ -23,14 +23,13 @@ func (c *chat) cmdNew(m Message) {
 
 func (c *chat) cmdStop(m Message) {
 	c.mu.Lock()
-	wasRunning := c.running
+	wasRunning := c.requestStopLocked()
 	if !wasRunning && !c.approvalRunning {
 		c.mu.Unlock()
 		c.notify(m.MessageID, "Nothing is running.")
 		return
 	}
 	c.queue = nil
-	c.stopped = true
 	c.taskActive = false
 	c.taskClosing = false
 	c.taskGeneration++
@@ -303,17 +302,16 @@ func updated(s acp.SessionInfo) string {
 // of a listed session), sends session/load and stores the binding.
 func (c *chat) cmdUse(m Message, arg string) {
 	c.mu.Lock()
-	if c.running || c.using {
+	if !c.beginSwitchLocked() {
 		c.mu.Unlock()
 		c.notify(m.MessageID, "A message is running or queued; /use is refused. Send /stop first.")
 		return
 	}
-	c.using = true
 	c.mu.Unlock()
 	go func() {
 		defer func() {
 			c.mu.Lock()
-			c.using = false
+			c.finishSwitchLocked()
 			c.mu.Unlock()
 		}()
 		c.memoryMu.Lock()

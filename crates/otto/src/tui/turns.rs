@@ -39,6 +39,8 @@ pub(super) async fn drive_turn<B: Backend, T, E>(
     tokio::pin!(future);
     let mut frames = render::spinner_interval();
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
+    let mut status = tokio::time::interval(std::time::Duration::from_millis(500));
+    status.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             result=&mut future=>{
@@ -49,9 +51,9 @@ pub(super) async fn drive_turn<B: Backend, T, E>(
             Some(event)=keys.recv()=>apply_turn_key(app,terminal,event,turn,backend),
             completion=app.next_completion()=>app.apply_completion(completion),
             _=refresh.tick()=>{app.tick_features();app.request_approvals();app.poll_steering();}
+            _=status.tick()=>app.poll_local_status(),
             _=frames.tick()=>{}
         }
-        app.refresh_tasks(backend);
         app.poll_observer();
         let _ = terminal.draw(|frame| render::draw(frame, app));
     }

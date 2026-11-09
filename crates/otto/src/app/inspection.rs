@@ -81,15 +81,22 @@ impl Controller {
                 ..Info::default()
             };
         }
-        let state = self.lock();
-        let Some(current) = state.current.as_ref() else {
+        // Pin the session/runtime pair, then release the controller lock before
+        // projecting history. Background status reads must not stall UI mailbox
+        // and runner lookups behind a large transcript or a session-store lock.
+        let current = self
+            .lock()
+            .current
+            .as_ref()
+            .map(|current| (current.session.clone(), current.info.clone()));
+        let Some((session, runtime_info)) = current else {
             return Info {
                 sandbox,
                 ..Info::default()
             };
         };
-        let header = current.session.header();
-        let snapshot = current.session.snapshot();
+        let header = session.header();
+        let snapshot = session.snapshot();
         let approval_settings = self
             .builder
             .approvals
@@ -101,27 +108,27 @@ impl Controller {
             })
             .unwrap_or_default();
         Info {
-            local_commands: current.session.handle().local_commands(),
+            local_commands: session.handle().local_commands(),
             session_id: header.id,
-            session_name: current.session.name(),
-            session_path: current.path(),
+            session_name: session.name(),
+            session_path: session.path(),
             workspace: header.workspace,
-            provider: current.info.provider.clone(),
-            provider_type: current.info.provider_type.clone(),
-            model_selector: current.info.model_selector.clone(),
-            model: current.info.model.clone(),
-            thinking: current.info.thinking.clone(),
+            provider: runtime_info.provider,
+            provider_type: runtime_info.provider_type,
+            model_selector: runtime_info.model_selector,
+            model: runtime_info.model,
+            thinking: runtime_info.thinking,
             usage: snapshot.aggregate_usage,
             usage_present: snapshot.aggregate_usage_present,
-            context_window: current.info.context_window,
+            context_window: runtime_info.context_window,
             context_input_tokens: snapshot.context_input_tokens,
             context_input_tokens_present: snapshot.context_input_tokens_present,
             context_input_tokens_pending: snapshot.context_input_tokens_pending,
             sandbox,
             approval_mode: approval_settings.mode(),
             approval_settings,
-            forked_from: current.session.forked_from().map(ForkedFrom::from),
-            plan: otto_core::session::Session::plan(&current.session),
+            forked_from: session.forked_from().map(ForkedFrom::from),
+            plan: otto_core::session::Session::plan(&session),
         }
     }
 

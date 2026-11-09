@@ -295,7 +295,7 @@ fn observer_terminal_input_dispatch_ignores_paste_and_does_not_select_main_text(
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     for event in [
         TuiEvent::Paste("must not enter composer".into()),
-        TuiEvent::Wheel { up: true },
+        TuiEvent::Wheel { up: true, steps: 1 },
         TuiEvent::Select {
             phase: DragPhase::Start,
             col: 4,

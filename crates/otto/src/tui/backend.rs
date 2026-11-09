@@ -17,9 +17,11 @@ use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 mod local;
 mod local_command;
+mod local_status;
 mod remote;
 pub(crate) use local::*;
 use local_command::*;
+pub(crate) use local_status::{LocalStatus, local_status};
 use remote::*;
 
 #[derive(Clone)]
@@ -38,6 +40,7 @@ pub(crate) struct Ticket {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Request {
+    LocalStatus,
     Sessions,
     /// The current session's fork points, newest first, as session choices
     /// whose value is the prompt's entry id.
@@ -125,6 +128,7 @@ pub(crate) struct SessionChoice {
 
 #[derive(Debug)]
 pub(crate) enum Reply {
+    LocalStatus(LocalStatus),
     LocalPrompt {
         text: String,
         input_id: String,

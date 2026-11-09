@@ -282,6 +282,17 @@ the catalog. Keep local and `--attach` input on the same composer, and return
 scoped replies through the backend contract. `crates/otto/tests/tui_boundary.rs`
 guards these dependency directions.
 
+Local TUI status projections (including input recovery, command receipts and
+task/skill lists) use the backend's blocking worker, with at most one status
+request in flight and a 500 ms polling interval in idle and active turns.
+Drawing and wheel input use the current UI snapshot without session-history
+queries. Status replies retain session/generation scope; turn transitions and
+command receipts invalidate older replies, and streamed usage stays authoritative
+while a turn is active.
+The terminal reader batches up to 64 already available, consecutive wheel steps
+in one direction before a redraw; direction changes, keys and selection events
+retain their original order.
+
 ### Browser and chat clients
 
 - [otto-plus](https://github.com/baiyuqing/otto-plus) owns the browser UI and

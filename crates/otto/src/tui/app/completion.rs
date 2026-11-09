@@ -45,6 +45,16 @@ impl App {
             self.complete_observer(&t, completion.result);
             return;
         }
+        if t.surface == lifecycle::LOCAL_STATUS_SURFACE {
+            if self.pending.remove(&(t.surface, t.generation))
+                && self.generations.get(&t.surface) == Some(&t.generation)
+                && self.session_changes.is_empty()
+                && let Ok(Reply::LocalStatus(status)) = completion.result
+            {
+                self.apply_local_status(status);
+            }
+            return;
+        }
         if t.surface == 0
             && completion.result.is_err()
             && self.steering_generation == Some(t.generation)
@@ -155,6 +165,7 @@ impl App {
             prompt,
             draft,
         } = receipt;
+        self.invalidate_local_status();
         let old = (self.info.workspace.clone(), self.info.session_id.clone());
         self.info = info;
         self.observer

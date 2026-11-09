@@ -201,6 +201,15 @@ after authoritative reload of the same session. Normal exit drains owned request
 including a cancellation produced by a completed send. Following a turn and
 running compaction remain independent activities.
 
+The Go connector's per-chat queue ownership is `Idle`, `Switching`, `Working`
+or `Stopping`, with transitions under the chat mutex. A worker retains ownership
+through session-lock waits, prompt execution and reply delivery. `/stop` clears
+the existing queue and requests cancellation without releasing that worker;
+later arrivals can queue and start with fresh stop state when dequeued.
+`/use` owns `Switching` through session loading and binding publication and
+releases it on success or failure. Approval and task-control workers retain
+their independent ownership and generations.
+
 Session replacement must preserve shared state and admitted work; avoid
 frontend-specific execution paths. `runtime/session_resources.rs` owns one
 session's inbox, tasks, timers, output leases, MCP connections and workflow

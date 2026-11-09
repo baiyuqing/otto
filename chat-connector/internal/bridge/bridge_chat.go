@@ -31,11 +31,9 @@ type chat struct {
 	approvalRunning    bool
 	approvalCancel     context.CancelFunc
 	approvalGeneration uint64
-	running            bool          // a worker goroutine owns the queue
+	activity           chatActivity  // queue-worker or session-switch ownership
 	turnDone           chan struct{} // closes after this turn's chat reply is sent
-	using              bool          // a /use is loading a session
 	sid                string
-	stopped            bool // /stop arrived during the current turn
 	taskGeneration     uint64
 	taskSID            string
 	taskActive         bool
@@ -135,7 +133,7 @@ func (c *chat) enqueue(m Message) bool {
 
 // enqueueLocked admits a message while c.mu is held.
 func (c *chat) enqueueLocked(m Message) bool {
-	if c.using {
+	if c.switchingLocked() {
 		c.notify(m.MessageID, "A session switch is in progress; the message was not queued.")
 		return false
 	}
@@ -146,7 +144,7 @@ func (c *chat) enqueueLocked(m Message) bool {
 	}
 	c.queue = append(c.queue, m)
 	slog.Info("chat_queued", "request_id", m.RequestID, "platform", c.p.Name(), "chat_id", c.id, "queue_length", len(c.queue))
-	if c.running {
+	if c.workerOwnedLocked() {
 		return true
 	}
 	c.b.mu.Lock()
@@ -160,7 +158,7 @@ func (c *chat) enqueueLocked(m Message) bool {
 		c.notify(m.MessageID, "Connector is shutting down; the message was not queued.")
 		return false
 	}
-	c.running = true
+	c.beginWorkerLocked()
 	go c.work()
 	return true
 }
@@ -334,14 +332,14 @@ func (c *chat) work() {
 	for {
 		c.mu.Lock()
 		if len(c.queue) == 0 || c.b.workCtx.Err() != nil {
-			c.running = false
+			c.finishWorkerLocked()
 			c.queue = nil
 			c.mu.Unlock()
 			return
 		}
 		m := c.queue[0]
 		c.queue = c.queue[1:]
-		c.stopped = false
+		c.beginMessageLocked()
 		c.mu.Unlock()
 		c.turn(m)
 	}
@@ -380,7 +378,7 @@ func (c *chat) turn(m Message) {
 		}
 		unlock := c.b.lockSession(sid)
 		c.mu.Lock()
-		if c.stopped {
+		if c.stopRequestedLocked() {
 			c.mu.Unlock()
 			unlock()
 			c.send(ctx, m.MessageID, "Stopped.")

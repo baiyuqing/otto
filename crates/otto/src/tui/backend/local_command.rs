@@ -317,6 +317,6 @@ async fn amend_sandbox(
 ) -> Result<(String, Option<String>), String> {
     let summary = change.summary();
     let info = c.amend_sandbox(change.clone()).await?;
-    let prompt = change.followup_prompt(&info.summary());
+    let prompt = change.followup_prompt(info.summary());
     Ok((format!("Sandbox: {} ({summary})", info.summary()), prompt))
 }

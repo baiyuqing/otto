@@ -185,9 +185,12 @@ async fn permanent_delete_rejects_native_admission_pin_and_compaction_without_cl
     assert!(harness.server.pin_session(&id));
     assert_eq!(erase(&harness, &id).await, StatusCode::CONFLICT);
     harness.server.unpin_session(&id);
-    session.lock().compacting = Some(CancellationToken::new());
+    let compaction = session
+        .lock()
+        .begin_compaction(CancellationToken::new())
+        .expect("idle session admits compaction");
     assert_eq!(erase(&harness, &id).await, StatusCode::CONFLICT);
-    session.lock().compacting = None;
+    assert!(session.lock().finish_compaction(compaction));
     assert!(session.ctrl.begin_operation().is_ok());
     assert!(PathBuf::from(session.ctrl.info().session_path).exists());
     assert_eq!(erase(&harness, &id).await, StatusCode::NO_CONTENT);

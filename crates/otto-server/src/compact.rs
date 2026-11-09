@@ -40,18 +40,17 @@ pub async fn handle(
         }
     };
 
-    let cancel = {
+    let cancel = server.cancel_token().child_token();
+    let generation = {
         let mut state = session.lock();
-        if state.deleting || state.busy() {
+        let Some(generation) = state.begin_compaction(cancel.clone()) else {
             return turn_active("a turn is already active for this session");
-        }
-        let cancel = server.cancel_token().child_token();
-        state.compacting = Some(cancel.clone());
-        cancel
+        };
+        generation
     };
 
     // Runs in its own task so a dropped handler future (the client closed the
-    // connection) still clears `compacting` and starts the next queued turn.
+    // connection) still releases compaction ownership and starts the next queued turn.
     // axum gives a handler no disconnect signal, so the compaction itself is
     // cancelled only by shutdown.
     let result = {
@@ -65,7 +64,7 @@ pub async fn handle(
                     .await
             };
             cancel.cancel();
-            session.lock().compacting = None;
+            session.lock().finish_compaction(generation);
             server.start_next(&session);
             result
         })

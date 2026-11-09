@@ -122,7 +122,7 @@ async fn retire(server: &Arc<Server>, id: &str, retirement: Retirement) -> Respo
                 "session is being closed",
             );
         }
-        state.deleting = true;
+        state.begin_close();
         // Neither a resume nor an idempotent create retry may bring this id
         // back in this process while its files change, or after they did.
         server

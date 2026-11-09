@@ -183,6 +183,15 @@ waiting and follow-up tokens, but only the active owner's completion releases
 the slot. Queue draining and ordered follow-up admission remain separate from
 activity; saved inputs retain their deduplication and recovery ordering.
 
+`otto-server/src/session_activity.rs` owns HTTP session arbitration. Activity is
+`Idle`, `Turn(handle)` or `Compacting(token)`; admission is `Open` or `Closing`.
+Closing retains active cancellation ownership until completion, and completion
+never reopens admission. The latest turn is retained separately for status and
+SSE replay; it does not authorize new execution. Start, completion and close
+transitions run under the session mutex. Pending/restored queues, approval waits
+and input receipts keep their own ordering and identity contracts; recovery
+wakes still run before restored prompts.
+
 Session replacement must preserve shared state and admitted work; avoid
 frontend-specific execution paths. `runtime/session_resources.rs` owns one
 session's inbox, tasks, timers, output leases, MCP connections and workflow

@@ -1,6 +1,7 @@
 use super::*;
 
 mod structured_approvals;
+mod transport_state;
 
 #[tokio::test]
 async fn delayed_session_snapshot_keeps_input_and_stream_live_and_cannot_erase_deltas() {
@@ -60,23 +61,21 @@ async fn delayed_session_snapshot_keeps_input_and_stream_live_and_cannot_erase_d
         app: App::new(&Backend::Attach(&remote)),
         cancel: &cancel,
         followed: None,
-        status: None,
+        connection: ConnectionState::Connected(test_status().await),
         rows: vec![row(Some("ok"), Some("old"))],
         last_row: None,
         last_done: None,
         fresh: false,
         compacting: None,
-        connected: true,
-        pending: None,
+        transport: TransportState::Idle,
         epoch: 0,
         transcript: 0,
         needs_sync: false,
-        cancel_after_send: false,
         actions: VecDeque::new(),
     };
     ui.sync();
     tokio::select! {
-        result = ui.pending.as_mut().unwrap().call.as_mut() => panic!("snapshot completed before release: {}", result.is_ok()),
+        result = ui.transport.pending_mut().unwrap().call.as_mut() => panic!("snapshot completed before release: {}", result.is_ok()),
         _ = started.notified() => {}
     }
     let stream = remote.client.turn_events("s1", "t1", None).await.unwrap();
@@ -89,7 +88,7 @@ async fn delayed_session_snapshot_keeps_input_and_stream_live_and_cannot_erase_d
     while !input || frames < 2 {
         let event = tokio::time::timeout(Duration::from_secs(1), async {
                 tokio::select! {
-                    result = ui.pending.as_mut().unwrap().call.as_mut() => Ev::Transport(result),
+                    result = ui.transport.pending_mut().unwrap().call.as_mut() => Ev::Transport(result),
                     event = received.recv(), if !input => Ev::Input(event),
                     frame = ui.followed.as_mut().unwrap().stream.next(), if frames < 2 => Ev::Frame(frame),
                 }
@@ -117,7 +116,7 @@ async fn delayed_session_snapshot_keeps_input_and_stream_live_and_cannot_erase_d
     assert_eq!(ui.app.composer.input.iter().collect::<String>(), "draft");
     assert!(ui.app.entries.iter().any(|entry| entry.raw == "live live "));
     release.notify_one();
-    let result = ui.pending.as_mut().unwrap().call.as_mut().await;
+    let result = ui.transport.pending_mut().unwrap().call.as_mut().await;
     ui.on_transport(result);
     assert!(
         ui.app.entries.iter().any(|entry| entry.raw == "live live "),
@@ -177,30 +176,31 @@ async fn reconnect_restores_pending_input_in_visible_main_conversation() {
         app,
         cancel: &cancel,
         followed: None,
-        status: None,
+        connection: ConnectionState::Disconnected,
         rows: Vec::new(),
         last_row: None,
         last_done: None,
         fresh: false,
         compacting: None,
-        connected: false,
-        pending: None,
+        transport: TransportState::Idle,
         epoch: 0,
         transcript: 0,
         needs_sync: false,
-        cancel_after_send: false,
         actions: VecDeque::new(),
     };
     ui.reconnect();
     let result = ui
-        .pending
-        .as_mut()
+        .transport
+        .pending_mut()
         .expect("reconnect call")
         .call
         .as_mut()
         .await;
     ui.on_transport(result);
-    assert!(ui.connected, "authoritative reconnect succeeds");
+    assert!(
+        ui.connection.is_connected(),
+        "authoritative reconnect succeeds"
+    );
     let completion = tokio::time::timeout(Duration::from_secs(1), ui.app.next_completion())
         .await
         .expect("reconnect must schedule a queue read");
@@ -284,5 +284,36 @@ fn follow_decision_follows_a_running_turn_once() {
             want,
             "{row:?}"
         );
+    }
+}
+
+/// A real stream keeps connected fixtures faithful to the transport contract.
+async fn test_status() -> StatusStream {
+    let router = axum::Router::new().fallback(|| async {
+        axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from("data: []\n\n"))
+            .unwrap()
+    });
+    Client::in_process(router).status().await.unwrap()
+}
+
+async fn attached_ui<'a>(remote: &'a Remote, cancel: &'a CancellationToken) -> Ui<'a> {
+    Ui {
+        remote,
+        app: App::new(&Backend::Attach(remote)),
+        cancel,
+        followed: None,
+        connection: ConnectionState::Connected(test_status().await),
+        rows: Vec::new(),
+        last_row: None,
+        last_done: None,
+        fresh: false,
+        compacting: None,
+        transport: TransportState::Idle,
+        epoch: 0,
+        transcript: 0,
+        needs_sync: false,
+        actions: VecDeque::new(),
     }
 }

@@ -9,6 +9,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Normal exit from the attached terminal UI now waits for deferred turn
+  cancellation generated when a pending prompt send completes.
+
 - Closing or evicting an HTTP session now rejects new work through retained
   session handles, including after canceled turns or compactions finish.
 

@@ -23,18 +23,16 @@ pub(super) async fn run_loop<B: TerminalBackend>(
         app,
         cancel,
         followed: None,
-        status: Some(status),
+        connection: ConnectionState::Connected(status),
         rows: Vec::new(),
         last_row: None,
         last_done: None,
         fresh: true,
         compacting: None,
-        connected: true,
-        pending: None,
+        transport: TransportState::Idle,
         epoch: 0,
         transcript: 0,
         needs_sync: false,
-        cancel_after_send: false,
         actions: VecDeque::new(),
     };
     let mut retry = tokio::time::interval(RETRY_INTERVAL);
@@ -46,10 +44,10 @@ pub(super) async fn run_loop<B: TerminalBackend>(
     loop {
         let event = {
             let followed = ui.followed.as_mut();
-            let status = ui.status.as_mut();
+            let connected = ui.connection.is_connected();
+            let status = ui.connection.status_mut();
             let compacting = ui.compacting.as_mut();
-            let pending = ui.pending.as_mut();
-            let connected = ui.connected;
+            let pending = ui.transport.pending_mut();
             let frame = async {
                 match followed {
                     Some(followed) => followed.stream.next().await,
@@ -155,8 +153,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                 let entries = ui.app.entries.len();
                 let mutation = completion.mutation;
                 let changed = ui.app.apply_completion(completion);
-                if mutation && ui.pending.as_ref().is_some_and(|pending| !pending.mutation) {
-                    ui.pending = None;
+                if mutation && ui.transport.discard_read() {
                     ui.needs_sync = true;
                 }
                 if ui.app.entries.len() != entries {
@@ -164,9 +161,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                 }
                 if ui.app.info.session_id != previous {
                     ui.epoch = ui.epoch.wrapping_add(1);
-                    if ui.pending.as_ref().is_some_and(|pending| !pending.mutation) {
-                        ui.pending = None;
-                    }
+                    ui.transport.discard_read();
                     ui.needs_sync = true;
                     ui.followed = None;
                     ui.last_done = None;

@@ -192,6 +192,15 @@ transitions run under the session mutex. Pending/restored queues, approval waits
 and input receipts keep their own ordering and identity contracts; recovery
 wakes still run before restored prompts.
 
+The attached TUI's connection owns its status stream while connected. Its
+transport request is idle, reading, sending, reconnecting or canceling; a send
+owns any deferred cancellation intent. Disconnect drops replaceable reads and
+retains send/cancel ownership until settlement. Session, epoch and transcript
+checks fence result adoption, and reconnect publishes connected state only
+after authoritative reload of the same session. Normal exit drains owned requests,
+including a cancellation produced by a completed send. Following a turn and
+running compaction remain independent activities.
+
 Session replacement must preserve shared state and admitted work; avoid
 frontend-specific execution paths. `runtime/session_resources.rs` owns one
 session's inbox, tasks, timers, output leases, MCP connections and workflow

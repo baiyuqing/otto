@@ -175,6 +175,14 @@ unstarted reservation and defers disposal until active work releases admission.
 resources itself. Disposal runs outside the Controller mutex, and concurrent
 `close` callers wait for the same result.
 
+`otto-acp/src/prompt_slot.rs` owns connection-local prompt admission. Its activity
+is `Idle`, `Prompt(token)` or `Wake(token)`; the occupied states carry the token
+that cancellation signals. Admission, wake handoff and release transition under
+the same slot mutex. Cancellation clears queued prompts and signals active,
+waiting and follow-up tokens, but only the active owner's completion releases
+the slot. Queue draining and ordered follow-up admission remain separate from
+activity; saved inputs retain their deduplication and recovery ordering.
+
 Session replacement must preserve shared state and admitted work; avoid
 frontend-specific execution paths. `runtime/session_resources.rs` owns one
 session's inbox, tasks, timers, output leases, MCP connections and workflow

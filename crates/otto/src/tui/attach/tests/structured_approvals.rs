@@ -1,28 +1,10 @@
 use super::*;
 
-#[test]
-fn attached_wire_frames_upsert_structured_approval_and_keep_literal_shell_escapes() {
+#[tokio::test]
+async fn attached_wire_frames_upsert_structured_approval_and_keep_literal_shell_escapes() {
     let remote = Remote::offline(vec![]);
     let cancel = CancellationToken::new();
-    let mut ui = Ui {
-        remote: &remote,
-        app: App::new(&Backend::Attach(&remote)),
-        cancel: &cancel,
-        followed: None,
-        status: None,
-        rows: vec![],
-        last_row: None,
-        last_done: None,
-        fresh: false,
-        compacting: None,
-        connected: true,
-        pending: None,
-        epoch: 0,
-        transcript: 0,
-        needs_sync: false,
-        cancel_after_send: false,
-        actions: VecDeque::new(),
-    };
+    let mut ui = attached_ui(&remote, &cancel).await;
     let mut request: otto_core::approval::Request = serde_json::from_value(serde_json::json!({
         "schema_version":1, "id":"attached-approval", "revision":1,
         "kind":"confirmation", "authority":"consent",

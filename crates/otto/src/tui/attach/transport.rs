@@ -12,19 +12,12 @@ impl<'a> Ui<'a> {
     }
 
     pub(super) fn disconnect(&mut self) {
-        if !self.connected {
+        self.transport.discard_read();
+        if !self.connection.is_connected() {
             return;
         }
-        self.connected = false;
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| !pending.mutation)
-        {
-            self.pending = None;
-        }
+        self.connection = ConnectionState::Disconnected;
         self.followed = None;
-        self.status = None;
         self.compacting = None;
         self.rows.clear();
         self.last_row = None;
@@ -35,54 +28,41 @@ impl<'a> Ui<'a> {
         self.transcript = self.transcript.wrapping_add(1);
     }
 
-    pub(super) fn pending_call(&mut self, mutation: bool, call: TransportCall<'a>) {
-        self.pending = Some(PendingTransport {
-            session: self.remote.session(),
-            epoch: self.epoch,
-            transcript: self.transcript,
-            mutation,
-            call,
-        });
-    }
-
     /// Reconnect commits nothing until the same session has been authoritatively reloaded.
     pub(super) fn reconnect(&mut self) {
-        if self.pending.is_some() {
+        if self.connection.is_connected() || !self.transport.is_idle() {
             return;
         }
         let remote = self.remote;
         let session = remote.session();
-        self.pending_call(
-            false,
-            Box::pin(async move {
-                let status = within(remote.client.status()).await?;
-                let id = within(remote.client.open_session(None, Some(&session))).await?;
-                if id != session {
-                    return Err(Error::Unreachable("reconnect changed session".into()));
-                }
-                let (info, history, tasks) = tokio::try_join!(
-                    within(remote.client.session(&session)),
-                    within(remote.client.history(&session, None)),
-                    within(remote.client.session_tasks(&session)),
-                )?;
-                Ok(TransportResult::Reconnect {
-                    snapshot: Snapshot {
-                        info: Some(info),
-                        tasks: Some(tasks),
-                        history: Some(history),
-                        stream: None,
-                        done: None,
-                        row: None,
-                    },
-                    status,
-                })
-            }),
-        );
+        self.start_reconnect(Box::pin(async move {
+            let status = within(remote.client.status()).await?;
+            let id = within(remote.client.open_session(None, Some(&session))).await?;
+            if id != session {
+                return Err(Error::Unreachable("reconnect changed session".into()));
+            }
+            let (info, history, tasks) = tokio::try_join!(
+                within(remote.client.session(&session)),
+                within(remote.client.history(&session, None)),
+                within(remote.client.session_tasks(&session)),
+            )?;
+            Ok(TransportResult::Reconnect {
+                snapshot: Snapshot {
+                    info: Some(info),
+                    tasks: Some(tasks),
+                    history: Some(history),
+                    stream: None,
+                    done: None,
+                    row: None,
+                },
+                status,
+            })
+        }));
     }
 
     /// Coalesces status changes while a snapshot or admitted operation is pending.
     pub(super) fn sync(&mut self) {
-        if !self.connected || self.pending.is_some() {
+        if !self.connection.is_connected() || !self.transport.is_idle() {
             return;
         }
         let session = self.remote.session();
@@ -101,83 +81,88 @@ impl<'a> Ui<'a> {
         let fresh = self.fresh;
         let remote = self.remote;
         self.needs_sync = false;
-        self.pending_call(
-            false,
-            Box::pin(async move {
-                let (before, done, follow) = match decision {
-                    Some(Follow::Own(id)) => (None, None, Some(id)),
-                    Some(Follow::Foreign(id)) => (Some(id.clone()), None, Some(id)),
-                    Some(Follow::Reload(id)) => (None, Some(id), None),
-                    None => (None, None, None),
-                };
-                let reload = before.is_some() || done.is_some() && !fresh;
-                let history = async {
-                    if reload {
-                        within(remote.client.history(&session, before.as_deref()))
-                            .await
-                            .map(Some)
-                    } else {
-                        Ok(None)
+        self.start_read(Box::pin(async move {
+            let (before, done, follow) = match decision {
+                Some(Follow::Own(id)) => (None, None, Some(id)),
+                Some(Follow::Foreign(id)) => (Some(id.clone()), None, Some(id)),
+                Some(Follow::Reload(id)) => (None, Some(id), None),
+                None => (None, None, None),
+            };
+            let reload = before.is_some() || done.is_some() && !fresh;
+            let history = async {
+                if reload {
+                    within(remote.client.history(&session, before.as_deref()))
+                        .await
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            };
+            let following = follow.is_some();
+            let stream = async {
+                match follow {
+                    Some(id) => within(remote.client.turn_events(&session, &id, None))
+                        .await
+                        .map(Some),
+                    None => Ok(None),
+                }
+            };
+            let metadata = async {
+                if following {
+                    return Ok((None, None));
+                }
+                let tasks = async {
+                    match within(remote.client.session_tasks(&session)).await {
+                        Ok(tasks) => Ok(Some(tasks)),
+                        Err(Error::Http { .. }) => Ok(None),
+                        Err(error) => Err(error),
                     }
                 };
-                let following = follow.is_some();
-                let stream = async {
-                    match follow {
-                        Some(id) => within(remote.client.turn_events(&session, &id, None))
-                            .await
-                            .map(Some),
-                        None => Ok(None),
-                    }
-                };
-                let metadata = async {
-                    if following {
-                        return Ok((None, None));
-                    }
-                    let tasks = async {
-                        match within(remote.client.session_tasks(&session)).await {
-                            Ok(tasks) => Ok(Some(tasks)),
-                            Err(Error::Http { .. }) => Ok(None),
-                            Err(error) => Err(error),
-                        }
-                    };
-                    let (info, tasks) =
-                        tokio::try_join!(within(remote.client.session(&session)), tasks)?;
-                    Ok::<_, Error>((Some(info), tasks))
-                };
-                let ((info, tasks), history, stream) = tokio::try_join!(metadata, history, stream)?;
-                Ok(TransportResult::Sync(Snapshot {
-                    info,
-                    tasks,
-                    history,
-                    stream,
-                    done,
-                    row,
-                }))
-            }),
-        );
+                let (info, tasks) =
+                    tokio::try_join!(within(remote.client.session(&session)), tasks)?;
+                Ok::<_, Error>((Some(info), tasks))
+            };
+            let ((info, tasks), history, stream) = tokio::try_join!(metadata, history, stream)?;
+            Ok(TransportResult::Sync(Snapshot {
+                info,
+                tasks,
+                history,
+                stream,
+                done,
+                row,
+            }))
+        }));
     }
 
     pub(super) fn on_transport(&mut self, result: Result<TransportResult, Error>) {
-        let Some(pending) = self.pending.take() else {
-            return;
+        let transport = std::mem::replace(&mut self.transport, TransportState::Idle);
+        let mutation = transport.is_owned();
+        let (pending, cancel_after_send, reconnecting) = match transport {
+            TransportState::Idle => return,
+            TransportState::Reading(pending) | TransportState::Canceling(pending) => {
+                (pending, false, false)
+            }
+            TransportState::Sending {
+                pending,
+                cancel_after_send,
+            } => (pending, cancel_after_send, false),
+            TransportState::Reconnecting(pending) => (pending, false, true),
         };
         if pending.session != self.remote.session() || pending.epoch != self.epoch {
-            self.cancel_after_send = false;
             return;
         }
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                self.cancel_after_send = false;
-                if pending.mutation && matches!(error, Error::Unreachable(_)) {
+                if mutation && matches!(error, Error::Unreachable(_)) {
                     self.app.push_system(format!(
                         "{error}; outcome unknown, reconcile before retrying"
                     ));
                 }
-                if !self.connected {
+                if !self.connection.is_connected() {
                     return;
                 }
-                if !pending.mutation && !matches!(error, Error::Unreachable(_)) {
+                if !mutation && !matches!(error, Error::Unreachable(_)) {
                     self.last_row = self
                         .rows
                         .iter()
@@ -195,20 +180,32 @@ impl<'a> Ui<'a> {
         };
         match result {
             TransportResult::Sync(snapshot) => {
-                if snapshot.history.is_some() && pending.transcript != self.transcript {
+                if snapshot
+                    .info
+                    .as_ref()
+                    .is_some_and(|info| info.session_id != pending.session)
+                    || snapshot.history.is_some() && pending.transcript != self.transcript
+                {
                     self.needs_sync = true;
                     return;
                 }
                 self.commit_snapshot(snapshot);
             }
             TransportResult::Reconnect { snapshot, status } => {
-                if pending.transcript != self.transcript {
+                if !reconnecting
+                    || pending.transcript != self.transcript
+                    || snapshot
+                        .info
+                        .as_ref()
+                        .is_none_or(|info| info.session_id != pending.session)
+                    || snapshot.history.is_none()
+                    || snapshot.tasks.is_none()
+                {
+                    self.needs_sync = true;
                     return;
                 }
                 self.commit_snapshot(snapshot);
-                self.status = Some(status);
-                self.connected = true;
-                self.app.connected = true;
+                self.mark_connected(status);
                 self.app.push_system("reconnected to otto serve");
                 self.transcript = self.transcript.wrapping_add(1);
                 self.app.tick_features();
@@ -225,28 +222,24 @@ impl<'a> Ui<'a> {
                 if let Some(stream) = stream {
                     let turn = stream.turn_id.clone();
                     self.remote.state().own.push(turn);
-                    if self.connected && self.followed.is_none() {
+                    if self.connection.is_connected() && self.followed.is_none() {
                         self.adopt_stream(stream);
                     }
                 } else if self.followed.is_none() && self.compacting.is_none() {
                     self.app
                         .finish_turn(crate::program_status::Completion::Canceled);
                 }
-                if self.cancel_after_send {
-                    self.cancel_after_send = false;
-                    if let Some(turn) = self
+                if cancel_after_send
+                    && let Some(turn) = self
                         .followed
                         .as_ref()
                         .map(|followed| followed.stream.turn_id.clone())
                         .or(sent_turn)
-                    {
-                        self.cancel_turn(turn);
-                    }
+                {
+                    self.cancel_turn(turn);
                 }
             }
-            TransportResult::Cancel => {
-                self.cancel_after_send = false;
-            }
+            TransportResult::Cancel => {}
         }
     }
 
@@ -293,10 +286,14 @@ impl<'a> Ui<'a> {
     }
 
     pub(super) async fn drain_transport(&mut self) {
-        if let Some(pending) = self.pending.as_mut()
-            && pending.mutation
-        {
-            let result = pending.call.as_mut().await;
+        while self.transport.is_owned() {
+            let result = self
+                .transport
+                .pending_mut()
+                .expect("owned transport has a pending call")
+                .call
+                .as_mut()
+                .await;
             self.on_transport(result);
         }
     }

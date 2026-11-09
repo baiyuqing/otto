@@ -84,6 +84,8 @@ pub mod turn_queue;
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 mod inspection;
+mod lifecycle;
+use lifecycle::State;
 mod model_selection;
 pub mod notices;
 mod prompt;
@@ -360,25 +362,6 @@ impl Current {
     }
 }
 
-#[derive(Default)]
-struct State {
-    current: Option<Current>,
-    /// An operation holds admission. Covers both the active and the replacing
-    /// state, because every caller treats them identically.
-    busy: bool,
-    /// Bumped on every admission so a stale [`Admission`] guard is a no-op
-    /// after [`Controller::request_close`] releases an unstarted wake.
-    generation: u64,
-    /// A wake claim that has not run yet. `request_close` releases it instead
-    /// of waiting.
-    wake_unstarted: bool,
-    closed: bool,
-    close_pending: bool,
-    close_in_progress: bool,
-    close_done: bool,
-    close_err: Option<String>,
-}
-
 pub struct Controller {
     builder: Arc<Builder>,
     /// False when the redaction boundary is closed. Every operation that would
@@ -462,10 +445,7 @@ impl Controller {
             builder,
             dynamic_content,
             sandbox: None,
-            state: Mutex::new(State {
-                current: Some(Current::build(session, Arc::new(runner), info)),
-                ..State::default()
-            }),
+            state: Mutex::new(State::new(Current::build(session, Arc::new(runner), info))),
             close_signal: Condvar::new(),
             close_cancel: CancellationToken::new(),
             notices: Arc::new(notices::Notices::new()),
@@ -503,118 +483,6 @@ impl Controller {
         self.state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-    }
-
-    // ---- admission ----
-
-    pub fn begin_operation(&self) -> Result<Admission<'_>, String> {
-        let mut state = self.lock();
-        if state.closed {
-            return Err(CLOSED.to_string());
-        }
-        if state.busy {
-            return Err(PROMPT_ACTIVE.to_string());
-        }
-        state.busy = true;
-        state.generation += 1;
-        Ok(Admission {
-            controller: self,
-            generation: state.generation,
-        })
-    }
-
-    pub(crate) fn begin_runner_operation(&self, runner: &Runner) -> Result<Admission<'_>, String> {
-        let admission = self.begin_operation()?;
-        let current = self.lock();
-        let is_current = current
-            .current
-            .as_ref()
-            .is_some_and(|current| std::ptr::eq(current.runner.as_ref(), runner));
-        drop(current);
-        if !is_current {
-            return Err("the active session changed before the task resumed".into());
-        }
-        Ok(admission)
-    }
-
-    fn release(&self, generation: u64) {
-        let victim = {
-            let mut state = self.lock();
-            if !state.busy || state.generation != generation {
-                return;
-            }
-            state.busy = false;
-            if !state.close_pending {
-                return;
-            }
-            state.close_pending = false;
-            state.close_in_progress = true;
-            state.current.take()
-        };
-        self.finish_close(victim);
-    }
-
-    fn finish_close(&self, victim: Option<Current>) {
-        let error = victim.and_then(|current| current.discard().err());
-        let mut state = self.lock();
-        if state.close_err.is_none() {
-            state.close_err = error;
-        }
-        state.close_in_progress = false;
-        state.close_done = true;
-        drop(state);
-        self.close_signal.notify_all();
-    }
-
-    /// Rejects new work and hands the close to whichever operation is in
-    /// flight. Never waits and never closes, so a callback running inside an
-    /// operation may call it.
-    pub fn request_close(&self) {
-        self.close_cancel.cancel();
-        let mut state = self.lock();
-        state.closed = true;
-        if state.busy {
-            if state.wake_claim_is_unstarted() {
-                // Release the claim, so the close need not wait for a wake turn
-                // that will now never run.
-                state.busy = false;
-                state.generation += 1;
-                state.wake_unstarted = false;
-            } else {
-                state.close_pending = true;
-            }
-        }
-    }
-
-    /// Completes the close, waiting for an in-flight operation to finish.
-    /// Blocking: an async caller must cancel and await its own work first.
-    pub fn close(&self) -> Result<(), String> {
-        self.request_close();
-        let victim = {
-            let mut state = self.lock();
-            if state.close_done {
-                return state.close_err.clone().map_or(Ok(()), Err);
-            }
-            if state.busy || state.close_in_progress {
-                let state = self
-                    .close_signal
-                    .wait_while(state, |state| !state.close_done)
-                    .unwrap_or_else(|poison| poison.into_inner());
-                return state.close_err.clone().map_or(Ok(()), Err);
-            }
-            state.close_in_progress = true;
-            state.current.take()
-        };
-        self.finish_close(victim);
-        self.lock().close_err.clone().map_or(Ok(()), Err)
-    }
-
-    // ---- reads ----
-}
-
-impl State {
-    fn wake_claim_is_unstarted(&self) -> bool {
-        self.wake_unstarted
     }
 }
 

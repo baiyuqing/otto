@@ -61,7 +61,7 @@ impl Controller {
     }
 
     pub fn set_default_model(&self, model: &str) -> Result<(), String> {
-        if self.lock().closed {
+        if self.lock().is_closed() {
             return Err(CLOSED.to_string());
         }
         if !self.dynamic_content {
@@ -112,7 +112,7 @@ impl Controller {
 
     pub fn save_model_thinking(&self, thinking: &str) -> Result<(), String> {
         validate_thinking_arg(thinking)?;
-        if self.lock().closed {
+        if self.lock().is_closed() {
             return Err(CLOSED.to_string());
         }
         if !self.dynamic_content {

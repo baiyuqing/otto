@@ -104,7 +104,7 @@ impl Controller {
         let (id, path, active) = {
             let state = self.lock();
             let current = state.current.as_ref().ok_or("the session is closed")?;
-            (current.session.header().id, current.path(), state.busy)
+            (current.session.header().id, current.path(), state.is_busy())
         };
         if path.is_empty() {
             return Err(

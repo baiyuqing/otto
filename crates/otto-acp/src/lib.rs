@@ -153,12 +153,18 @@ struct QueuedPrompt {
 }
 
 #[derive(Default)]
+enum PromptActivity {
+    #[default]
+    Idle,
+    Prompt(CancellationToken),
+    Wake(CancellationToken),
+}
+
+#[derive(Default)]
 struct PromptState {
-    active: Option<CancellationToken>,
+    activity: PromptActivity,
     queue: std::collections::VecDeque<QueuedPrompt>,
     draining: bool,
-    /// True while `active` belongs to a wake turn rather than a prompt.
-    wake: bool,
     /// An ordinary prompt waiting for a wake turn to end.
     waiting: Option<CancellationToken>,
     followups: HashMap<u64, CancellationToken>,
@@ -484,3 +490,5 @@ async fn drive<T>(
 
 #[cfg(test)]
 mod channel_tests;
+#[cfg(test)]
+mod prompt_slot_tests;

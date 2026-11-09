@@ -38,7 +38,7 @@ impl Connection {
             loop {
                 let idle = {
                     let state = slot.state.lock().expect("prompt slot");
-                    state.active.is_none() && !state.draining && state.followups.is_empty()
+                    state.is_idle()
                 };
                 let pending = controller
                     .notification_mailbox()

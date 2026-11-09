@@ -404,8 +404,40 @@ async fn drain_skips_a_queued_prompt_whose_input_id_is_in_the_session() {
     .expect("the skipped prompt must not reach the model");
     assert_eq!(controller.history().len(), delivered);
     let state = slot.state.lock().unwrap();
-    assert!(state.queue.is_empty() && state.active.is_none() && !state.draining);
+    assert!(state.queue.is_empty() && state.is_idle());
     drop(state);
+    controller.close().unwrap();
+}
+
+#[tokio::test]
+async fn canceled_queue_releases_admission_when_its_worker_finishes() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller = Arc::new(otto::fixtures::controller(workspace.path(), sessions.path()).await);
+    let (connection, slot, session_id) = local_test_connection(workspace.path(), &controller);
+    let parent = CancellationToken::new();
+    assert_eq!(
+        slot.enqueue_with_provenance("canceled".into(), (None, None), None, None),
+        Ok(true)
+    );
+    assert_eq!(slot.cancel(), 1);
+    assert!(
+        slot.begin(&parent).is_none(),
+        "the queue worker still owns admission"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        Arc::clone(&slot).drain_queue(connection, session_id),
+    )
+    .await
+    .expect("an empty canceled queue must finish without calling a provider");
+    assert!(slot.state.lock().unwrap().is_idle());
+    assert!(
+        slot.begin_wake(&parent).is_some(),
+        "the finished worker releases admission"
+    );
+    slot.end();
+    assert!(slot.begin(&parent).is_some());
     controller.close().unwrap();
 }
 

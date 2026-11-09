@@ -210,6 +210,15 @@ later arrivals can queue and start with fresh stop state when dequeued.
 releases it on success or failure. Approval and task-control workers retain
 their independent ownership and generations.
 
+Connector task control has `Idle`, `Active` and `Draining` phases. A task record
+binds session, generation, cancellation and queued controls; its worker handle
+owns that record and a completion channel. Main-task completion drains control
+replies before releasing its task. `/stop` revokes routing and cancels the task,
+while captured workers retain ownership until their work and admitted replies
+settle. Stale completion can close only its own worker and cannot clear a newer
+task's queue or wait on its worker. Natural control remains available during
+draining; `/steer` requires Active. All transitions run under the chat mutex.
+
 Session replacement must preserve shared state and admitted work; avoid
 frontend-specific execution paths. `runtime/session_resources.rs` owns one
 session's inbox, tasks, timers, output leases, MCP connections and workflow

@@ -30,15 +30,7 @@ func (c *chat) cmdStop(m Message) {
 		return
 	}
 	c.queue = nil
-	c.taskActive = false
-	c.taskClosing = false
-	c.taskGeneration++
-	c.taskControls = nil
-	if c.taskControlCancel != nil {
-		c.taskControlCancel()
-	}
-	c.taskControlCancel = nil
-	c.taskControlCtx = nil
+	c.stopTaskControlLocked()
 	c.approvalMessages = nil
 	c.approvalGeneration++
 	if c.approvalCancel != nil {
@@ -79,7 +71,7 @@ func (c *chat) cmdSteer(m Message, guidance string) {
 	}
 	m.Text = guidance
 	c.mu.Lock()
-	if c.perm != nil || c.approvalRunning || !c.taskActive || c.sid == "" {
+	if c.perm != nil || c.approvalRunning || c.taskControlPhaseLocked() != taskControlActive || c.sid == "" {
 		c.mu.Unlock()
 		c.notify(m.MessageID, "/steer only works during an active task without a pending approval.")
 		return

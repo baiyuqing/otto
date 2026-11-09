@@ -29,12 +29,7 @@ impl<'a> Ui<'a> {
 
     /// Esc: cancels the followed turn. A `/compact` has no turn to cancel.
     fn cancel_followed(&mut self) {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.mutation)
-        {
-            self.cancel_after_send = true;
+        if self.transport.defer_cancel() {
             return;
         }
         let Some(turn) = self.followed.as_ref().map(|f| f.stream.turn_id.clone()) else {
@@ -44,16 +39,12 @@ impl<'a> Ui<'a> {
     }
 
     pub(super) fn cancel_turn(&mut self, turn: String) {
-        self.pending = None;
         let remote = self.remote;
         let session = remote.session();
-        self.pending_call(
-            true,
-            Box::pin(async move {
-                within(remote.client.cancel_turn(&session, &turn)).await?;
-                Ok(TransportResult::Cancel)
-            }),
-        );
+        self.start_cancel(Box::pin(async move {
+            within(remote.client.cancel_turn(&session, &turn)).await?;
+            Ok(TransportResult::Cancel)
+        }));
     }
 
     pub(super) fn on_frame(&mut self, result: Result<Option<WireEvent>, Error>) {
@@ -139,15 +130,11 @@ impl<'a> Ui<'a> {
                 self.actions.push_front(action);
                 break;
             }
-            if !self.connected {
+            if !self.connection.is_connected() {
                 self.app.push_system(DISCONNECTED);
                 continue;
             }
-            if self
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.mutation)
-            {
+            if self.transport.is_owned() {
                 self.actions.push_front(action);
                 break;
             }
@@ -163,12 +150,10 @@ impl<'a> Ui<'a> {
         match action {
             Action::LocalPrompt { .. } => self.app.push_system("Local submission cannot execute in an attached session; reconnect to its original session and use /inputs"),
             Action::Prompt(line) => {
-                self.pending = None;
                 if self.followed.is_none() && self.compacting.is_none() {
                     self.app.start_turn();
                 }
-                self.pending_call(
-                    true,
+                self.start_send(
                     Box::pin(async move {
                         let mut reply = None;
                         if let Some(control) =

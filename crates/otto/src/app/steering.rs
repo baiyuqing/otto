@@ -243,12 +243,14 @@ impl Controller {
         task_control::control_message(
             self,
             &runner,
-            text,
-            channel,
-            ticket,
-            Some(&input_id),
-            provenance,
-            cancel,
+            task_control::ControlMessage {
+                text,
+                channel,
+                ticket,
+                input_id: Some(&input_id),
+                provenance,
+                cancel,
+            },
         )
         .await
     }

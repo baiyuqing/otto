@@ -4,6 +4,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
@@ -226,6 +227,7 @@ async fn acp_rpc(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn acp_tcp_clients_select_admitted_workspaces_without_crossing_history_or_tools() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     use serde_json::json;
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
@@ -397,6 +399,7 @@ async fn acp_tcp_clients_select_admitted_workspaces_without_crossing_history_or_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn acp_tcp_client_receives_the_reply_of_a_wake_turn_started_by_serve() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;

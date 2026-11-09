@@ -188,14 +188,13 @@ impl App {
                     );
                 } else if self.queued_input.is_some() {
                     if let Some(id) = self.queued_input_id.take() {
-                        if let Backend::Local(controller) = backend {
-                            if let Err(error) =
+                        if let Backend::Local(controller) = backend
+                            && let Err(error) =
                                 controller.update_input_submission(&id, "withdrawn", None)
-                            {
-                                self.push_system(format!(
-                                    "[{id}] withdrawal status save failed: {error}; /inputs"
-                                ));
-                            }
+                        {
+                            self.push_system(format!(
+                                "[{id}] withdrawal status save failed: {error}; /inputs"
+                            ));
                         }
                         self.push_system(format!(
                             "[{id}] withdrawn; /recover {id} restores a draft"

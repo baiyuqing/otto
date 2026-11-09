@@ -138,10 +138,10 @@ async fn task_control_client_uses_session_routes_and_transient_channel() {
     );
 }
 
-/// Control dialogue routes reject unknown JSON fields; the ACP source tag is
-/// only sent to routes that admit ordinary user input.
+/// Control dialogue is still human input: the HTTP server confirms its own
+/// transport while preserving the attached client's source as an unverified tag.
 #[tokio::test]
-async fn tagged_client_keeps_provenance_out_of_control_dialogue_requests() {
+async fn tagged_client_sends_provenance_on_control_dialogue_requests() {
     let (client, seen, _dir) = stub(|_, _| json_body(StatusCode::OK, "null"));
     let client = client.with_input_source(otto_core::model::InputSource::Acp);
     assert!(
@@ -162,14 +162,14 @@ async fn tagged_client_keeps_provenance_out_of_control_dialogue_requests() {
         request(&seen, 0),
         (
             "POST /v1/sessions/s1/approvals/message".into(),
-            json!({"text":"why?", "channel":"telegram"})
+            json!({"text":"why?", "channel":"telegram", "client_source":"acp"})
         )
     );
     assert_eq!(
         request(&seen, 1),
         (
             "POST /v1/sessions/s1/tasks/control".into(),
-            json!({"text":"what now?"})
+            json!({"text":"what now?", "client_source":"acp"})
         )
     );
 }

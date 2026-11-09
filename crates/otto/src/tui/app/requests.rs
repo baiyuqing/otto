@@ -158,15 +158,15 @@ impl App {
             if self.delivered_steers.contains(&message.id) {
                 continue;
             }
-            if !message.input_id.is_empty() && message.status == Status::Delivered {
-                if self
+            if !message.input_id.is_empty()
+                && message.status == Status::Delivered
+                && self
                     .entries
                     .iter()
                     .any(|entry| entry.input_id == message.input_id)
-                {
-                    self.delivered_steers.insert(message.id);
-                    continue;
-                }
+            {
+                self.delivered_steers.insert(message.id);
+                continue;
             }
             if message.input_id.is_empty()
                 && message.status == Status::Delivered

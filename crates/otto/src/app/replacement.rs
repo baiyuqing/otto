@@ -1,5 +1,6 @@
 //! Replacement runners, controller construction and the free functions that build them.
 
+use super::lifecycle::ReplacementCommit;
 use super::*;
 
 impl Controller {
@@ -58,23 +59,25 @@ impl Controller {
         admission: Admission<'_>,
     ) -> Result<String, String> {
         let path = replacement.path();
-        let (displaced, deferred) = {
+        let outcome = {
             let mut state = self.lock();
-            if state.closed {
-                (Some(replacement), true)
-            } else {
-                (state.current.replace(replacement), false)
-            }
+            state.install_replacement(replacement, admission.generation)
         };
-        let close_error = displaced.and_then(|current| current.discard().err());
-        drop(admission);
-        if deferred {
-            return Err(CLOSED.to_string());
-        }
-        self.notify_memory_state();
-        match close_error {
-            Some(error) => Err(self.builder.redact_error(&error, None)),
-            None => Ok(path),
+        match outcome {
+            ReplacementCommit::Rejected(candidate) => {
+                let _ = candidate.discard();
+                drop(admission);
+                Err(CLOSED.to_string())
+            }
+            ReplacementCommit::Installed(displaced) => {
+                let close_error = displaced.and_then(|current| current.discard().err());
+                drop(admission);
+                self.notify_memory_state();
+                match close_error {
+                    Some(error) => Err(self.builder.redact_error(&error, None)),
+                    None => Ok(path),
+                }
+            }
         }
     }
 
@@ -145,10 +148,7 @@ impl Controller {
             builder,
             dynamic_content: true,
             sandbox: None,
-            state: Mutex::new(State {
-                current: Some(current),
-                ..State::default()
-            }),
+            state: Mutex::new(State::new(current)),
             close_signal: Condvar::new(),
             close_cancel: CancellationToken::new(),
             notices: Arc::new(notices::Notices::new()),

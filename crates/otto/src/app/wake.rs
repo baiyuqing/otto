@@ -37,7 +37,9 @@ impl<'a> WakeOperation<'a> {
             return Err(AgentError::Other(CLOSED.to_string()));
         };
         // The claim is no longer releasable by `request_close`: it started.
-        self.controller.lock().wake_unstarted = false;
+        if !self.controller.lock().start_wake(admission.generation) {
+            return Err(AgentError::Other(CLOSED.to_string()));
+        }
         let runner = match self.controller.runner() {
             Ok(runner) => runner,
             Err(message) => {

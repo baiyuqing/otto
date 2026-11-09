@@ -8,7 +8,7 @@ impl Controller {
         let requested = canonical_session_path(path);
         let is_current = {
             let state = self.lock();
-            if state.closed {
+            if state.is_closed() {
                 return Err(CLOSED.into());
             }
             if !self.dynamic_content {

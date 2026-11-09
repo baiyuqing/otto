@@ -164,6 +164,17 @@ outcome reconciliation. Without a supported receiver contract, retain
 ## Lifecycle and frontend contracts
 
 Lifecycle and task/authentication capabilities belong in `app`, not UI code.
+`app/lifecycle.rs` owns Controller transitions: `Open` carries an idle,
+reserved-wake or active admission; `CloseRequested` retains only an active
+admission; `Disposing` gives one caller cleanup ownership; `Closed` retains
+the cleanup result. Admission generations reject stale releases and replacement
+commits. Reserve a wake atomically with admission, and change it to active before
+executing it. Dropping a reservation releases it; requesting close revokes an
+unstarted reservation and defers disposal until active work releases admission.
+`request_close` only rejects admission and requests shutdown; it never disposes
+resources itself. Disposal runs outside the Controller mutex, and concurrent
+`close` callers wait for the same result.
+
 Session replacement must preserve shared state and admitted work; avoid
 frontend-specific execution paths. `runtime/session_resources.rs` owns one
 session's inbox, tasks, timers, output leases, MCP connections and workflow

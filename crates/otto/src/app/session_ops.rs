@@ -23,22 +23,9 @@ impl Controller {
             .map_err(|error| self.builder.redact_error(&error, None))
     }
 
-    /// Admission for an operation that replaces the session. Ordering: closed
-    /// first, then the capability gate, then the active check.
+    /// Session replacement shares the ordinary operation's admission rule.
     pub(super) fn begin_replacement(&self) -> Result<Admission<'_>, String> {
-        let mut state = self.lock();
-        if state.closed {
-            return Err(CLOSED.to_string());
-        }
-        if state.busy {
-            return Err(PROMPT_ACTIVE.to_string());
-        }
-        state.busy = true;
-        state.generation += 1;
-        Ok(Admission {
-            controller: self,
-            generation: state.generation,
-        })
+        self.begin_operation()
     }
 
     pub async fn new_session(&self) -> Result<(), String> {
@@ -91,7 +78,7 @@ impl Controller {
 
     /// Rows carry `current` for the file already open.
     pub fn list_sessions(&self, limit: usize) -> Result<ListResult, String> {
-        if self.lock().closed {
+        if self.lock().is_closed() {
             return Err(CLOSED.to_string());
         }
         if !self.dynamic_content {
@@ -165,7 +152,7 @@ impl Controller {
     pub fn fork_points(&self) -> Result<Vec<otto_core::session::ForkPoint>, String> {
         let path = {
             let state = self.lock();
-            if state.closed {
+            if state.is_closed() {
                 return Err(CLOSED.to_string());
             }
             if !self.dynamic_content {
@@ -200,7 +187,7 @@ impl Controller {
     ) -> Result<crate::session::Forked, ForkFailure> {
         let path = {
             let state = self.lock();
-            if state.closed {
+            if state.is_closed() {
                 return Err(ForkFailure::Failed(CLOSED.to_string()));
             }
             if !self.dynamic_content {
@@ -238,7 +225,7 @@ impl Controller {
         &self,
         before: Option<&str>,
     ) -> Result<(ResumeResult, Option<String>), String> {
-        if self.lock().busy {
+        if self.lock().is_busy() {
             return Err(PROMPT_ACTIVE.to_string());
         }
         let forked = self.fork_file(before).map_err(|error| error.to_string())?;
@@ -252,13 +239,13 @@ impl Controller {
         let requested = canonical_session_path(path);
         let is_current = {
             let state = self.lock();
-            if state.closed {
+            if state.is_closed() {
                 return Err(CLOSED.to_string());
             }
             if !self.dynamic_content {
                 return Err(PERSISTENCE_DISABLED.to_string());
             }
-            if state.busy {
+            if state.is_busy() {
                 return Err(PROMPT_ACTIVE.to_string());
             }
             state.current.as_ref().is_some_and(|current| {

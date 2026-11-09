@@ -9,13 +9,13 @@ impl Controller {
     pub async fn reload_sandbox(&self) -> Result<SandboxInfo, String> {
         let control = {
             let state = self.lock();
-            if state.closed {
+            if state.is_closed() {
                 return Err(CLOSED.to_string());
             }
             let Some(control) = self.sandbox.clone() else {
                 return Err(SANDBOX_RELOAD_UNAVAILABLE.to_string());
             };
-            if state.busy {
+            if state.is_busy() {
                 return Err(PROMPT_ACTIVE.to_string());
             }
             control
@@ -48,7 +48,7 @@ impl Controller {
     ) -> Result<SandboxInfo, String> {
         let control = {
             let state = self.lock();
-            if state.closed {
+            if state.is_closed() {
                 return Err(CLOSED.to_string());
             }
             let Some(control) = self.sandbox.clone() else {
@@ -79,7 +79,7 @@ impl Controller {
 
     pub(super) fn admitted_session_id(&self) -> Result<String, String> {
         let state = self.lock();
-        if state.closed {
+        if state.is_closed() {
             return Err(CLOSED.to_string());
         }
         Ok(state

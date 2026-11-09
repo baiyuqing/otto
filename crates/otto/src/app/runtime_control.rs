@@ -32,9 +32,9 @@ impl Controller {
         let mut runner = Some(runner);
         let decision = {
             let mut state = self.lock();
-            if state.closed {
+            if state.is_closed() {
                 Decision::Closed
-            } else if state.busy {
+            } else if state.is_busy() {
                 Decision::Busy
             } else {
                 let current = state.current.as_mut().ok_or_else(|| CLOSED.to_string())?;

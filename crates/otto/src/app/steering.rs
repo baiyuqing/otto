@@ -46,7 +46,7 @@ impl Controller {
     /// controller is closed.
     pub fn tasks(&self) -> Option<Arc<dyn TaskView>> {
         let state = self.lock();
-        if state.closed {
+        if state.is_closed() {
             return None;
         }
         tasks::task_view(state.current.as_ref()?.runner.as_ref())
@@ -260,7 +260,7 @@ impl Controller {
     /// [`Self::archive_current_session`] clears it.
     pub fn reminders(&self) -> Option<Arc<Reminders>> {
         let state = self.lock();
-        if state.closed {
+        if state.is_closed() {
             return None;
         }
         state.current.as_ref()?.runner.reminders().cloned()
@@ -268,24 +268,26 @@ impl Controller {
 
     /// Claims a turn only when the runner has pending inbox messages.
     pub fn prepare_wake(&self) -> Result<Option<WakeOperation<'_>>, String> {
-        let pending = {
-            let state = self.lock();
-            if state.closed {
+        let generation = {
+            let mut state = self.lock();
+            if state.is_closed() {
                 return Err(CLOSED.to_string());
             }
-            if state.busy {
+            if state.is_busy() {
                 return Err(PROMPT_ACTIVE.to_string());
             }
             let Some(current) = state.current.as_ref() else {
                 return Err(CLOSED.to_string());
             };
-            current.runner.mailbox().len()
+            if current.runner.mailbox().is_empty() {
+                return Ok(None);
+            }
+            state.reserve_wake()?
         };
-        if pending == 0 {
-            return Ok(None);
-        }
-        let admission = self.begin_operation()?;
-        self.lock().wake_unstarted = true;
+        let admission = Admission {
+            controller: self,
+            generation,
+        };
         Ok(Some(WakeOperation::new(self, admission)))
     }
 }

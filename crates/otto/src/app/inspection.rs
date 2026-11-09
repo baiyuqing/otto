@@ -65,7 +65,7 @@ impl Controller {
     }
 
     pub fn dynamic_content_available(&self) -> bool {
-        !self.lock().closed && self.dynamic_content
+        !self.lock().is_closed() && self.dynamic_content
     }
 
     pub fn workspace(&self) -> &str {

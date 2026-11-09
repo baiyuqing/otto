@@ -9,6 +9,10 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Dropping an unused background wake reservation no longer lets shutdown
+  mistake a later active operation for an unstarted wake. Controller shutdown
+  retains the active operation's ownership until it releases admission.
+
 - Local and attached terminal rendering no longer redraws for timer ticks or
   unchanged local status. Streamed text/reasoning updates share frames, and ready wheel, resize and
   drag-extension bursts are safely coalesced without delaying input, approvals,

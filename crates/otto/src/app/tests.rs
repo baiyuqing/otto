@@ -84,6 +84,7 @@ fn propose_pending(controller: &Controller, key: &str) {
 
 mod admission;
 mod approvals;
+mod lifecycle;
 mod memory_notice;
 mod migrate;
 mod permissions_command;

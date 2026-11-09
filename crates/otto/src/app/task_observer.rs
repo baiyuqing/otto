@@ -18,7 +18,7 @@ impl Controller {
     pub fn observer_snapshot(&self) -> Result<ObserverSnapshot, String> {
         let (parent, parent_path, workspace, registry) = {
             let state = self.lock();
-            if !self.dynamic_content || state.closed || state.close_pending {
+            if !self.dynamic_content || state.is_closed() {
                 return Err("session observer unavailable".into());
             }
             let current = state
@@ -117,8 +117,7 @@ impl Controller {
         }
         drop(cache);
         let state = self.lock();
-        if state.closed
-            || state.close_pending
+        if state.is_closed()
             || state
                 .current
                 .as_ref()

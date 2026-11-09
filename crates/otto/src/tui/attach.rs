@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::app::{Action, App, Backend, compaction_line};
-use super::{TerminalInput, TuiEvent, render, spawn_key_reader};
+use super::{TerminalInput, TuiEvent, frame_gate, render, spawn_key_reader};
 use crate::app::Info;
 use crate::cli::repl::Error as ReplError;
 use crate::client::{Client, Error, StatusRow, StatusStream, TurnStream};
@@ -460,6 +460,7 @@ enum Ev {
     FeaturesTick,
     ApprovalsTick,
     Tick,
+    Draw,
 }
 
 #[cfg(test)]

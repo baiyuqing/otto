@@ -161,24 +161,25 @@ impl App {
             return None;
         }
         let mut local_id = None;
-        if !current.trim().is_empty() && !current.starts_with('/') {
-            if let Backend::Local(controller) = backend {
-                let delivery = if self.has_writes() {
-                    otto_core::model::InputDelivery::Queued
-                } else if self.busy() {
-                    otto_core::model::InputDelivery::Steering
-                } else {
-                    otto_core::model::InputDelivery::Direct
-                };
-                match controller.prepare_input(&current, delivery) {
-                    Ok(record) => {
-                        self.push_system(format!("[{}] Tui / {:?} / pending", record.id, delivery));
-                        local_id = Some(record.id);
-                    }
-                    Err(error) => {
-                        self.push_system(format!("Input NOT sent; original draft retained. {error}. Check session storage/permissions, then retry Enter."));
-                        return None;
-                    }
+        if !current.trim().is_empty()
+            && !current.starts_with('/')
+            && let Backend::Local(controller) = backend
+        {
+            let delivery = if self.has_writes() {
+                otto_core::model::InputDelivery::Queued
+            } else if self.busy() {
+                otto_core::model::InputDelivery::Steering
+            } else {
+                otto_core::model::InputDelivery::Direct
+            };
+            match controller.prepare_input(&current, delivery) {
+                Ok(record) => {
+                    self.push_system(format!("[{}] Tui / {:?} / pending", record.id, delivery));
+                    local_id = Some(record.id);
+                }
+                Err(error) => {
+                    self.push_system(format!("Input NOT sent; original draft retained. {error}. Check session storage/permissions, then retry Enter."));
+                    return None;
                 }
             }
         }

@@ -78,7 +78,7 @@ pub async fn apply(
             return error_response(StatusCode::CONFLICT, "sandbox_change_failed", &message);
         }
     };
-    let followup = change.followup_prompt(&info.summary());
+    let followup = change.followup_prompt(info.summary());
     let others = server.factory.reload_other_sandboxes().await;
     let mut body = match reload_body(&server, Ok(info), others) {
         Ok(body) => body,

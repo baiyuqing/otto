@@ -338,16 +338,28 @@ pub(crate) fn checked_text(text: &str) -> Result<&str, String> {
     Ok(text)
 }
 
+pub(crate) struct ControlMessage<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) channel: Option<Channel>,
+    pub(crate) ticket: u64,
+    pub(crate) input_id: Option<&'a str>,
+    pub(crate) provenance: Option<otto_core::model::InputProvenance>,
+    pub(crate) cancel: &'a CancellationToken,
+}
+
 pub(crate) async fn control_message(
     controller: &Controller,
     runner: &Runner,
-    text: &str,
-    channel: Option<Channel>,
-    ticket: u64,
-    input_id: Option<&str>,
-    provenance: Option<otto_core::model::InputProvenance>,
-    cancel: &CancellationToken,
+    message: ControlMessage<'_>,
 ) -> Result<Option<ControlReply>, String> {
+    let ControlMessage {
+        text,
+        channel,
+        ticket,
+        input_id,
+        provenance,
+        cancel,
+    } = message;
     let text = checked_text(text)?;
     let task_control = runner.task_control();
     let session_id = runner.session().header().id.clone();

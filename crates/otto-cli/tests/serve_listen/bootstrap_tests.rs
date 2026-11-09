@@ -4,6 +4,7 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn empty_home_serves_config_and_requires_setup_before_sessions() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     let mut fixture = fixture("http://127.0.0.1:1", "");
     std::fs::remove_file(&fixture.config).expect("remove initial config");
     fixture.config.clear(); // Normal first-run discovery, not an explicit missing --config.

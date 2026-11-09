@@ -11,6 +11,17 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+const MAX_CONCURRENT_SERVE_FIXTURES: usize = 4;
+static SERVE_FIXTURE_PERMITS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_SERVE_FIXTURES);
+
+async fn serve_fixture_permit() -> tokio::sync::SemaphorePermit<'static> {
+    SERVE_FIXTURE_PERMITS
+        .acquire()
+        .await
+        .expect("serve fixture semaphore remains open")
+}
+
 mod binary_harness;
 #[path = "serve_listen/bootstrap_tests.rs"]
 mod bootstrap_tests;
@@ -161,6 +172,7 @@ async fn await_startup(stdout: &LockedBuffer, stderr: &LockedBuffer) -> (String,
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serve_refuses_a_non_loopback_listen_address() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     let fixture = fixture("http://127.0.0.1:1", "");
     let cancel = CancellationToken::new();
     let (stdout, stderr, handle) = run_serve(&fixture, &["--listen", "0.0.0.0:0"], cancel).await;
@@ -172,6 +184,7 @@ async fn serve_refuses_a_non_loopback_listen_address() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serve_listens_on_loopback_tcp_behind_the_token() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     let (base_url, _requests) = serve(Script {
         replies: vec![text_reply("served")],
         served: Arc::new(AtomicUsize::new(0)),
@@ -247,6 +260,7 @@ async fn serve_listens_on_loopback_tcp_behind_the_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_listen_address_can_come_from_the_config_file() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     let fixture = fixture(
         "http://127.0.0.1:1",
         "\n[server]\nlisten = \"localhost:0\"\n",
@@ -293,6 +307,7 @@ async fn socket_status(socket: &std::path::Path, path: &str) -> u16 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn socket_and_tcp_listeners_serve_one_server_with_the_token_on_tcp_only() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     let fixture = fixture("http://127.0.0.1:1", "");
     let sockets = tempfile::tempdir().expect("socket dir");
     let socket = sockets.path().join("run").join("otto.sock");
@@ -333,6 +348,7 @@ async fn socket_and_tcp_listeners_serve_one_server_with_the_token_on_tcp_only() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn model_queued_followup_runs_after_the_task_with_agent_provenance() {
+    let _serve_fixture_permit = serve_fixture_permit().await;
     use serde_json::Value;
 
     let (provider, requests) = serve(Script {

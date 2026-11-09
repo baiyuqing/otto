@@ -85,7 +85,7 @@ impl Server {
     pub(super) async fn wake_turn(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let prepared = {
             let mut state = session.lock();
-            if state.deleting || state.busy_for_wake() {
+            if state.is_closing() || state.busy_for_wake() {
                 None
             } else {
                 let trigger = if session.ctrl.resumes_interrupted_turn() {
@@ -105,7 +105,7 @@ impl Server {
                                 ),
                             );
                             turn.start_running(session.ctrl.history().len());
-                            state.turn = Some(Arc::clone(&turn));
+                            assert!(state.begin_turn(Arc::clone(&turn)));
                             Some(Ok((turn, wake, trigger)))
                         }
                         Err(error) => Some(Err(error)),
@@ -284,7 +284,13 @@ impl Server {
                 Err(error) if error.is_cancelled() => (Some(String::new()), true),
                 Err(error) => (Some(session.ctrl.redact_error(&error.to_string())), false),
             };
-            turn.finish(error.clone(), canceled);
+            // Clear native per-turn input before releasing HTTP admission.
+            session.ctrl.set_next_input_id(None);
+            {
+                let mut state = session.lock();
+                turn.finish(error.clone(), canceled);
+                state.finish_turn(turn);
+            }
             self.bump_status();
             let summary = turn.summary();
             self.metrics.turn_finished(&summary.status, turn.elapsed());
@@ -460,7 +466,7 @@ impl Server {
     ) -> Result<Arc<Turn>, String> {
         let (turn, running) = {
             let mut state = session.lock();
-            if state.deleting {
+            if state.is_closing() {
                 return Err(TURN_ACTIVE.to_string());
             }
             if let Some(input_id) = &input_id {
@@ -524,7 +530,7 @@ impl Server {
                     request_id,
                 ));
                 turn.start_running(session.ctrl.history().len());
-                state.turn = Some(Arc::clone(&turn));
+                assert!(state.begin_turn(Arc::clone(&turn)));
                 (
                     turn,
                     Some((
@@ -570,15 +576,15 @@ impl Server {
     pub(super) fn start_next(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let next = {
             let mut state = session.lock();
-            if state.turn_running() || state.compacting.is_some() {
+            if state.turn_running() || state.is_compacting() {
                 return;
             }
-            if self.cancel.is_cancelled() || session.closed.is_cancelled() {
+            if state.is_closing() || self.cancel.is_cancelled() || session.closed.is_cancelled() {
                 state.cancel_queue();
                 None
             } else if let Some(next) = state.queue.pop_front() {
                 next.turn.start_running(session.ctrl.history().len());
-                state.turn = Some(Arc::clone(&next.turn));
+                assert!(state.begin_turn(Arc::clone(&next.turn)));
                 Some(next)
             } else {
                 None
@@ -591,7 +597,7 @@ impl Server {
         }
     }
 
-    /// Spawns the task that runs `turn`, which is already `state.turn`.
+    /// Spawns the task that runs `turn`, which already owns the session activity.
     pub(super) fn spawn_user_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
@@ -625,7 +631,6 @@ impl Server {
             server
                 .run_turn(&session, &turn, first, TRIGGER_USER, channel, origin)
                 .await;
-            session.ctrl.set_next_input_id(None);
             // The turn ran: a saved copy of it is no longer waiting.
             if let (Some(input_id), Some(journal)) = (&input_id, session.ctrl.turn_queue()) {
                 journal.forget(input_id);

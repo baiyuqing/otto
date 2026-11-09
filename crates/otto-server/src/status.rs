@@ -22,7 +22,7 @@ impl Server {
                 let info = session.ctrl.info();
                 let (turn, turn_id, queued, approvals) = {
                     let state = session.lock();
-                    let summary = state.turn.as_ref().map(|turn| turn.summary());
+                    let summary = state.last_turn().map(|turn| turn.summary());
                     // The running turn; else the newest, which is a queued
                     // one while a compaction holds the session.
                     let turn_id = match &summary {

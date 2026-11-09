@@ -198,8 +198,7 @@ pub async fn control(
     };
     let cancel = session
         .lock()
-        .turn
-        .as_ref()
+        .last_turn()
         .map_or_else(|| session.closed.clone(), |turn| turn.cancel_token());
     match session
         .ctrl

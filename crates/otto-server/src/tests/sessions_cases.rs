@@ -418,10 +418,13 @@ async fn a_session_that_became_busy_after_selection_is_not_removed() {
     let id = harness.create().await;
     let session = harness.server.lookup(&id).expect("session");
 
-    session.lock().compacting = Some(CancellationToken::new());
+    let compaction = session
+        .lock()
+        .begin_compaction(CancellationToken::new())
+        .expect("idle session admits compaction");
     assert!(!harness.server.remove_if_idle(&id, &session));
     assert!(harness.server.lookup(&id).is_some(), "busy session removed");
-    session.lock().compacting = None;
+    assert!(session.lock().finish_compaction(compaction));
 
     assert!(harness.server.pin_session(&id));
     assert!(!harness.server.remove_if_idle(&id, &session));
@@ -433,6 +436,29 @@ async fn a_session_that_became_busy_after_selection_is_not_removed() {
 
     assert!(harness.server.remove_if_idle(&id, &session));
     assert!(harness.server.lookup(&id).is_none());
+    assert!(session.lock().is_closing());
+    assert!(
+        session
+            .lock()
+            .begin_compaction(CancellationToken::new())
+            .is_none()
+    );
+    for queue in [false, true] {
+        assert!(
+            harness
+                .server
+                .start_turn(
+                    &session,
+                    "stale".to_string(),
+                    None,
+                    (None, None),
+                    queue,
+                    "",
+                    None,
+                )
+                .is_err()
+        );
+    }
 }
 
 #[tokio::test]

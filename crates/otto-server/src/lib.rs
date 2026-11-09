@@ -6,8 +6,8 @@
 //! `docs/specs/2026-09-03-agent-server-design.md`.
 //!
 //! Concurrency: `sessions` is a plain `Mutex<HashMap>` held only for map
-//! operations. Each [`OpenSession`] has its own `Mutex` for the turn,
-//! and compaction slots.
+//! operations. Each [`OpenSession`] has its own `Mutex` for admission,
+//! exclusive activity and queued work.
 
 pub mod agents;
 pub mod approvals;
@@ -28,6 +28,7 @@ mod responses;
 pub mod sandbox;
 mod sandbox_changes;
 pub mod schedule;
+mod session_activity;
 mod session_retirement;
 mod session_routes;
 pub mod skills;
@@ -46,6 +47,7 @@ pub mod workspaces;
 
 use middleware::*;
 pub use responses::*;
+use session_activity::SessionState;
 pub use session_routes::*;
 use status::*;
 pub use turn_routes::INVALID_INPUT_ID;
@@ -200,69 +202,6 @@ struct WaitingApproval {
     decide: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
-#[derive(Default)]
-struct SessionState {
-    /// Irreversible close/delete admission; stale handles cannot start work.
-    deleting: bool,
-    /// The running turn, or the last one that finished. Never a queued turn.
-    turn: Option<Arc<Turn>>,
-    /// Non-`None` while `POST .../compact` runs. `start_turn` and
-    /// `handle_compact` both check it under the same lock, so a turn and a
-    /// compaction are never admitted together.
-    compacting: Option<CancellationToken>,
-    /// Turns waiting for the running turn or compaction, oldest first. Every
-    /// reader of this field holds the session lock, so the queue, `turn` and
-    /// `compacting` change together.
-    queue: VecDeque<QueuedTurn>,
-    /// Turns restored from the session's saved turn queue on open, oldest
-    /// first. They join the front of `queue` once the recovery wake turn,
-    /// if any, has run (see [`Server::release_restored`]).
-    restored: VecDeque<QueuedTurn>,
-    waiting: Option<WaitingApproval>,
-    decided: VecDeque<String>,
-    /// The turns started for recent client `input_id`s, newest last.
-    inputs: VecDeque<(String, Arc<Turn>)>,
-}
-
-impl SessionState {
-    fn turn_running(&self) -> bool {
-        self.turn.as_ref().is_some_and(|turn| !turn.is_done())
-    }
-
-    /// Whether a new turn or compaction must wait. A non-empty queue counts:
-    /// the next queued turn starts when the current one ends, and nothing may
-    /// start in between.
-    pub(crate) fn busy(&self) -> bool {
-        self.busy_for_wake() || !self.restored.is_empty()
-    }
-
-    /// [`Self::busy`] without the restored turns: they wait for the wake turn
-    /// that resumes an interrupted turn, so they must not hold it back.
-    fn busy_for_wake(&self) -> bool {
-        self.turn_running() || !self.queue.is_empty() || self.compacting.is_some()
-    }
-
-    fn remember_decided(&mut self, id: &str) {
-        if self.decided.iter().any(|known| known == id) {
-            return;
-        }
-        if self.decided.len() == REMEMBERED_DECISIONS {
-            self.decided.pop_front();
-        }
-        self.decided.push_back(id.to_string());
-    }
-
-    /// Ends every queued turn `canceled`; none of them ran. Their saved
-    /// copies stay in the turn queue journal, so a later open of the
-    /// session restores them; a caller that ends them for good also clears
-    /// the journal.
-    fn cancel_queue(&mut self) {
-        for queued in self.queue.drain(..).chain(self.restored.drain(..)) {
-            queued.turn.finish(Some(String::new()), true);
-        }
-    }
-}
-
 impl OpenSession {
     fn new(ctrl: Controller) -> Arc<Self> {
         Arc::new(Self {
@@ -296,15 +235,15 @@ impl OpenSession {
     }
 
     fn current_turn(&self) -> Option<Arc<Turn>> {
-        self.lock().turn.clone()
+        self.lock().last_turn().cloned()
     }
 
     /// The running, last finished or queued turn named `id`.
     fn find_turn(&self, id: &str) -> Option<Arc<Turn>> {
         let state = self.lock();
         state
-            .turn
-            .iter()
+            .last_turn()
+            .into_iter()
             .chain(state.queue.iter().map(|queued| &queued.turn))
             .chain(state.restored.iter().map(|queued| &queued.turn))
             .find(|turn| turn.id == id)
@@ -315,15 +254,10 @@ impl OpenSession {
     /// wait on a provider call, ends the queued turns, and stops the wake
     /// loop.
     fn cancel_work(&self) {
-        self.closed.cancel();
         let mut state = self.lock();
+        state.begin_close();
+        self.closed.cancel();
         state.cancel_queue();
-        if let Some(turn) = state.turn.as_ref() {
-            turn.cancel();
-        }
-        if let Some(cancel) = state.compacting.as_ref() {
-            cancel.cancel();
-        }
     }
 }
 

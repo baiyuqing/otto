@@ -95,7 +95,7 @@ impl Server {
         // session, so a sweep that removes it ([`Self::remove_if_idle`]) either
         // sees the pin or makes this call return `false`.
         let state = session.lock();
-        if state.deleting {
+        if state.is_closing() {
             return false;
         }
         let still_open = self
@@ -147,15 +147,14 @@ impl Server {
     }
 
     pub(super) fn remove(&self, id: &str) -> Option<Arc<OpenSession>> {
-        let removed = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .remove(id);
-        if removed.is_some() {
-            self.status_changed.send_modify(|version| *version += 1);
+        let session = self.lookup(id)?;
+        let mut state = session.lock();
+        if !self.remove_if_same(id, &session) {
+            return None;
         }
-        removed
+        state.begin_close();
+        drop(state);
+        Some(session)
     }
 
     pub(super) fn all_sessions(&self) -> Vec<Arc<OpenSession>> {
@@ -295,15 +294,19 @@ impl Server {
     /// between the check and the removal. The lock order is session state, then
     /// the registry; nothing takes them the other way round.
     pub(super) fn remove_if_idle(&self, id: &str, session: &Arc<OpenSession>) -> bool {
-        let state = session.lock();
-        self.idle_session(session, &state) && self.remove_if_same(id, session)
+        let mut state = session.lock();
+        if !self.idle_session(session, &state) || !self.remove_if_same(id, session) {
+            return false;
+        }
+        state.begin_close();
+        true
     }
 
     /// Whether `session`, whose locked state is `state`, has nothing to lose:
     /// no turn, compaction, waiting approval, unfinished sub-agent
     /// task, undelivered notification or pin.
     pub(super) fn idle_session(&self, session: &OpenSession, state: &super::SessionState) -> bool {
-        if state.deleting || state.busy() || state.waiting.is_some() || session.pinned() {
+        if state.is_closing() || state.busy() || state.waiting.is_some() || session.pinned() {
             return false;
         }
         match session.ctrl.tasks() {

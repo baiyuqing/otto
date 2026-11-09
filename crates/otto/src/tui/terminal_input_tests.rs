@@ -3,6 +3,49 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::time::Duration;
 
 #[test]
+fn wheel_batches_preserve_direction_changes_keys_and_step_counts() {
+    let wheel = |up| TuiEvent::Wheel { up, steps: 1 };
+    let mut events = [
+        wheel(true),
+        wheel(true),
+        wheel(false),
+        TuiEvent::Key(KeyCode::Enter.into()),
+    ]
+    .into_iter();
+    let (batch, pending) = batch_wheel(wheel(true), || events.next());
+    assert!(matches!(batch, TuiEvent::Wheel { up: true, steps: 3 }));
+    let (batch, pending) = batch_wheel(pending.unwrap(), || events.next());
+    assert!(matches!(
+        batch,
+        TuiEvent::Wheel {
+            up: false,
+            steps: 1
+        }
+    ));
+    let (key, pending) = batch_wheel(pending.unwrap(), || panic!("never read beyond a key"));
+    assert!(matches!(key, TuiEvent::Key(key) if key.code == KeyCode::Enter));
+    assert!(pending.is_none());
+}
+
+#[test]
+fn wheel_batches_are_bounded_and_do_not_drop_remaining_input() {
+    let mut remaining = 99;
+    let (batch, pending) = batch_wheel(TuiEvent::Wheel { up: true, steps: 1 }, || {
+        remaining -= 1;
+        Some(TuiEvent::Wheel { up: true, steps: 1 })
+    });
+    assert!(matches!(
+        batch,
+        TuiEvent::Wheel {
+            up: true,
+            steps: 64
+        }
+    ));
+    assert_eq!(remaining, 36);
+    assert!(pending.is_none());
+}
+
+#[test]
 fn suspend_parks_reader_until_ui_releases_terminal_handoff() {
     let (sender, mut receiver) = mpsc::channel(1);
     let (finished, completion) = std::sync::mpsc::channel();

@@ -25,6 +25,8 @@ mod job_control;
 mod layout;
 mod markdown;
 mod render;
+#[cfg(test)]
+mod scroll_tests;
 mod selection;
 mod transcript;
 mod widgets;
@@ -156,18 +158,8 @@ enum IdleEvent {
     MemoryReviewAvailable,
 }
 
-/// Refreshes the sub-agent panel snapshot and redraws. The sole place
-/// `run_app` calls `terminal.draw`, so the panel is never stale by more than
-/// one frame.
-fn redraw<B: Backend>(
-    terminal: &mut Terminal<B>,
-    app: &mut App,
-    controller: &Controller,
-) -> Result<(), ReplError> {
-    app.info.approval_mode = controller.info().approval_mode;
-    app.info.approval_settings = controller.info().approval_settings;
-    app.refresh_tasks(&app::Backend::Local(controller));
-    app.poll_observer();
+/// Draws only the current UI snapshot. Backend reads run independently.
+fn redraw<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), ReplError> {
     terminal
         .draw(|frame| render::draw(frame, app))
         .map(|_| ())
@@ -193,6 +185,7 @@ async fn run_app<B: Backend>(
     let mut notices = controller.notices_changed();
     let mut memory_review = controller.memory_review_available_changed();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut frames = render::spinner_interval();
     let mut feature_tick = tokio::time::interval(std::time::Duration::from_secs(2));
     feature_tick.reset();
@@ -200,12 +193,12 @@ async fn run_app<B: Backend>(
     // The session whose saved turn queue was restored; a `/resume` or
     // `/new` changes the session and restores again.
     let mut restored_session = String::new();
-    redraw(terminal, &mut app, controller)?;
+    redraw(terminal, &mut app)?;
     loop {
         for text in controller.take_notices() {
             app.push_system(text);
         }
-        let session_id = controller.info().session_id;
+        let session_id = app.info.session_id.clone();
         if session_id != restored_session {
             restored_session = session_id;
             if let Err(error) =
@@ -262,6 +255,7 @@ async fn run_app<B: Backend>(
             }
             IdleEvent::Completion(completion) => app.apply_completion(*completion),
             IdleEvent::Tick => {
+                app.poll_local_status();
                 app.request_approvals();
                 app.poll_steering();
             }
@@ -405,8 +399,8 @@ async fn run_app<B: Backend>(
                 actions.push_back(queued);
             }
         }
-        app.refresh_info(&backend);
-        redraw(terminal, &mut app, controller)?;
+        app.poll_observer();
+        redraw(terminal, &mut app)?;
     }
 }
 
@@ -441,8 +435,10 @@ fn apply_input<B: Backend>(
             app.insert_text(&text);
             Ok(None)
         }
-        TuiEvent::Wheel { up } => {
-            app.scroll_wheel(up);
+        TuiEvent::Wheel { up, steps } => {
+            for _ in 0..steps {
+                app.scroll_wheel(up);
+            }
             Ok(None)
         }
         TuiEvent::Select { phase, col, row } => {

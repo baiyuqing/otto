@@ -7,6 +7,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Fixed
+
+- Local terminal scrolling no longer refreshes session history and input recovery
+  records on every wheel event or redraw. Status refreshes run in the background
+  during both idle and active turns, and ready wheel bursts share a redraw
+  without losing steps or changing input order.
+
 ### Added
 
 - `otto --attach` accepts `/sandbox allow|network|exclude` and

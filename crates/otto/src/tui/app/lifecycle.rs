@@ -2,47 +2,60 @@
 
 use super::*;
 
+pub(super) const LOCAL_STATUS_SURFACE: u64 = u64::MAX - 1;
+
 impl App {
+    /// Startup-only synchronous refresh; event loops use the backend request.
     pub(crate) fn refresh_tasks(&mut self, backend: &Backend<'_>) {
-        if let Backend::Local(c) = backend {
-            let info = c.info();
-            if (info.workspace.as_str(), info.session_id.as_str())
-                != (self.info.workspace.as_str(), self.info.session_id.as_str())
-            {
-                return;
+        if let Backend::Local(controller) = backend {
+            self.apply_local_status(backend::local_status(controller));
+        }
+    }
+
+    pub(crate) fn poll_local_status(&mut self) {
+        if !self.attached
+            && self.connected
+            && self.session_changes.is_empty()
+            && !self
+                .pending
+                .iter()
+                .any(|(surface, _)| *surface == LOCAL_STATUS_SURFACE)
+        {
+            self.enqueue(LOCAL_STATUS_SURFACE, Request::LocalStatus);
+        }
+    }
+
+    pub(super) fn apply_local_status(&mut self, status: backend::LocalStatus) {
+        if (
+            status.info.workspace.as_str(),
+            status.info.session_id.as_str(),
+        ) != (self.info.workspace.as_str(), self.info.session_id.as_str())
+        {
+            return;
+        }
+        self.tasks = status.tasks;
+        self.skill_names = status.skill_names;
+        for (id, marker) in status.input_statuses {
+            let scoped_id = format!("{}:{id}", self.info.session_id);
+            if self.input_statuses.get(&scoped_id) != Some(&marker) {
+                self.input_statuses.insert(scoped_id, marker.clone());
+                self.push_system(format!("{marker}; /inputs lists session-scoped status; /recover {id} restores a draft only (never automatically replayed)"));
             }
-            if let Ok(records) = c.input_submissions() {
-                let guidance = c.steering_messages().unwrap_or_default();
-                for record in records {
-                    let terminal_guidance = guidance
-                        .iter()
-                        .find(|message| message.input_id == record.id)
-                        .and_then(|message| match message.status {
-                            otto_core::agent::steering::Status::Withdrawn => Some("withdrawn"),
-                            otto_core::agent::steering::Status::Discarded => {
-                                Some("failed: guidance discarded before delivery")
-                            }
-                            _ => None,
-                        });
-                    let status = if c.has_input(&record.id) {
-                        "delivered"
-                    } else {
-                        terminal_guidance.unwrap_or(&record.state)
-                    };
-                    let marker = format!(
-                        "[{}] {:?} / {:?} / {}",
-                        record.id, record.provenance.source, record.provenance.delivery, status
-                    );
-                    let scoped_id = format!("{}:{}", self.info.session_id, record.id);
-                    if self.input_statuses.get(&scoped_id) != Some(&marker) {
-                        self.input_statuses.insert(scoped_id, marker.clone());
-                        self.push_system(format!("{marker}; /inputs lists session-scoped status; /recover {} restores a draft only (never automatically replayed)", record.id));
-                    }
-                }
-            }
-            self.tasks = c.subagent_tasks().map(|t| t.list()).unwrap_or_default();
-            self.skill_names = c.skills().skills().iter().map(|s| s.name.clone()).collect();
-            self.skill_names.sort();
+        }
+        // Live usage comes from wire events, not a potentially older snapshot.
+        if !self.busy() {
+            self.usage = status.info.usage;
+            self.info = status.info;
+        } else {
+            self.info.approval_mode = status.info.approval_mode;
+            self.info.approval_settings = status.info.approval_settings;
+            self.info.local_commands = status.info.local_commands;
+        }
+        entries::project_local_commands(&mut self.entries, &self.info.local_commands);
+    }
+    pub(super) fn invalidate_local_status(&mut self) {
+        if let Some(generation) = self.generations.get_mut(&LOCAL_STATUS_SURFACE) {
+            *generation = generation.wrapping_add(1);
         }
     }
     pub(crate) fn enable_program_status(&mut self) {
@@ -51,6 +64,7 @@ impl App {
         self.program_status = Some(reporter);
     }
     pub fn start_turn(&mut self) {
+        self.invalidate_local_status();
         self.report_program_status(crate::program_status::State::Working);
         self.start_operation("waiting for model");
     }
@@ -66,6 +80,7 @@ impl App {
         self.retry_event = None;
     }
     pub fn end_turn(&mut self) {
+        self.invalidate_local_status();
         self.busy_since = None;
         self.finish_steering();
     }

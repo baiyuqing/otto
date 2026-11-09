@@ -83,12 +83,12 @@ impl App {
         if self.has_writes() || (self.queued_input_id.is_some() && self.busy()) {
             return None;
         }
-        if let Backend::Local(controller) = backend
+        if self
+            .queued_input
+            .as_ref()
+            .is_some_and(|line| !line.starts_with('/'))
+            && let Backend::Local(controller) = backend
             && controller.pending_approval().is_some()
-            && self
-                .queued_input
-                .as_ref()
-                .is_some_and(|line| !line.starts_with('/'))
         {
             return None;
         }

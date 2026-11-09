@@ -41,21 +41,60 @@ pub(super) async fn drive_turn<B: Backend, T, E>(
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
     let mut status = tokio::time::interval(std::time::Duration::from_millis(500));
     status.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut frame_gate = frame_gate::FrameGate::new(std::time::Instant::now());
     loop {
-        tokio::select! {
+        let redraw = tokio::select! {
             result=&mut future=>{
                 while let Ok(event)=events.try_recv(){apply(app,&event);}
+                let _ = terminal.draw(|frame| render::draw(frame, app));
                 return result;
             }
-            Some(event)=events.recv()=>apply(app,&event),
-            Some(event)=keys.recv()=>apply_turn_key(app,terminal,event,turn,backend),
-            completion=app.next_completion()=>app.apply_completion(completion),
-            _=refresh.tick()=>{app.tick_features();app.request_approvals();app.poll_steering();}
-            _=status.tick()=>app.poll_local_status(),
-            _=frames.tick()=>{}
-        }
+            Some(event)=events.recv()=>{
+                let redraw=frame_gate::wire_redraw(&event);
+                apply(app,&event);
+                redraw
+            }
+            Some(event)=keys.recv()=>{
+                apply_turn_key(app,terminal,event,turn,backend);
+                frame_gate::Redraw::Immediate
+            }
+            completion=app.next_completion()=>{
+                if app.apply_completion(completion) {
+                    frame_gate::Redraw::Immediate
+                } else {
+                    frame_gate::Redraw::None
+                }
+            }
+            _=refresh.tick()=>{
+                app.tick_features();
+                app.request_approvals();
+                app.poll_steering();
+                frame_gate::Redraw::None
+            }
+            _=status.tick()=>{
+                app.poll_local_status();
+                frame_gate::Redraw::None
+            }
+            _=frames.tick()=>{
+                if render::needs_animation(app) {
+                    frame_gate::Redraw::Immediate
+                } else {
+                    frame_gate::Redraw::None
+                }
+            }
+            _=frame_gate::wait_for_frame(frame_gate.deadline())=>frame_gate::Redraw::Immediate,
+        };
         app.poll_observer();
-        let _ = terminal.draw(|frame| render::draw(frame, app));
+        let now = std::time::Instant::now();
+        let draw = match redraw {
+            frame_gate::Redraw::None => false,
+            frame_gate::Redraw::Paced => frame_gate.request(now),
+            frame_gate::Redraw::Immediate => true,
+        };
+        if draw {
+            let _ = terminal.draw(|frame| render::draw(frame, app));
+            frame_gate.drew(now);
+        }
     }
 }
 

@@ -25,14 +25,15 @@ impl App {
         }
     }
 
-    pub(super) fn apply_local_status(&mut self, status: backend::LocalStatus) {
+    pub(super) fn apply_local_status(&mut self, status: backend::LocalStatus) -> bool {
         if (
             status.info.workspace.as_str(),
             status.info.session_id.as_str(),
         ) != (self.info.workspace.as_str(), self.info.session_id.as_str())
         {
-            return;
+            return false;
         }
+        let mut changed = self.tasks != status.tasks || self.skill_names != status.skill_names;
         self.tasks = status.tasks;
         self.skill_names = status.skill_names;
         for (id, marker) in status.input_statuses {
@@ -40,18 +41,26 @@ impl App {
             if self.input_statuses.get(&scoped_id) != Some(&marker) {
                 self.input_statuses.insert(scoped_id, marker.clone());
                 self.push_system(format!("{marker}; /inputs lists session-scoped status; /recover {id} restores a draft only (never automatically replayed)"));
+                changed = true;
             }
         }
         // Live usage comes from wire events, not a potentially older snapshot.
         if !self.busy() {
+            changed |= self.usage != status.info.usage || self.info != status.info;
             self.usage = status.info.usage;
             self.info = status.info;
         } else {
+            changed |= self.info.approval_mode != status.info.approval_mode
+                || self.info.approval_settings != status.info.approval_settings
+                || self.info.local_commands != status.info.local_commands;
             self.info.approval_mode = status.info.approval_mode;
             self.info.approval_settings = status.info.approval_settings;
             self.info.local_commands = status.info.local_commands;
         }
-        entries::project_local_commands(&mut self.entries, &self.info.local_commands);
+        if changed {
+            entries::project_local_commands(&mut self.entries, &self.info.local_commands);
+        }
+        changed
     }
     pub(super) fn invalidate_local_status(&mut self) {
         if let Some(generation) = self.generations.get_mut(&LOCAL_STATUS_SURFACE) {

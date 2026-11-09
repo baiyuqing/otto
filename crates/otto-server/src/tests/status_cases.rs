@@ -192,7 +192,7 @@ async fn a_dropped_compact_request_still_releases_the_session() {
 
     let session = harness.server.lookup(&id).expect("session");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while session.lock().compacting.is_some() {
+        while session.lock().is_compacting() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

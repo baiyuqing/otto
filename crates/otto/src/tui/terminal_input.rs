@@ -155,6 +155,7 @@ pub(super) enum TuiEvent {
     Paste(String),
     Wheel {
         up: bool,
+        steps: u16,
     },
     /// One end of a left-button drag, in terminal cells. Otto draws its own
     /// selection because asking for mouse reporting takes the terminal's
@@ -176,8 +177,13 @@ pub(super) fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
         TermEvent::Paste(text) => Some(TuiEvent::Paste(text)),
         TermEvent::Mouse(mouse) => {
             let phase = match mouse.kind {
-                MouseEventKind::ScrollUp => return Some(TuiEvent::Wheel { up: true }),
-                MouseEventKind::ScrollDown => return Some(TuiEvent::Wheel { up: false }),
+                MouseEventKind::ScrollUp => return Some(TuiEvent::Wheel { up: true, steps: 1 }),
+                MouseEventKind::ScrollDown => {
+                    return Some(TuiEvent::Wheel {
+                        up: false,
+                        steps: 1,
+                    });
+                }
                 MouseEventKind::Down(MouseButton::Left) => DragPhase::Start,
                 MouseEventKind::Drag(MouseButton::Left) => DragPhase::Extend,
                 MouseEventKind::Up(MouseButton::Left) => DragPhase::End,
@@ -217,18 +223,54 @@ pub(super) fn is_suspend_key(key: KeyEvent) -> bool {
 pub(super) fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
     let (sender, receiver) = mpsc::channel(1);
     std::thread::spawn(move || {
-        while let Ok(event) = crossterm::event::read() {
+        let mut pending = None;
+        loop {
             // ponytail: focus/paste/key-release and right/middle-button
             // events have no behavior; drop them instead of redrawing.
-            let Some(forwarded) = map_terminal_event(event) else {
+            let forwarded = match pending.take() {
+                Some(event) => Some(event),
+                None => match crossterm::event::read() {
+                    Ok(event) => map_terminal_event(event),
+                    Err(_) => break,
+                },
+            };
+            let Some(forwarded) = forwarded else {
                 continue;
             };
+            let (forwarded, next) = batch_wheel(forwarded, || {
+                if !crossterm::event::poll(std::time::Duration::ZERO).ok()? {
+                    return None;
+                }
+                map_terminal_event(crossterm::event::read().ok()?)
+            });
+            pending = next;
             if !forward_event(&sender, forwarded) {
                 break;
             }
         }
     });
     receiver
+}
+
+/// Combine only ready, consecutive wheel events in the same direction. Bound
+/// each batch, preserve every step and keep the first different event in order.
+pub(super) fn batch_wheel(
+    event: TuiEvent,
+    mut next: impl FnMut() -> Option<TuiEvent>,
+) -> (TuiEvent, Option<TuiEvent>) {
+    let TuiEvent::Wheel { up, mut steps } = event else {
+        return (event, None);
+    };
+    while steps < 64 {
+        match next() {
+            Some(TuiEvent::Wheel {
+                up: direction,
+                steps: count,
+            }) if direction == up && count <= 64 - steps => steps += count,
+            pending => return (TuiEvent::Wheel { up, steps }, pending),
+        }
+    }
+    (TuiEvent::Wheel { up, steps }, None)
 }
 
 pub(super) fn forward_event(sender: &mpsc::Sender<TuiEvent>, event: TuiEvent) -> bool {

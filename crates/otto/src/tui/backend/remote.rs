@@ -29,6 +29,7 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
     let client = &remote.client;
     let session = &ticket.session;
     match request {
+        Request::LocalStatus => Err("local status is unavailable over attach".into()),
         Request::Sessions => Ok(Reply::Sessions(
             client
                 .list_sessions(&ticket.workspace)

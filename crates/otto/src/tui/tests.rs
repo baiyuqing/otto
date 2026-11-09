@@ -240,7 +240,7 @@ fn mouse_wheel_scrolls_without_becoming_a_composer_key() {
             modifiers: KeyModifiers::NONE,
         });
         match map_terminal_event(event) {
-            Some(TuiEvent::Wheel { up }) => Some(up),
+            Some(TuiEvent::Wheel { up, steps: 1 }) => Some(up),
             _ => None,
         }
     };

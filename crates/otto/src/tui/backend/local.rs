@@ -54,6 +54,17 @@ pub(super) async fn local(
         }
         request => {
             blocking(controller, move |c| match request {
+                Request::LocalStatus => {
+                    let status = local_status(c);
+                    check_scope(&status.info, &observer_scope)?;
+                    let header = c.current_session_opt().ok_or("session is closed")?.header();
+                    if header.id != observer_scope.session
+                        || header.workspace != observer_scope.workspace
+                    {
+                        return Err("session changed; status was not applied".into());
+                    }
+                    Ok(Reply::LocalStatus(status))
+                }
                 Request::ForkPoints => c.fork_points().map(|points| {
                     Reply::Sessions(fork_point_choices(
                         points

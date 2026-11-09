@@ -2,6 +2,88 @@
 
 use super::*;
 
+impl PromptState {
+    /// Readiness shared by ordinary admission, wake claims and queue restore.
+    /// A registered wake waiter does not reserve ordinary prompt admission.
+    pub(super) fn is_idle(&self) -> bool {
+        !self.has_activity() && !self.draining && self.followups.is_empty()
+    }
+
+    fn has_activity(&self) -> bool {
+        !matches!(self.activity, PromptActivity::Idle)
+    }
+
+    fn active_token(&self) -> Option<&CancellationToken> {
+        match &self.activity {
+            PromptActivity::Idle => None,
+            PromptActivity::Prompt(token) | PromptActivity::Wake(token) => Some(token),
+        }
+    }
+
+    fn begin_prompt(&mut self, parent: &CancellationToken) -> Option<CancellationToken> {
+        if !self.is_idle() {
+            return None;
+        }
+        let token = parent.child_token();
+        self.start_prompt(token.clone());
+        Some(token)
+    }
+
+    fn begin_wake(&mut self, parent: &CancellationToken) -> Option<CancellationToken> {
+        if !self.is_idle() || self.waiting.is_some() {
+            return None;
+        }
+        let token = parent.child_token();
+        self.activity = PromptActivity::Wake(token.clone());
+        Some(token)
+    }
+
+    fn wait_for_wake(&mut self, parent: &CancellationToken) -> Option<CancellationToken> {
+        if !(matches!(self.activity, PromptActivity::Wake(_)) || self.is_idle())
+            || self.waiting.is_some()
+        {
+            return None;
+        }
+        let token = parent.child_token();
+        self.waiting = Some(token.clone());
+        Some(token)
+    }
+
+    fn claim_waiting_prompt(&mut self, token: &CancellationToken) -> bool {
+        if !self.is_idle() {
+            return false;
+        }
+        self.waiting = None;
+        self.start_prompt(token.clone());
+        true
+    }
+
+    /// Callers establish admission first; the queue drain needs only no activity.
+    fn start_prompt(&mut self, token: CancellationToken) {
+        self.activity = PromptActivity::Prompt(token);
+    }
+
+    fn end_activity(&mut self) {
+        self.activity = PromptActivity::Idle;
+    }
+
+    /// Cancellation signals owners; only their completion releases activity.
+    fn cancel(&mut self) -> usize {
+        let dropped = self.queue.len();
+        self.queue.clear();
+        if let Some(token) = self.active_token() {
+            token.cancel();
+        }
+        if let Some(token) = &self.waiting {
+            token.cancel();
+        }
+        for token in self.followups.values() {
+            token.cancel();
+        }
+        dropped
+    }
+}
+
 impl PromptSlot {
     pub(super) fn signal_released(&self) {
         self.released.send_modify(|count| *count += 1);
@@ -10,17 +92,7 @@ impl PromptSlot {
     /// Claims the slot for a wake turn when nothing else holds or awaits it.
     pub(super) fn begin_wake(&self, parent: &CancellationToken) -> Option<CancellationToken> {
         let mut state = self.state.lock().expect("prompt slot");
-        if state.active.is_some()
-            || state.draining
-            || !state.followups.is_empty()
-            || state.waiting.is_some()
-        {
-            return None;
-        }
-        let token = parent.child_token();
-        state.active = Some(token.clone());
-        state.wake = true;
-        Some(token)
+        state.begin_wake(parent)
     }
 
     /// Registers an ordinary prompt to run after the wake turn that holds the
@@ -30,13 +102,7 @@ impl PromptSlot {
     /// awaited.
     pub(super) fn wait_for_wake(&self, parent: &CancellationToken) -> Option<CancellationToken> {
         let mut state = self.state.lock().expect("prompt slot");
-        let free = state.active.is_none() && !state.draining && state.followups.is_empty();
-        if !(state.wake || free) || state.waiting.is_some() {
-            return None;
-        }
-        let token = parent.child_token();
-        state.waiting = Some(token.clone());
-        Some(token)
+        state.wait_for_wake(parent)
     }
 
     /// Waits until the slot is free and installs the waiting prompt's token as
@@ -50,9 +116,7 @@ impl PromptSlot {
                     state.waiting = None;
                     return false;
                 }
-                if state.active.is_none() && !state.draining && state.followups.is_empty() {
-                    state.waiting = None;
-                    state.active = Some(token.clone());
+                if state.claim_waiting_prompt(token) {
                     return true;
                 }
             }
@@ -67,19 +131,13 @@ impl PromptSlot {
     /// Installs a normal prompt only when no prompt or explicit queue is active.
     pub(super) fn begin(&self, parent: &CancellationToken) -> Option<CancellationToken> {
         let mut state = self.state.lock().expect("prompt slot");
-        if state.active.is_some() || state.draining || !state.followups.is_empty() {
-            return None;
-        }
-        let token = parent.child_token();
-        state.active = Some(token.clone());
-        Some(token)
+        state.begin_prompt(parent)
     }
 
     pub(super) fn end(&self) {
         {
             let mut state = self.state.lock().expect("prompt slot");
-            state.active = None;
-            state.wake = false;
+            state.end_activity();
         }
         self.changed.notify_one();
         self.signal_released();
@@ -87,17 +145,7 @@ impl PromptSlot {
 
     pub(super) fn cancel(&self) -> usize {
         let mut state = self.state.lock().expect("prompt slot");
-        let dropped = state.queue.len();
-        state.queue.clear();
-        if let Some(token) = state.active.as_ref() {
-            token.cancel();
-        }
-        if let Some(token) = state.waiting.as_ref() {
-            token.cancel();
-        }
-        for token in state.followups.values() {
-            token.cancel();
-        }
+        let dropped = state.cancel();
         self.changed.notify_one();
         dropped
     }
@@ -106,8 +154,8 @@ impl PromptSlot {
         self.state
             .lock()
             .expect("prompt slot")
-            .active
-            .clone()
+            .active_token()
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -164,11 +212,11 @@ impl PromptSlot {
                     self.signal_released();
                     return;
                 }
-                if state.active.is_some() {
+                if state.has_activity() {
                     None
                 } else if let Some(queued) = state.queue.pop_front() {
                     let token = stop.child_token();
-                    state.active = Some(token.clone());
+                    state.start_prompt(token.clone());
                     Some((queued, token))
                 } else {
                     state.draining = false;
@@ -230,7 +278,7 @@ impl PromptSlot {
         parent: &CancellationToken,
     ) -> Result<(u64, CancellationToken), &'static str> {
         let mut state = self.state.lock().expect("prompt slot");
-        let limit = ACP_QUEUE_LIMIT + if state.active.is_none() { 1 } else { 0 };
+        let limit = ACP_QUEUE_LIMIT + if state.has_activity() { 0 } else { 1 };
         if state.followups.len() >= limit {
             return Err("queue is full (16 pending prompts)");
         }

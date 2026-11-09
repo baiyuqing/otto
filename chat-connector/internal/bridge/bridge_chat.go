@@ -35,14 +35,7 @@ type chat struct {
 	turnDone           chan struct{} // closes after this turn's chat reply is sent
 	sid                string
 	taskGeneration     uint64
-	taskSID            string
-	taskActive         bool
-	taskClosing        bool
-	taskControlCtx     context.Context
-	taskControlCancel  context.CancelFunc
-	taskControls       []controlItem
-	taskControlRunning bool
-	taskControlDone    chan struct{}
+	controlTask        *controlTask
 	perm               *permission
 	reply              strings.Builder
 	brk                bool // a tool call followed text; the next text starts a paragraph
@@ -164,15 +157,18 @@ func (c *chat) enqueueLocked(m Message) bool {
 }
 
 func (c *chat) enqueueTaskControlLocked(item controlItem) bool {
-	if c.taskSID == "" || (!c.taskActive && !c.taskClosing) || c.taskControlCtx == nil ||
-		len(c.queue)+len(c.taskControls) >= c.b.opts.QueueLimit {
+	if !c.taskControlAvailableLocked() {
 		return false
 	}
-	c.taskControls = append(c.taskControls, item)
-	if c.taskControlRunning {
+	task := c.controlTask
+	if len(c.queue)+len(task.controls) >= c.b.opts.QueueLimit {
+		return false
+	}
+	task.controls = append(task.controls, item)
+	if task.worker != nil {
 		return true
 	}
-	done := make(chan struct{})
+
 	c.b.mu.Lock()
 	closing := c.b.closing
 	if !closing {
@@ -180,52 +176,54 @@ func (c *chat) enqueueTaskControlLocked(item controlItem) bool {
 	}
 	c.b.mu.Unlock()
 	if closing {
-		c.taskControls = nil
+		task.controls = nil
 		c.notify(item.message.MessageID, "Connector is shutting down; control input was not routed.")
 		return false
 	}
-	c.taskControlRunning = true
-	c.taskControlDone = done
-	sid, generation, ctx := c.taskSID, c.taskGeneration, c.taskControlCtx
+	worker := &controlWorker{task: task, done: make(chan struct{})}
+	task.worker = worker
 	go func() {
 		defer c.b.wg.Done()
-		c.taskControlDialogue(sid, generation, ctx, done)
+		c.taskControlDialogue(worker)
 	}()
 	return true
 }
 
-func (c *chat) taskControlDialogue(sid string, generation uint64, taskCtx context.Context, done chan struct{}) {
+func (c *chat) taskControlDialogue(worker *controlWorker) {
+	task := worker.task
 	for {
 		c.mu.Lock()
-		if generation != c.taskGeneration || taskCtx.Err() != nil {
-			c.taskControls = nil
-			c.finishTaskControlWorkerLocked(done)
+		if !c.controlWorkerCurrentLocked(worker) {
+			if task.worker == worker {
+				task.controls = nil
+			}
+			c.finishTaskControlWorkerLocked(worker)
 			c.mu.Unlock()
 			return
 		}
-		if len(c.taskControls) == 0 {
-			c.finishTaskControlWorkerLocked(done)
+		if len(task.controls) == 0 {
+			c.finishTaskControlWorkerLocked(worker)
 			c.mu.Unlock()
 			return
 		}
-		item := c.taskControls[0]
-		c.taskControls = c.taskControls[1:]
+		item := task.controls[0]
+		task.controls = task.controls[1:]
 		c.mu.Unlock()
 
-		ctx, stop := context.WithTimeout(taskCtx, 35*time.Second)
+		ctx, stop := context.WithTimeout(task.ctx, 35*time.Second)
 		var reply *agent.ControlReply
 		var err error
 		if item.steer {
-			err = c.b.opts.Agent.Steer(ctx, sid, item.text)
+			err = c.b.opts.Agent.Steer(ctx, task.sessionID, item.text)
 		} else {
-			reply, err = c.b.opts.Agent.ControlMessageWithChannel(ctx, sid, item.message.Text, item.message.Platform)
+			reply, err = c.b.opts.Agent.ControlMessageWithChannel(ctx, task.sessionID, item.message.Text, item.message.Platform)
 		}
 		stop()
 
 		response, markdown := "", false
 		c.mu.Lock()
-		if generation != c.taskGeneration {
-			c.finishTaskControlWorkerLocked(done)
+		if !c.controlWorkerCurrentLocked(worker) {
+			c.finishTaskControlWorkerLocked(worker)
 			c.mu.Unlock()
 			return
 		}
@@ -288,45 +286,6 @@ func (c *chat) taskControlDialogue(sid string, generation uint64, taskCtx contex
 	}
 }
 
-func (c *chat) finishTaskControlWorkerLocked(done chan struct{}) {
-	if c.taskControlDone == done {
-		c.taskControlDone = nil
-		c.taskControlRunning = false
-	}
-	close(done)
-}
-
-func (c *chat) finishTaskControl(generation uint64) {
-	for {
-		c.mu.Lock()
-		if generation != c.taskGeneration {
-			done := c.taskControlDone
-			c.mu.Unlock()
-			if done != nil {
-				<-done
-			}
-			return
-		}
-		c.taskActive = false
-		c.taskClosing = true
-		done := c.taskControlDone
-		if done == nil {
-			if c.taskControlCancel != nil {
-				c.taskControlCancel()
-			}
-			c.taskControlCancel = nil
-			c.taskControlCtx = nil
-			c.taskSID = ""
-			c.taskClosing = false
-			c.taskGeneration++
-			c.mu.Unlock()
-			return
-		}
-		c.mu.Unlock()
-		<-done
-	}
-}
-
 func (c *chat) work() {
 	defer c.b.wg.Done()
 	for {
@@ -367,10 +326,10 @@ func (c *chat) turn(m Message) {
 	go c.typing(ctx, typingDone)
 
 	var (
-		sid        string
-		stop       acp.StopReason
-		err        error
-		generation uint64
+		sid  string
+		stop acp.StopReason
+		err  error
+		task *controlTask
 	)
 	for attempt := 0; attempt < 2; attempt++ {
 		if sid, err = c.session(ctx, m); err != nil {
@@ -385,12 +344,7 @@ func (c *chat) turn(m Message) {
 			return
 		}
 		c.sid = sid
-		c.taskGeneration++
-		generation = c.taskGeneration
-		c.taskSID = sid
-		c.taskActive = true
-		c.taskClosing = false
-		c.taskControlCtx, c.taskControlCancel = context.WithCancel(ctx)
+		task = c.beginTaskControlLocked(ctx, sid)
 		c.reply.Reset()
 		c.brk = false
 		c.proposed = false
@@ -406,7 +360,7 @@ func (c *chat) turn(m Message) {
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)
 		c.b.mu.Unlock()
-		c.finishTaskControl(generation)
+		c.finishTaskControl(task)
 		unlock()
 		if !errors.Is(err, agent.ErrNotOpen) {
 			break

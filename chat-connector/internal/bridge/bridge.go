@@ -419,7 +419,7 @@ func (b *Bridge) deliver(m Message) {
 		}
 		return
 	}
-	activeControl := c.taskSID != "" && (c.taskActive || c.taskClosing)
+	activeControl := c.taskControlAvailableLocked()
 	if activeControl {
 		if len(m.Text) > 32_000 {
 			c.mu.Unlock()

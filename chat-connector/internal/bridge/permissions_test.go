@@ -166,7 +166,7 @@ func TestOngoingPromptGetsHumanCardWhenReviewStatusChanges(t *testing.T) {
 	// Same pending state, ID and revision: the review disposition alone changes.
 	c.showApprovals(context.Background(), sid, []agent.SharedApproval{r})
 	c.mu.Lock()
-	active, card := c.taskActive, c.sharedCards[r.ID]
+	active, card := c.taskControlPhaseLocked() == taskControlActive, c.sharedCards[r.ID]
 	c.mu.Unlock()
 	if !active || card == nil || card.session != sid || card.request.Revision != 1 || len(h.plat.texts()) != 2 {
 		t.Fatalf("active=%v card=%+v messages=%v", active, card, h.plat.texts())

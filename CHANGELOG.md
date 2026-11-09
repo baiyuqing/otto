@@ -9,10 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
-- Local terminal scrolling no longer refreshes session history and input recovery
-  records on every wheel event or redraw. Status refreshes run in the background
-  during both idle and active turns, and ready wheel bursts share a redraw
-  without losing steps or changing input order.
+- Local and attached terminal rendering no longer redraws for timer ticks or
+  unchanged local status. Streamed text/reasoning updates share frames, and ready wheel, resize and
+  drag-extension bursts are safely coalesced without delaying input, approvals,
+  interruption, errors or lifecycle changes. Local status refreshes remain
+  independent of scrolling during idle and active turns.
 
 ### Added
 

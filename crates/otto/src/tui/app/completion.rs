@@ -3,7 +3,28 @@
 use super::*;
 
 impl App {
-    pub(crate) fn apply_completion(&mut self, completion: Completion) {
+    /// Applies a backend completion and reports whether the visible snapshot changed.
+    pub(crate) fn apply_completion(&mut self, completion: Completion) -> bool {
+        if completion.ticket.surface == lifecycle::LOCAL_STATUS_SURFACE {
+            return self.apply_local_status_completion(completion);
+        }
+        self.apply_completion_inner(completion);
+        true
+    }
+
+    fn apply_local_status_completion(&mut self, completion: Completion) -> bool {
+        let t = completion.ticket;
+        if self.pending.remove(&(t.surface, t.generation))
+            && self.generations.get(&t.surface) == Some(&t.generation)
+            && self.session_changes.is_empty()
+            && let Ok(Reply::LocalStatus(status)) = completion.result
+        {
+            return self.apply_local_status(status);
+        }
+        false
+    }
+
+    fn apply_completion_inner(&mut self, completion: Completion) {
         let t = completion.ticket;
         let mutation = completion.mutation;
         let composer_feedback = self.composer_feedback.remove(&(t.surface, t.generation));
@@ -43,16 +64,6 @@ impl App {
         }
         if t.surface == observer::OBSERVER_SURFACE {
             self.complete_observer(&t, completion.result);
-            return;
-        }
-        if t.surface == lifecycle::LOCAL_STATUS_SURFACE {
-            if self.pending.remove(&(t.surface, t.generation))
-                && self.generations.get(&t.surface) == Some(&t.generation)
-                && self.session_changes.is_empty()
-                && let Ok(Reply::LocalStatus(status)) = completion.result
-            {
-                self.apply_local_status(status);
-            }
             return;
         }
         if t.surface == 0

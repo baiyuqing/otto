@@ -1,5 +1,37 @@
 use super::*;
 
+#[test]
+fn local_status_completion_requests_redraw_only_for_visible_changes() {
+    let (mut app, _remote) = app();
+    app.enqueue(lifecycle::LOCAL_STATUS_SURFACE, Request::LocalStatus);
+    let (ticket, _) = app.requests.pop().unwrap();
+    let unchanged = backend::LocalStatus {
+        info: app.info.clone(),
+        tasks: app.tasks.clone(),
+        skill_names: app.skill_names.clone(),
+        input_statuses: Vec::new(),
+    };
+    assert!(!app.apply_completion(Completion {
+        ticket,
+        mutation: false,
+        result: Ok(Reply::LocalStatus(unchanged)),
+    }));
+
+    app.enqueue(lifecycle::LOCAL_STATUS_SURFACE, Request::LocalStatus);
+    let (ticket, _) = app.requests.pop().unwrap();
+    let changed = backend::LocalStatus {
+        info: app.info.clone(),
+        tasks: app.tasks.clone(),
+        skill_names: vec!["new-skill".into()],
+        input_statuses: Vec::new(),
+    };
+    assert!(app.apply_completion(Completion {
+        ticket,
+        mutation: false,
+        result: Ok(Reply::LocalStatus(changed)),
+    }));
+}
+
 #[tokio::test]
 async fn background_status_is_bounded_refreshes_recovery_and_retries_after_failure() {
     let workspace = tempfile::tempdir().unwrap();
@@ -27,7 +59,7 @@ async fn background_status_is_bounded_refreshes_recovery_and_retries_after_failu
     assert!(matches!(request, Request::LocalStatus));
     let mut driver = Driver::new(backend::Connection::Local(controller.clone()));
     driver.submit(ticket, request);
-    app.apply_completion(driver.next().await);
+    assert!(app.apply_completion(driver.next().await));
     assert!(
         app.entries
             .iter()
@@ -37,7 +69,10 @@ async fn background_status_is_bounded_refreshes_recovery_and_retries_after_failu
     app.poll_local_status();
     let (ticket, request) = app.requests.pop().unwrap();
     driver.submit(ticket, request);
-    app.apply_completion(driver.next().await);
+    assert!(
+        !app.apply_completion(driver.next().await),
+        "an unchanged status must not request a redraw"
+    );
     assert_eq!(
         app.entries.len(),
         entry_count,
@@ -46,11 +81,11 @@ async fn background_status_is_bounded_refreshes_recovery_and_retries_after_failu
 
     app.poll_local_status();
     let (ticket, _) = app.requests.pop().unwrap();
-    app.apply_completion(Completion {
+    assert!(!app.apply_completion(Completion {
         ticket,
         mutation: false,
         result: Err("read unavailable".into()),
-    });
+    }));
     assert_eq!(
         app.entries.len(),
         entry_count,

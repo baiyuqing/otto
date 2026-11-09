@@ -42,6 +42,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
     let mut approvals = tokio::time::interval(Duration::from_millis(500));
     let mut frames = render::spinner_interval();
     draw(terminal, &mut ui.app)?;
+    let mut frame_gate = frame_gate::FrameGate::new(std::time::Instant::now());
     loop {
         let event = {
             let followed = ui.followed.as_mut();
@@ -92,20 +93,46 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                 _ = agents.tick() => Ev::FeaturesTick,
                 _ = approvals.tick(), if connected => Ev::ApprovalsTick,
                 _ = frames.tick() => Ev::Tick,
+                _ = frame_gate::wait_for_frame(frame_gate.deadline()) => Ev::Draw,
             }
         };
-        match event {
+        let mut redraw = match event {
             Ev::Input(None) => {
                 ui.drain_transport().await;
                 super::super::drain_writes(&mut ui.app).await;
                 return Ok(());
             }
-            Ev::Input(Some(event)) => ui.on_input(terminal, event)?,
-            Ev::Frame(result) => ui.on_frame(result),
-            Ev::Status(result) => ui.on_status(result),
-            Ev::Compact(result) => ui.on_compact(result),
-            Ev::Transport(result) => ui.on_transport(result),
+            Ev::Input(Some(event)) => {
+                ui.on_input(terminal, event)?;
+                frame_gate::Redraw::Immediate
+            }
+            Ev::Frame(result) => {
+                let redraw = match &result {
+                    Ok(Some(event)) => frame_gate::wire_redraw(event),
+                    Ok(None) | Err(_) => frame_gate::Redraw::Immediate,
+                };
+                ui.on_frame(result);
+                redraw
+            }
+            Ev::Status(result) => {
+                let disconnected = !matches!(&result, Ok(Some(_)));
+                ui.on_status(result);
+                if disconnected {
+                    frame_gate::Redraw::Immediate
+                } else {
+                    frame_gate::Redraw::None
+                }
+            }
+            Ev::Compact(result) => {
+                ui.on_compact(result);
+                frame_gate::Redraw::Immediate
+            }
+            Ev::Transport(result) => {
+                ui.on_transport(result);
+                frame_gate::Redraw::Immediate
+            }
             Ev::Scheduled(text) => {
+                let visible = text.is_some();
                 if let Some(text) = text {
                     ui.transcript = ui.transcript.wrapping_add(1);
                     ui.app.push_system(text);
@@ -113,13 +140,21 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                     let mut stdout = std::io::stdout();
                     let _ = stdout.write_all(b"\x07").and_then(|()| stdout.flush());
                 }
+                if visible {
+                    frame_gate::Redraw::Immediate
+                } else {
+                    frame_gate::Redraw::None
+                }
             }
-            Ev::Retry => ui.reconnect(),
+            Ev::Retry => {
+                ui.reconnect();
+                frame_gate::Redraw::None
+            }
             Ev::Completion(completion) => {
                 let previous = ui.app.info.session_id.clone();
                 let entries = ui.app.entries.len();
                 let mutation = completion.mutation;
-                ui.app.apply_completion(completion);
+                let changed = ui.app.apply_completion(completion);
                 if mutation && ui.pending.as_ref().is_some_and(|pending| !pending.mutation) {
                     ui.pending = None;
                     ui.needs_sync = true;
@@ -140,20 +175,31 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                     ui.app
                         .finish_turn(crate::program_status::Completion::Canceled);
                 }
+                if changed {
+                    frame_gate::Redraw::Immediate
+                } else {
+                    frame_gate::Redraw::None
+                }
             }
-            Ev::FeaturesTick => ui.app.tick_features(),
+            Ev::FeaturesTick => {
+                ui.app.tick_features();
+                frame_gate::Redraw::None
+            }
             Ev::ApprovalsTick => {
                 ui.app.request_approvals();
                 ui.app.poll_steering();
+                frame_gate::Redraw::None
             }
             Ev::Tick => {
                 ui.app.poll_observer();
-                // Idle frames need no redraw unless something on screen moves.
-                if !render::needs_animation(&ui.app) {
-                    continue;
+                if render::needs_animation(&ui.app) {
+                    frame_gate::Redraw::Immediate
+                } else {
+                    frame_gate::Redraw::None
                 }
             }
-        }
+            Ev::Draw => frame_gate::Redraw::Immediate,
+        };
         if !ui.app.busy()
             && !ui.app.has_writes()
             && let Some(action) = ui.app.submit_queued_input(&Backend::Attach(remote), cancel)
@@ -161,13 +207,26 @@ pub(super) async fn run_loop<B: TerminalBackend>(
             ui.actions.push_back(action);
         }
         ui.actions.extend(ui.app.drain_actions());
+        let has_actions = !ui.actions.is_empty();
         if ui.run_actions() {
             ui.drain_transport().await;
             super::super::drain_writes(&mut ui.app).await;
             return Ok(());
         }
+        if has_actions {
+            redraw = frame_gate::Redraw::Immediate;
+        }
         ui.sync();
-        draw(terminal, &mut ui.app)?;
+        let now = std::time::Instant::now();
+        let should_draw = match redraw {
+            frame_gate::Redraw::None => false,
+            frame_gate::Redraw::Paced => frame_gate.request(now),
+            frame_gate::Redraw::Immediate => true,
+        };
+        if should_draw {
+            draw(terminal, &mut ui.app)?;
+            frame_gate.drew(now);
+        }
     }
 }
 

@@ -12,9 +12,9 @@ fn wheel_batches_preserve_direction_changes_keys_and_step_counts() {
         TuiEvent::Key(KeyCode::Enter.into()),
     ]
     .into_iter();
-    let (batch, pending) = batch_wheel(wheel(true), || events.next());
+    let (batch, pending) = coalesce_terminal_event(wheel(true), || events.next());
     assert!(matches!(batch, TuiEvent::Wheel { up: true, steps: 3 }));
-    let (batch, pending) = batch_wheel(pending.unwrap(), || events.next());
+    let (batch, pending) = coalesce_terminal_event(pending.unwrap(), || events.next());
     assert!(matches!(
         batch,
         TuiEvent::Wheel {
@@ -22,7 +22,8 @@ fn wheel_batches_preserve_direction_changes_keys_and_step_counts() {
             steps: 1
         }
     ));
-    let (key, pending) = batch_wheel(pending.unwrap(), || panic!("never read beyond a key"));
+    let (key, pending) =
+        coalesce_terminal_event(pending.unwrap(), || panic!("never read beyond a key"));
     assert!(matches!(key, TuiEvent::Key(key) if key.code == KeyCode::Enter));
     assert!(pending.is_none());
 }
@@ -30,7 +31,7 @@ fn wheel_batches_preserve_direction_changes_keys_and_step_counts() {
 #[test]
 fn wheel_batches_are_bounded_and_do_not_drop_remaining_input() {
     let mut remaining = 99;
-    let (batch, pending) = batch_wheel(TuiEvent::Wheel { up: true, steps: 1 }, || {
+    let (batch, pending) = coalesce_terminal_event(TuiEvent::Wheel { up: true, steps: 1 }, || {
         remaining -= 1;
         Some(TuiEvent::Wheel { up: true, steps: 1 })
     });
@@ -42,6 +43,107 @@ fn wheel_batches_are_bounded_and_do_not_drop_remaining_input() {
         }
     ));
     assert_eq!(remaining, 36);
+    assert!(pending.is_none());
+}
+
+#[test]
+fn redraws_collapse_without_crossing_a_key() {
+    let mut events = [
+        TuiEvent::Redraw,
+        TuiEvent::Redraw,
+        TuiEvent::Key(KeyCode::Enter.into()),
+    ]
+    .into_iter();
+
+    let (redraw, pending) = coalesce_terminal_event(TuiEvent::Redraw, || events.next());
+
+    assert!(matches!(redraw, TuiEvent::Redraw));
+    assert!(matches!(pending, Some(TuiEvent::Key(key)) if key.code == KeyCode::Enter));
+}
+
+#[test]
+fn drag_extensions_keep_only_the_latest_coordinate_and_preserve_end() {
+    let mut events = [
+        TuiEvent::Select {
+            phase: DragPhase::Extend,
+            col: 5,
+            row: 6,
+        },
+        TuiEvent::Select {
+            phase: DragPhase::Extend,
+            col: 8,
+            row: 9,
+        },
+        TuiEvent::Select {
+            phase: DragPhase::End,
+            col: 10,
+            row: 11,
+        },
+    ]
+    .into_iter();
+
+    let (extension, pending) = coalesce_terminal_event(
+        TuiEvent::Select {
+            phase: DragPhase::Extend,
+            col: 1,
+            row: 2,
+        },
+        || events.next(),
+    );
+
+    assert!(matches!(
+        extension,
+        TuiEvent::Select {
+            phase: DragPhase::Extend,
+            col: 8,
+            row: 9
+        }
+    ));
+    assert!(matches!(
+        pending,
+        Some(TuiEvent::Select {
+            phase: DragPhase::End,
+            col: 10,
+            row: 11
+        })
+    ));
+}
+
+#[test]
+fn redraw_and_drag_batches_are_bounded() {
+    let mut redraws = 100;
+    let (_, pending) = coalesce_terminal_event(TuiEvent::Redraw, || {
+        redraws -= 1;
+        Some(TuiEvent::Redraw)
+    });
+    assert_eq!(redraws, 37);
+    assert!(pending.is_none());
+
+    let mut extensions = 100;
+    let (event, pending) = coalesce_terminal_event(
+        TuiEvent::Select {
+            phase: DragPhase::Extend,
+            col: 0,
+            row: 0,
+        },
+        || {
+            extensions -= 1;
+            Some(TuiEvent::Select {
+                phase: DragPhase::Extend,
+                col: extensions,
+                row: extensions,
+            })
+        },
+    );
+    assert_eq!(extensions, 37);
+    assert!(matches!(
+        event,
+        TuiEvent::Select {
+            phase: DragPhase::Extend,
+            col: 37,
+            row: 37
+        }
+    ));
     assert!(pending.is_none());
 }
 

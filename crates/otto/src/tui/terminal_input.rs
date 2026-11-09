@@ -237,7 +237,7 @@ pub(super) fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
             let Some(forwarded) = forwarded else {
                 continue;
             };
-            let (forwarded, next) = batch_wheel(forwarded, || {
+            let (forwarded, next) = coalesce_terminal_event(forwarded, || {
                 if !crossterm::event::poll(std::time::Duration::ZERO).ok()? {
                     return None;
                 }
@@ -252,25 +252,75 @@ pub(super) fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
     receiver
 }
 
-/// Combine only ready, consecutive wheel events in the same direction. Bound
-/// each batch, preserve every step and keep the first different event in order.
-pub(super) fn batch_wheel(
+/// Coalesces only ready terminal events whose intermediate states are not
+/// observable. The first different event is retained so input order is exact.
+pub(super) fn coalesce_terminal_event(
     event: TuiEvent,
     mut next: impl FnMut() -> Option<TuiEvent>,
 ) -> (TuiEvent, Option<TuiEvent>) {
-    let TuiEvent::Wheel { up, mut steps } = event else {
-        return (event, None);
-    };
-    while steps < 64 {
-        match next() {
-            Some(TuiEvent::Wheel {
-                up: direction,
-                steps: count,
-            }) if direction == up && count <= 64 - steps => steps += count,
-            pending => return (TuiEvent::Wheel { up, steps }, pending),
+    match event {
+        TuiEvent::Wheel { up, mut steps } => {
+            while steps < 64 {
+                match next() {
+                    Some(TuiEvent::Wheel {
+                        up: direction,
+                        steps: count,
+                    }) if direction == up && count <= 64 - steps => steps += count,
+                    pending => return (TuiEvent::Wheel { up, steps }, pending),
+                }
+            }
+            (TuiEvent::Wheel { up, steps }, None)
         }
+        TuiEvent::Redraw => {
+            let mut count = 1;
+            while count < 64 {
+                match next() {
+                    Some(TuiEvent::Redraw) => count += 1,
+                    pending => return (TuiEvent::Redraw, pending),
+                }
+            }
+            (TuiEvent::Redraw, None)
+        }
+        TuiEvent::Select {
+            phase: DragPhase::Extend,
+            mut col,
+            mut row,
+        } => {
+            let mut count = 1;
+            while count < 64 {
+                match next() {
+                    Some(TuiEvent::Select {
+                        phase: DragPhase::Extend,
+                        col: next_col,
+                        row: next_row,
+                    }) => {
+                        col = next_col;
+                        row = next_row;
+                        count += 1;
+                    }
+                    pending => {
+                        return (
+                            TuiEvent::Select {
+                                phase: DragPhase::Extend,
+                                col,
+                                row,
+                            },
+                            pending,
+                        );
+                    }
+                }
+            }
+            (
+                TuiEvent::Select {
+                    phase: DragPhase::Extend,
+                    col,
+                    row,
+                },
+                None,
+            )
+        }
+        event => (event, None),
     }
-    (TuiEvent::Wheel { up, steps }, None)
 }
 
 pub(super) fn forward_event(sender: &mpsc::Sender<TuiEvent>, event: TuiEvent) -> bool {

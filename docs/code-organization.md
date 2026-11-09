@@ -285,13 +285,19 @@ guards these dependency directions.
 Local TUI status projections (including input recovery, command receipts and
 task/skill lists) use the backend's blocking worker, with at most one status
 request in flight and a 500 ms polling interval in idle and active turns.
-Drawing and wheel input use the current UI snapshot without session-history
+Drawing and terminal input use the current UI snapshot without session-history
 queries. Status replies retain session/generation scope; turn transitions and
 command receipts invalidate older replies, and streamed usage stays authoritative
 while a turn is active.
-The terminal reader batches up to 64 already available, consecutive wheel steps
-in one direction before a redraw; direction changes, keys and selection events
-retain their original order.
+
+`tui/frame_gate.rs` owns redraw pacing shared by local idle, local active-turn
+and `--attach` loops. Timer ticks and unchanged local status do not draw;
+background request completions draw when they update their visible projection.
+Consecutive streamed text/reasoning events are applied in order but share
+terminal frames; input, approvals, interruption, errors and lifecycle boundaries
+draw immediately. The terminal reader batches ready wheel steps in one direction,
+collapses ready resize redraws and keeps only the latest consecutive drag-extend
+coordinate. Direction changes, keys, paste, and drag start/end retain exact order.
 
 ### Browser and chat clients
 

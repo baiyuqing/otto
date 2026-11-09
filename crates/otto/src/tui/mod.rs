@@ -17,6 +17,7 @@ mod backend;
 mod commands;
 mod entries;
 mod features;
+mod frame_gate;
 pub(crate) mod gutter;
 mod input;
 mod interaction;
@@ -243,7 +244,7 @@ async fn run_app<B: Backend>(
                 _=memory_review.changed()=>IdleEvent::MemoryReviewAvailable,
             }
         };
-        match event {
+        let mut should_redraw = match event {
             IdleEvent::Input(None) => {
                 drain_writes(&mut app).await;
                 return Ok(());
@@ -252,29 +253,39 @@ async fn run_app<B: Backend>(
                 if let Some(action) = apply_input(&mut app, terminal, event, cancel, &backend)? {
                     actions.push_back(action);
                 }
+                true
             }
             IdleEvent::Completion(completion) => app.apply_completion(*completion),
             IdleEvent::Tick => {
                 app.poll_local_status();
                 app.request_approvals();
                 app.poll_steering();
+                false
             }
             IdleEvent::Animation => {
                 app.poll_observer();
-                if !render::needs_animation(&app) {
-                    continue;
-                }
+                render::needs_animation(&app)
             }
-            IdleEvent::FeaturesTick => app.tick_features(),
-            IdleEvent::MemoryReviewAvailable => app.memory_review_available(),
-            IdleEvent::Notices => {}
-            IdleEvent::Registry(false) => updates = None,
+            IdleEvent::FeaturesTick => {
+                app.tick_features();
+                false
+            }
+            IdleEvent::MemoryReviewAvailable => {
+                app.memory_review_available();
+                true
+            }
+            IdleEvent::Notices => true,
+            IdleEvent::Registry(false) => {
+                updates = None;
+                false
+            }
             IdleEvent::Registry(true) => {
                 if let Err(error) = run_wake(&mut app, terminal, keys, controller, cancel).await {
                     propagate_turn_error(error)?;
                 }
+                true
             }
-        }
+        };
         if !app.busy()
             && !app.has_writes()
             && let Some(queued) = app.submit_queued_input(&backend, cancel)
@@ -283,6 +294,7 @@ async fn run_app<B: Backend>(
         }
         actions.extend(app.drain_actions());
         while let Some(action) = actions.pop_front() {
+            should_redraw = true;
             match action {
                 Action::Exit => {
                     drain_writes(&mut app).await;
@@ -400,7 +412,9 @@ async fn run_app<B: Backend>(
             }
         }
         app.poll_observer();
-        redraw(terminal, &mut app)?;
+        if should_redraw {
+            redraw(terminal, &mut app)?;
+        }
     }
 }
 

@@ -439,7 +439,7 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 }
 
 // HandleExtensionMethod serves the _otto/memory/* methods.
-func (a *agent) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+func (a *agent) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	path := a.dir + "/memory"
 	raw, _ := os.ReadFile(path)
 	var lines []string
@@ -545,6 +545,23 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 			return nil, nil
 		}
 		a.log("approval:%s", req.Text)
+		if req.Text == "hold-approval" {
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				if _, err := os.Stat(a.dir + "/release"); err == nil {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-ticker.C:
+				}
+			}
+		}
+		if req.Text == "approval-error" {
+			return nil, &acp.RequestError{Code: -32020, Message: "approval dialogue failed"}
+		}
 		if req.Channel != "" {
 			a.log("approval_channel:%s", req.Channel)
 		}

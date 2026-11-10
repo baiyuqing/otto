@@ -219,6 +219,16 @@ settle. Stale completion can close only its own worker and cannot clear a newer
 task's queue or wait on its worker. Natural control remains available during
 draining; `/steer` requires Active. All transitions run under the chat mutex.
 
+Connector approval dialogue is idle when no record is attached. Each running
+record binds session, generation, FIFO input, cancellation and completion, and
+retains ownership through RPC and reply delivery. Routing uses the live prompt's
+session, or the saved chat binding for background approvals. `/stop` or a session
+replacement cancels and detaches the record; stale results and completion affect
+only their captured record. Empty-queue completion detaches under the chat mutex
+so the next enqueue starts a fresh worker. Shutdown rejects new input and drains
+admitted dialogue workers before closing the agent. Dialogue never grants tool
+permission; existing decision commands and cards remain the authority.
+
 Session replacement must preserve shared state and admitted work; avoid
 frontend-specific execution paths. `runtime/session_resources.rs` owns one
 session's inbox, tasks, timers, output leases, MCP connections and workflow

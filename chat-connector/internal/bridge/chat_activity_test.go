@@ -284,8 +284,7 @@ func TestChatSwitchOwnsSuccessAndFailureReplies(t *testing.T) {
 			requireChatActivity(t, c, chatSwitching)
 			// Independent approval cancellation must not release a switch.
 			c.mu.Lock()
-			c.approvalRunning = true
-			c.approvalCancel = func() {}
+			c.beginApprovalDialogueLocked(h.b.workCtx, "")
 			c.mu.Unlock()
 			h.say("/stop")
 			h.say("/stop")
@@ -326,14 +325,12 @@ func TestChatApprovalOnlyStopLeavesQueueIdle(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
 	c := h.b.chat(h.plat, "c1")
-	cancelled := make(chan struct{})
 	c.mu.Lock()
-	c.approvalRunning = true
-	c.approvalCancel = func() { close(cancelled) }
+	dialogue := c.beginApprovalDialogueLocked(h.b.workCtx, "")
 	c.mu.Unlock()
 	h.say("/stop")
 	select {
-	case <-cancelled:
+	case <-dialogue.ctx.Done():
 	case <-time.After(20 * time.Second):
 		t.Fatal("approval-only stop did not cancel approval dialogue")
 	}

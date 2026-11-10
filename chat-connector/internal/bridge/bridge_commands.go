@@ -15,29 +15,27 @@ import (
 )
 
 func (c *chat) cmdNew(m Message) {
+	c.mu.Lock()
 	if err := c.b.opts.Store.SetSession(c.key, ""); err != nil {
 		slog.Warn("clearing session id failed", "chat", c.key, "error", err)
 	}
+	c.cancelReboundApprovalDialogueLocked()
+	c.mu.Unlock()
 	c.notify(m.MessageID, "The next message starts a new session.")
 }
 
 func (c *chat) cmdStop(m Message) {
 	c.mu.Lock()
 	wasRunning := c.requestStopLocked()
-	if !wasRunning && !c.approvalRunning {
+	if !wasRunning && c.dialogue == nil {
 		c.mu.Unlock()
 		c.notify(m.MessageID, "Nothing is running.")
 		return
 	}
 	c.queue = nil
 	c.stopTaskControlLocked()
-	c.approvalMessages = nil
-	c.approvalGeneration++
-	if c.approvalCancel != nil {
-		c.approvalCancel()
-		c.approvalCancel = nil
-	}
-	c.approvalRunning = false
+	c.stopApprovalDialogueLocked()
+
 	sid := c.sid
 	if c.perm != nil {
 		c.perm.decided <- cancel
@@ -71,7 +69,7 @@ func (c *chat) cmdSteer(m Message, guidance string) {
 	}
 	m.Text = guidance
 	c.mu.Lock()
-	if c.perm != nil || c.approvalRunning || c.taskControlPhaseLocked() != taskControlActive || c.sid == "" {
+	if c.perm != nil || c.approvalDialogueAvailableLocked() || c.taskControlPhaseLocked() != taskControlActive || c.sid == "" {
 		c.mu.Unlock()
 		c.notify(m.MessageID, "/steer only works during an active task without a pending approval.")
 		return
@@ -346,9 +344,12 @@ func (c *chat) cmdUse(m Message, arg string) {
 			reply("Error: could not load session " + id + ": " + err.Error())
 			return
 		}
+		c.mu.Lock()
 		if err := c.b.opts.Store.SetSession(c.key, id); err != nil {
 			slog.Warn("saving session id failed", "chat", c.key, "error", err)
 		}
+		c.cancelReboundApprovalDialogueLocked()
+		c.mu.Unlock()
 		t := "(untitled)"
 		if len(found) == 1 {
 			t = title(found[0])

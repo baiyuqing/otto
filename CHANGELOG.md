@@ -9,6 +9,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Chat connector approval dialogue now uses the saved session for background
+  approvals and drains admitted dialogue replies before closing the agent.
+
 - Normal exit from the attached terminal UI now waits for deferred turn
   cancellation generated when a pending prompt send completes.
 

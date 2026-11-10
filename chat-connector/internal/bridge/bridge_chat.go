@@ -27,9 +27,7 @@ type chat struct {
 
 	mu                 sync.Mutex
 	queue              []Message
-	approvalMessages   []Message
-	approvalRunning    bool
-	approvalCancel     context.CancelFunc
+	dialogue           *approvalDialogue
 	approvalGeneration uint64
 	activity           chatActivity  // queue-worker or session-switch ownership
 	turnDone           chan struct{} // closes after this turn's chat reply is sent
@@ -227,8 +225,8 @@ func (c *chat) taskControlDialogue(worker *controlWorker) {
 			c.mu.Unlock()
 			return
 		}
-		if !item.steer && err != nil && (c.perm != nil || c.approvalRunning) {
-			accepted := c.enqueueApprovalMessageLocked(c.sid, item.message)
+		if !item.steer && err != nil && (c.perm != nil || c.approvalDialogueAvailableLocked()) {
+			accepted := c.enqueueApprovalMessageLocked(item.message)
 			c.mu.Unlock()
 			if !accepted {
 				c.notify(item.message.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
@@ -344,6 +342,7 @@ func (c *chat) turn(m Message) {
 			return
 		}
 		c.sid = sid
+		c.cancelReboundApprovalDialogueLocked()
 		task = c.beginTaskControlLocked(ctx, sid)
 		c.reply.Reset()
 		c.brk = false
@@ -368,6 +367,7 @@ func (c *chat) turn(m Message) {
 	}
 	c.mu.Lock()
 	c.sid = ""
+	c.cancelReboundApprovalDialogueLocked()
 	text := strings.TrimSpace(c.reply.String())
 	c.reply.Reset()
 	proposed := c.proposed
@@ -488,9 +488,12 @@ func (c *chat) session(ctx context.Context, m Message) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	c.mu.Lock()
 	if err := c.b.opts.Store.SetSession(c.key, id); err != nil {
 		slog.Warn("saving session id failed", "chat", c.key, "error", err)
 	}
+	c.cancelReboundApprovalDialogueLocked()
+	c.mu.Unlock()
 	slog.Info("session_created", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", id)
 	return id, nil
 }

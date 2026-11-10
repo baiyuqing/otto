@@ -404,14 +404,14 @@ func (b *Bridge) deliver(m Message) {
 	}
 	m.Text = text
 	c.mu.Lock()
-	pending, sid := c.perm != nil || c.approvalRunning || c.sharedBlocking, c.sid
+	pending := c.perm != nil || c.approvalDialogueAvailableLocked() || c.sharedBlocking
 	if pending {
 		if len(m.Text) > 32_000 {
 			c.mu.Unlock()
 			c.notify(m.MessageID, "Message is too long; limit is 32000 bytes.")
 			return
 		}
-		accepted := c.enqueueApprovalMessageLocked(sid, m)
+		accepted := c.enqueueApprovalMessageLocked(m)
 		c.mu.Unlock()
 		if !accepted {
 			c.queueFull(m, c.b.opts.QueueLimit)
@@ -444,73 +444,6 @@ func commandArg(text, name string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(arg), true
-}
-
-func (c *chat) enqueueApprovalMessageLocked(sid string, m Message) bool {
-	if len(c.queue)+len(c.approvalMessages) >= c.b.opts.QueueLimit {
-		return false
-	}
-	c.approvalMessages = append(c.approvalMessages, m)
-	if !c.approvalRunning {
-		c.approvalRunning = true
-		c.approvalGeneration++
-		approvalCtx, cancel := context.WithCancel(c.b.workCtx)
-		c.approvalCancel = cancel
-		go c.approvalDialogue(sid, c.approvalGeneration, approvalCtx)
-	}
-	return true
-}
-
-// approvalDialogue sends messages received while a permission is pending in
-// delivery order. The agent decides whether each message belongs in the turn
-// queue; this path never grants permission.
-func (c *chat) approvalDialogue(sid string, generation uint64, approvalCtx context.Context) {
-	for {
-		c.mu.Lock()
-		if generation != c.approvalGeneration {
-			c.mu.Unlock()
-			return
-		}
-		if len(c.approvalMessages) == 0 {
-			c.approvalRunning = false
-			c.approvalCancel()
-			c.approvalCancel = nil
-			c.mu.Unlock()
-			return
-		}
-		m := c.approvalMessages[0]
-		c.approvalMessages = c.approvalMessages[1:]
-		c.mu.Unlock()
-
-		ctx, stop := context.WithTimeout(approvalCtx, 35*time.Second)
-		reply, err := c.b.opts.Agent.ApprovalMessageWithChannel(ctx, sid, m.Text, m.Platform, chatPrompt(m))
-		queue, response := false, ""
-		if errors.Is(err, agent.ErrApprovalUnsupported) {
-			queue = true
-			response = "This agent queues messages while waiting for approval; use /deny or /stop to cancel."
-		} else if err != nil {
-			response = "Could not handle the approval message; use /deny to reject or /stop to cancel. " + err.Error()
-		} else {
-			queue = reply == nil || reply.Queued
-			if reply != nil && reply.Text != "" {
-				response = reply.Text
-			}
-		}
-		c.mu.Lock()
-		if generation != c.approvalGeneration {
-			c.mu.Unlock()
-			stop()
-			return
-		}
-		if queue {
-			c.enqueueLocked(m)
-		}
-		c.mu.Unlock()
-		if response != "" {
-			c.send(ctx, m.MessageID, response)
-		}
-		stop()
-	}
 }
 
 func (b *Bridge) chat(p Platform, id string) *chat {

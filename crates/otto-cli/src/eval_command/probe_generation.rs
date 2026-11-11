@@ -57,7 +57,7 @@ pub fn candidate_sources(log: &[LogMessage], final_view: &[NodeAddress], count: 
             let qualifies = match message.kind {
                 LogKind::User | LogKind::Assistant => true,
                 LogKind::ToolResult => message.text.to_lowercase().contains("error"),
-                LogKind::ToolCall => false,
+                LogKind::ToolCall | LogKind::Context => false,
             };
             if qualifies && message.text.len() >= MINIMUM_SOURCE_BYTES {
                 candidates.push(id);

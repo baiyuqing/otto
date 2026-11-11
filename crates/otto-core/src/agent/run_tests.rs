@@ -53,6 +53,7 @@ mod auto_compaction;
 mod capability_plan;
 mod claude_cache_prefix;
 mod context_oneshot;
+mod context_view;
 mod durable_boundaries;
 mod input_delivery;
 mod input_provenance;

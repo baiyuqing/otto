@@ -1,6 +1,39 @@
 use super::*;
 
 #[tokio::test]
+async fn context_strategy_controls_zoom_registration_and_session_cache_ownership() {
+    use otto_core::config::context_strategy::ContextStrategy;
+    let dir = tempfile::tempdir().unwrap();
+    let builder = builder(dir.path());
+    let session = SharedSession::memory(Header::default());
+    let mut runtime = runtime();
+    let baseline = builder.build_runner(&session, &runtime).await.unwrap();
+    assert!(!tool_names(&baseline).iter().any(|name| name == "zoom"));
+    runtime.context_strategy = ContextStrategy::ViewTree;
+    let selected = builder.build_runner(&session, &runtime).await.unwrap();
+    assert!(tool_names(&selected).iter().any(|name| name == "zoom"));
+    let cache = session.resources().unwrap().context_view().clone();
+    let rebuilt = builder.build_runner(&session, &runtime).await.unwrap();
+    assert!(tool_names(&rebuilt).iter().any(|name| name == "zoom"));
+    assert!(Arc::ptr_eq(
+        &cache,
+        session.resources().unwrap().context_view()
+    ));
+    let other_session = SharedSession::memory(Header::default());
+    builder
+        .build_runner(&other_session, &runtime)
+        .await
+        .unwrap();
+    assert!(!Arc::ptr_eq(
+        &cache,
+        other_session.resources().unwrap().context_view()
+    ));
+    runtime.context_strategy = ContextStrategy::Compaction;
+    let restored = builder.build_runner(&session, &runtime).await.unwrap();
+    assert!(!tool_names(&restored).iter().any(|name| name == "zoom"));
+}
+
+#[tokio::test]
 async fn runner_build_writes_discovery_warnings_to_the_supplied_sink() {
     let dir = tempfile::tempdir().expect("temp dir");
     let skill = dir.path().join(".otto/skills/bad");

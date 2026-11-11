@@ -14,6 +14,8 @@ pub const LOG_TEXT_MAXIMUM_CHARS: usize = 30_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogKind {
+    /// Runtime context, never attributed to a user (live views only).
+    Context,
     /// User text (an image is the text `[image]`).
     User,
     /// Assistant text, without reasoning.
@@ -28,6 +30,7 @@ impl LogKind {
     /// The snake_case name used in rendered lines and prompts.
     pub fn name(self) -> &'static str {
         match self {
+            Self::Context => "context",
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::ToolCall => "tool_call",

@@ -73,7 +73,7 @@ pub fn turns_from_log(log: &[LogMessage]) -> Vec<TurnBytes> {
         for message in &log[*start as usize..end as usize] {
             let bytes = message.text.len() as u64;
             match message.kind {
-                LogKind::User => turn.user_bytes += bytes,
+                LogKind::User | LogKind::Context => turn.user_bytes += bytes,
                 LogKind::Assistant | LogKind::ToolCall => {
                     if matches!(previous, None | Some(LogKind::User | LogKind::ToolResult)) {
                         turn.calls.push(ModelCallBytes::default());

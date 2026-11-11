@@ -119,6 +119,7 @@ impl Session for SharedTranscript {
 /// `allowed`, in the registry's own order. `None` allows every child tool.
 pub struct ChildTools {
     pub(super) registry: Arc<Registry>,
+    pub(super) context_view: Option<Arc<otto_core::agent::context_view::ContextView>>,
     pub(super) allowed: Option<BTreeSet<String>>,
     pub(super) write_policy: WritePolicy,
     pub(super) write_paths: Vec<String>,
@@ -280,12 +281,23 @@ impl ToolExecutor for ChildTools {
                 .definition(),
             );
         }
+        if let Some(context) = &self.context_view {
+            definitions.push(
+                crate::tool::context_view::Zoom {
+                    context: context.clone(),
+                }
+                .definition(),
+            );
+        }
         definitions.push(Self::agent_report_definition());
         definitions
     }
 
     fn retry_safety(&self, name: &str) -> otto_core::model::RetrySafety {
         if name == "session_info" && self.permits(name) {
+            return otto_core::model::RetrySafety::ReadOnly;
+        }
+        if name == "zoom" && self.context_view.is_some() {
             return otto_core::model::RetrySafety::ReadOnly;
         }
         if name == AGENT_REPORT_RETRY.0 {
@@ -327,6 +339,17 @@ impl ToolExecutor for ChildTools {
                     });
             ToolExecution { result, outcome }
         };
+        if call.name == "zoom"
+            && let Some(context) = &self.context_view
+        {
+            return local(
+                crate::tool::context_view::Zoom {
+                    context: context.clone(),
+                }
+                .execute(call.arguments, control.cancellation_token())
+                .await,
+            );
+        }
         if call.name == "session_info" && self.permits(call.name) {
             if control.admission_stop_reason().is_some() {
                 return local(error_result(CONTEXT_CANCELED));

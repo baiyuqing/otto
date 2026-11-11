@@ -3,6 +3,28 @@
 use super::*;
 
 #[tokio::test]
+async fn child_zoom_uses_its_own_context_and_never_dispatches_to_parent_catalog() {
+    assert!(EXCLUDED_CHILD_TOOLS.contains(&"zoom"));
+    let registry = Arc::new(Registry::new(vec![stub("zoom")]).unwrap());
+    let mut tools = child_tools(
+        registry,
+        WritePolicy::ReadOnly,
+        Vec::new(),
+        Arc::new(Inbox::new(None)),
+    );
+    tools.context_view = Some(Arc::default());
+    tools.allowed = Some(BTreeSet::new());
+    assert!(tool_names(&tools.definitions()).contains(&"zoom".into()));
+    assert_eq!(
+        tools.retry_safety("zoom"),
+        otto_core::model::RetrySafety::ReadOnly
+    );
+    let result = execute_child(&tools, "zoom", r#"{"id":0,"n":1}"#).await;
+    assert!(result.result.is_error);
+    assert!(result.result.content.contains("outside the log"));
+}
+
+#[tokio::test]
 async fn a_shared_transcript_keeps_the_session_contract() {
     let fresh = || SharedTranscript(Arc::new(otto_core::session::MemorySession::new()));
     otto_core::conformance::session(&fresh, None)
@@ -190,6 +212,7 @@ async fn parent_message_grants_one_more_report() {
 
     let registry = Arc::new(Registry::new(vec![stub("read")]).unwrap());
     let tools = ChildTools {
+        context_view: None,
         registry,
         allowed: None,
         write_policy: WritePolicy::SingleWriter,

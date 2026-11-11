@@ -39,6 +39,13 @@ impl Builder {
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let mut tools = self.builtin_file_tools(max_output);
+        if runtime.context_strategy
+            == otto_core::config::context_strategy::ContextStrategy::ViewTree
+        {
+            tools.push(Box::new(crate::tool::context_view::Zoom {
+                context: resources.context_view().clone(),
+            }));
+        }
         tools.push(Box::new(crate::tool::session_info::SessionInfo {
             session_id: session.header().id,
         }));
@@ -634,6 +641,8 @@ impl Builder {
             now: Box::new(Utc::now),
             new_operation_id: Box::new(new_operation_id),
             request_sizer,
+            context_strategy: runtime.context_strategy,
+            context_view: resources.context_view().clone(),
             compaction: CompactionSettings {
                 auto: runtime.compaction.auto,
                 hard_input_window: runtime.compaction.hard_input_window,

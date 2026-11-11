@@ -30,6 +30,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- Sessions can select `[agent.context] strategy = "view-tree"` for summary-tree
+  history with a session-scoped `zoom` tool. `compaction` remains the default;
+  see [context strategies](docs/manual/interactive-use.md#context-strategy)
+  for extra model calls, cache lifetime and image limitations.
+
 - `otto --attach` accepts `/sandbox allow|network|exclude` and
   `/approve <id> always`. `otto serve` adds
   `POST /v1/sessions/{id}/sandbox/changes`, and the approval decision route

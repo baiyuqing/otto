@@ -41,10 +41,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // every step, so a forget or retirement inside the tool loop reaches
         // the next request (#591 §5).
         self.refresh_memory_context(emit, state, control).await;
-        let (mut request, mut estimate) = self.build_normal_provider_request(state, system_context);
         state
             .sent_record_ids
             .extend(state.memory_record_ids.iter().cloned());
+        if self.options.context_strategy
+            == crate::config::context_strategy::ContextStrategy::ViewTree
+        {
+            return self
+                .dispatch_view_provider_step(emit, state, system_context, control)
+                .await;
+        }
+        let (mut request, mut estimate) = self.build_normal_provider_request(state, system_context);
         let mut estimate_complete = context_estimate::estimate_complete(&request);
         let triggers = automatic_compaction_triggers(&self.options.compaction);
 
@@ -295,10 +302,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         state: &RunDispatchState,
         system_context: &str,
     ) -> (Request, i64) {
-        let remote_compaction = matches!(
-            self.provider.capabilities().remote_compaction,
-            RemoteCompactionSupport::ResponsesV2
-        )
+        let remote_compaction = (self.options.context_strategy
+            == crate::config::context_strategy::ContextStrategy::Compaction
+            && matches!(
+                self.provider.capabilities().remote_compaction,
+                RemoteCompactionSupport::ResponsesV2
+            ))
         .then(|| self.session.remote_compaction())
         .flatten()
         .filter(|checkpoint| checkpoint.provider == self.options.provider_name);
@@ -307,6 +316,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         } else {
             self.session.model_messages()
         };
+        if self.options.context_strategy
+            == crate::config::context_strategy::ContextStrategy::ViewTree
+        {
+            messages = self.options.context_view.project(messages);
+        }
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
         messages = crate::model::project_input_provenance(messages);
         // Message counts before the request-local memory message is inserted:
@@ -353,7 +367,16 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
         let request = Request {
             model: self.options.model.clone(),
-            system_prompt: append_system_context(&self.options.system_prompt, system_context),
+            system_prompt: append_system_context(
+                &append_system_context(&self.options.system_prompt, system_context),
+                if self.options.context_strategy
+                    == crate::config::context_strategy::ContextStrategy::ViewTree
+                {
+                    context_view::CONTEXT_POLICY
+                } else {
+                    ""
+                },
+            ),
             thinking: self.options.thinking.clone(),
             messages,
             tools: self.tools.definitions(),
@@ -377,7 +400,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// Runs one provider call, reporting whether any text reached the user.
     /// That flag decides whether an overflow may be retried: a partly
     /// delivered answer must not be replaced by a second one.
-    async fn complete_normal_provider_attempt(
+    pub(super) async fn complete_normal_provider_attempt(
         &self,
         request: &Request,
         state: &RunDispatchState,

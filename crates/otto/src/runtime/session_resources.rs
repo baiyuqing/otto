@@ -38,6 +38,7 @@ pub(crate) struct SessionResources {
     /// notices and workflow lifecycle events. Persisted as
     /// `<session>.inbox.json` when the session has a file.
     notifications: Arc<Inbox>,
+    context_view: Arc<otto_core::agent::context_view::ContextView>,
     /// The sub-agent task registry; absent when sub-agents are off.
     tasks: Option<Arc<Tasks>>,
     /// The timer registry; absent when sub-agents are off.
@@ -52,6 +53,10 @@ pub(crate) struct SessionResources {
 }
 
 impl SessionResources {
+    pub(crate) fn context_view(&self) -> &Arc<otto_core::agent::context_view::ContextView> {
+        &self.context_view
+    }
+
     pub(crate) fn notifications(&self) -> &Arc<Inbox> {
         &self.notifications
     }
@@ -159,6 +164,7 @@ impl SessionResources {
             .map(|_| Arc::new(Reminders::new(notifications.clone())));
         Arc::new(Self {
             notifications,
+            context_view: Arc::default(),
             tasks,
             reminders,
             output_logs: Arc::new(Logs::for_session(session_id)),

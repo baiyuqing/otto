@@ -1,7 +1,8 @@
 # Summary-tree evaluation: acceptance rationale
 
 Status: implemented opt-in development evaluation, approved 2026-10-27. This is
-not a shipped replacement for session context. The
+an evaluation separate from the optional live `view-tree` context strategy
+described in the [manual](../manual/interactive-use.md#context-strategy). The
 [testing guide](../development/testing.md#summary-tree-view-evaluation) owns
 commands, artifacts, cost drivers and restart behavior. Portable tree/cost logic
 lives in `otto-core::view_tree`; native evaluation execution and CLI parsing
@@ -27,9 +28,9 @@ The approved acceptance criteria are:
 Build nodes, generated/validated probes, view and baseline answers, judge
 reasons and costs remain separate artifacts so a person can inspect the result.
 Reruns reuse prior artifacts; a report is evidence for that input, not a claim
-of general acceptance. The evaluation-only `zoom` and `date` tools do not enter
-the product registry. Adding them to ordinary sessions needs its own capability
-and safety review.
+of general acceptance. The evaluation `zoom` and `date` tools operate only on
+evaluation artifacts. Live sessions register their own session-bound `zoom`;
+`date` remains evaluation-only.
 
 ## Interpretation limits
 

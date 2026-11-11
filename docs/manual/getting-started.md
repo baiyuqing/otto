@@ -329,6 +329,9 @@ max_output_bytes = 51200
 # workflow_step_timeout. The unattended deadline defaults to 30m.
 # unattended_turn_timeout = "0"  # explicitly disable it
 
+[agent.context]
+strategy = "compaction" # "compaction" (default) or "view-tree"
+
 [agent.compaction]
 auto = true
 reserve_tokens = 16384

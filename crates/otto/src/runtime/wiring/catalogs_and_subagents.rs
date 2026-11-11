@@ -180,6 +180,7 @@ impl Builder {
                 subagent_models: runtime.subagent_models.clone(),
                 provider_name: runtime.provider_type.clone(),
                 thinking: runtime.thinking.clone(),
+                context_strategy: runtime.context_strategy,
                 compaction: otto_core::agent::CompactionSettings {
                     auto: runtime.compaction.auto,
                     hard_input_window: runtime.compaction.hard_input_window,

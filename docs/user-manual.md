@@ -7,7 +7,7 @@ for commands available in your installed version.
 | Topic | Covers |
 | --- | --- |
 | [Getting started](manual/getting-started.md) | Installation, sign-in, CLI and configuration |
-| [Interactive use](manual/interactive-use.md) | TUI/REPL, sessions, compaction and headless mode |
+| [Interactive use](manual/interactive-use.md) | TUI/REPL, sessions, context strategies and headless mode |
 | [Session JSONL reference](manual/interactive-use.md#session-jsonl-reference) | Record types, message roles, custom records and model-context visibility |
 | [Safety and tools](manual/safety-and-tools.md) | Approvals, sandbox, tools and sub-agents |
 | [Servers and connectors](manual/servers-and-connectors.md) | HTTP/API, ACP, browser and chat clients, diagnostics |

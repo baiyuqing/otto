@@ -329,45 +329,49 @@ impl ToolExecutor for ForgettingExecutor {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_record_forgotten_inside_the_tool_loop_leaves_the_next_step() {
-    let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
-    let agent = Agent::new(
-        FakeProvider::new(vec![
-            Turn::tool_call("c1", r#"{"value":1}"#),
-            Turn::text("done"),
-        ]),
-        ForgettingExecutor {
-            memory: memory.clone(),
-        },
-        MemorySession::new(),
-        Options {
-            memory: Some(memory.clone()),
-            ..options()
-        },
-    );
-    agent
-        .run("hello", &mut |_| {}, &CancellationToken::new())
-        .await
-        .expect("run");
+    use crate::config::context_strategy::ContextStrategy;
+    for strategy in [ContextStrategy::Compaction, ContextStrategy::ViewTree] {
+        let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
+        let agent = Agent::new(
+            FakeProvider::new(vec![
+                Turn::tool_call("c1", r#"{"value":1}"#),
+                Turn::text("done"),
+            ]),
+            ForgettingExecutor {
+                memory: memory.clone(),
+            },
+            MemorySession::new(),
+            Options {
+                context_strategy: strategy,
+                memory: Some(memory.clone()),
+                ..options()
+            },
+        );
+        agent
+            .run("hello", &mut |_| {}, &CancellationToken::new())
+            .await
+            .expect("run");
 
-    let requests = agent.provider().normal_requests();
-    let text = |index: usize| {
-        requests[index]
-            .messages
-            .iter()
-            .map(Message::text)
-            .collect::<Vec<_>>()
-            .join("\n---\n")
-    };
-    assert!(text(0).contains("MARKER-A"), "{}", text(0));
-    assert_no_notice_block(&text(0));
-    let second = text(1);
-    assert!(!second.contains("MARKER-A"), "{second}");
-    assert!(!second.contains("<memory id=\"rec-a\""), "{second}");
-    assert!(
-        second.contains(r#"id="rec-a""#) && second.contains(r#"reason="forgotten""#),
-        "{second}"
-    );
-    assert_eq!(memory.calls.load(Ordering::SeqCst), 1, "recall ran again");
+        let requests = agent.provider().normal_requests();
+        let text = |index: usize| {
+            requests[index]
+                .messages
+                .iter()
+                .map(Message::text)
+                .collect::<Vec<_>>()
+                .join("\n---\n")
+        };
+        assert!(text(0).contains("MARKER-A"), "{}", text(0));
+        assert_no_notice_block(&text(0));
+        let second = text(1);
+        assert!(!second.contains("MARKER-A"), "{second}");
+        assert!(!second.contains("<memory id=\"rec-a\""), "{second}");
+        assert!(
+            second.contains(r#"id="rec-a""#) && second.contains(r#"reason="forgotten""#),
+            "{second}"
+        );
+        assert_eq!(memory.calls.load(Ordering::SeqCst), 1, "recall ran again");
+    }
 }
 
 // Fails if the latest checkpoint's `details.memory_records` is not part of

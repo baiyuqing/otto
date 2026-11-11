@@ -3,6 +3,8 @@
 //! The tests below pin the identity, cooperation rules, and safety policies.
 //! Dynamic sections and the closing root element are appended by the parent
 //! or child prompt builder.
+//! Summary-tree source/zoom policy is added per request by
+//! `otto_core::agent::context_view` when that runner selects `view-tree`.
 //!
 //! Safety: a tool name reaches the model inside the prompt, so only names made
 //! of `[A-Za-z0-9_-]` and at most 64 bytes long are listed. Everything about a

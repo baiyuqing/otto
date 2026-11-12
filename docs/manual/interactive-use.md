@@ -1232,7 +1232,13 @@ node IDs refer to the current view.
 
 The recent suffix uses `[agent.compaction].keep_recent_tokens` (default 20,000),
 capped at half the available history budget. Model windows and the configured
-reserve also bound the view. The selected model writes nodes of at most 512
+reserve also bound the view. The summarized prefix only grows while history is
+unchanged: a later step with a larger suffix budget, such as the step after an
+overflow retry, keeps the already summarized messages instead of rebuilding the
+tree. A memory tool result whose full text is sent only for the current turn
+stays in the raw suffix while that suffix fits in half the history budget;
+beyond that, it is summarized from its saved placeholder text, as compaction
+stores it. The selected model writes nodes of at most 512
 bytes, with up to three attempts per node. Provider calls use the usual secret
 and PII egress controls; their usage is metered. Cached nodes survive runner
 replacement in the same active session. Reopening a session after process exit

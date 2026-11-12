@@ -85,6 +85,16 @@ impl ContextView {
         projected
     }
 
+    /// Length of the stored summarized prefix when it is still a prefix of `messages`, else 0.
+    fn summarized_prefix_len(&self, messages: &[Message]) -> usize {
+        let state = self.lock();
+        if messages.starts_with(&state.sources) {
+            state.sources.len()
+        } else {
+            0
+        }
+    }
+
     fn synchronize(&self, sources: &[Message], chunk_bytes: usize) -> Result<(), String> {
         let mut state = self.lock();
         if !sources.starts_with(&state.sources) {
@@ -186,24 +196,36 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .keep_recent_tokens
             .max(1)
             .min(history_budget / 2);
+        let context = &self.options.context_view;
         let mut prefix_end = retained_tail_start(&messages, tail_budget);
-        // Request-local output must remain available for this turn; summaries
-        // are made only from durable text, which may hold a placeholder.
+        // Request-local output must remain available for this turn, so the raw
+        // suffix starts before the first overlay tool result, but only while that
+        // suffix is at most half of the history budget. A larger suffix is
+        // summarized from the saved session text (a placeholder), never from the
+        // live overlay text.
         if let Some(overlay) = messages.iter().position(|message| {
             message.blocks.iter().any(|block| {
                 block.block_type == BlockType::ToolResult
                     && state.tool_result_overlay.contains_key(&block.tool_call_id)
             })
         }) {
-            prefix_end = prefix_end.min(overlay);
-            while prefix_end > 0 && messages[prefix_end].role == Role::Tool {
-                prefix_end -= 1;
+            let mut clamped_prefix_end = prefix_end.min(overlay);
+            while clamped_prefix_end > 0 && messages[clamped_prefix_end].role == Role::Tool {
+                clamped_prefix_end -= 1;
+            }
+            let raw_suffix_tokens = messages[clamped_prefix_end..]
+                .iter()
+                .map(context_estimate::estimate_message)
+                .fold(0i64, i64::saturating_add);
+            if raw_suffix_tokens <= history_budget / 2 {
+                prefix_end = clamped_prefix_end;
             }
         }
+        // Keep nodes already built for a longer prefix of this history.
+        prefix_end = prefix_end.max(context.summarized_prefix_len(&messages));
         let chunk_bytes = usize::try_from(history_budget.saturating_mul(3) / 2)
             .unwrap_or(12_000)
             .clamp(256, 12_000);
-        let context = &self.options.context_view;
         context
             .synchronize(&messages[..prefix_end], chunk_bytes)
             .map_err(AgentError::Other)?;

@@ -144,10 +144,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     pub(super) async fn dispatch_view_provider_step(
         &self,
         emit: EventSink<'_>,
-        state: &RunDispatchState,
+        state: &mut RunDispatchState,
         system_context: &str,
         control: &dyn OperationControl,
     ) -> Result<Response, AgentError> {
+        self.compact_images_before_view(emit, state, system_context, control)
+            .await?;
         self.prepare_context_view(emit, state, system_context, control, false)
             .await?;
         let (request, _) = self.build_normal_provider_request(state, system_context);
@@ -157,6 +159,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         match error {
             None => Ok(response),
             Some(error) if !visible && is_typed_context_overflow(&error) => {
+                // Images stay in the raw suffix, so only compaction can remove them.
+                if self.session.model_messages().iter().any(message_has_image) {
+                    if !self.compact_after_overflow(&error, emit, control).await? {
+                        return Err(error);
+                    }
+                    if let Some(stop) = stopped_provider_error(control) {
+                        return Err(AgentError::Provider(stop));
+                    }
+                }
                 self.prepare_context_view(emit, state, system_context, control, true)
                     .await?;
                 let (request, _) = self.build_normal_provider_request(state, system_context);
@@ -167,6 +178,59 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
             Some(error) => Err(error),
         }
+    }
+
+    /// Images cannot enter the summary tree, so a history with an image whose
+    /// raw suffix crosses the soft trigger gets one local compaction per turn
+    /// before any compressor call. Summarizing replaces the image with text.
+    async fn compact_images_before_view(
+        &self,
+        emit: EventSink<'_>,
+        state: &mut RunDispatchState,
+        system_context: &str,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
+        let Some((soft_trigger, hard_trigger)) =
+            automatic_compaction_triggers(&self.options.compaction)
+        else {
+            return Ok(());
+        };
+        if state.proactive_attempted {
+            return Ok(());
+        }
+        let messages = self.session.model_messages();
+        if !messages.iter().any(message_has_image) {
+            return Ok(());
+        }
+        let (mut overhead, _) = self.build_normal_provider_request(state, system_context);
+        overhead.messages.clear();
+        overhead.remote_compaction = None;
+        // Same tail budget as `prepare_context_view`, so the estimate matches the raw suffix it sends.
+        let overhead_estimate = context_estimate::estimate_request(&overhead, None);
+        let tail_budget = self
+            .options
+            .compaction
+            .keep_recent_tokens
+            .max(1)
+            .min((soft_trigger - overhead_estimate).max(512) / 2);
+        let raw_start = retained_tail_start(&messages, tail_budget);
+        let raw_suffix_estimate = messages[raw_start..]
+            .iter()
+            .map(context_estimate::estimate_message)
+            .fold(overhead_estimate, i64::saturating_add);
+        if raw_suffix_estimate <= soft_trigger {
+            return Ok(());
+        }
+        self.attempt_proactive_compaction(
+            CompactionReason::Threshold,
+            raw_suffix_estimate,
+            hard_trigger,
+            state,
+            emit,
+            control,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn prepare_context_view(
@@ -351,6 +415,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     }
 }
 
+fn message_has_image(message: &Message) -> bool {
+    message
+        .blocks
+        .iter()
+        .any(|block| block.block_type == BlockType::Image)
+}
+
 /// Keep a recent suffix, backing up to the start of any tool-call batch or image.
 fn retained_tail_start(messages: &[Message], budget: i64) -> usize {
     let mut start = messages.len();
@@ -359,12 +430,7 @@ fn retained_tail_start(messages: &[Message], budget: i64) -> usize {
         start -= 1;
         tokens = tokens.saturating_add(context_estimate::estimate_message(&messages[start]));
     }
-    if let Some(image) = messages.iter().position(|message| {
-        message
-            .blocks
-            .iter()
-            .any(|block| block.block_type == BlockType::Image)
-    }) {
+    if let Some(image) = messages.iter().position(message_has_image) {
         start = start.min(image);
     }
     while start > 0

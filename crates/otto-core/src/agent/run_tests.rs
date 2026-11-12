@@ -54,6 +54,7 @@ mod capability_plan;
 mod claude_cache_prefix;
 mod context_oneshot;
 mod context_view;
+mod context_view_images;
 mod durable_boundaries;
 mod input_delivery;
 mod input_provenance;

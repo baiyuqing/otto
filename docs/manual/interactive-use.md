@@ -1220,7 +1220,8 @@ returns the exact source chunk when `n=1`. For example, `zoom({"id":0,"n":2})`
 opens the first two chunks. Source chunks are UTF-8 JSON message fragments of
 at most 12,000 bytes; long messages span consecutive chunks. Context messages
 and input-origin metadata participate; display-only reasoning does not.
-Images and all history from the first image onward stay in the raw suffix.
+Images and all history from the first image onward stay in the raw suffix;
+see the image fallback below.
 Children receive their own tree and `zoom`, never access to the parent's tree.
 
 The tree is derived input: it does not replace or rewrite saved messages.
@@ -1245,11 +1246,19 @@ replacement in the same active session. Reopening a session after process exit
 rebuilds them, so initial/resumed turns can incur extra calls and latency.
 
 View mode replaces automatic local/remote compaction, even if compaction's
-`auto` is false. Summary failures stop the turn without deleting history. A
-typed context overflow before visible output gets one retry with a smaller
-history budget; a still-oversized raw tail, images or fixed prompt can still
-prevent the turn. Manual `/compact` remains available. This optional strategy
-does not promise better answer quality or lower measured provider cost.
+`auto` is false, with one exception for images. When the history contains an
+image and the request with the image-anchored raw suffix would exceed the
+working window minus the reserve, Otto runs one local compaction for that turn
+before sending, then rebuilds the tree from the compacted history; compacted
+images become `[User image]` text and no longer anchor the suffix. A typed
+context overflow before visible output gets one retry: after a local
+compaction when the history contains an image, otherwise with a smaller
+history budget. Summary failures stop the turn without deleting history. A
+still-oversized raw tail or fixed prompt can still prevent the turn. Every
+compaction in view mode, including manual `/compact`, is local, so its result
+is visible to the tree; a provider's remote compaction is not used. This
+optional strategy does not promise better answer quality or lower measured
+provider cost.
 
 ## Context compaction
 

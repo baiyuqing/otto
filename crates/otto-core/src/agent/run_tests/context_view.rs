@@ -442,3 +442,146 @@ async fn live_only_tool_output_stays_in_the_raw_tail_and_out_of_summaries() {
         );
     }
 }
+
+async fn append_filler_messages(session: &MemorySession, count: usize, words: usize) {
+    for index in 0..count {
+        session
+            .append(Message {
+                id: format!("filler-{index}"),
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                blocks: vec![Block::text(format!(
+                    "filler-{index} {}",
+                    "word ".repeat(words)
+                ))],
+                ..Message::default()
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn shrinking_summarized_prefix_keeps_built_nodes() {
+    let context = Arc::new(ContextView::default());
+    let session = MemorySession::new();
+    append_filler_messages(&session, 12, 240).await;
+    let mut options = view_options(context.clone());
+    options.compaction.working_window = 3_000;
+    options.compaction.hard_input_window = 20_000;
+    options.compaction.reserve_tokens = 0;
+    options.compaction.keep_recent_tokens = 1_000;
+    let agent = Agent::new(
+        ViewProvider::new(vec![Turn::overflow(), Turn::text("ok"), Turn::text("ok")]),
+        ViewExecutor { context },
+        session,
+        options,
+    );
+    let mut state = super::super::overflow::RunDispatchState::default();
+    // The overflow retry summarizes a longer prefix; the next step uses a shorter one.
+    for _ in 0..2 {
+        agent
+            .dispatch_normal_provider_step(&mut |_| {}, &mut state, "", &CancellationToken::new())
+            .await
+            .unwrap();
+    }
+    let inputs: Vec<String> = agent
+        .provider
+        .compression_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| serde_json::to_string(&request.messages).unwrap())
+        .collect();
+    let unique: std::collections::BTreeSet<&String> = inputs.iter().collect();
+    assert!(!inputs.is_empty());
+    assert_eq!(
+        unique.len(),
+        inputs.len(),
+        "a built node was compressed again"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn large_raw_suffix_after_overlay_result_is_summarized_from_saved_text() {
+    let context = Arc::new(ContextView::default());
+    let session = source_session().await;
+    let mut call = Turn::named_tool_call("read", "output-call", "{}")
+        .outcome
+        .unwrap()
+        .message;
+    call.id = "before-output".into();
+    session.append(call).await.unwrap();
+    session
+        .append(Message {
+            id: "saved-output".into(),
+            role: Role::Tool,
+            blocks: vec![Block {
+                block_type: BlockType::ToolResult,
+                tool_name: "read".into(),
+                tool_call_id: "output-call".into(),
+                text: "saved placeholder".into(),
+                ..Block::default()
+            }],
+            ..Message::default()
+        })
+        .await
+        .unwrap();
+    for index in 0..2 {
+        session
+            .append(Message {
+                id: format!("after-output-{index}"),
+                role: Role::Assistant,
+                blocks: vec![Block::text("recent ".repeat(600))],
+                ..Message::default()
+            })
+            .await
+            .unwrap();
+    }
+    let mut options = view_options(context.clone());
+    options.compaction.working_window = 3_000;
+    options.compaction.hard_input_window = 6_000;
+    options.compaction.reserve_tokens = 0;
+    options.compaction.keep_recent_tokens = 1;
+    let agent = Agent::new(
+        ViewProvider::new(vec![Turn::text("ok")]),
+        ViewExecutor { context },
+        session,
+        options,
+    );
+    let mut state = super::super::overflow::RunDispatchState::default();
+    state
+        .tool_result_overlay
+        .insert("output-call".into(), "live-only-output".into());
+    agent
+        .dispatch_normal_provider_step(&mut |_| {}, &mut state, "", &CancellationToken::new())
+        .await
+        .unwrap();
+    let requests = agent.provider.ordinary.requests();
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .any(|message| message.role == Role::Tool),
+        "the overlay tool result stayed in the raw suffix"
+    );
+    assert!(
+        !serde_json::to_string(&agent.session.messages())
+            .unwrap()
+            .contains("live-only-output")
+    );
+    let compression_requests = agent.provider.compression_requests.lock().unwrap();
+    assert!(!compression_requests.is_empty());
+    for request in compression_requests.iter() {
+        assert!(
+            !serde_json::to_string(&request.messages)
+                .unwrap()
+                .contains("live-only-output")
+        );
+    }
+}

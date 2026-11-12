@@ -71,54 +71,24 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             && let Some(reason) = proactive_reason
         {
             if !state.proactive_attempted {
-                state.proactive_attempted = true;
-                // Compaction futures live on the heap so the local and remote
-                // compaction state machines do not enlarge every turn future.
-                match Box::pin(self.compact_locked(reason, "", emit, control)).await {
-                    Err(error) if error.is_nothing_to_compact() => {
-                        emit(Event::CompactionCompleted {
-                            compaction: CompactionResult {
-                                reason,
-                                automatic: true,
-                                noop: true,
-                                ..CompactionResult::default()
-                            },
-                        });
-                        state.proactive_attempted = false;
-                    }
-                    Err(error) => {
-                        if let Some(stop) = stopped_provider_error(control) {
-                            return Err(AgentError::Provider(stop));
-                        }
-                        if let Some(cancellation) = automatic_cancellation(false, &error) {
-                            return Err(cancellation);
-                        }
-                        if estimate >= hard_trigger {
-                            return Err(automatic_dispatch_error(
-                                AUTOMATIC_COMPACTION_HARD_FAILURE_MESSAGE,
-                                vec![error.to_string()],
-                            ));
-                        }
-                        emit(Event::CompactionWarning {
-                            message: format!(
-                                "{AUTOMATIC_COMPACTION_WARNING_MESSAGE}: {}",
-                                self.redactor.redact_error(error)
-                            ),
-                        });
-                    }
-                    Ok(_) => {
-                        if let Some(error) = stopped_provider_error(control) {
-                            return Err(AgentError::Provider(error));
-                        }
-                        (request, estimate) =
-                            self.build_normal_provider_request(state, system_context);
-                        estimate_complete = context_estimate::estimate_complete(&request);
-                        if estimate_complete && estimate > hard_trigger {
-                            return Err(automatic_dispatch_error(
-                                AUTOMATIC_COMPACTION_STILL_TOO_LARGE_MESSAGE,
-                                Vec::new(),
-                            ));
-                        }
+                if self
+                    .attempt_proactive_compaction(
+                        reason,
+                        estimate,
+                        hard_trigger,
+                        state,
+                        emit,
+                        control,
+                    )
+                    .await?
+                {
+                    (request, estimate) = self.build_normal_provider_request(state, system_context);
+                    estimate_complete = context_estimate::estimate_complete(&request);
+                    if estimate_complete && estimate > hard_trigger {
+                        return Err(automatic_dispatch_error(
+                            AUTOMATIC_COMPACTION_STILL_TOO_LARGE_MESSAGE,
+                            Vec::new(),
+                        ));
                     }
                 }
             } else if estimate > hard_trigger {
@@ -142,30 +112,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(original_overflow);
         }
 
-        if let Err(compaction_error) =
-            Box::pin(self.compact_locked(CompactionReason::Overflow, "", emit, control)).await
+        if !self
+            .compact_after_overflow(&original_overflow, emit, control)
+            .await?
         {
-            if compaction_error.is_nothing_to_compact() {
-                emit(Event::CompactionCompleted {
-                    compaction: CompactionResult {
-                        reason: CompactionReason::Overflow,
-                        automatic: true,
-                        noop: true,
-                        ..CompactionResult::default()
-                    },
-                });
-                return Err(original_overflow);
-            }
-            if let Some(stop) = stopped_provider_error(control) {
-                return Err(AgentError::Provider(stop));
-            }
-            if let Some(cancellation) = automatic_cancellation(false, &compaction_error) {
-                return Err(cancellation);
-            }
-            return Err(automatic_dispatch_error(
-                OVERFLOW_COMPACTION_FAILURE_MESSAGE,
-                vec![original_overflow.to_string(), compaction_error.to_string()],
-            ));
+            return Err(original_overflow);
         }
         if let Some(error) = stopped_provider_error(control) {
             return Err(AgentError::Provider(error));
@@ -192,6 +143,104 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             Some(error) => Err(error),
             None => Ok(response),
         }
+    }
+
+    /// One automatic proactive compaction, at most once per turn (the caller
+    /// checks `state.proactive_attempted`). Returns `Ok(true)` when a
+    /// checkpoint was written, `Ok(false)` when there was nothing to compact
+    /// or compaction failed with `estimate` below `hard_trigger` (a warning
+    /// event is emitted), and an error when the stop or hard-limit rules apply.
+    pub(super) async fn attempt_proactive_compaction(
+        &self,
+        reason: CompactionReason,
+        estimate: i64,
+        hard_trigger: i64,
+        state: &mut RunDispatchState,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<bool, AgentError> {
+        state.proactive_attempted = true;
+        // Compaction futures live on the heap so the local and remote
+        // compaction state machines do not enlarge every turn future.
+        match Box::pin(self.compact_locked(reason, "", emit, control)).await {
+            Err(error) if error.is_nothing_to_compact() => {
+                emit(Event::CompactionCompleted {
+                    compaction: CompactionResult {
+                        reason,
+                        automatic: true,
+                        noop: true,
+                        ..CompactionResult::default()
+                    },
+                });
+                state.proactive_attempted = false;
+                Ok(false)
+            }
+            Err(error) => {
+                if let Some(stop) = stopped_provider_error(control) {
+                    return Err(AgentError::Provider(stop));
+                }
+                if let Some(cancellation) = automatic_cancellation(false, &error) {
+                    return Err(cancellation);
+                }
+                if estimate >= hard_trigger {
+                    return Err(automatic_dispatch_error(
+                        AUTOMATIC_COMPACTION_HARD_FAILURE_MESSAGE,
+                        vec![error.to_string()],
+                    ));
+                }
+                emit(Event::CompactionWarning {
+                    message: format!(
+                        "{AUTOMATIC_COMPACTION_WARNING_MESSAGE}: {}",
+                        self.redactor.redact_error(error)
+                    ),
+                });
+                Ok(false)
+            }
+            Ok(_) => {
+                if let Some(error) = stopped_provider_error(control) {
+                    return Err(AgentError::Provider(error));
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// Compaction after a typed context overflow. `Ok(true)` means a
+    /// checkpoint was written and the caller may retry; `Ok(false)` means
+    /// there was nothing to compact and the caller reports the original
+    /// overflow; an error is final.
+    pub(super) async fn compact_after_overflow(
+        &self,
+        original_overflow: &AgentError,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<bool, AgentError> {
+        let Err(compaction_error) =
+            Box::pin(self.compact_locked(CompactionReason::Overflow, "", emit, control)).await
+        else {
+            return Ok(true);
+        };
+        if compaction_error.is_nothing_to_compact() {
+            emit(Event::CompactionCompleted {
+                compaction: CompactionResult {
+                    reason: CompactionReason::Overflow,
+                    automatic: true,
+                    noop: true,
+                    ..CompactionResult::default()
+                },
+            });
+            return Ok(false);
+        }
+        if let Some(stop) = stopped_provider_error(control) {
+            return Err(AgentError::Provider(stop));
+        }
+        if let Some(cancellation) = automatic_cancellation(false, &compaction_error) {
+            return Err(cancellation);
+        }
+        Err(automatic_dispatch_error(
+            OVERFLOW_COMPACTION_FAILURE_MESSAGE,
+            vec![original_overflow.to_string(), compaction_error.to_string()],
+        ))
     }
 
     /// The capabilities a request sends: sorted, deduplicated tool names,

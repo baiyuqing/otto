@@ -148,7 +148,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         if !self.redactor.allows_dynamic_content() {
             return Err(AgentError::NothingToCompact);
         }
+        // The summary-tree strategy never carries a remote checkpoint: its
+        // requests are projected from local model messages.
         if focus.trim().is_empty()
+            && self.options.context_strategy
+                == crate::config::context_strategy::ContextStrategy::Compaction
             && matches!(
                 self.provider.capabilities().remote_compaction,
                 RemoteCompactionSupport::ResponsesV2

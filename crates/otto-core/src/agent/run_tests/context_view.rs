@@ -4,15 +4,15 @@ use super::*;
 use crate::agent::context_view::ContextView;
 use crate::config::context_strategy::ContextStrategy;
 
-struct ViewProvider {
-    ordinary: FakeProvider,
-    compressions: AtomicUsize,
+pub(super) struct ViewProvider {
+    pub(super) ordinary: FakeProvider,
+    pub(super) compressions: AtomicUsize,
     compression_requests: Mutex<Vec<Request>>,
     summary: String,
 }
 
 impl ViewProvider {
-    fn new(turns: Vec<Turn>) -> Self {
+    pub(super) fn new(turns: Vec<Turn>) -> Self {
         Self {
             ordinary: FakeProvider::new(turns).with_remote_compaction(),
             compressions: AtomicUsize::new(0),
@@ -47,8 +47,8 @@ impl Provider for ViewProvider {
     }
 }
 
-struct ViewExecutor {
-    context: Arc<ContextView>,
+pub(super) struct ViewExecutor {
+    pub(super) context: Arc<ContextView>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -83,7 +83,7 @@ impl ToolExecutor for ViewExecutor {
     }
 }
 
-fn view_options(context: Arc<ContextView>) -> Options {
+pub(super) fn view_options(context: Arc<ContextView>) -> Options {
     Options {
         context_strategy: ContextStrategy::ViewTree,
         context_view: context,

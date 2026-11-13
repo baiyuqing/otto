@@ -33,7 +33,6 @@ serde_json = { version = "=1.0.154", default-features = false, features = ["std"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", default-features = false }
 tokio-util = { version = "=0.7.20", default-features = false }
-wasm-bindgen = "=0.2.130"
 wasm-bindgen-test = "=0.3.80"
 regex = "=1.13.1"
 # Substring search for the egress secret scan; already in the lockfile through regex.

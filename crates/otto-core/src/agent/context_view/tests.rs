@@ -51,7 +51,9 @@ fn zoom_preserves_every_source_byte_and_rejects_overflow() {
 fn changing_source_invalidates_tree_and_cannot_project_a_different_prefix() {
     let context = ContextView::default();
     let source = message(Role::User, "original");
-    context.synchronize(&[source.clone()], 1000).unwrap();
+    context
+        .synchronize(std::slice::from_ref(&source), 1000)
+        .unwrap();
     {
         let mut state = context.lock();
         let address = crate::view_tree::NodeAddress::leaf(0);

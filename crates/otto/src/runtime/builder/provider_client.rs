@@ -210,7 +210,7 @@ where
 
 impl Builder {
     /// The provider client and the secret redactor the normal agents use for `runtime`. The
-    /// development evaluation (`otto eval view-tree`) calls its provider only through an
+    /// development evaluation (`otto eval memory-retraction`) calls its provider only through an
     /// `Agent` built with this redactor.
     pub fn eval_provider_access(
         &self,

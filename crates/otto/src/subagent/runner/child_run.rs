@@ -244,11 +244,7 @@ impl Runner {
             return Ok(task);
         }
 
-        let context_view = Arc::new(otto_core::agent::context_view::ContextView::default());
         let tools = ChildTools {
-            context_view: (self.config.template.context_strategy
-                == otto_core::config::context_strategy::ContextStrategy::ViewTree)
-                .then(|| context_view.clone()),
             session_id,
             registry: Arc::clone(&self.child_registry),
             allowed: definition
@@ -406,8 +402,6 @@ impl Runner {
             new_operation_id: Box::new(move || new_operation_id()),
             request_sizer: template.request_sizer.clone(),
             compaction: template.compaction,
-            context_strategy: template.context_strategy,
-            context_view,
             progress: template.progress,
             // A child gets no memory binding, no registry of its own, and a
             // private inbox: it can neither recall, delegate, nor observe the

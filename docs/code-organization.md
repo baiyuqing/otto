@@ -78,12 +78,6 @@ modules are:
   codecs.
 - `tool`: model-visible tool definitions and schema assembly.
 - `session`: Pi v3 session codec, compaction, and context association types.
-- `view_tree`: the summary-tree context view: log messages from session
-  history, tree nodes and build scheduling, due-ordered view selection, zoom
-  lookup, compressor prompts and the cache cost model. It is shared by
-  `agent::context_view` for configurable live session context and
-  `otto eval view-tree` (`crates/otto-cli/src/eval_command/`). The native
-  `tool/context_view.rs` binds read-only `zoom` to the executing session.
 - `agent`: provider/tool turn orchestration and emitted events.
 - `mailbox`: WASM-safe FIFO notification contract, delivery acknowledgement semantics, and the default in-memory adapter. Native runtime code composes persistence or external implementations.
 - `memory`: service-neutral capabilities, scoped requests, context projections,

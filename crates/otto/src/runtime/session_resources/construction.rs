@@ -76,7 +76,6 @@ impl Builder {
                 })
             });
             Arc::new(SessionResources {
-                context_view: Arc::default(),
                 notifications,
                 tasks,
                 reminders,

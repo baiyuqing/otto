@@ -29,7 +29,6 @@ pub mod compaction;
 pub mod compaction_select;
 pub mod context_estimate;
 pub mod context_report;
-pub mod context_view;
 pub mod events;
 pub mod hooks;
 pub mod inbox;
@@ -126,9 +125,6 @@ pub struct Options {
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
     /// The context windows and reserves that drive automatic compaction.
     pub compaction: CompactionSettings,
-    pub context_strategy: crate::config::context_strategy::ContextStrategy,
-    /// Session-owned derived context; shared only with this session’s zoom tool.
-    pub context_view: Arc<context_view::ContextView>,
     /// The limits that stop a turn making no progress. Every turn uses one,
     /// including each sub-agent's.
     pub progress: ProgressPolicy,
@@ -172,8 +168,6 @@ impl Default for Options {
             }),
             request_sizer: None,
             compaction: CompactionSettings::default(),
-            context_strategy: Default::default(),
-            context_view: Arc::default(),
             progress: ProgressPolicy::default(),
             memory: None,
             memory_recall_limit: DEFAULT_RECALL_LIMIT,

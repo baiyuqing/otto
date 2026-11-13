@@ -15,7 +15,6 @@
 
 pub mod agents;
 pub mod approval;
-pub mod context_strategy;
 pub mod duration;
 pub mod edit;
 pub mod endpoint;
@@ -225,8 +224,6 @@ pub struct Agent {
     pub no_progress_failures: Option<i64>,
     #[serde(default)]
     pub compaction: CompactionConfig,
-    #[serde(default)]
-    pub context: context_strategy::ContextConfig,
 }
 
 /// The `[agent.compaction]` table. Every field is optional so absent and

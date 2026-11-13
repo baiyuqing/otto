@@ -14,6 +14,10 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- The local terminal UI no longer overflows the default test-thread stack when
+  running saved queued prompts; turn execution keeps large controller futures
+  off the enclosing TUI futures' stack.
+
 - Chat connector approval dialogue now uses the saved session for background
   approvals and drains admitted dialogue replies before closing the agent.
 

@@ -7,6 +7,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Changed
+
+- Source and Docker builds now use Rust 1.100.0, managed by the repository's
+  pinned toolchain and build image.
+
 ### Fixed
 
 - Chat connector approval dialogue now uses the saved session for background

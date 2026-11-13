@@ -25,6 +25,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|retry| retry.interrupted_output) =>
             {
+                close_streams(&mut self.entries);
                 self.push_system(transcript::INTERRUPTED_OUTPUT_NOTICE);
             }
             "plan_updated" => {
@@ -44,16 +45,16 @@ impl App {
                 EntryKind::Assistant,
                 &event.text,
             ),
-            // `push_system` appends a row after the open reply and reasoning
-            // rows; `append_stream` only extends the last row, so the next
-            // delta starts a new row.
-            "step_interrupted" => self.push_system(match event.queued_guidance {
-                Some(1) => "Step interrupted; delivering 1 queued message.".to_string(),
-                Some(count) if count > 1 => {
-                    format!("Step interrupted; delivering {count} queued messages.")
-                }
-                _ => "Step interrupted.".to_string(),
-            }),
+            "step_interrupted" => {
+                close_streams(&mut self.entries);
+                self.push_system(match event.queued_guidance {
+                    Some(1) => "Step interrupted; delivering 1 queued message.".to_string(),
+                    Some(count) if count > 1 => {
+                        format!("Step interrupted; delivering {count} queued messages.")
+                    }
+                    _ => "Step interrupted.".to_string(),
+                });
+            }
             "provider_usage" if event.usage_present == Some(true) => {
                 let first_report =
                     self.cache_breakdown_complete.is_none() && self.usage == Default::default();

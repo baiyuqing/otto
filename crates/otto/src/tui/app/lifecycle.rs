@@ -89,6 +89,7 @@ impl App {
         self.retry_event = None;
     }
     pub fn end_turn(&mut self) {
+        close_streams(&mut self.entries);
         self.invalidate_local_status();
         self.busy_since = None;
         self.finish_steering();

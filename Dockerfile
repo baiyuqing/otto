@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.99.1-bookworm AS build
+FROM rust:1.100.0-bookworm AS build
 WORKDIR /src
 COPY rust-toolchain.toml ./
 # Optional CA secret for builds behind an HTTPS inspection proxy. Nothing

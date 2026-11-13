@@ -26,7 +26,7 @@ pub(super) fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 /// is streaming. An open `/agents` overlay is also re-queried on
 /// the same cadence as idle feature refreshes.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn drive_turn<B: Backend, T, E>(
+pub(super) fn drive_turn<B: Backend, T, E>(
     app: &mut App,
     terminal: &mut Terminal<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
@@ -35,65 +35,70 @@ pub(super) async fn drive_turn<B: Backend, T, E>(
     backend: &app::Backend<'_>,
     future: impl Future<Output = Result<T, E>>,
     mut apply: impl FnMut(&mut App, &WireEvent),
-) -> Result<T, E> {
-    tokio::pin!(future);
-    let mut frames = render::spinner_interval();
-    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
-    let mut status = tokio::time::interval(std::time::Duration::from_millis(500));
-    status.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut frame_gate = frame_gate::FrameGate::new(std::time::Instant::now());
-    loop {
-        let redraw = tokio::select! {
-            result=&mut future=>{
-                while let Ok(event)=events.try_recv(){apply(app,&event);}
+) -> impl Future<Output = Result<T, E>> {
+    // Allocate before constructing the driver future: otherwise the controller's
+    // large future is embedded in every enclosing TUI future, including restored
+    // prompts and the main loop, and can overflow a default test thread's stack.
+    let mut future = Box::pin(future);
+    async move {
+        let mut frames = render::spinner_interval();
+        let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
+        let mut status = tokio::time::interval(std::time::Duration::from_millis(500));
+        status.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut frame_gate = frame_gate::FrameGate::new(std::time::Instant::now());
+        loop {
+            let redraw = tokio::select! {
+                result=&mut future=>{
+                    while let Ok(event)=events.try_recv(){apply(app,&event);}
+                    let _ = terminal.draw(|frame| render::draw(frame, app));
+                    return result;
+                }
+                Some(event)=events.recv()=>{
+                    let redraw=frame_gate::wire_redraw(&event);
+                    apply(app,&event);
+                    redraw
+                }
+                Some(event)=keys.recv()=>{
+                    apply_turn_key(app,terminal,event,turn,backend);
+                    frame_gate::Redraw::Immediate
+                }
+                completion=app.next_completion()=>{
+                    if app.apply_completion(completion) {
+                        frame_gate::Redraw::Immediate
+                    } else {
+                        frame_gate::Redraw::None
+                    }
+                }
+                _=refresh.tick()=>{
+                    app.tick_features();
+                    app.request_approvals();
+                    app.poll_steering();
+                    frame_gate::Redraw::None
+                }
+                _=status.tick()=>{
+                    app.poll_local_status();
+                    frame_gate::Redraw::None
+                }
+                _=frames.tick()=>{
+                    if render::needs_animation(app) {
+                        frame_gate::Redraw::Immediate
+                    } else {
+                        frame_gate::Redraw::None
+                    }
+                }
+                _=frame_gate::wait_for_frame(frame_gate.deadline())=>frame_gate::Redraw::Immediate,
+            };
+            app.poll_observer();
+            let now = std::time::Instant::now();
+            let draw = match redraw {
+                frame_gate::Redraw::None => false,
+                frame_gate::Redraw::Paced => frame_gate.request(now),
+                frame_gate::Redraw::Immediate => true,
+            };
+            if draw {
                 let _ = terminal.draw(|frame| render::draw(frame, app));
-                return result;
+                frame_gate.drew(now);
             }
-            Some(event)=events.recv()=>{
-                let redraw=frame_gate::wire_redraw(&event);
-                apply(app,&event);
-                redraw
-            }
-            Some(event)=keys.recv()=>{
-                apply_turn_key(app,terminal,event,turn,backend);
-                frame_gate::Redraw::Immediate
-            }
-            completion=app.next_completion()=>{
-                if app.apply_completion(completion) {
-                    frame_gate::Redraw::Immediate
-                } else {
-                    frame_gate::Redraw::None
-                }
-            }
-            _=refresh.tick()=>{
-                app.tick_features();
-                app.request_approvals();
-                app.poll_steering();
-                frame_gate::Redraw::None
-            }
-            _=status.tick()=>{
-                app.poll_local_status();
-                frame_gate::Redraw::None
-            }
-            _=frames.tick()=>{
-                if render::needs_animation(app) {
-                    frame_gate::Redraw::Immediate
-                } else {
-                    frame_gate::Redraw::None
-                }
-            }
-            _=frame_gate::wait_for_frame(frame_gate.deadline())=>frame_gate::Redraw::Immediate,
-        };
-        app.poll_observer();
-        let now = std::time::Instant::now();
-        let draw = match redraw {
-            frame_gate::Redraw::None => false,
-            frame_gate::Redraw::Paced => frame_gate.request(now),
-            frame_gate::Redraw::Immediate => true,
-        };
-        if draw {
-            let _ = terminal.draw(|frame| render::draw(frame, app));
-            frame_gate.drew(now);
         }
     }
 }

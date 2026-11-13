@@ -255,10 +255,7 @@ impl UserinfoCollector {
                 return false;
             }
         }
-        if !final_before_at.is_empty() && !self.add(final_before_at) {
-            return false;
-        }
-        true
+        final_before_at.is_empty() || self.add(final_before_at)
     }
 
     /// Records a raw userinfo string together with its username, password, and

@@ -1199,71 +1199,10 @@ The tables are a format-reading reference, not a second execution API. Records
 from another Otto version may differ; inspect the matching version's writer and
 reader before assigning semantics to an unfamiliar extension.
 
-## Context strategy
-
-Choose how ordinary turns organize history in user or project configuration:
-
-```toml
-[agent.context]
-strategy = "view-tree" # Or "compaction", the default.
-```
-
-Restart or reopen the session after editing configuration. The shared runtime
-applies the choice to local TUI, prompt, HTTP, ACP, embedded and child sessions.
-Switch back to `compaction` to restore the existing context strategy.
-
-With `view-tree`, Otto retains a recent suffix with its original message roles
-and complete tool-call/result batches. Earlier model-visible history becomes
-an ordered summary tree; each `id+n|text` line covers `n` source chunks starting
-at `id`. The read-only `zoom` tool opens a range into two child summaries, or
-returns the exact source chunk when `n=1`. For example, `zoom({"id":0,"n":2})`
-opens the first two chunks. Source chunks are UTF-8 JSON message fragments of
-at most 12,000 bytes; long messages span consecutive chunks. Context messages
-and input-origin metadata participate; display-only reasoning does not.
-Images and all history from the first image onward stay in the raw suffix;
-see the image fallback below.
-Children receive their own tree and `zoom`, never access to the parent's tree.
-
-The tree is derived input: it does not replace or rewrite saved messages.
-Existing local checkpoints remain summaries, rather than recovering their
-discarded provider context. A provider's opaque remote checkpoint is not sent
-in view mode; the tree uses the locally retained model projection. Editing
-history or applying manual compaction invalidates incompatible cached nodes;
-node IDs refer to the current view.
-
-The recent suffix uses `[agent.compaction].keep_recent_tokens` (default 20,000),
-capped at half the available history budget. Model windows and the configured
-reserve also bound the view. The summarized prefix only grows while history is
-unchanged: a later step with a larger suffix budget, such as the step after an
-overflow retry, keeps the already summarized messages instead of rebuilding the
-tree. A memory tool result whose full text is sent only for the current turn
-stays in the raw suffix while that suffix fits in half the history budget;
-beyond that, it is summarized from its saved placeholder text, as compaction
-stores it. The selected model writes nodes of at most 512
-bytes, with up to three attempts per node. Provider calls use the usual secret
-and PII egress controls; their usage is metered. Cached nodes survive runner
-replacement in the same active session. Reopening a session after process exit
-rebuilds them, so initial/resumed turns can incur extra calls and latency.
-
-View mode replaces automatic local/remote compaction, even if compaction's
-`auto` is false, with one exception for images. When the history contains an
-image and the request with the image-anchored raw suffix would exceed the
-working window minus the reserve, Otto runs one local compaction for that turn
-before sending, then rebuilds the tree from the compacted history; compacted
-images become `[User image]` text and no longer anchor the suffix. A typed
-context overflow before visible output gets one retry: after a local
-compaction when the history contains an image, otherwise with a smaller
-history budget. Summary failures stop the turn without deleting history. A
-still-oversized raw tail or fixed prompt can still prevent the turn. Every
-compaction in view mode, including manual `/compact`, is local, so its result
-is visible to the tree; a provider's remote compaction is not used. This
-optional strategy does not promise better answer quality or lower measured
-provider cost.
-
 ## Context compaction
 
-The default `compaction` strategy is configured in `[agent.compaction]` and,
-when needed, with per-model context metadata.
+Context compaction is configured in `[agent.compaction]` and, when needed,
+with per-model context metadata.
 
 Rules and defaults:
 

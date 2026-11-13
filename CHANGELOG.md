@@ -43,13 +43,6 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
-- Sessions can select `[agent.context] strategy = "view-tree"` for summary-tree
-  history with a session-scoped `zoom` tool. `compaction` remains the default;
-  sessions whose image-anchored history would exceed the working window fall
-  back to one local compaction for that turn. See
-  [context strategies](docs/manual/interactive-use.md#context-strategy) for
-  extra model calls, cache lifetime and image handling.
-
 - `otto --attach` accepts `/sandbox allow|network|exclude` and
   `/approve <id> always`. `otto serve` adds
   `POST /v1/sessions/{id}/sandbox/changes`, and the approval decision route
@@ -121,6 +114,10 @@ commit ledger; Git and release tags retain the full history. See the
   SQLite and POSIX storage only. `~/.otto/storage/authority.json` and
   `~/.otto/storage/writer-admission.lock` are no longer read and can be
   deleted. Only `otto storage window-peaks` remains.
+
+### Removed
+
+- `otto eval view-tree` and the summary-tree evaluation are removed.
 
 ### Fixed
 

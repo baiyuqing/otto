@@ -83,10 +83,9 @@ pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
 /// because a child's plan would be shown nowhere; and delivery, which only a
 /// parent may start and which would otherwise let a child reach another
 /// workspace.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 22] = [
+pub const EXCLUDED_CHILD_TOOLS: [&str; 21] = [
     // Bound independently by each ChildTools, never inherited from a parent catalog.
     "session_info",
-    "zoom",
     "workflow_list",
     "workflow_inspect",
     "workflow_start",
@@ -140,7 +139,6 @@ pub struct OptionsTemplate {
     pub provider_name: String,
     pub thinking: String,
     pub compaction: CompactionSettings,
-    pub context_strategy: otto_core::config::context_strategy::ContextStrategy,
     /// The parent's progress limits. A child inherits them, so a stuck child
     /// stops on the same rule as the parent's own loop.
     pub progress: ProgressPolicy,
@@ -166,7 +164,6 @@ impl Default for OptionsTemplate {
             provider_name: String::new(),
             thinking: String::new(),
             compaction: CompactionSettings::default(),
-            context_strategy: Default::default(),
             progress: ProgressPolicy::default(),
             request_sizer: None,
             provider_timeout: None,

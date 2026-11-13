@@ -53,7 +53,6 @@ fn environment(max_calls: u32) -> (CaseEnvironment, RequestLog, Arc<Mutex<Vec<St
         redactor: Redactor::new(&[]),
         provider_name: "openai-compatible".into(),
         profile_model: "profile-model".into(),
-        compressor_model: "compressor-model".into(),
         thinking: String::new(),
         compaction: CompactionRuntime {
             auto: false,

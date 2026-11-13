@@ -23,10 +23,6 @@ impl OutputDir {
         })
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub fn path(&self, name: &str) -> PathBuf {
         self.root.join(name)
     }
@@ -97,14 +93,6 @@ impl OutputDir {
                     .map_err(|error| format!("{} line {}: {error}", path.display(), index + 1))
             })
             .collect()
-    }
-
-    /// Reads a JSON file.
-    pub fn read_json<T: DeserializeOwned>(&self, name: &str) -> Result<T, String> {
-        let path = self.path(name);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|error| format!("read {}: {error}", path.display()))?;
-        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
     }
 
     fn write_file(&self, name: &str, text: &str) -> Result<(), String> {

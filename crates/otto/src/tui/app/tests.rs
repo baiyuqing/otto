@@ -115,6 +115,7 @@ mod observer;
 mod reads_and_sessions;
 mod steering;
 mod step_interrupt;
+mod stream_continuity;
 mod structured_approvals;
 mod surfaces_and_approvals;
 mod usage_and_tool_timing;

@@ -240,8 +240,12 @@ impl App {
 }
 
 fn append_stream(entries: &mut Vec<Entry>, id: &str, kind: EntryKind, text: &str) {
+    // Status notices may arrive between chunks of the same provider reply.
+    // Only content rows or an explicitly closed stream delimit its output.
     if let Some(last) = entries
-        .last_mut()
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.kind != Some(EntryKind::System))
         .filter(|e| e.kind == Some(kind) && e.id == id)
     {
         last.raw.push_str(text)
@@ -254,6 +258,17 @@ fn append_stream(entries: &mut Vec<Entry>, id: &str, kind: EntryKind, text: &str
         })
     }
 }
+/// Close live rows without dropping their contents or informational notices.
+fn close_streams(entries: &mut [Entry]) {
+    for (index, entry) in entries.iter_mut().enumerate().rev() {
+        if matches!(entry.id.as_str(), "streaming" | "streaming-reasoning") {
+            entry.id = format!("completed-stream-{index}");
+        } else if entry.kind != Some(EntryKind::System) {
+            break;
+        }
+    }
+}
+
 /// The prompts a session already had, oldest first, for the composer's recall.
 fn prompt_history(entries: &[Entry]) -> Vec<String> {
     entries

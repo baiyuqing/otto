@@ -138,21 +138,16 @@ fn a_flag_without_a_value_is_rejected() {
 #[test]
 fn eval_routes_each_target_to_its_parser() {
     let memory = parse_command(&arguments(&["memory-retraction", "--layer", "2"])).unwrap();
-    match memory {
-        EvalCommand::MemoryRetraction(invocation) => {
-            assert_eq!(invocation.options.layer, Layer::Two);
-        }
-        other => panic!("expected the memory-retraction target, got {other:?}"),
-    }
-    let view_tree = parse_command(&arguments(&["view-tree", "build", "--session", "s"])).unwrap();
-    assert!(matches!(view_tree, EvalCommand::ViewTree(_)));
+    let EvalCommand::MemoryRetraction(invocation) = memory;
+    assert_eq!(invocation.options.layer, Layer::Two);
+    let message = parse_command(&arguments(&["view-tree", "build"])).expect_err("rejected");
+    assert!(message.contains("unknown eval target"), "{message}");
 }
 
 #[test]
-fn eval_errors_name_both_targets() {
+fn eval_errors_name_the_target() {
     for values in [vec![], vec!["other"]] {
         let message = parse_command(&arguments(&values)).expect_err("rejected");
-        assert!(message.contains("view-tree"), "{message}");
         assert!(message.contains("memory-retraction"), "{message}");
     }
 }

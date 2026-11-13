@@ -86,7 +86,6 @@ pub async fn run(
         redactor,
         provider_name: runtime.provider_type.clone(),
         profile_model: runtime.model.clone(),
-        compressor_model: runtime.model.clone(),
         thinking: runtime.thinking.clone(),
         compaction: runtime.compaction,
         cancel: cancel.clone(),

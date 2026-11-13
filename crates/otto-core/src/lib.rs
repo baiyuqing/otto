@@ -24,5 +24,4 @@ pub mod safetext;
 pub mod session;
 pub mod tool;
 pub mod verification;
-pub mod view_tree;
 pub mod wire;

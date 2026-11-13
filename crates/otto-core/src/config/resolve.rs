@@ -154,7 +154,6 @@ pub struct Runtime {
     pub shell_timeout: Duration,
     pub max_output_bytes: i64,
     pub compaction: CompactionRuntime,
-    pub context_strategy: super::context_strategy::ContextStrategy,
     pub resilience: ResilienceRuntime,
     pub progress: ProgressRuntime,
 }
@@ -410,7 +409,6 @@ fn resolve_impl(
         shell_timeout,
         max_output_bytes,
         compaction,
-        context_strategy: file.agent.context.strategy.unwrap_or_default(),
         resilience,
         progress,
     };

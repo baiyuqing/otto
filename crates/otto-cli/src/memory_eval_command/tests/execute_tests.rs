@@ -60,7 +60,6 @@ fn environment(provider: ScriptedProvider, redactor: Redactor) -> (Environment, 
         redactor,
         provider_name: "openai-compatible".into(),
         profile_model: "profile-model".into(),
-        compressor_model: "profile-model".into(),
         thinking: String::new(),
         compaction: CompactionRuntime {
             auto: false,

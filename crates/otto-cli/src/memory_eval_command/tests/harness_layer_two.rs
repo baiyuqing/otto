@@ -234,7 +234,6 @@ fn environment_with<P>(
         redactor: Redactor::new(&[]),
         provider_name: template.provider_name.clone(),
         profile_model: template.profile_model.clone(),
-        compressor_model: template.compressor_model.clone(),
         thinking: String::new(),
         compaction: template.compaction,
         cancel: tokio_util::sync::CancellationToken::new(),

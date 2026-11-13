@@ -190,10 +190,10 @@ pub async fn run_with_extensions(
         workspace: workspace_path.clone(),
         home: loaded.home.clone(),
     });
-    if let (Some(command), Some(roots)) = (&eval_command, &eval_roots)
+    if let Some(command) = &eval_command
         && command.is_dry_run()
     {
-        return crate::eval_command::run_dry_command(command, roots, stdout, stderr);
+        return crate::eval_command::run_dry_command(command, stdout, stderr);
     }
 
     if let Some(target) = &options.delete_target {

@@ -69,7 +69,6 @@ fn child_tools_with_budget(
     budget: usize,
 ) -> ChildTools {
     ChildTools {
-        context_view: None,
         registry,
         allowed: None,
         write_policy,

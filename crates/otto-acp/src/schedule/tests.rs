@@ -15,10 +15,19 @@ use otto_core::session::Session as _;
 fn connection(
     schedule: Option<Arc<dyn otto::schedule::ScheduleStore>>,
 ) -> (Arc<Connection>, mpsc::UnboundedReceiver<Value>) {
+    connection_as(otto_server::authorization::Principal::Owner, schedule)
+}
+
+fn connection_as(
+    principal: otto_server::authorization::Principal,
+    schedule: Option<Arc<dyn otto::schedule::ScheduleStore>>,
+) -> (Arc<Connection>, mpsc::UnboundedReceiver<Value>) {
     let (out, frames) = mpsc::unbounded_channel();
+    let mut relay = super::super::attach::Relay::unreachable(schedule);
+    relay.principal = principal;
     let connection = Arc::new(Connection {
         workspace: "/work".into(),
-        backend: Backend::Attach(super::super::attach::Relay::unreachable(schedule)),
+        backend: Backend::Attach(relay),
         out,
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(1),
@@ -140,6 +149,18 @@ fn no_worker_without_platforms_or_store() {
     assert!(worker(&with_store, Vec::new()).is_none());
     let attach = worker(&with_store, vec!["telegram".into()]).unwrap();
     assert!(attach.run.is_none() && attach.deliver.is_some());
+}
+
+#[test]
+fn a_client_principal_gets_no_delivery_worker() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let principal = otto_server::authorization::Principal::Client {
+        name: "test-client".into(),
+    };
+    let (client, _frames) = connection_as(principal, Some(store.clone()));
+    assert!(worker(&client, vec!["telegram".into()]).is_none());
+    let (owner, _frames) = connection(Some(store));
+    assert!(worker(&owner, vec!["telegram".into()]).is_some());
 }
 
 /// A client of `drive`: frames go in through a pipe, out through a

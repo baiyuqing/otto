@@ -400,86 +400,54 @@ async fn workflow_routes_report_the_disabled_error_for_a_workspace_with_no_contr
     assert_eq!(default_list.status, StatusCode::OK, "{}", default_list.body);
 }
 
-/// Every API path the router serves.
-///
-/// ponytail: axum exposes no route table, so this list is written out once
-/// and checked against both the router and `openapi.yaml`.
-pub(super) const ROUTES: &[&str] = &[
-    "/v1/config/providers",
-    "/v1/config/providers/{name}",
-    "/v1/config/models",
-    "/v1/config/changes",
-    "/v1/config/changes/{id}",
-    "/v1/sessions",
-    "/v1/sessions/{id}",
-    "/v1/sessions/{id}/history",
-    "/v1/sessions/{id}/context",
-    "/v1/sessions/{id}/trace",
-    "/v1/sessions/{id}/trace/{span_id}",
-    "/v1/sessions/{id}/model",
-    "/v1/sessions/{id}/approvals/{approval_id}",
-    "/v1/sessions/{id}/inputs",
-    "/v1/sessions/{id}/tasks/steer",
-    "/v1/sessions/{id}/tasks/steer/interrupt",
-    "/v1/sessions/{id}/tasks/control",
-    "/v1/sessions/{id}/turns",
-    "/v1/sessions/{id}/turns/{turn_id}",
-    "/v1/sessions/{id}/turns/{turn_id}/events",
-    "/v1/sessions/{id}/turns/{turn_id}/cancel",
-    "/v1/sessions/{id}/compact",
-    "/v1/sessions/{id}/wake-replies",
-    "/v1/sessions/{id}/tasks",
-    "/v1/sessions/{id}/tasks/{task_id}",
-    "/v1/sessions/{id}/tasks/{task_id}/cancel",
-    "/v1/sessions/{id}/timers",
-    "/v1/sessions/{id}/timers/{timer_id}/cancel",
-    "/v1/sessions/{id}/mcp",
-    "/v1/sessions/{id}/memory/records",
-    "/v1/sessions/{id}/memory/records/{record_id}",
-    "/v1/sessions/{id}/memory/records/{record_id}/state",
-    "/v1/sessions/{id}/memory/records/{record_id}/verify",
-    "/v1/sessions/{id}/memory/records/{record_id}/history",
-    "/v1/sessions/{id}/memory/records/{record_id}/diff",
-    "/v1/sessions/{id}/memory/records/{record_id}/restore",
-    "/v1/sessions/{id}/memory/records/{record_id}/propose",
-    "/v1/sessions/{id}/memory/search",
-    "/v1/sessions/{id}/memory/candidates",
-    "/v1/sessions/{id}/memory/candidates/{candidate_id}/review",
-    "/v1/sessions/{id}/skill-manager",
-    "/v1/sessions/{id}/skill-manager/{name}",
-    "/v1/sessions/{id}/skills",
-    "/v1/sessions/{id}/skills/{name}",
-    "/v1/sessions/{id}/skills/{name}/enable",
-    "/v1/sessions/{id}/skills/{name}/disable",
-    "/v1/sandbox/reload",
-    "/v1/tasks",
-    "/v1/tasks/{parent_session}/{task_id}",
-    "/v1/workflows",
-    "/v1/workflows/{id}",
-    "/v1/workflows/{id}/events",
-    "/v1/workflows/{id}/resume",
-    "/v1/workflows/{id}/fork",
-    "/v1/workflows/{id}/cancel",
-    "/v1/workflows/requests/{id}/approve",
-    "/v1/workflows/requests/{id}/reject",
-    "/v1/workspaces",
-    "/v1/workspaces/diff",
-    "/v1/info",
-    "/v1/status",
-    "/v1/usage",
-    "/v1/usage/daily",
-    "/v1/openapi.yaml",
-    "/healthz",
-    "/metrics",
-];
+/// Every route pattern the router serves, from the operation registry.
+fn route_paths() -> Vec<&'static str> {
+    let mut paths: Vec<&'static str> = Vec::new();
+    for operation in authorization::OperationId::ALL {
+        if !paths.contains(&operation.path()) {
+            paths.push(operation.path());
+        }
+    }
+    paths
+}
 
 #[test]
-fn openapi_documents_every_route() {
+fn openapi_documents_exactly_the_registered_operations() {
     let document = String::from_utf8_lossy(OPENAPI_YAML);
-    for path in ROUTES {
-        let want = format!("\n  {path}:");
-        assert!(document.contains(&want), "openapi.yaml is missing {path}");
+    let mut documented = std::collections::BTreeSet::new();
+    let mut path: Option<&str> = None;
+    for line in document.lines() {
+        if let Some(key) = line
+            .strip_prefix("  ")
+            .and_then(|rest| rest.strip_suffix(':'))
+            && key.starts_with('/')
+        {
+            path = Some(key);
+        } else if !line.starts_with(' ') && !line.is_empty() {
+            path = None;
+        } else if let (Some(path), Some(method)) = (
+            path,
+            line.strip_prefix("    ")
+                .and_then(|rest| rest.strip_suffix(':'))
+                .filter(|method| ["get", "post", "put", "patch", "delete"].contains(method)),
+        ) {
+            documented.insert(format!("{} {path}", method.to_uppercase()));
+        }
     }
+    let registered: std::collections::BTreeSet<String> = authorization::OperationId::ALL
+        .iter()
+        .map(|operation| format!("{} {}", operation.method(), operation.path()))
+        .collect();
+    let undocumented: Vec<_> = registered.difference(&documented).collect();
+    let unserved: Vec<_> = documented.difference(&registered).collect();
+    assert!(
+        undocumented.is_empty(),
+        "openapi.yaml is missing {undocumented:?}"
+    );
+    assert!(
+        unserved.is_empty(),
+        "openapi.yaml documents unserved {unserved:?}"
+    );
     assert!(document.matches("enum: [telegram]").count() >= 2);
 }
 
@@ -487,15 +455,22 @@ fn openapi_documents_every_route() {
 async fn every_documented_route_is_reachable_on_the_router() {
     let harness = Harness::new();
     let id = harness.create().await;
-    for path in ROUTES {
-        let probe = path
-            .replace("{id}", &id)
-            .replace("{turn_id}", "nope")
-            .replace("{task_id}", "nope")
-            .replace("{span_id}", "nope")
-            .replace("{timer_id}", "nope")
-            .replace("{approval_id}", "nope")
-            .replace("{name}", "nope");
+    for path in route_paths() {
+        let mut probe = path.replace("{id}", &id);
+        for parameter in [
+            "{turn_id}",
+            "{task_id}",
+            "{span_id}",
+            "{timer_id}",
+            "{approval_id}",
+            "{name}",
+            "{message_id}",
+            "{record_id}",
+            "{candidate_id}",
+            "{parent_session}",
+        ] {
+            probe = probe.replace(parameter, "nope");
+        }
         // An unmatched path logs the route label "unmatched"; a matched
         // one logs its own pattern. That is the reachability check.
         let before = harness.logged().len();

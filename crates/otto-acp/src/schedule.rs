@@ -113,15 +113,24 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
         }
         // In-process ACP (`otto serve --acp-listen`) counts into serve's
         // `/metrics`; `otto acp --attach` has no registry of its own.
-        Backend::Attach(relay) => (
-            relay.schedule.clone()?,
-            None,
-            Arc::clone(&relay.logger),
-            relay
-                .server
-                .as_ref()
-                .map(|server| Arc::clone(server.metrics())),
-        ),
+        Backend::Attach(relay) => {
+            if !delivery_authorized(&relay.principal) {
+                relay.logger.info(
+                    "schedule_delivery_denied",
+                    &[("principal", relay.principal.name().to_string())],
+                );
+                return None;
+            }
+            (
+                relay.schedule.clone()?,
+                None,
+                Arc::clone(&relay.logger),
+                relay
+                    .server
+                    .as_ref()
+                    .map(|server| Arc::clone(server.metrics())),
+            )
+        }
     };
     let client_id = otto::runtime::builder::random_id().ok()?;
     if store
@@ -150,6 +159,16 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
         logger,
         metrics,
     })
+}
+
+/// The relay's worker claims and acknowledges due items in the schedule store
+/// directly, the same operations as `POST /v1/schedule/claim` and
+/// `POST /v1/schedule/{id}/delivered`, so it needs both.
+fn delivery_authorized(principal: &otto_server::authorization::Principal) -> bool {
+    use otto_server::authorization::{OperationId, authorize};
+    [OperationId::ScheduleClaim, OperationId::ScheduleDelivered]
+        .into_iter()
+        .all(|operation| authorize(Some(principal), operation, &[]).is_ok())
 }
 
 struct LocalRunner {

@@ -43,6 +43,7 @@ use otto::app::ApprovalDecision;
 use otto::app::Channel;
 use otto::client::{Client, Error as ClientError};
 use otto::schedule::Origin;
+use otto_server::authorization::Principal;
 
 const LOST: &str = "connection to otto serve lost";
 
@@ -58,6 +59,10 @@ struct OpenApproval {
 pub(super) struct Relay {
     pub(super) client: Client,
     pub(super) server: Option<Arc<otto_server::Server>>,
+    /// The caller this connection authenticated as. Requests through
+    /// `client` are authorized as this principal; the schedule worker, which
+    /// uses `schedule` directly, checks it itself.
+    pub(super) principal: Principal,
     /// The store this connection delivers scheduled items from.
     pub(super) schedule: Option<Arc<dyn otto::schedule::ScheduleStore>>,
     /// The process log, for the connection's schedule worker.
@@ -88,6 +93,7 @@ impl Relay {
         Self {
             client: Client::in_process(router),
             server: None,
+            principal: Principal::Owner,
             schedule: None,
             logger: Arc::new(otto::log::Logger::discard()),
             sessions: Mutex::new(HashMap::new()),
@@ -101,6 +107,7 @@ impl Relay {
         Self {
             client: Client::new(Path::new("/nonexistent/otto.sock")).expect("client"),
             server: None,
+            principal: Principal::Owner,
             schedule,
             logger: Arc::new(otto::log::Logger::discard()),
             sessions: Mutex::new(HashMap::new()),
@@ -558,6 +565,7 @@ pub async fn run(
     let relay = Relay {
         client,
         server: None,
+        principal: Principal::Owner,
         schedule,
         logger,
         sessions: Mutex::new(HashMap::new()),
@@ -577,8 +585,10 @@ pub async fn run(
 }
 
 /// ACP served by the HTTP server process, sharing its router and controllers.
+/// Every request of the connection is authorized as `principal`.
 pub(super) async fn serve_in_process(
     server: Arc<otto_server::Server>,
+    principal: Principal,
     workspace: PathBuf,
     input: Box<dyn BufRead + Send>,
     output: &mut (dyn Write + Send),
@@ -586,8 +596,9 @@ pub(super) async fn serve_in_process(
 ) {
     let lost = CancellationToken::new();
     let relay = Relay {
-        client: Client::in_process(server.socket_router())
+        client: Client::in_process(server.router_for(principal.clone()))
             .with_input_source(otto_core::model::InputSource::Acp),
+        principal,
         schedule: server.schedule_store(),
         logger: Arc::clone(server.logger()),
         server: Some(server),

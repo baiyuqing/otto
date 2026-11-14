@@ -76,7 +76,7 @@ fn a_relayed_prompt_sends_the_same_updates_as_local_acp() {
     );
     let session_id = relay.new_session(workspace.path());
     let (_, memory) = relay.call("_otto/memory/pending", json!({"sessionId": session_id}));
-    assert_eq!(memory["error"]["code"], -32601, "{memory}");
+    assert_eq!(memory["result"]["candidates"], json!([]), "{memory}");
     let (_, approval) = relay.call(
         "_otto/approvals/message",
         json!({"sessionId": session_id, "text": "hello"}),

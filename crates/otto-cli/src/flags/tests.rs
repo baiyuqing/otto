@@ -49,19 +49,11 @@ fn delete_command_has_a_separate_strict_grammar() {
 }
 
 #[test]
-fn acp_tcp_listener_requires_serve() {
-    let got = options(&["serve", "--acp-listen", "127.0.0.1:9001"]);
-    assert_eq!(got.acp_listen, "127.0.0.1:9001");
-    for args in [
-        vec!["--acp-listen", "127.0.0.1:9001"],
-        vec!["acp", "--acp-listen", "127.0.0.1:9001"],
-    ] {
-        let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
-        assert!(matches!(
-            parse_flags(&args, &mut Vec::new()),
-            Err(ParseFailure::Rejected(_))
-        ));
-    }
+fn acp_listen_is_an_unknown_option() {
+    assert_eq!(
+        parse(&["serve", "--acp-listen", "127.0.0.1:9001"]).expect_err("rejected"),
+        ParseFailure::Unsafe
+    );
 }
 
 #[test]
@@ -229,9 +221,7 @@ fn help_prints_usage_and_stops() {
         assert!(text.contains(
             "  --sandbox MODE         sandbox mode: auto, seatbelt, or off (off is unsafe)\n"
         ));
-        assert!(text.contains(
-            "  --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)\n"
-        ));
+        assert!(!text.contains("--acp-listen"), "{text}");
     }
 }
 

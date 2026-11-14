@@ -27,10 +27,6 @@ mod binary_harness;
 mod bootstrap_tests;
 use otto::fixtures::scripted_provider::{Script, serve, text_reply, tool_call_reply};
 
-/// Wait for one ACP frame. Session creation takes about 0.9 s alone and about
-/// 10 s when this file's tests run in parallel in a debug build.
-const ACP_READ: Duration = Duration::from_secs(30);
-
 /// Lets a test read serve's stdout while the server task is still writing.
 #[derive(Clone, Default)]
 struct LockedBuffer(Arc<Mutex<Vec<u8>>>);
@@ -431,6 +427,3 @@ async fn model_queued_followup_runs_after_the_task_with_agent_provenance() {
     cancel.cancel();
     assert_eq!(handle.await.unwrap(), 0, "{}", stderr.text());
 }
-
-#[path = "serve_listen/acp_tcp.rs"]
-mod acp_tcp;

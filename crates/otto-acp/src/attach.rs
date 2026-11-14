@@ -58,10 +58,9 @@ struct OpenApproval {
 
 pub(super) struct Relay {
     pub(super) client: Client,
-    pub(super) server: Option<Arc<otto_server::Server>>,
-    /// The caller this connection authenticated as. Requests through
-    /// `client` are authorized as this principal; the schedule worker, which
-    /// uses `schedule` directly, checks it itself.
+    /// The caller this connection is authorized as. `otto acp --attach`
+    /// reaches serve through its Unix socket, so it is the owner; the schedule
+    /// worker, which uses `schedule` directly, checks it itself.
     pub(super) principal: Principal,
     /// The store this connection delivers scheduled items from.
     pub(super) schedule: Option<Arc<dyn otto::schedule::ScheduleStore>>,
@@ -72,27 +71,12 @@ pub(super) struct Relay {
     lost: CancellationToken,
 }
 
-impl Drop for Relay {
-    /// Releases the sessions this connection pinned, so the server's idle
-    /// sweeper can close them once nothing else holds them.
-    fn drop(&mut self) {
-        let Some(server) = &self.server else {
-            return;
-        };
-        let sessions = self.sessions.lock().expect("session map");
-        for id in sessions.keys() {
-            server.unpin_session(id);
-        }
-    }
-}
-
 impl Relay {
     /// A relay whose server is `router`, for tests of what the relay sends.
     #[cfg(test)]
     pub(super) fn with_router(router: axum::Router) -> Self {
         Self {
             client: Client::in_process(router),
-            server: None,
             principal: Principal::Owner,
             schedule: None,
             logger: Arc::new(otto::log::Logger::discard()),
@@ -106,7 +90,6 @@ impl Relay {
     pub(super) fn unreachable(schedule: Option<Arc<dyn otto::schedule::ScheduleStore>>) -> Self {
         Self {
             client: Client::new(Path::new("/nonexistent/otto.sock")).expect("client"),
-            server: None,
             principal: Principal::Owner,
             schedule,
             logger: Arc::new(otto::log::Logger::discard()),
@@ -120,17 +103,11 @@ impl Relay {
     }
 
     pub(super) fn register(&self, id: &str) {
-        let newly = {
-            let mut sessions = self.sessions.lock().expect("session map");
-            let newly = !sessions.contains_key(id);
-            sessions.entry(id.to_string()).or_default();
-            newly
-        };
-        // A connection that holds a session keeps it open: the server's idle
-        // sweeper must not close a session this frontend is still using.
-        if newly && let Some(server) = &self.server {
-            server.pin_session(id);
-        }
+        self.sessions
+            .lock()
+            .expect("session map")
+            .entry(id.to_string())
+            .or_default();
     }
 
     /// The JSON-RPC error for a failed call. A connection failure also marks
@@ -564,7 +541,6 @@ pub async fn run(
     let lost = CancellationToken::new();
     let relay = Relay {
         client,
-        server: None,
         principal: Principal::Owner,
         schedule,
         logger,
@@ -582,39 +558,6 @@ pub async fn run(
     )
     .await;
     i32::from(lost.is_cancelled())
-}
-
-/// ACP served by the HTTP server process, sharing its router and controllers.
-/// Every request of the connection is authorized as `principal`.
-pub(super) async fn serve_in_process(
-    server: Arc<otto_server::Server>,
-    principal: Principal,
-    workspace: PathBuf,
-    input: Box<dyn BufRead + Send>,
-    output: &mut (dyn Write + Send),
-    cancel: &CancellationToken,
-) {
-    let lost = CancellationToken::new();
-    let relay = Relay {
-        client: Client::in_process(server.router_for(principal.clone()))
-            .with_input_source(otto_core::model::InputSource::Acp),
-        principal,
-        schedule: server.schedule_store(),
-        logger: Arc::clone(server.logger()),
-        server: Some(server),
-        sessions: Mutex::new(HashMap::new()),
-        lost: lost.clone(),
-    };
-    drive(
-        workspace,
-        Backend::Attach(relay),
-        input,
-        output,
-        &lost,
-        cancel,
-        |_| (),
-    )
-    .await;
 }
 
 #[cfg(test)]

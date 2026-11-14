@@ -483,3 +483,5 @@ mod approval;
 mod commands;
 #[path = "acp_attach/relay.rs"]
 mod relay;
+#[path = "acp_attach/workspaces.rs"]
+mod workspaces;

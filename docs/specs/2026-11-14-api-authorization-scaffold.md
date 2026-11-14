@@ -66,7 +66,7 @@ Assignment:
 | TCP with a valid bearer token | `Owner` |
 | TCP when the server has no token (Unix-socket-only server, tests) | `Owner` |
 | Unix socket router | `Owner`, inserted where `SocketRequest` is inserted today; `SocketRequest` is removed |
-| ACP TCP after the `Authorization` preface succeeds | `Owner`, through a router built for that principal (`Server::router_for(principal)`) |
+| ACP TCP after the `Authorization` preface succeeds (transport removed later in #655) | `Owner`, through a router built for that principal (`Server::router_for(principal)`) |
 | ACP attach (`otto acp --attach`) | `Owner`, through the Unix socket |
 
 The token gate keeps its current rules for which routes need a token

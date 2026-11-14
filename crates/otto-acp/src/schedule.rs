@@ -111,8 +111,7 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
                 None,
             )
         }
-        // In-process ACP (`otto serve --acp-listen`) counts into serve's
-        // `/metrics`; `otto acp --attach` has no registry of its own.
+        // `otto acp --attach` has no metrics registry of its own.
         Backend::Attach(relay) => {
             if !delivery_authorized(&relay.principal) {
                 relay.logger.info(
@@ -125,10 +124,7 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
                 relay.schedule.clone()?,
                 None,
                 Arc::clone(&relay.logger),
-                relay
-                    .server
-                    .as_ref()
-                    .map(|server| Arc::clone(server.metrics())),
+                None,
             )
         }
     };

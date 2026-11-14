@@ -31,7 +31,7 @@ use crate::{Server, error_response};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Principal {
     /// The account Otto runs as. Every caller authenticated by
-    /// `OTTO_SERVER_TOKEN`, `OTTO_ACP_TOKEN` or the Unix socket.
+    /// `OTTO_SERVER_TOKEN` or the Unix socket.
     Owner,
     /// A named client with fewer permissions. No transport produces one yet;
     /// tests construct it to exercise the deny path.

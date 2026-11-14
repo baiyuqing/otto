@@ -26,33 +26,50 @@ impl Connection {
         );
     }
 
-    /// Memory review uses a controller owned by this process, either a local
-    /// ACP session or a serve session opened by this TCP connection.
-    pub(super) fn memory_request(&self, method: &str, params: Value) -> Reply {
-        if matches!(&self.backend, Backend::Attach(relay) if relay.server.is_none()) {
-            return Err(error(METHOD_NOT_FOUND, format!("unknown method {method}")));
-        }
-        let session_of = |id: &str| {
-            match &self.backend {
-                Backend::Local(local) => local
-                    .session(id)
-                    .map(|session| Arc::clone(&session.controller)),
-                Backend::Attach(relay) => relay
-                    .server
-                    .as_ref()
-                    .filter(|_| relay.slot(id).is_some())
-                    .and_then(|server| server.controller(id)),
+    /// Memory review. A local session uses the controller it owns; an attached
+    /// session forwards to serve's session memory routes. Either way only a
+    /// session this connection opened is reviewed.
+    pub(super) async fn memory_request(&self, method: &str, params: Value) -> Reply {
+        let pending = method == memory::PENDING_METHOD;
+        match &self.backend {
+            Backend::Local(local) => {
+                let controller = |id: &str| {
+                    local
+                        .session(id)
+                        .map(|session| Arc::clone(&session.controller))
+                        .ok_or_else(unknown_session)
+                };
+                if pending {
+                    let params: memory::PendingParams = serde_json::from_value(params)
+                        .map_err(|failure| invalid_params(failure.to_string()))?;
+                    memory::pending(controller(&params.session_id)?.as_ref(), &params)
+                } else {
+                    let params: memory::ReviewParams = serde_json::from_value(params)
+                        .map_err(|failure| invalid_params(failure.to_string()))?;
+                    memory::review(controller(&params.session_id)?.as_ref(), &params)
+                }
             }
-            .ok_or_else(unknown_session)
-        };
-        if method == memory::PENDING_METHOD {
-            let params: memory::PendingParams = serde_json::from_value(params)
-                .map_err(|failure| invalid_params(failure.to_string()))?;
-            memory::pending(session_of(&params.session_id)?.as_ref(), &params)
-        } else {
-            let params: memory::ReviewParams = serde_json::from_value(params)
-                .map_err(|failure| invalid_params(failure.to_string()))?;
-            memory::review(session_of(&params.session_id)?.as_ref(), &params)
+            Backend::Attach(relay) => {
+                let result = if pending {
+                    let params: memory::PendingParams = serde_json::from_value(params)
+                        .map_err(|failure| invalid_params(failure.to_string()))?;
+                    if relay.slot(&params.session_id).is_none() {
+                        return Err(unknown_session());
+                    }
+                    memory::attached_pending(&relay.client, &params).await
+                } else {
+                    let params: memory::ReviewParams = serde_json::from_value(params)
+                        .map_err(|failure| invalid_params(failure.to_string()))?;
+                    if relay.slot(&params.session_id).is_none() {
+                        return Err(unknown_session());
+                    }
+                    memory::attached_review(&relay.client, &params).await
+                };
+                result.map_err(|failure| match failure {
+                    memory::AttachedFailure::Reply(reply) => reply,
+                    memory::AttachedFailure::Unreachable(failure) => relay.fail(failure),
+                })
+            }
         }
     }
 

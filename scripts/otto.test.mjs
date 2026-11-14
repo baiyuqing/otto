@@ -139,14 +139,15 @@ test('reports a missing Otto binary instead of starting anything', (t) => {
 });
 
 test('every otto.env.example setting is one a consumer handles', () => {
-  // scripts/otto.sh and scripts/otto-tcp.sh read the same file: the launcher,
-  // and the ACP TCP stack that turns its settings into `otto serve` options.
+  // scripts/otto.sh and scripts/otto-serve-connect.sh read the same file: the
+  // launcher, and the serve and connect stack that turns its settings into
+  // `otto serve` options.
   const settings = new Set([
     'OTTO_API_KEY', 'OTTO_PROVIDER', 'OTTO_MODEL', 'OTTO_PROFILE', 'OTTO_BASE_URL',
     'OTTO_CWD', 'OTTO_UI', 'OTTO_SANDBOX', 'OTTO_THINKING', 'OTTO_SHELL_TIMEOUT',
     'OTTO_MAX_OUTPUT_BYTES', 'OTTO_EXTRA_ARGS',
-    'OTTO_ACP_LISTEN', 'OTTO_CONNECT_CONFIG', 'OTTO_LISTEN', 'OTTO_SERVE_EXTRA_ARGS',
-    'OTTO_TCP_HOME',
+    'OTTO_CONNECT_CONFIG', 'OTTO_LISTEN', 'OTTO_SERVE_EXTRA_ARGS',
+    'OTTO_SERVE_CONNECT_SOCKET', 'OTTO_SERVE_CONNECT_HOME',
   ]);
   const example = readFileSync(EXAMPLE, 'utf8');
   const keys = example.split('\n').filter((line) => /^[A-Z][A-Z0-9_]*=/.test(line)).map((line) => line.split('=')[0]);

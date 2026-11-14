@@ -262,18 +262,12 @@ fn chat_metadata_becomes_an_origin_only_when_valid_and_consistent() {
 }
 
 #[test]
-fn channel_context_capability_is_advertised() {
-    for local in [false, true] {
-        let reply = initialize_result(local).unwrap();
-        assert_eq!(
-            reply["agentCapabilities"]["_meta"]["otto"]["channelContext"],
-            true
-        );
-        assert_eq!(
-            reply["agentCapabilities"]["_meta"]["otto"]["scheduleDelivery"],
-            true
-        );
-    }
+fn channel_context_and_memory_review_capabilities_are_advertised() {
+    let reply = initialize_result().unwrap();
+    let otto = &reply["agentCapabilities"]["_meta"]["otto"];
+    assert_eq!(otto["channelContext"], true);
+    assert_eq!(otto["scheduleDelivery"], true);
+    assert_eq!(otto["memoryReview"], true);
 }
 
 fn local_test_connection(

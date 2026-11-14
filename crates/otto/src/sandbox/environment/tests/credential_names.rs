@@ -3,29 +3,6 @@
 use super::*;
 
 #[test]
-fn acp_token_is_redacted_and_cannot_be_restored_to_tools() {
-    let snapshot = resolve_environment(&EnvironmentOptions {
-        host_entries: vec![b"OTTO_ACP_TOKEN=test-listener-secret".to_vec()],
-        allow_names: vec!["OTTO_ACP_TOKEN".into()],
-        ..Default::default()
-    })
-    .expect("environment");
-    assert!(
-        !snapshot
-            .entries()
-            .unwrap()
-            .iter()
-            .any(|entry| entry.starts_with("OTTO_ACP_TOKEN="))
-    );
-    assert!(
-        snapshot
-            .redaction_values()
-            .iter()
-            .any(|value| value == "test-listener-secret")
-    );
-}
-
-#[test]
 fn server_token_is_redacted_and_cannot_be_restored_to_tools() {
     let snapshot = resolve_environment(&EnvironmentOptions {
         host_entries: vec![b"OTTO_SERVER_TOKEN=test-server-listener-secret".to_vec()],

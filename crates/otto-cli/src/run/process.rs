@@ -101,20 +101,6 @@ pub async fn run_with_extensions(
     };
     startup_trace.mark("config/load");
     let storage = Arc::new(otto::runtime::storage::Storage::default());
-    if !options.acp_listen.is_empty()
-        && loaded
-            .config
-            .policy
-            .as_ref()
-            .and_then(|p| p.force.get("server"))
-            .and_then(toml::Value::as_table)
-            .is_some_and(|p| p.contains_key("socket") || p.contains_key("listen"))
-    {
-        return fail(
-            stderr,
-            "ACP listener override is prohibited by managed server policy",
-        );
-    }
     let configured = match startup::configure(
         &mut loaded,
         &host_entries,
@@ -507,8 +493,6 @@ pub async fn run_with_extensions(
                 builder,
                 runtime: resolved,
                 listen,
-                acp_listen: options.acp_listen.clone(),
-                acp_token: lookup.get("OTTO_ACP_TOKEN").cloned().unwrap_or_default(),
                 server_token: lookup.get("OTTO_SERVER_TOKEN").cloned().unwrap_or_default(),
                 control,
                 reloader,

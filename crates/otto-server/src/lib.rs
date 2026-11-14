@@ -362,12 +362,6 @@ impl Server {
         &self.log
     }
 
-    /// The scheduled-delivery store, for the ACP TCP listener's delivery
-    /// workers.
-    pub fn schedule_store(&self) -> Option<Arc<dyn otto::schedule::ScheduleStore>> {
-        self.schedule.clone()
-    }
-
     /// Cancels every in-flight turn, then closes every open controller.
     pub async fn close(&self) -> Result<(), String> {
         if let Some(workflows) = &self.workflows {

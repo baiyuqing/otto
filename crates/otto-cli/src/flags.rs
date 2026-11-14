@@ -50,7 +50,6 @@ pub struct CliOptions {
     pub delete_force: bool,
     pub socket: String,
     pub listen: String,
-    pub acp_listen: String,
     /// Start this process's session in the YOLO approval mode.
     pub yolo: bool,
 
@@ -180,7 +179,6 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.archive_path = set.string("archive");
     options.socket = set.string("socket");
     options.listen = set.string("listen");
-    options.acp_listen = set.string("acp-listen");
     options.attach = set.bool_value("attach");
     options.yolo = set.bool_value("yolo");
 
@@ -297,9 +295,6 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
             "otto: --yolo requires a frontend that opens one session; use /permissions yolo, _otto/approval_mode/set or PUT /v1/sessions/{id}/approval-mode instead",
         ));
     }
-    if !options.acp_listen.is_empty() && !options.serve {
-        return Err(reject("otto: --acp-listen requires the serve subcommand"));
-    }
     if options.listen_set && !options.serve {
         return Err(reject("otto: --listen requires the serve subcommand"));
     }
@@ -381,7 +376,6 @@ Options:
   --yolo                 start this process's session in the YOLO approval mode
                          (every request of the session is approved without asking)
   --listen HOST:PORT     TCP address for the serve subcommand (non-loopback needs [server].tls_cert, tls_key and OTTO_SERVER_TOKEN)
-  --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
 ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -424,7 +418,6 @@ const DECLARED: &[(&str, Kind)] = &[
     ("socket", Kind::Str),
     ("attach", Kind::Bool),
     ("listen", Kind::Str),
-    ("acp-listen", Kind::Str),
     ("yolo", Kind::Bool),
 ];
 

@@ -69,10 +69,6 @@ impl Dispatcher {
         let connection = Arc::clone(&self.connection);
         match method.as_str() {
             "initialize" => {
-                let local = match &connection.backend {
-                    Backend::Local(_) => true,
-                    Backend::Attach(relay) => relay.server.is_some(),
-                };
                 let platforms = schedule::delivery_platforms(&params);
                 if let Err(message) = schedule::delivery_chats(&params, &platforms) {
                     return connection.reply(id, Err(invalid_params(message)));
@@ -88,7 +84,7 @@ impl Dispatcher {
                     let stop = self.stop.clone();
                     self.tasks.spawn(worker.run(stop));
                 }
-                connection.reply(id, initialize_result(local));
+                connection.reply(id, initialize_result());
             }
             "session/new" => {
                 self.tasks.spawn(async move {
@@ -266,7 +262,7 @@ impl Dispatcher {
             }
             memory::PENDING_METHOD | memory::REVIEW_METHOD => {
                 self.tasks.spawn(async move {
-                    let reply = connection.memory_request(&method, params);
+                    let reply = connection.memory_request(&method, params).await;
                     connection.reply(id, reply);
                 });
             }

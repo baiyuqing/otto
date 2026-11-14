@@ -25,6 +25,7 @@ commit ledger; Git and release tags retain the full history. See the
   `~/.local/state/otto-tcp` to `~/.local/state/otto-serve-connect`;
   `OTTO_ACP_LISTEN` is removed and `OTTO_SERVE_CONNECT_SOCKET` selects a
   non-default socket.
+
 - `otto serve` authorizes every API operation, over HTTP and the Unix socket,
   before its handler runs. Every authenticated caller is the owner,
   so no request that succeeded before is refused; `http_request` log lines
@@ -43,6 +44,11 @@ commit ledger; Git and release tags retain the full history. See the
   `otto serve` with `otto acp --attach` over its Unix socket, for example
   `[agent] command = ["otto", "acp", "--attach"]` in `connect.toml`, and unset
   `OTTO_ACP_TOKEN`.
+
+- The chat connector no longer connects to `otto serve` over ACP TCP. The
+  `[agent].address` and `[agent].token_env` keys in `connect.toml` are
+  refused at load; use `command = ["otto", "acp", "--attach"]` to reach a
+  running `otto serve`.
 
 ### Fixed
 

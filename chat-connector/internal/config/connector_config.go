@@ -32,9 +32,6 @@ type Metrics struct {
 type Agent struct {
 	Command   []string // default ["otto", "acp"]
 	Workspace string   // absolute path; required
-	Address   string   // loopback ACP TCP address; mutually exclusive with Command
-	TokenEnv  string
-	Token     string // read only from TokenEnv
 }
 
 // Telegram is the [telegram] section.
@@ -54,8 +51,8 @@ type file struct {
 	Agent struct {
 		Command   []string `toml:"command"`
 		Workspace string   `toml:"workspace"`
-		Address   string   `toml:"address"`
-		TokenEnv  string   `toml:"token_env"`
+		Address   *string  `toml:"address"`
+		TokenEnv  *string  `toml:"token_env"`
 	} `toml:"agent"`
 	Telegram *struct {
 		TokenEnv string   `toml:"token_env"`
@@ -84,36 +81,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
 
-	if md.IsDefined("agent", "address") && f.Agent.Address == "" {
-		return nil, errors.New("config: [agent].address must not be empty")
+	for _, key := range []string{"address", "token_env"} {
+		if md.IsDefined("agent", key) {
+			return nil, fmt.Errorf("config %s: [agent].%s is no longer supported; reach `otto serve` with command = [\"otto\", \"acp\", \"--attach\"] instead", path, key)
+		}
 	}
 	cmd := f.Agent.Command
-	if !md.IsDefined("agent", "command") && f.Agent.Address == "" {
+	if !md.IsDefined("agent", "command") {
 		cmd = []string{"otto", "acp"}
 	}
-	if f.Agent.Address == "" && (len(cmd) == 0 || cmd[0] == "") {
+	if len(cmd) == 0 || cmd[0] == "" {
 		return nil, errors.New("config: [agent].command must be a non-empty array with a non-empty first element")
-	}
-	var token string
-	if f.Agent.Address != "" {
-		if md.IsDefined("agent", "command") {
-			return nil, errors.New("config: [agent].address and command are mutually exclusive")
-		}
-		host, port, err := net.SplitHostPort(f.Agent.Address)
-		ip := net.ParseIP(host)
-		p, perr := strconv.Atoi(port)
-		if err != nil || (host != "localhost" && (ip == nil || !ip.IsLoopback())) || perr != nil || p < 1 || p > 65535 {
-			return nil, errors.New("config: [agent].address must be a loopback host:port")
-		}
-		if f.Agent.TokenEnv == "" {
-			return nil, errors.New("config: [agent].token_env is required for address")
-		}
-		token = os.Getenv(f.Agent.TokenEnv)
-		if token == "" || len(token) > 4000 || strings.IndexFunc(token, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
-			return nil, errors.New("config: ACP token environment variable must contain printable non-space ASCII (maximum 4000 bytes)")
-		}
-	} else if f.Agent.TokenEnv != "" {
-		return nil, errors.New("config: [agent].token_env requires address")
 	}
 	ws := f.Agent.Workspace
 	if ws == "" {
@@ -136,7 +114,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	cfg := &Config{Metrics: Metrics{Listen: listen}, Agent: Agent{Command: cmd, Workspace: filepath.Clean(ws), Address: f.Agent.Address, TokenEnv: f.Agent.TokenEnv, Token: token}}
+	cfg := &Config{Metrics: Metrics{Listen: listen}, Agent: Agent{Command: cmd, Workspace: filepath.Clean(ws)}}
 	if t := f.Telegram; t != nil {
 		if t.TokenEnv == "" {
 			return nil, errors.New("config: [telegram].token_env is required")

@@ -12,6 +12,7 @@
 pub mod agents;
 pub mod approvals;
 pub mod auth;
+pub mod authorization;
 pub mod compact;
 pub mod config_routes;
 pub mod delivery;
@@ -45,6 +46,7 @@ pub mod workflows;
 mod workspace_factory;
 pub mod workspaces;
 
+use authorization::{OperationId, OperationRoutes};
 use middleware::*;
 pub use responses::*;
 use session_activity::SessionState;
@@ -65,7 +67,7 @@ use axum::extract::{DefaultBodyLimit, MatchedPath, Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{delete, get, post};
+use axum::routing::post;
 use otto_core::agent::Event;
 use otto_core::model::{Block, MAX_IMAGE_BYTES, Message, Usage};
 use otto_core::session::ListResult;
@@ -436,232 +438,33 @@ impl Server {
 
     // ---- routing ----
 
-    /// Every route in `openapi.yaml`, plus the two token-free UI routes.
-    /// The router for a Unix socket listener. Reaching the socket needs
-    /// file-system permission on its path, so requests on it skip the bearer
-    /// token that [`Server::router`] requires on TCP.
-    pub fn socket_router(self: &Arc<Self>) -> Router {
+    /// The router for a transport whose callers are already authenticated as
+    /// `principal`: the Unix socket and the in-process ACP connections. Its
+    /// requests skip the bearer token that [`Server::router`] requires on TCP
+    /// and are authorized as `principal`.
+    pub fn router_for(self: &Arc<Self>, principal: authorization::Principal) -> Router {
         self.router().layer(axum::middleware::from_fn(
-            |mut request: axum::extract::Request, next: Next| async move {
-                request.extensions_mut().insert(SocketRequest);
-                next.run(request).await
+            move |mut request: axum::extract::Request, next: Next| {
+                let principal = principal.clone();
+                async move {
+                    request.extensions_mut().insert(principal);
+                    next.run(request).await
+                }
             },
         ))
     }
 
+    /// The router for a Unix socket listener. Reaching the socket needs
+    /// file-system permission on its path, so its callers are the owner.
+    pub fn socket_router(self: &Arc<Self>) -> Router {
+        self.router_for(authorization::Principal::Owner)
+    }
+
+    /// Every API operation, plus the token-free `/healthz` and `/metrics`.
     pub fn router(self: &Arc<Self>) -> Router {
         let state = Arc::clone(self);
-        Router::new()
-            .route("/v1/approvals", get(approvals::list_shared))
-            .route("/v1/approvals/changes", get(approvals::changes_shared))
-            .route("/v1/approvals/events", get(approvals::events_shared))
-            .route("/v1/approvals/{id}", get(approvals::get_shared))
-            .route(
-                "/v1/approvals/{id}/decision",
-                post(approvals::decide_shared),
-            )
-            .route(
-                "/v1/approvals/{id}/withdraw",
-                post(approvals::withdraw_shared),
-            )
-            .route("/v1/config/providers", get(config_routes::providers))
-            .route(
-                "/v1/config/providers/{name}",
-                get(config_routes::get_provider),
-            )
-            .route("/v1/config/models", get(config_routes::models))
-            .route("/v1/config/changes", post(config_routes::preview))
-            .route(
-                "/v1/config/changes/{id}",
-                post(config_routes::confirm).delete(config_routes::cancel),
-            )
-            .route("/v1/sessions", post(create_session).get(list_sessions))
-            .route(
-                "/v1/sessions/{id}",
-                get(get_session)
-                    .patch(rename_session)
-                    .delete(delete_session),
-            )
-            .route(
-                "/v1/sessions/{id}/permanent",
-                axum::routing::delete(session_retirement::delete_handle),
-            )
-            .route(
-                "/v1/sessions/{id}/archive",
-                post(session_retirement::archive_handle),
-            )
-            .route("/v1/sessions/{id}/fork", post(fork_session))
-            .route("/v1/sessions/{id}/model", post(set_session_model))
-            .route("/v1/sessions/{id}/thinking", post(set_session_thinking))
-            .route("/v1/sessions/{id}/fork-points", get(fork_points))
-            .route("/v1/sessions/{id}/history", get(history))
-            .route(
-                "/v1/sessions/{id}/local-commands",
-                post(local_commands::execute),
-            )
-            .route("/v1/sessions/{id}/context", get(context))
-            .route("/v1/sessions/{id}/trace", get(trace))
-            .route("/v1/sessions/{id}/trace/{span_id}", get(trace_span))
-            .route(
-                "/v1/sessions/{id}/approvals/message",
-                post(approvals::message),
-            )
-            .route("/v1/sessions/{id}/inputs", post(task_control::admit_input))
-            .route(
-                "/v1/sessions/{id}/tasks/steer",
-                get(task_control::steering_messages).post(task_control::steer),
-            )
-            .route(
-                "/v1/sessions/{id}/tasks/steer/interrupt",
-                post(task_control::interrupt_steering),
-            )
-            .route(
-                "/v1/sessions/{id}/tasks/steer/{message_id}",
-                delete(task_control::withdraw_steering),
-            )
-            .route(
-                "/v1/sessions/{id}/tasks/control",
-                post(task_control::control),
-            )
-            .route(
-                "/v1/sessions/{id}/approvals/{approval_id}",
-                post(approvals::decide),
-            )
-            .route(
-                "/v1/sessions/{id}/turns",
-                post(start_turn).layer(DefaultBodyLimit::max(IMAGE_TURN_BODY_MAX_BYTES)),
-            )
-            .route("/v1/sessions/{id}/turns/{turn_id}", get(get_turn))
-            .route("/v1/sessions/{id}/turns/{turn_id}/events", get(turn_events))
-            .route(
-                "/v1/sessions/{id}/turns/{turn_id}/cancel",
-                post(cancel_turn),
-            )
-            .route("/v1/sessions/{id}/compact", post(compact::handle))
-            .route("/v1/sessions/{id}/wake-replies", get(wake_replies::list))
-            .route("/v1/sessions/{id}/tasks", get(tasks::list))
-            .route("/v1/sessions/{id}/tasks/observer", get(tasks::observer))
-            .route(
-                "/v1/sessions/{id}/deliveries/{approval_id}",
-                get(delivery::get),
-            )
-            .route("/v1/sessions/{id}/tasks/{task_id}", get(tasks::get))
-            .route(
-                "/v1/sessions/{id}/tasks/{task_id}/cancel",
-                post(tasks::cancel),
-            )
-            .route("/v1/sessions/{id}/timers", get(timers::list))
-            .route(
-                "/v1/sessions/{id}/timers/{timer_id}/cancel",
-                post(timers::cancel),
-            )
-            .route("/v1/sessions/{id}/mcp", get(mcp::list))
-            .route(
-                "/v1/sessions/{id}/memory/records",
-                get(memory_routes::list).post(memory_routes::create),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/records/{record_id}",
-                get(memory_routes::show).delete(memory_routes::forget),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/records/{record_id}/state",
-                post(memory_routes::set_state),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/records/{record_id}/verify",
-                post(memory_routes::verify),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/records/{record_id}/history",
-                get(memory_routes::history),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/records/{record_id}/diff",
-                get(memory_routes::diff),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/records/{record_id}/restore",
-                post(memory_routes::restore),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/records/{record_id}/propose",
-                post(memory_routes::propose),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/search",
-                get(memory_routes::search),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/candidates",
-                get(memory_routes::candidates),
-            )
-            .route(
-                "/v1/sessions/{id}/memory/candidates/{candidate_id}/review",
-                post(memory_routes::review),
-            )
-            .route("/v1/sessions/{id}/skill-manager", get(skills::manager))
-            .route("/v1/sessions/{id}/skill-manager/{name}", get(skills::info))
-            .route("/v1/sessions/{id}/skills", get(skills::list))
-            .route("/v1/sessions/{id}/skills/{name}", get(skills::get))
-            .route(
-                "/v1/sessions/{id}/skills/{name}/enable",
-                post(skills::enable),
-            )
-            .route(
-                "/v1/sessions/{id}/skills/{name}/disable",
-                post(skills::disable),
-            )
-            .route("/v1/sandbox/reload", post(sandbox::reload))
-            .route(
-                "/v1/sessions/{id}/sandbox/changes",
-                post(sandbox_changes::apply),
-            )
-            .route(
-                "/v1/sessions/{id}/approval-events",
-                get(approvals::session_events),
-            )
-            .route(
-                "/v1/sessions/{id}/approval-mode",
-                get(approvals::mode).put(approvals::set_mode),
-            )
-            .route(
-                "/v1/sessions/{id}/approval-policy",
-                get(approvals::policy).put(approvals::set_policy),
-            )
-            .route("/v1/schedule/claim", post(schedule::claim))
-            .route("/v1/schedule/{id}/delivered", post(schedule::delivered))
-            .route("/v1/tasks", get(agents::list))
-            .route("/v1/tasks/{parent_session}/{task_id}", get(agents::get))
-            .route("/v1/workflows", get(workflows::list).post(workflows::start))
-            .route("/v1/workflows/{id}", get(workflows::get))
-            .route("/v1/workflows/{id}/events", get(workflows::events))
-            .route("/v1/workflows/{id}/resume", post(workflows::resume))
-            .route("/v1/workflows/{id}/fork", post(workflows::fork))
-            .route("/v1/workflows/{id}/cancel", post(workflows::cancel))
-            .route(
-                "/v1/workflows/requests/{id}/approve",
-                post(workflows::approve),
-            )
-            .route(
-                "/v1/workflows/requests/{id}/reject",
-                post(workflows::reject),
-            )
-            .route(
-                "/v1/workspaces",
-                get(workspaces::list)
-                    .post(workspaces::register)
-                    .delete(workspaces::remove),
-            )
-            .route("/v1/workspaces/diff", get(diff::get))
-            .route("/v1/fs/dirs", get(fs::dirs))
-            .route("/v1/info", get(info))
-            .route("/v1/status", get(status))
-            .route("/v1/usage", get(usage))
-            .route("/v1/usage/daily", get(daily_usage))
-            .route("/v1/openapi.yaml", get(openapi))
-            .route("/healthz", get(healthz))
-            .route("/metrics", get(prometheus))
+        api_routes()
+            .into_router()
             .layer(DefaultBodyLimit::max(1 << 20))
             .layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -669,10 +472,127 @@ impl Server {
             ))
             .layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
+                authorization::authorize_operation,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
                 instrument,
             ))
             .with_state(state)
     }
+}
+
+/// The handler of every [`OperationId`].
+pub(crate) fn api_routes() -> OperationRoutes {
+    use OperationId as Op;
+    OperationRoutes::new()
+        .add(Op::ApprovalList, approvals::list_shared)
+        .add(Op::ApprovalChanges, approvals::changes_shared)
+        .add(Op::ApprovalEvents, approvals::events_shared)
+        .add(Op::ApprovalGet, approvals::get_shared)
+        .add(Op::ApprovalDecide, approvals::decide_shared)
+        .add(Op::ApprovalWithdraw, approvals::withdraw_shared)
+        .add(Op::ConfigProviderList, config_routes::providers)
+        .add(Op::ConfigProviderGet, config_routes::get_provider)
+        .add(Op::ConfigModelList, config_routes::models)
+        .add(Op::ConfigChangePreview, config_routes::preview)
+        .add(Op::ConfigChangeConfirm, config_routes::confirm)
+        .add(Op::ConfigChangeCancel, config_routes::cancel)
+        .add(Op::SessionCreate, create_session)
+        .add(Op::SessionList, list_sessions)
+        .add(Op::SessionGet, get_session)
+        .add(Op::SessionRename, rename_session)
+        .add(Op::SessionDelete, delete_session)
+        .add(
+            Op::SessionDeletePermanent,
+            session_retirement::delete_handle,
+        )
+        .add(Op::SessionArchive, session_retirement::archive_handle)
+        .add(Op::SessionFork, fork_session)
+        .add(Op::SessionModelSet, set_session_model)
+        .add(Op::SessionThinkingSet, set_session_thinking)
+        .add(Op::SessionForkPoints, fork_points)
+        .add(Op::SessionHistory, history)
+        .add(Op::SessionLocalCommand, local_commands::execute)
+        .add(Op::SessionContext, context)
+        .add(Op::SessionTrace, trace)
+        .add(Op::SessionTraceSpan, trace_span)
+        .add(Op::SessionApprovalMessage, approvals::message)
+        .add(Op::SessionInputAdmit, task_control::admit_input)
+        .add(Op::SessionSteerList, task_control::steering_messages)
+        .add(Op::SessionSteer, task_control::steer)
+        .add(Op::SessionSteerInterrupt, task_control::interrupt_steering)
+        .add(Op::SessionSteerWithdraw, task_control::withdraw_steering)
+        .add(Op::SessionTaskControl, task_control::control)
+        .add(Op::SessionApprovalDecide, approvals::decide)
+        .add_method_router(
+            Op::SessionTurnStart,
+            post(start_turn).layer(DefaultBodyLimit::max(IMAGE_TURN_BODY_MAX_BYTES)),
+        )
+        .add(Op::SessionTurnGet, get_turn)
+        .add(Op::SessionTurnEvents, turn_events)
+        .add(Op::SessionTurnCancel, cancel_turn)
+        .add(Op::SessionCompact, compact::handle)
+        .add(Op::SessionWakeReplies, wake_replies::list)
+        .add(Op::SessionTaskList, tasks::list)
+        .add(Op::SessionTaskObserver, tasks::observer)
+        .add(Op::SessionDeliveryGet, delivery::get)
+        .add(Op::SessionTaskGet, tasks::get)
+        .add(Op::SessionTaskCancel, tasks::cancel)
+        .add(Op::SessionTimerList, timers::list)
+        .add(Op::SessionTimerCancel, timers::cancel)
+        .add(Op::SessionMcpList, mcp::list)
+        .add(Op::MemoryRecordList, memory_routes::list)
+        .add(Op::MemoryRecordCreate, memory_routes::create)
+        .add(Op::MemoryRecordGet, memory_routes::show)
+        .add(Op::MemoryRecordForget, memory_routes::forget)
+        .add(Op::MemoryRecordStateSet, memory_routes::set_state)
+        .add(Op::MemoryRecordVerify, memory_routes::verify)
+        .add(Op::MemoryRecordHistory, memory_routes::history)
+        .add(Op::MemoryRecordDiff, memory_routes::diff)
+        .add(Op::MemoryRecordRestore, memory_routes::restore)
+        .add(Op::MemoryRecordPropose, memory_routes::propose)
+        .add(Op::MemorySearch, memory_routes::search)
+        .add(Op::MemoryCandidateList, memory_routes::candidates)
+        .add(Op::MemoryCandidateReview, memory_routes::review)
+        .add(Op::SkillManagerList, skills::manager)
+        .add(Op::SkillManagerInfo, skills::info)
+        .add(Op::SkillList, skills::list)
+        .add(Op::SkillGet, skills::get)
+        .add(Op::SkillEnable, skills::enable)
+        .add(Op::SkillDisable, skills::disable)
+        .add(Op::SandboxReload, sandbox::reload)
+        .add(Op::SessionSandboxChangeApply, sandbox_changes::apply)
+        .add(Op::SessionApprovalEvents, approvals::session_events)
+        .add(Op::SessionApprovalModeGet, approvals::mode)
+        .add(Op::SessionApprovalModeSet, approvals::set_mode)
+        .add(Op::SessionApprovalPolicyGet, approvals::policy)
+        .add(Op::SessionApprovalPolicySet, approvals::set_policy)
+        .add(Op::ScheduleClaim, schedule::claim)
+        .add(Op::ScheduleDelivered, schedule::delivered)
+        .add(Op::TaskList, agents::list)
+        .add(Op::TaskGet, agents::get)
+        .add(Op::WorkflowList, workflows::list)
+        .add(Op::WorkflowStart, workflows::start)
+        .add(Op::WorkflowGet, workflows::get)
+        .add(Op::WorkflowEvents, workflows::events)
+        .add(Op::WorkflowResume, workflows::resume)
+        .add(Op::WorkflowFork, workflows::fork)
+        .add(Op::WorkflowCancel, workflows::cancel)
+        .add(Op::WorkflowRequestApprove, workflows::approve)
+        .add(Op::WorkflowRequestReject, workflows::reject)
+        .add(Op::WorkspaceList, workspaces::list)
+        .add(Op::WorkspaceRegister, workspaces::register)
+        .add(Op::WorkspaceRemove, workspaces::remove)
+        .add(Op::WorkspaceDiff, diff::get)
+        .add(Op::FsDirList, fs::dirs)
+        .add(Op::Info, info)
+        .add(Op::Status, status)
+        .add(Op::Usage, usage)
+        .add(Op::UsageDaily, daily_usage)
+        .add(Op::OpenApi, openapi)
+        .add(Op::Healthz, healthz)
+        .add(Op::Metrics, prometheus)
 }
 
 #[cfg(test)]

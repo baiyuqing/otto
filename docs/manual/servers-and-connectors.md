@@ -75,6 +75,14 @@ listener is opened, resolved in this order: `--listen` > `--socket` >
 `[server].listen` > `[server].socket` > the built-in default
 `~/.otto/otto.sock`. The config file cannot select both.
 
+**Callers.** Every caller that authenticates, with the TCP token, through the
+Unix socket or over [ACP TCP](#direct-acp-tcp-connection), is the owner: it
+has the authority of the account Otto runs as and may perform every operation,
+including trusting directories and changing provider configuration. Keep the
+token as secret as that account's credentials. Each API operation is still
+authorized before its handler runs, and the `http_request` log line names the
+caller as `principal=owner`.
+
 **Unix socket.** Otto creates a missing parent directory with mode `0700`,
 creates the socket file with mode `0600`, and refuses to start if a live
 server already owns that path. A socket file left by a process that did not
@@ -487,7 +495,7 @@ are served at the root. Request and error bodies are JSON.
 
 
 
-| `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, in the shape and with the rules of `.../notices`. `otto acp --attach` reads it to send wake replies to its ACP client. |
+| `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, as `{notices:[{id,text}],last}`. Pass `last` as `after` to read only newer replies; the 20 newest are kept. `otto acp --attach` reads it to send wake replies to its ACP client. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
 | `POST /v1/sessions/{id}/inputs` | Admit ordinary `{"text":"..."}` without model routing or implicit queuing. Returns `"steered"` when bound to the active run's next safe boundary, `"idle"` when the caller may explicitly start a new turn, or `"approval_pending"` while an approval owns input. Nonblank text is limited to 32,000 UTF-8 bytes. An optional `input_id` admits a retry once (`409 duplicate_input` after delivery). `503 input_not_persisted` when the guidance could not be saved; it was not accepted. |
 | `POST /v1/sessions/{id}/tasks/steer` | Explicit steering endpoint. It returns `{id,text,status:"queued",input_id}` immediately, so clients display the exact guidance while it waits for the next safe boundary. An optional `input_id` returns the same message for a retry while it is queued and `409 duplicate_input` after delivery; `503 input_not_persisted` when it could not be saved. |
@@ -726,6 +734,7 @@ Status codes:
 | --- | --- |
 | `400` | Empty or missing turn text, or an invalid JSON body. |
 | `401` | Missing or invalid bearer token (TCP listener only). |
+| `403` | `forbidden`: the client may not perform this operation. The owner, the only caller today, never receives it. Workspace routes also answer `403` for a directory outside the admitted workspaces. |
 | `404` | Session, turn, task, memory record or memory candidate not found. |
 | `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `skills_unavailable`, `sandbox_reload_failed`, `task_done`, and `memory_conflict` name the other conflicts. |
 | `501` | `memory_unsupported`: the selected plugin memory source manages its own records. |

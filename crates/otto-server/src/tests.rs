@@ -24,6 +24,7 @@ use tokio::sync::watch;
 use tower::ServiceExt;
 
 mod approval_cases;
+mod authorization_cases;
 mod doubles;
 mod endpoint_cases;
 mod harness;

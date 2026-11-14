@@ -9,6 +9,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- `otto serve` authorizes every API operation, over HTTP, the Unix socket and
+  ACP TCP, before its handler runs. Every authenticated caller is the owner,
+  so no request that succeeded before is refused; `http_request` log lines
+  gain `principal=owner`, and the API documents `403 forbidden` for clients
+  with fewer permissions. The OpenAPI document now lists the approval-mode,
+  approval-policy, approval-events, local-command and task-observer routes and
+  no longer lists the removed reflection and notices routes.
+
 - Source and Docker builds now use Rust 1.100.0, managed by the repository's
   pinned toolchain and build image.
 

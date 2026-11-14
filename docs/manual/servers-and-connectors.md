@@ -1253,7 +1253,7 @@ checks enabled; `OTTO_SERVE_CONNECT_SKIP_CHECKS=1` delegates this validation to
 the operator.
 
 `start` backgrounds the supervisor; `run` stays foreground for a supervisor or
-terminal. Connect starts after the socket file exists, or after 20 s. Exited
+terminal. Connect starts after serve answers `GET /healthz` on the socket (checked with `curl`, or `python3` when curl is absent), or after 20 s. Exited
 processes restart with 1–60 s exponential delay, reset after 60 s uptime; five
 fast failures stop the stack. Inspect logs/config/credentials before
 restarting. SIGTERM/SIGINT stop connect first, cancelling prompts, then serve.

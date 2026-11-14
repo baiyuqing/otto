@@ -11,8 +11,9 @@ const SCRIPT = fileURLToPath(new URL('./otto-serve-connect.sh', import.meta.url)
 // A fake `otto` and a fake `otto-connect`, so these tests need neither a built
 // binary, a real serve, nor a chat platform. The fake serve records its
 // argument vector and whether OTTO_ACP_TOKEN reached its environment, then
-// binds the Unix socket named by --socket. The fake connect records whether
-// that socket existed when it started, which is the order the supervisor must
+// answers GET /healthz on the Unix socket named by --socket, after the delay
+// in the serve-delay file when there is one. The fake connect records whether
+// that request succeeded when it started, which is the order the supervisor must
 // keep, and its argument vector.
 const FAKE_OTTO = `#!/usr/bin/env bash
 for arg in "$@"; do printf 'arg=%s\\n' "$arg"; done >> "\${FAKE_OTTO_ARGS:?}"
@@ -24,16 +25,30 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 mkdir -p "$(dirname "$socket")"
+if [[ -f "\${FAKE_DIR:?}/serve-delay" ]]; then sleep "$(cat "$FAKE_DIR/serve-delay")"; fi
 rm -f "$socket"
-exec python3 -c 'import socket, sys, time
-s = socket.socket(socket.AF_UNIX)
-s.bind(sys.argv[1])
-time.sleep(100000)' "$socket"
+exec python3 -c 'import http.server, socketserver, sys
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"ok" if self.path == "/healthz" else b"no"
+        self.send_response(200 if self.path == "/healthz" else 404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def address_string(self):
+        return "unix"
+    def log_message(self, *args):
+        pass
+class Server(socketserver.UnixStreamServer):
+    def get_request(self):
+        request, _ = super().get_request()
+        return request, ("unix", 0)
+Server(sys.argv[1], Handler).serve_forever()' "$socket"
 `;
 
 const FAKE_CONNECT = `#!/usr/bin/env bash
 {
-  if [[ -S "\${FAKE_SOCKET:?}" ]]; then
+  if curl --silent --fail --max-time 2 --output /dev/null --unix-socket "\${FAKE_SOCKET:?}" http://otto/healthz; then
     printf 'serve_ready=yes\\n'
   else
     printf 'serve_ready=no\\n'
@@ -316,6 +331,26 @@ test('serves on the socket without --acp-listen and without OTTO_ACP_TOKEN', (t)
   assert.deepEqual(args.slice(-2), ['--socket', paths.socket]);
   assert.match(readFileSync(paths.ottoArgs, 'utf8'), /^token_env=unset$/m);
   assert.equal(statSync(paths.socket).isSocket(), true);
+  paths.run(['stop']);
+});
+
+test('connect waits for serve to answer when a stale socket file exists', async (t) => {
+  const paths = context(t);
+  // A socket that was bound and closed leaves its file behind, and nothing
+  // accepts on it. It passes `-S` but refuses connections.
+  mkdirSync(join(paths.dir, '.otto'));
+  const stale = spawnSync('python3', ['-c', 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])', paths.socket]);
+  assert.equal(stale.status, 0, stale.stderr.toString());
+  assert.equal(statSync(paths.socket).isSocket(), true);
+  writeFileSync(join(paths.dir, 'serve-delay'), '1.5');
+
+  const startedAt = Date.now();
+  const result = start(paths);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(Date.now() - startedAt >= 1400, 'start returned before the fake serve answered');
+  await paths.waitFor(() => existsSync(paths.connectArgs) && capturedArgs(paths.connectArgs).length > 0, 'connect to record its arguments');
+  assert.match(readFileSync(paths.connectArgs, 'utf8'), /serve_ready=yes/);
+  assert.match(readFileSync(paths.supervisorLog, 'utf8'), /serve answers on /);
   paths.run(['stop']);
 });
 

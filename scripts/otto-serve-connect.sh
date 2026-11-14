@@ -212,6 +212,27 @@ resolve_workspace() {
   [[ $workspace == /* ]] || die "the serve workspace must be an absolute path, got '$workspace'"
 }
 
+# serve_answers: true when a server answers GET /healthz on the socket. A
+# socket file left by an earlier run passes `-S` but refuses the connection,
+# so only a request that gets a response counts as ready. The script never
+# removes the file: serve replaces a stale one during its own startup and
+# refuses to start over a live one.
+serve_answers() {
+  [[ -S $socket ]] || return 1
+  if command -v curl >/dev/null 2>&1; then
+    curl --silent --fail --max-time 2 --output /dev/null --unix-socket "$socket" http://otto/healthz
+  else
+    python3 - "$socket" <<'PY' 2>/dev/null
+import socket, sys
+c = socket.socket(socket.AF_UNIX)
+c.settimeout(2)
+c.connect(sys.argv[1])
+c.sendall(b"GET /healthz HTTP/1.1\r\nHost: otto\r\nConnection: close\r\n\r\n")
+sys.exit(0 if c.recv(12).startswith(b"HTTP/1.1 200") else 1)
+PY
+  fi
+}
+
 # ---- preflight ----
 
 preflight() {
@@ -225,6 +246,7 @@ preflight() {
     fi
   done
   [[ -x $otto_bin ]] || die "no Otto binary at '${otto_bin:-otto}'; run make build or set OTTO_BIN"
+  command -v curl >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || die "curl or python3 is required to check that serve answers on its socket"
   [[ -x $connect_bin ]] || die "no otto-connect binary at '${connect_bin:-otto-connect}'; run make connect-build or set OTTO_CONNECT_BIN"
 
   [[ $socket == /* ]] || die "OTTO_SERVE_CONNECT_SOCKET must be an absolute path, got '$socket'"
@@ -413,9 +435,9 @@ supervise_serve() {
   if [[ -z $serve_pid ]]; then
     if [[ $(now) -ge $serve_next ]]; then start_serve; fi
   elif [[ $serve_ready -eq 0 ]]; then
-    if [[ -S $socket ]]; then
+    if serve_answers; then
       serve_ready=1
-      log "serve socket ready at $socket"
+      log "serve answers on $socket"
     fi
   fi
 }
@@ -428,9 +450,9 @@ supervise_connect() {
   [[ -n $connect_pid ]] && return 0
   [[ -n $serve_pid ]] || return 0
   [[ $(now) -ge $connect_next ]] || return 0
-  # Connect attaches on its next message, but starting it after the socket
-  # exists keeps the first message from failing. The timeout is a fallback for
-  # a serve whose socket this script cannot see.
+  # Connect attaches on its next message, but starting it after serve answers
+  # on the socket keeps the first message from failing. The timeout is a
+  # fallback for a serve that never answers; a serve that exits is reaped first.
   if [[ $serve_ready -eq 0 && $(( $(now) - serve_started )) -lt $ready_timeout ]]; then
     return 0
   fi
@@ -550,7 +572,7 @@ start_stack() {
       tail -n 20 "$supervisor_log" >&2 || true
       exit 1
     fi
-    if [[ -S $socket ]] && live_pid_of "$connect_pid_file" "$connect_bin" >/dev/null; then
+    if serve_answers && live_pid_of "$connect_pid_file" "$connect_bin" >/dev/null; then
       break
     fi
     if [[ $(now) -ge $deadline ]]; then

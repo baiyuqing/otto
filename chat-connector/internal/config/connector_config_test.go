@@ -98,35 +98,24 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
-func TestLoadTCPAgent(t *testing.T) {
+func TestLoadRefusesDirectACPKeys(t *testing.T) {
 	t.Setenv("TEST_TG_TOKEN", "test-bot-token")
-	t.Setenv("TEST_ACP_TOKEN", "test-acp-token")
-	body := strings.Replace(valid, "[agent]", "[agent]\naddress = \"127.0.0.1:9001\"\ntoken_env = \"TEST_ACP_TOKEN\"", 1)
-	cfg, err := Load(write(t, body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Agent.Command) != 0 || cfg.Agent.Address != "127.0.0.1:9001" || cfg.Agent.Token != "test-acp-token" {
-		t.Fatal("wrong TCP agent config")
-	}
-	for name, bad := range map[string]string{
-		"command conflict":  strings.Replace(body, "[agent]", "[agent]\ncommand = [\"otto\", \"acp\"]", 1),
-		"empty address":     strings.Replace(body, "127.0.0.1:9001", "", 1),
-		"non-loopback":      strings.Replace(body, "127.0.0.1", "0.0.0.0", 1),
-		"missing token env": strings.Replace(body, "token_env = \"TEST_ACP_TOKEN\"", "", 1),
-		"literal token":     strings.Replace(body, "[agent]", "[agent]\ntoken = \"secret\"", 1),
-		"zero port":         strings.Replace(body, "9001", "0", 1),
-		"large port":        strings.Replace(body, "9001", "99999", 1),
+	for _, tc := range []struct{ name, line, key string }{
+		{"address", "address = \"127.0.0.1:9001\"", "address"},
+		{"token_env", "token_env = \"X\"", "token_env"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := Load(write(t, bad)); err == nil {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(valid, "[agent]", "[agent]\n"+tc.line, 1)
+			_, err := Load(write(t, body))
+			if err == nil {
 				t.Fatal("expected config rejection")
 			}
+			for _, want := range []string{tc.key, `acp", "--attach`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not contain %q", err, want)
+				}
+			}
 		})
-	}
-	t.Setenv("TEST_ACP_TOKEN", "bad\nheader")
-	if _, err := Load(write(t, body)); err == nil {
-		t.Fatal("accepted injected header")
 	}
 }
 

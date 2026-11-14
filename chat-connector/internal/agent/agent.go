@@ -1,4 +1,4 @@
-// Package agent owns one ACP child process or TCP connection and exposes the
+// Package agent owns one ACP child process and exposes the
 // session operations the bridge needs. It connects on first use or through
 // Keep, and reconnects on the next use or by Keep after the transport closes.
 package agent
@@ -41,16 +41,12 @@ var ErrClosed = errors.New("agent is closed")
 // ExitError reports that the agent process exited while a call was in
 // flight (or before it could start). Stderr holds the last 20 lines.
 type ExitError struct {
-	Remote bool
 	Status string
 	Stderr []string
 }
 
 func (e *ExitError) Error() string {
 	s := "agent process exited (" + e.Status + ")"
-	if e.Remote {
-		s = "ACP connection closed"
-	}
 	if len(e.Stderr) > 0 {
 		s += "; last stderr lines:\n" + strings.Join(e.Stderr, "\n")
 	}
@@ -69,9 +65,7 @@ type Handler interface {
 // Options configure an Agent. Zero values of the hooks select production
 // behavior.
 type Options struct {
-	Command []string // program and arguments
-	Address string   // authenticated ACP TCP, instead of a child process
-	Token   string
+	Command []string         // program and arguments
 	Dir     string           // working directory of the process and cwd of every session; absolute
 	Env     []string         // child environment; nil inherits the connector's
 	Metrics *metrics.Metrics // nil disables counting
@@ -269,8 +263,7 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 	return p.wrap(p.conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(id)}))
 }
 
-// Kill terminates the child or disconnects TCP. It never kills a remote
-// server. The next operation starts a process or reconnects.
+// Kill terminates the child process. The next operation starts a new one.
 func (a *Agent) Kill() {
 	if p := a.live(); p != nil {
 		if p.cmd != nil {

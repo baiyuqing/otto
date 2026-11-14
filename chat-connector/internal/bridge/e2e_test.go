@@ -336,12 +336,6 @@ func TestEndToEndSharedSession(t *testing.T) {
 // The real ACP agent must turn remember's pending candidate into an actionable
 // connector card; a tool-call notification alone is not a permission request.
 func TestEndToEndMemoryApprovalCard(t *testing.T) {
-	for _, tcp := range []bool{false, true} {
-		t.Run(fmt.Sprintf("tcp=%t", tcp), func(t *testing.T) { testEndToEndMemoryApprovalCard(t, tcp) })
-	}
-}
-
-func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 	bin := ottoBin(t)
 	var calls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -364,10 +358,6 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 		t.Fatal(err)
 	}
 	options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
-	if tcp {
-		_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
-		options = tcpAgentOptions(t, diagnostics, workspace)
-	}
 	h := newHarness(t, setup{platform: "telegram", agent: options})
 	h.say("Remember my preference for tabs.")
 	waitCards(h, 1)
@@ -426,12 +416,12 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 // the real ACP SDK: the model withdraws a pending request, which must close its
 // chat card promptly, and a late Allow click must not run the command.
 func TestEndToEndApprovalDialogueRevokesPermission(t *testing.T) {
-	for _, tcp := range []bool{false, true} {
-		t.Run(fmt.Sprintf("tcp=%t", tcp), func(t *testing.T) { testEndToEndApprovalDialogueRevokesPermission(t, tcp) })
+	for _, attach := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attach=%t", attach), func(t *testing.T) { testEndToEndApprovalDialogueRevokesPermission(t, attach) })
 	}
 }
 
-func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, tcp bool) {
+func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, attach bool) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("elevated bash approval requires macOS Seatbelt")
 	}
@@ -472,9 +462,9 @@ func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, tcp bool) {
 		t.Fatal(err)
 	}
 	options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "seatbelt"}, Dir: workspace, Env: ottoEnv(home)}
-	if tcp {
-		_, diagnostics := startOttoServer(t, bin, home, workspace, "--sandbox", "seatbelt", "--acp-listen", "127.0.0.1:0")
-		options = tcpAgentOptions(t, diagnostics, workspace)
+	if attach {
+		sock, _ := startOttoServer(t, bin, home, workspace, "--sandbox", "seatbelt")
+		options = &agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)}
 	}
 	h := newHarness(t, setup{platform: "telegram", mod: func(o *Options) { o.PermissionTimeout = 2 * time.Minute }, agent: options})
 	h.say("/auto off")
@@ -516,7 +506,7 @@ func startOttoServer(t *testing.T, bin, home, workspace string, extra ...string)
 
 	serve := exec.Command(bin, append([]string{"serve", "--socket", sock, "--cwd", workspace, "--sandbox", "off"}, extra...)...)
 	serve.Dir = workspace
-	serve.Env = append(ottoEnv(home), "OTTO_ACP_TOKEN=connect-test-acp-token")
+	serve.Env = ottoEnv(home)
 	errFile, err := os.Create(filepath.Join(sockDir, "serve.err"))
 	if err != nil {
 		t.Fatal(err)

@@ -35,6 +35,11 @@ commit ledger; Git and release tags retain the full history. See the
   `[agent] command = ["otto", "acp", "--attach"]` in `connect.toml`, and unset
   `OTTO_ACP_TOKEN`.
 
+- The chat connector no longer connects to `otto serve` over ACP TCP. The
+  `[agent].address` and `[agent].token_env` keys in `connect.toml` are
+  refused at load; use `command = ["otto", "acp", "--attach"]` to reach a
+  running `otto serve`.
+
 ### Fixed
 
 - Informational notices, including input delivery status, no longer split an

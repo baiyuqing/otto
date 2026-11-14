@@ -47,15 +47,6 @@ func TestPlatformsForTelegram(t *testing.T) {
 	}
 }
 
-func TestPlatformsForWithholdsACPToken(t *testing.T) {
-	cfg := &config.Config{Agent: config.Agent{TokenEnv: "ACP_TOKEN"}, Telegram: &config.Telegram{TokenEnv: "TG_TOKEN"}}
-	_, _, names := platformsFor(cfg, nil)
-	got := withoutVars([]string{"PATH=/bin", "ACP_TOKEN=test-transport-token", "TG_TOKEN=test-bot-token"}, names...)
-	if !reflect.DeepEqual(got, []string{"PATH=/bin"}) {
-		t.Fatal("transport credentials reached agent environment")
-	}
-}
-
 func TestServeMetricsBusyPortLogsAndReturns(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

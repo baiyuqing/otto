@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Run the direct ACP TCP deployment: one `otto serve --acp-listen HOST:PORT`
-# and one `otto-connect` whose connect.toml uses `[agent] address`, supervised
-# as a pair. Connect starts no `otto acp` child in this mode; the two
-# processes talk over the authenticated loopback TCP listener of serve.
+# Run `otto serve` and `otto-connect` as a supervised pair. Serve listens on
+# its Unix socket, and connect's connect.toml sets
+# `[agent] command = ["otto", "acp", "--attach"]`, so every connect session is
+# an `otto acp --attach` process that relays to serve over that socket. There
+# is no token: the socket file is mode 0600 inside a private directory.
 #
 # Settings come from otto.env (default <checkout>/otto.env, override with
 # OTTO_ENV_FILE), the same file scripts/otto.sh reads, plus the settings in
-# OTTO_TCP_* below. Secrets are environment variables: OTTO_ACP_TOKEN is read
-# by `otto serve` and by connect through `[agent] token_env`, and the
-# connector's Telegram token comes from the variable its configuration names.
-# The script writes no secret.
+# OTTO_SERVE_CONNECT_* below. The connector's chat-platform token comes from
+# the variable its configuration names. The script writes no secret.
 #
 # The supervisor restarts a process that exits, 1 s doubling to 60 s, and
 # immediately after it had run for 60 s; five consecutive fast failures stop
@@ -18,7 +17,7 @@
 set -euo pipefail
 umask 077
 
-PROGRAM=otto-tcp
+PROGRAM=otto-serve-connect
 
 die() {
   printf '%s: %s\n' "$PROGRAM" "$1" >&2
@@ -33,23 +32,22 @@ log() {
 
 usage() {
   cat <<'EOF'
-otto-tcp.sh runs the direct ACP TCP deployment: one `otto serve
---acp-listen HOST:PORT` plus one `otto-connect` configured with
-`[agent] address`, so connect starts no `otto acp` process.
+otto-serve-connect.sh runs one `otto serve` on its Unix socket plus one
+`otto-connect` whose agent command is `otto acp --attach`.
 
-  otto-tcp.sh start                    start the stack in the background
-  otto-tcp.sh stop                     stop both processes
-  otto-tcp.sh restart [serve|connect]  restart one process, or the stack
-  otto-tcp.sh status                   what is running, and where state lives
-  otto-tcp.sh logs [serve|connect|supervisor]
-  otto-tcp.sh run                      run the supervisor in the foreground
-  otto-tcp.sh help
+  otto-serve-connect.sh start                    start the stack in the background
+  otto-serve-connect.sh stop                     stop both processes
+  otto-serve-connect.sh restart [serve|connect]  restart one process, or the stack
+  otto-serve-connect.sh status                   what is running, and where state lives
+  otto-serve-connect.sh logs [serve|connect|supervisor]
+  otto-serve-connect.sh run                      run the supervisor in the foreground
+  otto-serve-connect.sh help
 
 Settings come from otto.env (OTTO_ENV_FILE) and the environment:
-OTTO_BIN, OTTO_CONNECT_BIN, OTTO_ACP_LISTEN, OTTO_CONNECT_CONFIG, OTTO_CWD,
-OTTO_LISTEN, OTTO_SERVE_EXTRA_ARGS, OTTO_TCP_HOME. OTTO_ACP_TOKEN and the
+OTTO_BIN, OTTO_CONNECT_BIN, OTTO_CONNECT_CONFIG, OTTO_CWD, OTTO_LISTEN,
+OTTO_SERVE_EXTRA_ARGS, OTTO_SERVE_CONNECT_SOCKET, OTTO_SERVE_CONNECT_HOME. The
 connector's platform secrets are environment-only. Defaults and the advanced
-OTTO_TCP_* settings are documented in the user manual.
+OTTO_SERVE_CONNECT_* settings are documented in the user manual.
 EOF
 }
 
@@ -75,7 +73,11 @@ else
   printf '%s: no %s; using Otto configuration and the environment only.\n' "$PROGRAM" "$env_file" >&2
 fi
 
-state_dir=${OTTO_TCP_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/otto-tcp}
+# Serve and connect use no token for each other. A token left in the caller's
+# environment would only reach the child processes, so it is dropped.
+unset OTTO_ACP_TOKEN
+
+state_dir=${OTTO_SERVE_CONNECT_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/otto-serve-connect}
 supervisor_pid_file=$state_dir/supervisor.pid
 serve_pid_file=$state_dir/serve.pid
 connect_pid_file=$state_dir/connect.pid
@@ -83,16 +85,17 @@ supervisor_log=$state_dir/supervisor.log
 serve_log=$state_dir/serve.log
 connect_log=$state_dir/connect.log
 
-acp_listen=${OTTO_ACP_LISTEN:-127.0.0.1:9001}
+default_socket=$HOME/.otto/otto.sock
+socket=${OTTO_SERVE_CONNECT_SOCKET:-$default_socket}
 connect_config=${OTTO_CONNECT_CONFIG:-$HOME/.config/otto/connect.toml}
-poll=${OTTO_TCP_POLL:-1}
-ready_timeout=${OTTO_TCP_READY_TIMEOUT:-20}
-stop_timeout=${OTTO_TCP_STOP_TIMEOUT:-20}
-min_delay=${OTTO_TCP_MIN_DELAY:-1}
-max_delay=${OTTO_TCP_MAX_DELAY:-60}
-stable_after=${OTTO_TCP_STABLE_AFTER:-60}
-max_fails=${OTTO_TCP_MAX_FAILS:-5}
-skip_checks=${OTTO_TCP_SKIP_CHECKS:-}
+poll=${OTTO_SERVE_CONNECT_POLL:-1}
+ready_timeout=${OTTO_SERVE_CONNECT_READY_TIMEOUT:-20}
+stop_timeout=${OTTO_SERVE_CONNECT_STOP_TIMEOUT:-20}
+min_delay=${OTTO_SERVE_CONNECT_MIN_DELAY:-1}
+max_delay=${OTTO_SERVE_CONNECT_MAX_DELAY:-60}
+stable_after=${OTTO_SERVE_CONNECT_STABLE_AFTER:-60}
+max_fails=${OTTO_SERVE_CONNECT_MAX_FAILS:-5}
+skip_checks=${OTTO_SERVE_CONNECT_SKIP_CHECKS:-}
 
 otto_bin=${OTTO_BIN:-}
 if [[ -z $otto_bin ]]; then
@@ -109,18 +112,6 @@ alive() { kill -0 "$1" 2>/dev/null; }
 
 file_size() {
   if [[ -f $1 ]]; then wc -c <"$1" | tr -d ' '; else printf '0'; fi
-}
-
-# new_since FILE OFFSET PATTERN: true when the bytes written after OFFSET
-# contain PATTERN. Reading from the recorded offset keeps a line from an
-# earlier run, or from an earlier start in the same file, from counting as
-# readiness. The `|| true` keeps a tail that loses the race with an exiting
-# grep from failing the pipeline under `pipefail`.
-new_since() {
-  local size
-  size=$(file_size "$1")
-  [[ $size -gt $2 ]] || return 1
-  { tail -c +$(( $2 + 1 )) "$1" 2>/dev/null || true; } | grep -q -F -- "$3"
 }
 
 read_pid() {
@@ -175,27 +166,22 @@ toml_table_key() {
     }' "$3"
 }
 
-# host_port VALUE: splits VALUE into the globals HP_HOST and HP_PORT. False
-# when VALUE carries no port.
-host_port() {
+# loopback_address VALUE: true for a loopback host:port, with a port in 1-65535.
+loopback_address() {
+  local host port
   case $1 in
-  \[*\]:*) HP_HOST=${1%%]*}; HP_HOST=${HP_HOST#[}; HP_PORT=${1##*:} ;;
-  *:*) HP_HOST=${1%:*}; HP_PORT=${1##*:} ;;
+  \[*\]:*) host=${1%%]*}; host=${host#[}; port=${1##*:} ;;
+  *:*) host=${1%:*}; port=${1##*:} ;;
   *) return 1 ;;
   esac
-  return 0
-}
-
-loopback_address() {
-  host_port "$1" || return 1
-  case $HP_HOST in
+  case $host in
   127.0.0.1 | localhost | ::1) ;;
   *) return 1 ;;
   esac
-  case $HP_PORT in
+  case $port in
   '' | *[!0-9]*) return 1 ;;
   esac
-  [[ $HP_PORT -ge 1 && $HP_PORT -le 65535 ]] || return 1
+  [[ $port -ge 1 && $port -le 65535 ]] || return 1
   return 0
 }
 
@@ -226,6 +212,27 @@ resolve_workspace() {
   [[ $workspace == /* ]] || die "the serve workspace must be an absolute path, got '$workspace'"
 }
 
+# serve_answers: true when a server answers GET /healthz on the socket. A
+# socket file left by an earlier run passes `-S` but refuses the connection,
+# so only a request that gets a response counts as ready. The script never
+# removes the file: serve replaces a stale one during its own startup and
+# refuses to start over a live one.
+serve_answers() {
+  [[ -S $socket ]] || return 1
+  if command -v curl >/dev/null 2>&1; then
+    curl --silent --fail --max-time 2 --output /dev/null --unix-socket "$socket" http://otto/healthz
+  else
+    python3 - "$socket" <<'PY' 2>/dev/null
+import socket, sys
+c = socket.socket(socket.AF_UNIX)
+c.settimeout(2)
+c.connect(sys.argv[1])
+c.sendall(b"GET /healthz HTTP/1.1\r\nHost: otto\r\nConnection: close\r\n\r\n")
+sys.exit(0 if c.recv(12).startswith(b"HTTP/1.1 200") else 1)
+PY
+  fi
+}
+
 # ---- preflight ----
 
 preflight() {
@@ -233,76 +240,57 @@ preflight() {
   for name in poll ready_timeout stop_timeout min_delay max_delay stable_after max_fails; do
     eval "value=\${$name}"
     if [[ $name == poll || $name == min_delay || $name == max_delay ]]; then
-      seconds "$value" || die "OTTO_TCP_$(printf '%s' "$name" | tr 'a-z' 'A-Z') must be a number, got '$value'"
+      seconds "$value" || die "OTTO_SERVE_CONNECT_$(printf '%s' "$name" | tr 'a-z' 'A-Z') must be a number, got '$value'"
     else
-      integer "$value" || die "OTTO_TCP_$(printf '%s' "$name" | tr 'a-z' 'A-Z') must be a whole number, got '$value'"
+      integer "$value" || die "OTTO_SERVE_CONNECT_$(printf '%s' "$name" | tr 'a-z' 'A-Z') must be a whole number, got '$value'"
     fi
   done
   [[ -x $otto_bin ]] || die "no Otto binary at '${otto_bin:-otto}'; run make build or set OTTO_BIN"
+  command -v curl >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || die "curl or python3 is required to check that serve answers on its socket"
   [[ -x $connect_bin ]] || die "no otto-connect binary at '${connect_bin:-otto-connect}'; run make connect-build or set OTTO_CONNECT_BIN"
 
-  local token=${OTTO_ACP_TOKEN:-}
-  [[ -n $token ]] || die "OTTO_ACP_TOKEN is not set; both otto serve and otto-connect read it in this mode"
-  case $token in
-  *[![:print:]]* | *' '*) die "OTTO_ACP_TOKEN must be printable ASCII without spaces" ;;
-  esac
-  [[ ${#token} -le 4000 ]] || die "OTTO_ACP_TOKEN must be at most 4000 bytes"
-
-  loopback_address "$acp_listen" || die "OTTO_ACP_LISTEN must be a loopback host:port, got '$acp_listen'"
+  [[ $socket == /* ]] || die "OTTO_SERVE_CONNECT_SOCKET must be an absolute path, got '$socket'"
   if [[ -n ${OTTO_LISTEN:-} ]]; then
     loopback_address "$OTTO_LISTEN" || die "OTTO_LISTEN must be a loopback host:port, got '$OTTO_LISTEN'"
   fi
-  [[ -f $connect_config ]] || die "connect configuration '$connect_config' not found; set OTTO_CONNECT_CONFIG or write the [agent] address section"
+  [[ -f $connect_config ]] || die "connect configuration '$connect_config' not found; set OTTO_CONNECT_CONFIG or write the [agent] command section"
   check_connect_config
 }
 
 # check_connect_config fails before either process starts on a configuration
-# that cannot work: connect would start its own `otto acp` (the mode this
-# script exists to avoid), talk to another port, or fail authentication.
-# OTTO_TCP_SKIP_CHECKS turns these checks off for a configuration whoever runs
-# the stack vouches for, for example one this reader cannot parse; the
-# workspace is always resolved, because serve needs it.
+# that cannot work: connect would not start `otto acp --attach`, would attach
+# to another socket, or still sets the removed TCP keys. The command is read
+# as the single-line array this project documents, with spaces removed.
+# OTTO_SERVE_CONNECT_SKIP_CHECKS turns these checks off for a configuration
+# whoever runs the stack vouches for, for example one this reader cannot parse;
+# the workspace is always resolved, because serve needs it.
 check_connect_config() {
   local address token_env command workspace_cfg
   address=$(toml_table_key agent address "$connect_config")
   token_env=$(toml_table_key agent token_env "$connect_config")
   command=$(toml_table_key agent command "$connect_config")
+  command=${command// /}
   workspace_cfg=$(toml_table_key agent workspace "$connect_config")
 
   if [[ -n $skip_checks ]]; then
-    warn "skipping the [agent] checks (OTTO_TCP_SKIP_CHECKS is set); connect.toml must already use address = \"$acp_listen\" and token_env = \"OTTO_ACP_TOKEN\""
+    warn "skipping the [agent] checks (OTTO_SERVE_CONNECT_SKIP_CHECKS is set); connect.toml must already use command = [\"otto\", \"acp\", \"--attach\"] and the socket $socket"
   else
-    if [[ -n $command ]]; then
-      die "connect.toml sets [agent].command; connect would start its own otto acp. Remove it, because address and command are mutually exclusive"
+    if [[ -n $address || -n $token_env ]]; then
+      die "connect.toml sets [agent].address or [agent].token_env; remove them and set command = [\"otto\", \"acp\", \"--attach\"]"
     fi
-    if [[ -z $address ]]; then
-      die "connect.toml has no [agent].address; add address = \"$acp_listen\" and token_env = \"OTTO_ACP_TOKEN\""
-    fi
-    if [[ $address != "$acp_listen" ]]; then
-      if ! loopback_address "$address"; then
-        die "connect.toml [agent].address '$address' is not a loopback host:port"
-      fi
-      local a_host a_port b_host b_port
-      host_port "$address"
-      a_host=$HP_HOST
-      a_port=$HP_PORT
-      host_port "$acp_listen"
-      b_host=$HP_HOST
-      b_port=$HP_PORT
-      case $a_host in localhost) a_host=127.0.0.1 ;; esac
-      case $b_host in localhost) b_host=127.0.0.1 ;; esac
-      if [[ $a_host != "$b_host" || $a_port != "$b_port" ]]; then
-        die "connect.toml [agent].address is '$address' but this stack serves ACP on '$acp_listen'; set OTTO_ACP_LISTEN=$address or edit the configuration"
-      fi
-    fi
-    if [[ -z $token_env ]]; then
-      die "connect.toml has no [agent].token_env; set token_env = \"OTTO_ACP_TOKEN\""
-    fi
-    if [[ $token_env != OTTO_ACP_TOKEN ]]; then
-      local named=${!token_env:-}
-      if [[ -z $named || $named != "${OTTO_ACP_TOKEN:-}" ]]; then
-        die "connect.toml names token_env = \"$token_env\" but otto serve reads OTTO_ACP_TOKEN; name OTTO_ACP_TOKEN there, or export $token_env with the same value"
-      fi
+    case $command in
+    *'"acp","--attach"'*) ;;
+    *) die "connect.toml [agent].command must be [\"otto\", \"acp\", \"--attach\"], so connect attaches to this serve" ;;
+    esac
+    if [[ $socket != "$default_socket" ]]; then
+      case $command in
+      *'"--socket","'"$socket"'"'*) ;;
+      *) die "connect.toml [agent].command must add \"--socket\", \"$socket\" to attach to this stack's socket" ;;
+      esac
+    else
+      case $command in
+      *'"--socket"'*) die "connect.toml [agent].command names --socket but this stack uses the default socket $default_socket; set OTTO_SERVE_CONNECT_SOCKET or edit the configuration" ;;
+      esac
     fi
     if [[ -z $workspace_cfg || $workspace_cfg != /* ]]; then
       die "connect.toml [agent].workspace must be an absolute path, got '${workspace_cfg:-}'"
@@ -320,10 +308,11 @@ check_connect_config() {
 
 want_arg() { [[ -n ${2:-} ]] && serve_cmd+=("$1" "$2"); return 0; }
 
-# build_serve_args fills serve_cmd from the shared otto.env settings. The ACP
-# address and the workspace are written last so they win over
-# OTTO_SERVE_EXTRA_ARGS: the address is what connect's configuration was
-# checked against.
+# build_serve_args fills serve_cmd from the shared otto.env settings. The
+# socket and the workspace are written last so they win over
+# OTTO_SERVE_EXTRA_ARGS: the socket is what connect's configuration was
+# checked against. --socket is always passed, because with --listen alone
+# serve opens only the TCP listener and no socket.
 build_serve_args() {
   serve_cmd=(serve)
   want_arg --provider "${OTTO_PROVIDER:-}"
@@ -339,7 +328,7 @@ build_serve_args() {
     read -r -a extra <<<"${OTTO_SERVE_EXTRA_ARGS}"
     if [[ ${#extra[@]} -gt 0 ]]; then serve_cmd+=("${extra[@]}"); fi
   fi
-  serve_cmd+=(--cwd "$workspace" --acp-listen "$acp_listen")
+  serve_cmd+=(--cwd "$workspace" --socket "$socket")
   if [[ -n ${OTTO_LISTEN:-} ]]; then serve_cmd+=(--listen "$OTTO_LISTEN"); fi
 }
 
@@ -349,7 +338,6 @@ serve_pid=
 connect_pid=
 serve_started=0
 connect_started=0
-serve_offset=0
 serve_ready=0
 serve_fails=0
 connect_fails=0
@@ -361,7 +349,6 @@ restart_connect_requested=
 exit_status=0
 
 start_serve() {
-  serve_offset=$(file_size "$serve_log")
   serve_started=$(now)
   serve_ready=0
   rm -f "$serve_pid_file"
@@ -448,9 +435,9 @@ supervise_serve() {
   if [[ -z $serve_pid ]]; then
     if [[ $(now) -ge $serve_next ]]; then start_serve; fi
   elif [[ $serve_ready -eq 0 ]]; then
-    if new_since "$serve_log" "$serve_offset" 'otto serve: ACP'; then
+    if serve_answers; then
       serve_ready=1
-      log "serve ACP listener ready on $acp_listen"
+      log "serve answers on $socket"
     fi
   fi
 }
@@ -463,9 +450,9 @@ supervise_connect() {
   [[ -n $connect_pid ]] && return 0
   [[ -n $serve_pid ]] || return 0
   [[ $(now) -ge $connect_next ]] || return 0
-  # Connect reconnects on its next message, but starting it after serve
-  # announced its listener keeps the first message from failing. The timeout is
-  # a fallback for a serve that never prints that line.
+  # Connect attaches on its next message, but starting it after serve answers
+  # on the socket keeps the first message from failing. The timeout is a
+  # fallback for a serve that never answers; a serve that exits is reaped first.
   if [[ $serve_ready -eq 0 && $(( $(now) - serve_started )) -lt $ready_timeout ]]; then
     return 0
   fi
@@ -523,7 +510,7 @@ run_supervisor() {
   trap 'stop_requested=1' TERM INT
   trap 'restart_serve_requested=1' USR1
   trap 'restart_connect_requested=1' USR2
-  log "supervisor started pid=$$ acp=$acp_listen workspace=$workspace"
+  log "supervisor started pid=$$ socket=$socket workspace=$workspace"
   serve_next=$(now)
   while :; do
     [[ -n $stop_requested ]] && break
@@ -585,7 +572,7 @@ start_stack() {
       tail -n 20 "$supervisor_log" >&2 || true
       exit 1
     fi
-    if grep -q -F 'otto serve: ACP' "$serve_log" 2>/dev/null && live_pid_of "$connect_pid_file" "$connect_bin" >/dev/null; then
+    if serve_answers && live_pid_of "$connect_pid_file" "$connect_bin" >/dev/null; then
       break
     fi
     if [[ $(now) -ge $deadline ]]; then
@@ -665,7 +652,7 @@ status_stack() {
     printf 'supervisor:  not running\n'
   fi
   if child=$(live_pid_of "$serve_pid_file" ""); then
-    printf 'otto serve:  running (pid %s, up %s, ACP %s)\n' "$child" "$(uptime_of "$child")" "$acp_listen"
+    printf 'otto serve:  running (pid %s, up %s, socket %s)\n' "$child" "$(uptime_of "$child")" "$socket"
   else
     printf 'otto serve:  not running\n'
   fi

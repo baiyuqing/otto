@@ -19,13 +19,10 @@ pub(super) fn new_id() -> Result<String, String> {
 
 // ---- middleware ----
 
-/// Request extension set by [`Server::socket_router`].
-#[derive(Clone, Copy)]
-pub(super) struct SocketRequest;
-
 /// Re-opens a session the idle sweeper evicted before the route runs, so a
 /// client that holds a session id keeps working across an eviction. Runs inside
-/// [`instrument`], so a request still has to pass the token gate first.
+/// [`instrument`] and [`authorization::authorize_operation`], so a request
+/// still has to pass the token gate and authorization first.
 ///
 /// A failure is not answered here: the route resolves the session itself and
 /// answers its own 404 (or its own error) exactly as it does for a session that
@@ -53,12 +50,15 @@ pub(super) fn session_id_in_path(path: &str) -> Option<&str> {
 /// Token gating is folded in so a 401 is still logged and measured under its
 /// real route. The token gates `/v1/` routes; when the TCP listener is
 /// non-loopback it gates every route except `GET /healthz`, including
-/// `/metrics` and unmatched paths. Requests from the Unix socket router are
-/// never gated. The `http_request` log line carries `peer` when the listener
-/// attached the peer address.
+/// `/metrics` and unmatched paths. A request that already carries a
+/// [`authorization::Principal`] ([`Server::router_for`]) is never gated. A
+/// request with the valid token, or any request when the server has no token,
+/// is attached [`authorization::Principal::Owner`]. The `http_request` log
+/// line carries `principal` when the request has one and `peer` when the
+/// listener attached the peer address.
 pub(super) async fn instrument(
     State(server): State<Arc<Server>>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let mut id = request_id(
@@ -87,11 +87,24 @@ pub(super) async fn instrument(
         route.contains(" /v1/") || (server.remote_listener && route != "GET /healthz");
 
     let start = Instant::now();
-    let mut response = if !server.token.is_empty()
-        && request.extensions().get::<SocketRequest>().is_none()
-        && gated_route
-        && !auth::authorized(&server.token, request.headers())
+    if request
+        .extensions()
+        .get::<authorization::Principal>()
+        .is_none()
+        && (server.token.is_empty() || auth::authorized(&server.token, request.headers()))
     {
+        request
+            .extensions_mut()
+            .insert(authorization::Principal::Owner);
+    }
+    let principal = request
+        .extensions()
+        .get::<authorization::Principal>()
+        .map(|principal| principal.name().to_string());
+    request
+        .extensions_mut()
+        .insert(authorization::RequestId(id.clone()));
+    let mut response = if principal.is_none() && gated_route {
         auth::unauthorized()
     } else {
         next.run(request).await
@@ -113,6 +126,9 @@ pub(super) async fn instrument(
         ("duration_ms", elapsed.as_millis().to_string()),
         ("request_id", id),
     ];
+    if let Some(principal) = principal {
+        fields.push(("principal", principal));
+    }
     if let Some(peer) = peer {
         fields.push(("peer", peer));
     }

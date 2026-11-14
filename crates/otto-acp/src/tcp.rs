@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use otto_server::authorization::Principal;
 use otto_server::{Server, auth, listen};
 
 pub fn bind(address: &str, token: &str) -> Result<TcpListener, String> {
@@ -91,7 +92,13 @@ pub async fn serve(
                     let worker_stop = connection_stop.clone();
                     let mut worker = tokio::task::spawn_blocking(move || {
                         runtime.block_on(super::attach::serve_in_process(
-                            server, workspace, Box::new(BufReader::new(input)), &mut stream, &worker_stop,
+                            server,
+                            // `OTTO_ACP_TOKEN` authenticates the account owner.
+                            Principal::Owner,
+                            workspace,
+                            Box::new(BufReader::new(input)),
+                            &mut stream,
+                            &worker_stop,
                         ));
                         let _ = stream.flush();
                         let _ = stream.shutdown(Shutdown::Both);

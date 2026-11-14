@@ -336,6 +336,12 @@ func TestEndToEndSharedSession(t *testing.T) {
 // The real ACP agent must turn remember's pending candidate into an actionable
 // connector card; a tool-call notification alone is not a permission request.
 func TestEndToEndMemoryApprovalCard(t *testing.T) {
+	for _, attach := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attach=%t", attach), func(t *testing.T) { testEndToEndMemoryApprovalCard(t, attach) })
+	}
+}
+
+func testEndToEndMemoryApprovalCard(t *testing.T, attach bool) {
 	bin := ottoBin(t)
 	var calls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +364,10 @@ func TestEndToEndMemoryApprovalCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
+	if attach {
+		sock, _ := startOttoServer(t, bin, home, workspace)
+		options = &agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)}
+	}
 	h := newHarness(t, setup{platform: "telegram", agent: options})
 	h.say("Remember my preference for tabs.")
 	waitCards(h, 1)

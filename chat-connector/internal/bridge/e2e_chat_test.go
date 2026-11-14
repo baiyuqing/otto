@@ -138,6 +138,10 @@ func TestEndToEndAttachSharedSession(t *testing.T) {
 		t.Fatal(got)
 	}
 	sid := h.store.Session("fake:c1")
+	page, err := h.agent.MemoryPending(context.Background(), sid, "")
+	if err != nil || len(page.Candidates) != 0 {
+		t.Fatalf("attach memory review unavailable: %v", err)
+	}
 
 	// A second stdio relay accesses the same serve-owned session.
 	local := agent.New(attach)

@@ -60,8 +60,6 @@ func run() error {
 	b := bridge.New(bridge.Options{
 		Agent: agent.New(agent.Options{
 			Command: cfg.Agent.Command,
-			Address: cfg.Agent.Address,
-			Token:   cfg.Agent.Token,
 			Dir:     cfg.Agent.Workspace,
 			// The agent and its tools do not need the bot token or app secret.
 			Env:     withoutVars(os.Environ(), secretVars...),
@@ -81,11 +79,7 @@ func run() error {
 	for i, p := range platforms {
 		names[i] = p.Name()
 	}
-	mode := "process"
-	if cfg.Agent.Address != "" {
-		mode = "address"
-	}
-	slog.Info("connector_started", "platforms", strings.Join(names, ","), "agent_mode", mode, "metrics_listen", cfg.Metrics.Listen)
+	slog.Info("connector_started", "platforms", strings.Join(names, ","), "agent_mode", "process", "metrics_listen", cfg.Metrics.Listen)
 	err = b.Run(ctx)
 	reason := "signal"
 	if err != nil {
@@ -103,9 +97,6 @@ func platformsFor(cfg *config.Config, store *state.Store) ([]bridge.Platform, ma
 	var platforms []bridge.Platform
 	access := map[string]bridge.Access{}
 	var secretVars []string
-	if cfg.Agent.TokenEnv != "" {
-		secretVars = append(secretVars, cfg.Agent.TokenEnv)
-	}
 	if t := cfg.Telegram; t != nil {
 		bot := telegram.New(t.Token, store, t.Chats...)
 		platforms = append(platforms, bot)

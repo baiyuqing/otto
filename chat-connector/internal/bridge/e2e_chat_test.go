@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -15,7 +14,7 @@ import (
 
 func TestEndToEndChatRoleAndChannel(t *testing.T) {
 	bin := ottoBin(t)
-	for _, mode := range []string{"local", "attach", "tcp"} {
+	for _, mode := range []string{"local", "attach"} {
 		t.Run(mode, func(t *testing.T) {
 			provider := newFakeProvider(t, nil)
 			home := ottoHome(t, provider.URL)
@@ -27,10 +26,6 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 			if mode == "attach" {
 				sock, _ := startOttoServer(t, bin, home, workspace)
 				options = &agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)}
-			}
-			if mode == "tcp" {
-				_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
-				options = tcpAgentOptions(t, diagnostics, workspace)
 			}
 			store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
 			if err != nil {
@@ -46,7 +41,7 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 				{"telegram", "write a short invitation", "The user is communicating through Telegram chat"},
 			} {
 				h := newHarness(t, setup{platform: turn.platform, agent: &agent.Options{
-					Command: options.Command, Address: options.Address, Token: options.Token, Dir: options.Dir, Env: options.Env,
+					Command: options.Command, Dir: options.Dir, Env: options.Env,
 				}, store: store})
 				// Reuse the first turn's session to check that the current
 				// transport is supplied even when the session already has history.
@@ -124,9 +119,9 @@ func lastProviderBody(provider *fakeProvider) string {
 	return provider.bodies[len(provider.bodies)-1]
 }
 
-// TCP drives serve directly: no ACP child, persistent shared sessions and a
-// transport reconnect that leaves serve and its HTTP clients alive.
-func TestEndToEndTCPSharedSession(t *testing.T) {
+// Attach mode: persistent shared sessions and a transport reconnect that
+// leaves serve and its HTTP clients alive.
+func TestEndToEndAttachSharedSession(t *testing.T) {
 	bin := ottoBin(t)
 	provider := newFakeProvider(t, nil)
 	home := ottoHome(t, provider.URL)
@@ -134,29 +129,22 @@ func TestEndToEndTCPSharedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sock, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
-	address := tcpAgentOptions(t, diagnostics, workspace).Address
-	options := func(token string) *agent.Options {
-		return &agent.Options{Address: address, Token: token, Dir: workspace}
-	}
-	bad := agent.New(*options("wrong-token"))
-	if _, err := bad.New(context.Background()); err == nil {
-		t.Fatal("bad authentication admitted")
-	}
-	bad.Close()
-	h := newHarness(t, setup{agent: options("connect-test-acp-token")})
-	h.say("first over TCP")
-	if got := h.waitSent(1); got[0] != "echo: first over TCP" {
+	sock, diagnostics := startOttoServer(t, bin, home, workspace)
+	attach := agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)}
+	opts := attach
+	h := newHarness(t, setup{agent: &opts})
+	h.say("first over attach")
+	if got := h.waitSent(1); got[0] != "echo: first over attach" {
 		t.Fatal(got)
 	}
 	sid := h.store.Session("fake:c1")
 	page, err := h.agent.MemoryPending(context.Background(), sid, "")
 	if err != nil || len(page.Candidates) != 0 {
-		t.Fatalf("TCP memory review unavailable: %v", err)
+		t.Fatalf("attach memory review unavailable: %v", err)
 	}
 
-	// The existing stdio relay accesses the same serve-owned session.
-	local := agent.New(agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)})
+	// A second stdio relay accesses the same serve-owned session.
+	local := agent.New(attach)
 	local.SetHandler(h.b)
 	defer local.Close()
 	if err := local.Load(context.Background(), sid); err != nil {
@@ -165,9 +153,9 @@ func TestEndToEndTCPSharedSession(t *testing.T) {
 	if _, err := local.Prompt(context.Background(), sid, "shared from HTTP relay"); err != nil {
 		t.Fatal(err)
 	}
-	h.agent.Kill() // disconnect transport only; the server must remain alive
-	h.say("after TCP reconnect")
-	if got := h.waitSent(2); got[1] != "echo: after TCP reconnect" {
+	h.agent.Kill() // stop this relay only; the server must remain alive
+	h.say("after attach reconnect")
+	if got := h.waitSent(2); got[1] != "echo: after attach reconnect" {
 		t.Fatalf("reconnect: %q; %s", got, diagnostics())
 	}
 	if h.store.Session("fake:c1") != sid {
@@ -178,22 +166,13 @@ func TestEndToEndTCPSharedSession(t *testing.T) {
 	}
 	h.agent.Close()
 	if _, err := local.List(context.Background()); err != nil {
-		t.Fatalf("closing TCP stopped serve: %v", err)
+		t.Fatalf("closing the first relay stopped serve: %v", err)
 	}
-}
-
-func tcpAgentOptions(t *testing.T, diagnostics func() string, workspace string) *agent.Options {
-	t.Helper()
-	match := regexp.MustCompile(`otto serve: ACP ([^\s]+)`).FindStringSubmatch(diagnostics())
-	if len(match) != 2 {
-		t.Fatalf("missing ACP address: %s", diagnostics())
-	}
-	return &agent.Options{Address: match[1], Token: "connect-test-acp-token", Dir: workspace}
 }
 
 func TestEndToEndModelInitiatedApproval(t *testing.T) {
-	for _, tcp := range []bool{false, true} {
-		t.Run(fmt.Sprintf("tcp=%t", tcp), func(t *testing.T) {
+	for _, attach := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attach=%t", attach), func(t *testing.T) {
 			bin := ottoBin(t)
 			provider := newScriptedFakeProvider(t, nil, func(body []byte, _ int) string {
 				if !strings.Contains(string(body), `"role":"tool"`) && !strings.Contains(string(body), `"role": "tool"`) {
@@ -208,9 +187,9 @@ func TestEndToEndModelInitiatedApproval(t *testing.T) {
 				t.Fatal(err)
 			}
 			options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
-			if tcp {
-				_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
-				options = tcpAgentOptions(t, diagnostics, workspace)
+			if attach {
+				sock, _ := startOttoServer(t, bin, home, workspace)
+				options = &agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)}
 			}
 			h := newHarness(t, setup{platform: "telegram", agent: options})
 			h.say("/auto off")

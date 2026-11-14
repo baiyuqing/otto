@@ -7,10 +7,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Added
+
+- `otto acp --attach` serves memory review (`_otto/memory/pending` and
+  `_otto/memory/review`) for the sessions it opened, through serve's session
+  memory routes. A chat connector attached to `otto serve` shows memory review
+  cards and accepts `/memory accept|reject`.
+
 ### Changed
 
-- `otto serve` authorizes every API operation, over HTTP, the Unix socket and
-  ACP TCP, before its handler runs. Every authenticated caller is the owner,
+- `otto serve` authorizes every API operation, over HTTP and the Unix socket,
+  before its handler runs. Every authenticated caller is the owner,
   so no request that succeeded before is refused; `http_request` log lines
   gain `principal=owner`, and the API documents `403 forbidden` for clients
   with fewer permissions. The OpenAPI document now lists the approval-mode,
@@ -19,6 +26,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 - Source and Docker builds now use Rust 1.100.0, managed by the repository's
   pinned toolchain and build image.
+
+### Removed
+
+- `otto serve --acp-listen` and `OTTO_ACP_TOKEN`. The loopback ACP TCP
+  transport sent its token to whatever process held the port. Reach a running
+  `otto serve` with `otto acp --attach` over its Unix socket, for example
+  `[agent] command = ["otto", "acp", "--attach"]` in `connect.toml`, and unset
+  `OTTO_ACP_TOKEN`.
 
 ### Fixed
 

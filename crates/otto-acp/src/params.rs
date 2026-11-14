@@ -114,15 +114,14 @@ pub(super) fn channel_name(channel: Channel) -> &'static str {
     }
 }
 
-/// Advertise memory review only when the controller lives in this process.
-pub(super) fn initialize_result(local: bool) -> Reply {
+/// The capabilities every ACP connection advertises, local or attached.
+pub(super) fn initialize_result() -> Reply {
     let capabilities = AgentCapabilities::new()
         .load_session(true)
         .prompt_capabilities(PromptCapabilities::new())
         .mcp_capabilities(McpCapabilities::new())
-        .session_capabilities(SessionCapabilities::new().list(SessionListCapabilities::new()));
-    let capabilities = match local {
-        true => capabilities.meta(serde_json::Map::from_iter([(
+        .session_capabilities(SessionCapabilities::new().list(SessionListCapabilities::new()))
+        .meta(serde_json::Map::from_iter([(
             "otto".to_string(),
             json!({"memoryReview": true,
                 "approvalDialogue":true,
@@ -133,19 +132,7 @@ pub(super) fn initialize_result(local: bool) -> Reply {
                 "approvalMode":{"version":1},
                 "approvalPolicy":{"version":1},
                 "approvals":{"version":1}}),
-        )])),
-        false => capabilities.meta(serde_json::Map::from_iter([(
-            "otto".to_string(),
-            json!({"approvalDialogue":true,
-                "channelContext": true,
-                "taskControl": true,
-                "scheduleDelivery": true,
-                "scheduleDeliveryChats": true,
-                "approvalMode":{"version":1},
-                "approvalPolicy":{"version":1},
-                "approvals":{"version":1}}),
-        )])),
-    };
+        )]));
     result(
         InitializeResponse::new(ProtocolVersion::V1)
             .agent_capabilities(capabilities)

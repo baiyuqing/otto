@@ -75,8 +75,8 @@ listener is opened, resolved in this order: `--listen` > `--socket` >
 `[server].listen` > `[server].socket` > the built-in default
 `~/.otto/otto.sock`. The config file cannot select both.
 
-**Callers.** Every caller that authenticates, with the TCP token, through the
-Unix socket or over [ACP TCP](#direct-acp-tcp-connection), is the owner: it
+**Callers.** Every caller that authenticates, with the TCP token or through the
+Unix socket (including `otto acp --attach`), is the owner: it
 has the authority of the account Otto runs as and may perform every operation,
 including trusting directories and changing provider configuration. Keep the
 token as secret as that account's credentials. Each API operation is still
@@ -611,9 +611,7 @@ minute. A setting of `"0"`, or `0` for the cap, turns that rule off. Both are on
 by default and need no restart to change. Busy sessions are never closed,
 whatever their age or the count: a running or queued turn, a compaction, a
 waiting approval, an unfinished sub-agent task, or an undelivered notification
-keeps a session open. A live ACP connection (`--acp-listen`, or the
-Web UI's own connection) pins the sessions it opened, so those stay open until
-it ends.
+keeps a session open.
 
 Closing a session this way is invisible to a client. The session keeps its file,
 its history, and its saved queued turns, and the next request that names it —
@@ -904,7 +902,7 @@ is rejected.
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
 | `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}` plus an optional string `advice` (the one-line advice, omitted when there is none); `nextCursor` is `""` on the last page. |
-| `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. Errors: `-32010` memory is not available in the session, `-32011` the candidate was already decided or changed, `-32002` unknown session or candidate, `-32602` bad parameters or cursor. `otto acp` advertises both with `agentCapabilities._meta.otto.memoryReview`; `otto acp --attach` does not serve them. |
+| `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. Errors: `-32010` memory is not available in the session, `-32011` the candidate was already decided or changed, `-32002` unknown session or candidate, `-32602` bad parameters or cursor. `otto acp` and `otto acp --attach` advertise both with `agentCapabilities._meta.otto.memoryReview`; a relay reviews only sessions it opened and forwards to `GET /v1/sessions/{id}/memory/candidates` and `POST /v1/sessions/{id}/memory/candidates/{candidate_id}/review`. |
 
 `mcpServers` in `session/new` and `session/load` must be empty: MCP servers
 come from Otto's own configuration (see [MCP servers](memory-and-extensions.md#mcp-servers)). Otto
@@ -934,8 +932,7 @@ and waits up to 60 s. A `result` with any value (`otto-connect` answers
 `{}`) marks the item delivered; an error or no answer is a failed attempt
 that Otto retries (see [`schedule`](safety-and-tools.md#schedule)). `otto acp` also runs the due
 prompt items of those chats that were created in its workspace; with
-`--attach`, and on the ACP TCP listener of `otto serve`, `otto serve` runs
-them.
+`--attach`, `otto serve` runs them.
 
 ### `/compact` and `/context` are slash commands
 
@@ -1047,8 +1044,7 @@ provider credentials. The socket defaults to `[server].socket`, then
 memory-review capabilities are those of attach mode. Unlike local ACP,
 `session/new` and `session/load` select an admitted workspace using each
 request's absolute `cwd`. `session/list` filters by its `cwd`, or uses the
-connection's startup workspace when omitted. Direct ACP TCP follows the same
-workspace rules. Admission stays in `otto serve`; ACP does not implicitly
+connection's startup workspace when omitted. Admission stays in `otto serve`; ACP does not implicitly
 trust directories (see [Workspaces](servers-and-connectors.md#workspaces)).
 
 At startup it requests `GET /healthz`. If `otto serve` does not answer, it
@@ -1070,8 +1066,7 @@ with status `1`.
   [`otto acp`](servers-and-connectors.md#background-results-start-a-wake-turn). The relay reads
   `GET /v1/sessions/{id}/wake-replies` once a second, starting after the
   newest reply that existed when the session was opened, so earlier replies
-  are not sent again. Over [ACP TCP](servers-and-connectors.md#direct-acp-tcp-connection), `otto serve`
-  sends the same update without polling. Loading the session again replaces
+  are not sent again. Loading the session again replaces
   its notification subscription, including after another client closes and
   reopens that session.
 - A turn that ends with an error answers the prompt with a JSON-RPC error
@@ -1088,8 +1083,8 @@ with status `1`.
 
 ### Chat access goes through otto-connect
 
-To use Otto from Telegram, run `otto-connect`, which starts `otto acp` or
-connects directly to `otto serve` over [ACP TCP](servers-and-connectors.md#direct-acp-tcp-connection).
+To use Otto from Telegram, run `otto-connect`, which starts `otto acp`, or
+`otto acp --attach` to share the sessions of `otto serve`.
 See [Chat connector](servers-and-connectors.md#chat-connector).
 
 ### Not supported over ACP
@@ -1104,9 +1099,9 @@ See [Chat connector](servers-and-connectors.md#chat-connector).
 ## Chat connector
 
 `otto-connect` connects Telegram chats to Otto through ACP.
-It is a separate Go program in `chat-connector/`: it starts one `otto acp` child by
-default or connects directly to `otto serve` over authenticated ACP TCP,
-and maps each chat to one Otto session. Provider selection and authentication
+It is a separate Go program in `chat-connector/`: it starts one `otto acp` child,
+by default a local agent or `otto acp --attach` to share the sessions of
+`otto serve`, and maps each chat to one Otto session. Provider selection and authentication
 always belong to that Otto runtime. For example, a Claude key must be present
 in the environment of `otto acp` or `otto serve`, never in `connect.toml` or the
 connector process when it connects to an existing server. Restart the Otto
@@ -1212,46 +1207,6 @@ workspace = "/Users/me/work"            # the same workspace the serve clients u
   sent to the chat while the connector has the session open.
 - Use `/sessions` and `/use` (see [Commands](servers-and-connectors.md#commands)) to bind a chat to a
   session that was started in another client.
-
-### Direct ACP TCP connection
-
-`otto serve` can also accept ACP directly, without an `otto acp --attach`
-child. Set `OTTO_ACP_TOKEN` in the environment of both programs (for example,
-through your secret manager), then start:
-
-```bash
-otto serve --cwd /Users/me/work --acp-listen 127.0.0.1:9001
-```
-
-Use this agent section in `connect.toml`; keep the Telegram section:
-
-```toml
-[agent]
-address = "127.0.0.1:9001"
-token_env = "OTTO_ACP_TOKEN"
-workspace = "/Users/me/work"
-```
-
-`address` and `command` are mutually exclusive. The workspace must match
-serve's startup workspace. Connect starts no agent process and needs no model
-credentials in this mode. Its conversations, cancellation, permission cards,
-and memory review use the sessions held by serve, also accessible through
-`otto --attach` and the web UI. A lost connection is reopened on the next
-message, loading the chat's saved session. Stopping connect closes its
-connection and cancels its turns; it does not stop serve.
-
-The listener is opt-in and accepts only loopback IPs or `localhost`; it has no
-TLS or remote-network support. The token is non-empty printable ASCII without
-spaces, at most 4000 bytes, and is never stored in config or printed. Each TCP
-connection begins with `Authorization: Bearer <token>\n` (one LF-terminated
-line), followed immediately by ordinary newline-delimited ACP v1 JSON-RPC.
-This authentication preface is Otto's transport convention, not part of ACP.
-Authentication must finish within five seconds. The listener allows at most
-64 simultaneous connections. Port `0` selects a free port, printed at startup.
-
-Configuration-management chat commands that require the separate HTTP
-management client remain available with `command = ["otto", "acp", "--attach"]`;
-they are unavailable in direct TCP mode.
 
 ### The ACP TCP stack script
 
@@ -1497,7 +1452,7 @@ no tool for this, and text in the chat such as "approve" is just a prompt.
 The commands need the chat to have a session (otherwise "This chat has no
 session yet; send a message first."), work while a turn is running, and
 reply "This agent does not support memory review." when the agent does not
-advertise it, as `otto acp --attach` does not. An id that is not a unique
+advertise it; `otto acp` and `otto acp --attach` both do. An id that is not a unique
 pending prefix gets "No single pending candidate starts with \"`<id>`\"."; other
 arguments get "Usage: /memory | /memory accept <id> | /memory reject <id>".
 After each successful turn, Telegram shows pending memory candidates
@@ -1722,8 +1677,8 @@ failed send, with an empty `request_id` when the text was a connector notice
 
 The connector gives each admitted chat message a `request_id` (32 hex
 characters) and sends it with the prompt. Otto attaches it to the turn the
-prompt starts when the prompt reaches `otto serve`: through `otto acp
---attach` or through the direct ACP TCP connection. To follow a message:
+prompt starts when the prompt reaches `otto serve` through `otto acp
+--attach`. To follow a message:
 
 ```sh
 grep 'request_id=<id>' ~/.otto/connect.log   # chat_received ... chat_reply_sent, with session_id

@@ -25,7 +25,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories | `runtime/storage.rs` composition |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
-| `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-tcp.sh` supervises the ACP TCP pair (`otto serve --acp-listen` plus `otto-connect`) | `Makefile` |
+| `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-serve-connect.sh` supervises `otto serve` and an `otto-connect` that reaches it through `otto acp --attach` | `Makefile` |
 
 The root Cargo workspace contains `otto-core`, `otto`, `otto-server`,
 `otto-acp` and `otto-cli`.
@@ -300,9 +300,9 @@ coordinate. Direction changes, keys, paste, and drag start/end retain exact orde
 - [otto-plus](https://github.com/baiyuqing/otto-plus) owns the browser UI and
   thin WASM bindings. It consumes `otto-core` at a pinned revision and calls
   Otto HTTP APIs; Otto does not depend on it.
-- `chat-connector/` does not link Otto code. It starts `otto acp` over stdio or
-  connects directly to `otto serve` over authenticated loopback ACP TCP.
-  Both use ACP v1; see [ACP guide](manual/servers-and-connectors.md#acp-agent-server).
+- `chat-connector/` does not link Otto code. It starts `otto acp` over stdio,
+  either a local agent or `otto acp --attach` to reach `otto serve` through its
+  Unix socket. Both use ACP v1; see [ACP guide](manual/servers-and-connectors.md#acp-agent-server).
 
 ## Common change paths
 

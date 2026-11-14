@@ -206,10 +206,9 @@ impl Connection {
             Backend::Local(local) => local
                 .session(&id)
                 .map(|session| Arc::clone(&session.controller)),
-            Backend::Attach(relay) => relay
-                .server
-                .as_ref()
-                .and_then(|server| server.controller(&id)),
+            // An attached session's controller lives in serve; its notices are
+            // polled over the socket below.
+            Backend::Attach(_) => None,
         };
         let connection = Arc::clone(self);
         let stop = self.notice_stop.child_token();
@@ -275,44 +274,6 @@ impl Connection {
                 });
             }
             Backend::Attach(relay) => {
-                if relay.server.is_some() {
-                    let Some(controller) = controller else {
-                        return;
-                    };
-                    let changed = controller.notices_changed();
-                    let (_, after) = controller.notices_since(0);
-                    let replies_changed = controller.wake_replies_changed();
-                    let (_, replies_after) = controller.wake_replies_since(0);
-                    let (wake_connection, wake_controller) =
-                        (Arc::clone(&connection), Arc::clone(&controller));
-                    let (wake_id, wake_stop, wake_start) =
-                        (id.clone(), stop.clone(), start.clone());
-                    tokio::spawn(async move {
-                        if !notice_watcher_ready(wake_start, &wake_stop).await {
-                            return;
-                        }
-                        watch_controller_notices(
-                            wake_connection,
-                            wake_controller,
-                            wake_id,
-                            wake_stop,
-                            replies_changed,
-                            replies_after,
-                            true,
-                        )
-                        .await;
-                    });
-                    tokio::spawn(async move {
-                        if !notice_watcher_ready(start, &stop).await {
-                            return;
-                        }
-                        watch_controller_notices(
-                            connection, controller, id, stop, changed, after, false,
-                        )
-                        .await;
-                    });
-                    return;
-                }
                 // An older serve has no wake-replies route; only this polling
                 // stops then.
                 let mut replies_after = tokio::select! {

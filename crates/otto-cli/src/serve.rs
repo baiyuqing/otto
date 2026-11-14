@@ -58,8 +58,6 @@ pub struct ServeOptions<'a> {
     pub runtime: Runtime,
     /// At least one of its two fields is set; both set binds both listeners.
     pub listen: ServerRuntime,
-    pub acp_listen: String,
-    pub acp_token: String,
     /// `OTTO_SERVER_TOKEN` from the process environment; empty when unset.
     pub server_token: String,
     /// The process sandbox the composition root opened, already behind its
@@ -88,8 +86,6 @@ pub async fn run(
         builder,
         runtime,
         listen,
-        acp_listen,
-        acp_token,
         server_token,
         control,
         reloader,
@@ -107,17 +103,6 @@ pub async fn run(
         }
     };
 
-    let acp = if acp_listen.is_empty() {
-        None
-    } else {
-        match otto_acp::tcp::bind(&acp_listen, &acp_token) {
-            Ok(listener) => Some((listener, acp_token)),
-            Err(message) => {
-                let _ = control.close().await;
-                return fail(stderr, &builder.redact_error(&message, Some(&runtime)));
-            }
-        }
-    };
     let serve_cancel = cancel.child_token();
     let bound = match bind(&listen, &server_token, &builder.logger) {
         Ok(bound) => bound,
@@ -134,13 +119,6 @@ pub async fn run(
         tls,
         remote,
     } = bound;
-    if let Some((listener, _)) = &acp {
-        let _ = writeln!(
-            stdout,
-            "otto serve: ACP {}",
-            listener.local_addr().expect("bound address")
-        );
-    }
     if let Some(tcp) = &tcp {
         let scheme = if tls { "https" } else { "http" };
         let printed_token = if token_from_env {
@@ -275,28 +253,7 @@ pub async fn run(
     // Closes sessions nobody has used for a while, so a server that stays up
     // keeps only the sessions in play. See `Server::sweep_idle_sessions`.
     server.start_session_sweeper(serve_cancel.child_token());
-    let (serve_error, acp_error) = tokio::join!(
-        serve_listeners(&server, tcp, socket, &serve_cancel),
-        async {
-            if let Some((listener, token)) = acp {
-                let result = otto_acp::tcp::serve(
-                    listener,
-                    token,
-                    Arc::clone(&server),
-                    PathBuf::from(&builder.workspace_path),
-                    &serve_cancel,
-                )
-                .await;
-                if result.is_err() {
-                    serve_cancel.cancel();
-                }
-                result.err()
-            } else {
-                None
-            }
-        }
-    );
-    let serve_error = serve_error.or(acp_error);
+    let serve_error = serve_listeners(&server, tcp, socket, &serve_cancel).await;
     serve_cancel.cancel();
     server.cancel_token().cancel();
     if let Some(worker) = schedule_worker {

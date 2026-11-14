@@ -77,11 +77,18 @@ fn candidate_json(candidate: &Candidate) -> Value {
     value
 }
 
-pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply {
+/// The page size `params` asks for: 1 to [`MAX_PAGE`], [`DEFAULT_PAGE`]
+/// when absent.
+fn page_limit(params: &PendingParams) -> Result<usize, super::Error> {
     let limit = params.limit.unwrap_or(DEFAULT_PAGE);
     if limit == 0 || limit > MAX_PAGE {
         return Err(invalid_params(format!("limit must be 1 to {MAX_PAGE}")));
     }
+    Ok(limit)
+}
+
+pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply {
+    let limit = page_limit(params)?;
     let (memory, user_scope, workspace_scope) = controller
         .memory_manager()
         .ok_or_else(|| error(MEMORY_UNAVAILABLE, UNAVAILABLE))?;
@@ -100,9 +107,13 @@ pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply 
     Ok(json!({ "candidates": candidates, "nextCursor": page.next_cursor }))
 }
 
+fn review_decision(params: &ReviewParams) -> Result<ReviewDecision, super::Error> {
+    ReviewDecision::parse(&params.decision)
+        .ok_or_else(|| invalid_params("decision must be accept or reject"))
+}
+
 pub(super) fn review(controller: &Controller, params: &ReviewParams) -> Reply {
-    let decision = ReviewDecision::parse(&params.decision)
-        .ok_or_else(|| invalid_params("decision must be accept or reject"))?;
+    let decision = review_decision(params)?;
     let (service, user_scope, workspace_scope) = controller
         .memory_manager()
         .ok_or_else(|| error(MEMORY_UNAVAILABLE, UNAVAILABLE))?;
@@ -132,6 +143,185 @@ pub(super) fn review(controller: &Controller, params: &ReviewParams) -> Reply {
         "record": result.record.map(|record| json!({"id": record.id, "revision": record.revision})),
         "forgotten": result.tombstone.map(|tombstone| tombstone.id),
     }))
+}
+
+// ---- attached sessions ----
+//
+// `otto acp --attach` holds no controller: the session lives in `otto serve`.
+// It reviews through serve's session memory routes and returns the same
+// shapes as the in-process functions above.
+
+/// The ACP error for a failed memory route, by HTTP status. `None` for a
+/// failure to reach serve, which the relay handles itself.
+fn attached_error(failure: &otto::client::Error) -> Option<super::Error> {
+    let otto::client::Error::Http {
+        status, message, ..
+    } = failure
+    else {
+        return None;
+    };
+    let code = match status {
+        501 | 503 => MEMORY_UNAVAILABLE,
+        409 => MEMORY_CONFLICT,
+        404 => RESOURCE_NOT_FOUND,
+        400 => super::INVALID_PARAMS,
+        _ => INTERNAL_ERROR,
+    };
+    Some(error(code, message.clone()))
+}
+
+/// One candidate of serve's `MemoryCandidate` JSON in the shape of
+/// [`candidate_json`].
+fn attached_candidate_json(candidate: &Value) -> Value {
+    let mut value = json!({
+        "id": candidate["id"],
+        "action": candidate["action"],
+        "kind": candidate["kind"],
+        "key": candidate["key"],
+        "text": candidate["text"],
+        "reason": candidate["reason"],
+        "origin": candidate["origin"],
+        "scope": {"namespace": candidate["scope"]["namespace"], "id": candidate["scope"]["id"]},
+    });
+    if let Some(advice) = candidate.get("advice").filter(|advice| advice.is_string()) {
+        value["advice"] = advice.clone();
+    }
+    value
+}
+
+/// Candidate ids are letters, digits, `-` and `_`. Anything else cannot name
+/// a candidate and is not placed in a request path.
+fn candidate_id_is_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// [`pending`] for a session held by serve.
+pub(super) async fn attached_pending(
+    client: &otto::client::Client,
+    params: &PendingParams,
+) -> Result<Value, AttachedFailure> {
+    let limit = page_limit(params).map_err(AttachedFailure::Reply)?;
+    let page = client
+        .memory_candidates(&params.session_id, &params.cursor, limit)
+        .await
+        .map_err(AttachedFailure::from)?;
+    let candidates: Vec<Value> = page["candidates"]
+        .as_array()
+        .map(|rows| rows.iter().map(attached_candidate_json).collect())
+        .unwrap_or_default();
+    Ok(json!({ "candidates": candidates, "nextCursor": page["next_cursor"] }))
+}
+
+/// [`review`] for a session held by serve. Serve records the decision as a
+/// human review.
+pub(super) async fn attached_review(
+    client: &otto::client::Client,
+    params: &ReviewParams,
+) -> Result<Value, AttachedFailure> {
+    let decision = review_decision(params).map_err(AttachedFailure::Reply)?;
+    let id = &params.candidate_id;
+    if !candidate_id_is_valid(id) {
+        return Err(AttachedFailure::Reply(error(
+            RESOURCE_NOT_FOUND,
+            format!("candidate {id} not found"),
+        )));
+    }
+    let reviewed = client
+        .review_memory_candidate(&params.session_id, id, decision.as_str())
+        .await
+        .map_err(AttachedFailure::from)?;
+    let record = reviewed
+        .get("record")
+        .filter(|record| record.is_object())
+        .map_or(
+            Value::Null,
+            |record| json!({"id": record["id"], "revision": record["revision"]}),
+        );
+    Ok(json!({
+        "decision": reviewed["decision"],
+        "candidateId": reviewed["candidate"]["id"],
+        "record": record,
+        "forgotten": reviewed.get("tombstone").map_or(Value::Null, |tombstone| tombstone["id"].clone()),
+    }))
+}
+
+/// Why an attached memory request failed: an ACP error to answer, or serve
+/// could not be reached.
+pub(super) enum AttachedFailure {
+    Reply(super::Error),
+    Unreachable(otto::client::Error),
+}
+
+impl From<otto::client::Error> for AttachedFailure {
+    fn from(failure: otto::client::Error) -> Self {
+        match attached_error(&failure) {
+            Some(reply) => Self::Reply(reply),
+            None => Self::Unreachable(failure),
+        }
+    }
+}
+
+#[cfg(test)]
+mod attached_tests {
+    use super::*;
+
+    #[test]
+    fn an_http_candidate_keeps_exactly_the_in_process_fields() {
+        let http = json!({
+            "id": "c1", "action": "create", "state": "pending", "target_id": "r1",
+            "base_revision": 0, "kind": "preference", "key": "editor", "text": "vim",
+            "reason": "asked", "origin": "model",
+            "scope": {"namespace": "user", "id": "u1"},
+            "created_at": "2026-11-14T00:00:00Z", "advice": "check it",
+            "proposed": {"id": "r1"},
+        });
+        let value = attached_candidate_json(&http);
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "action", "advice", "id", "key", "kind", "origin", "reason", "scope", "text"
+            ]
+        );
+        assert_eq!(value["scope"], json!({"namespace": "user", "id": "u1"}));
+        assert_eq!(value["advice"], "check it");
+    }
+
+    #[test]
+    fn http_statuses_map_to_the_in_process_error_codes() {
+        let http = |status| otto::client::Error::Http {
+            status,
+            code: "x".into(),
+            message: "m".into(),
+        };
+        let code = |status| attached_error(&http(status)).unwrap().code;
+        let want = |code: i32| error(code, "").code;
+        assert_eq!(code(503), want(MEMORY_UNAVAILABLE));
+        assert_eq!(code(501), want(MEMORY_UNAVAILABLE));
+        assert_eq!(code(409), want(MEMORY_CONFLICT));
+        assert_eq!(code(404), want(RESOURCE_NOT_FOUND));
+        assert_eq!(code(400), want(super::super::INVALID_PARAMS));
+        assert_eq!(code(500), want(INTERNAL_ERROR));
+        assert!(attached_error(&otto::client::Error::Unreachable("down".into())).is_none());
+    }
+
+    #[test]
+    fn a_candidate_id_outside_the_id_alphabet_never_reaches_a_path() {
+        assert!(candidate_id_is_valid("0a1b-c_2"));
+        for id in ["", "../records", "a/b", "a?x=1", "a b"] {
+            assert!(!candidate_id_is_valid(id), "{id}");
+        }
+    }
 }
 
 #[cfg(test)]

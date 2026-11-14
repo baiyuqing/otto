@@ -34,7 +34,6 @@ mod schedule;
 mod session_lifecycle;
 mod session_notices;
 mod shared_approval;
-pub mod tcp;
 pub mod update;
 
 use std::collections::HashMap;

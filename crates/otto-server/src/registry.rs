@@ -5,11 +5,6 @@ use super::*;
 impl Server {
     // ---- registry ----
 
-    /// Shared controller for an already-open session; used by ACP memory review.
-    pub fn controller(&self, id: &str) -> Option<Arc<Controller>> {
-        self.lookup(id).map(|session| Arc::clone(&session.ctrl))
-    }
-
     /// Shared controller for a route that names a session in a query or a body
     /// rather than in its path, re-opening one the sweeper evicted. `None` when
     /// no such session exists, which the caller answers 404 for.

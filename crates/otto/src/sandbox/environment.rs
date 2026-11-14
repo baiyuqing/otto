@@ -298,7 +298,7 @@ fn classify_environment_name(name: &str, provider_names: &HashSet<String>) -> Cl
 }
 
 fn is_non_restorable_environment_name(upper: &str) -> bool {
-    if upper == "OTTO_ACP_TOKEN" || upper == "OTTO_SERVER_TOKEN" {
+    if upper == "OTTO_SERVER_TOKEN" {
         return true;
     }
     upper == "OTTO_SANDBOX"

@@ -6,23 +6,34 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-const SCRIPT = fileURLToPath(new URL('./otto-tcp.sh', import.meta.url));
+const SCRIPT = fileURLToPath(new URL('./otto-serve-connect.sh', import.meta.url));
 
 // A fake `otto` and a fake `otto-connect`, so these tests need neither a built
-// binary, a real serve, nor a chat platform. The fakes record the argument
-// vector they were started with: for connect, whether serve had already
-// announced its ACP listener, which is the order the supervisor must keep.
+// binary, a real serve, nor a chat platform. The fake serve records its
+// argument vector and whether OTTO_ACP_TOKEN reached its environment, then
+// binds the Unix socket named by --socket. The fake connect records whether
+// that socket existed when it started, which is the order the supervisor must
+// keep, and its argument vector.
 const FAKE_OTTO = `#!/usr/bin/env bash
 for arg in "$@"; do printf 'arg=%s\\n' "$arg"; done >> "\${FAKE_OTTO_ARGS:?}"
+printf 'token_env=%s\\n' "\${OTTO_ACP_TOKEN-unset}" >> "\${FAKE_OTTO_ARGS:?}"
 if [[ -f "\${FAKE_DIR:?}/serve-fail" ]]; then exit 3; fi
-printf 'otto serve: ACP 127.0.0.1:9001\\n'
-trap 'exit 0' TERM INT
-while :; do sleep 0.05; done
+socket=
+while [[ $# -gt 0 ]]; do
+  if [[ $1 == --socket ]]; then socket=$2; fi
+  shift
+done
+mkdir -p "$(dirname "$socket")"
+rm -f "$socket"
+exec python3 -c 'import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+time.sleep(100000)' "$socket"
 `;
 
 const FAKE_CONNECT = `#!/usr/bin/env bash
 {
-  if grep -q -F 'otto serve: ACP' "\${FAKE_SERVE_LOG:?}" 2>/dev/null; then
+  if [[ -S "\${FAKE_SOCKET:?}" ]]; then
     printf 'serve_ready=yes\\n'
   else
     printf 'serve_ready=no\\n'
@@ -49,7 +60,7 @@ function writeExecutable(path, text) {
 }
 
 function context(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'otto-tcp-'));
+  const dir = mkdtempSync(join(tmpdir(), 'osc-'));
   const state = join(dir, 'state');
   const bin = join(dir, 'bin');
   const workspace = join(dir, 'workspace');
@@ -68,6 +79,7 @@ function context(t) {
     envFile: join(dir, 'otto.env'),
     config: join(dir, 'connect.toml'),
     serveLog: join(state, 'serve.log'),
+    socket: join(dir, '.otto', 'otto.sock'),
     supervisorLog: join(state, 'supervisor.log'),
     supervisorPid: join(state, 'supervisor.pid'),
     servePid: join(state, 'serve.pid'),
@@ -83,22 +95,21 @@ function context(t) {
   const env = {
     PATH: process.env.PATH,
     HOME: dir,
-    OTTO_TCP_HOME: state,
+    OTTO_SERVE_CONNECT_HOME: state,
     OTTO_ENV_FILE: paths.envFile,
     OTTO_BIN: join(bin, 'otto'),
     OTTO_CONNECT_BIN: join(bin, 'otto-connect'),
     OTTO_CONNECT_CONFIG: paths.config,
-    OTTO_ACP_TOKEN: 'test-token-123',
     // Fast ticks and no backoff keep the restart tests quick; the defaults are
     // the documented ones.
-    OTTO_TCP_POLL: '0.05',
-    OTTO_TCP_MIN_DELAY: '0',
-    OTTO_TCP_READY_TIMEOUT: '5',
-    OTTO_TCP_STOP_TIMEOUT: '5',
+    OTTO_SERVE_CONNECT_POLL: '0.05',
+    OTTO_SERVE_CONNECT_MIN_DELAY: '0',
+    OTTO_SERVE_CONNECT_READY_TIMEOUT: '5',
+    OTTO_SERVE_CONNECT_STOP_TIMEOUT: '5',
     FAKE_DIR: dir,
     FAKE_OTTO_ARGS: paths.ottoArgs,
     FAKE_CONNECT_ARGS: paths.connectArgs,
-    FAKE_SERVE_LOG: paths.serveLog,
+    FAKE_SOCKET: paths.socket,
   };
 
   const run = (args = [], extra = {}) =>
@@ -149,8 +160,7 @@ function context(t) {
 // writeConnectConfig writes a connect.toml, overridable key by key.
 function writeConnectConfig(paths, overrides) {
   const agent = {
-    address: '"127.0.0.1:9001"',
-    token_env: '"OTTO_ACP_TOKEN"',
+    command: '["otto", "acp", "--attach"]',
     workspace: `"${paths.workspace}"`,
     ...overrides.agent,
   };
@@ -162,17 +172,18 @@ function writeConnectConfig(paths, overrides) {
   writeFileSync(paths.config, lines.join('\n'));
 }
 
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const start = (paths, extra) => paths.run(['start'], extra);
 const statusLine = (output, label) =>
   output.split('\n').find((line) => line.startsWith(label)) ?? '';
 
-test('starts serve with the otto.env settings and connect against the ACP port', async (t) => {
+test('starts serve with the otto.env settings and connect against its Unix socket', async (t) => {
   const paths = context(t);
   const result = start(paths);
   assert.equal(result.status, 0, result.stderr);
 
   assert.match(statusLine(result.stdout, 'supervisor:'), /running \(pid \d+/);
-  assert.match(statusLine(result.stdout, 'otto serve:'), /running \(pid \d+, up .*, ACP 127\.0\.0\.1:9001\)/);
+  assert.match(statusLine(result.stdout, 'otto serve:'), new RegExp(`running \\(pid \\d+, up .*, socket ${escapeRegExp(paths.socket)}\\)`));
   assert.match(statusLine(result.stdout, 'connect:'), /running \(pid \d+/);
   assert.match(statusLine(result.stdout, 'state:'), new RegExp(paths.state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
@@ -181,7 +192,7 @@ test('starts serve with the otto.env settings and connect against the ACP port',
     '--provider', 'openai-compatible',
     '--model', 'example-model',
     '--cwd', paths.workspace,
-    '--acp-listen', '127.0.0.1:9001',
+    '--socket', paths.socket,
   ]);
   // The fake records its argv as soon as it starts, which can be a moment
   // after start returns, so wait for the record rather than assuming it.
@@ -288,48 +299,83 @@ test('restart serve and restart connect replace exactly one process', async (t) 
 test('stops the stack after repeated fast failures instead of looping', async (t) => {
   const paths = context(t);
   writeFileSync(join(paths.dir, 'serve-fail'), '');
-  const result = start(paths, { OTTO_TCP_MAX_FAILS: '2' });
+  const result = start(paths, { OTTO_SERVE_CONNECT_MAX_FAILS: '2' });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /serve failed 2 times in a row; stopping the stack/);
   assert.match(readFileSync(paths.supervisorLog, 'utf8'), /supervisor stopped/);
   assert.match(paths.run(['status']).stdout, /supervisor:  not running/);
 });
 
-test('fails closed when connect.toml would start its own otto acp', (t) => {
+test('serves on the socket without --acp-listen and without OTTO_ACP_TOKEN', (t) => {
   const paths = context(t);
-  writeConnectConfig(paths, { agent: { command: '["otto", "acp"]', address: null } });
-  const result = start(paths);
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /connect\.toml sets \[agent\]\.command; connect would start its own otto acp/);
+  // A token left in the caller's environment must not reach serve.
+  const result = start(paths, { OTTO_ACP_TOKEN: 'left-over-token' });
+  assert.equal(result.status, 0, result.stderr);
+  const args = capturedArgs(paths.ottoArgs);
+  assert.equal(args.includes('--acp-listen'), false, 'serve must not get --acp-listen');
+  assert.deepEqual(args.slice(-2), ['--socket', paths.socket]);
+  assert.match(readFileSync(paths.ottoArgs, 'utf8'), /^token_env=unset$/m);
+  assert.equal(statSync(paths.socket).isSocket(), true);
+  paths.run(['stop']);
+});
+
+test('fails closed when connect.toml would not attach to serve', (t) => {
+  const paths = context(t);
+  writeConnectConfig(paths, { agent: { command: '["otto", "acp"]' } });
+  const notAttach = start(paths);
+  assert.equal(notAttach.status, 1);
+  assert.match(notAttach.stderr, /\[agent\]\.command must be \["otto", "acp", "--attach"\]/);
+
+  writeConnectConfig(paths, { agent: { command: null } });
+  const noCommand = start(paths);
+  assert.equal(noCommand.status, 1);
+  assert.match(noCommand.stderr, /\[agent\]\.command must be/);
   assert.equal(existsSync(paths.ottoArgs), false, 'serve must not start');
   assert.equal(existsSync(paths.connectArgs), false, 'connect must not start');
 });
 
-test('fails closed when connect.toml names another ACP address or token', (t) => {
+test('fails closed when connect.toml still sets the removed TCP keys', (t) => {
   const paths = context(t);
-  writeConnectConfig(paths, { agent: { address: '"127.0.0.1:9999"' } });
+  writeConnectConfig(paths, { agent: { address: '"127.0.0.1:9001"' } });
   const address = start(paths);
   assert.equal(address.status, 1);
-  assert.match(address.stderr, /\[agent\]\.address is '127\.0\.0\.1:9999' but this stack serves ACP on '127\.0\.0\.1:9001'/);
+  assert.match(address.stderr, /sets \[agent\]\.address or \[agent\]\.token_env; remove them/);
 
-  writeConnectConfig(paths, { agent: { token_env: '"OTHER_TOKEN"' } });
+  writeConnectConfig(paths, { agent: { token_env: '"OTTO_ACP_TOKEN"' } });
   const token = start(paths);
   assert.equal(token.status, 1);
-  assert.match(token.stderr, /token_env = "OTHER_TOKEN" but otto serve reads OTTO_ACP_TOKEN/);
-
-  // The same value under another name is accepted, because connect then
-  // authenticates with the token serve checks.
-  const named = start(paths, { OTHER_TOKEN: 'test-token-123' });
-  assert.equal(named.status, 0, named.stderr);
-  paths.run(['stop']);
+  assert.match(token.stderr, /sets \[agent\]\.address or \[agent\]\.token_env; remove them/);
+  assert.equal(existsSync(paths.ottoArgs), false, 'serve must not start');
 });
 
-test('fails closed without a token, a config or a workspace', (t) => {
+test('a configured socket is passed to serve and must be named in the attach command', (t) => {
   const paths = context(t);
-  const noToken = start(paths, { OTTO_ACP_TOKEN: '' });
-  assert.equal(noToken.status, 1);
-  assert.match(noToken.stderr, /OTTO_ACP_TOKEN is not set/);
+  const custom = join(paths.dir, 'custom', 'serve.sock');
+  const env = { OTTO_SERVE_CONNECT_SOCKET: custom, FAKE_SOCKET: custom };
 
+  const missing = start(paths, env);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /must add "--socket", "[^"]*serve\.sock"/);
+
+  writeConnectConfig(paths, { agent: { command: `["otto", "acp", "--attach", "--socket", "${custom}"]` } });
+  const result = start(paths, env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(capturedArgs(paths.ottoArgs).slice(-2), ['--socket', custom]);
+  assert.match(statusLine(result.stdout, 'otto serve:'), new RegExp(`socket ${escapeRegExp(custom)}`));
+  paths.run(['stop']);
+
+  const relative = start(paths, { OTTO_SERVE_CONNECT_SOCKET: 'relative.sock' });
+  assert.equal(relative.status, 1);
+  assert.match(relative.stderr, /OTTO_SERVE_CONNECT_SOCKET must be an absolute path/);
+
+  // The default socket cannot be combined with a --socket in the command.
+  const other = start(paths);
+  assert.equal(other.status, 1);
+  assert.match(other.stderr, /names --socket but this stack uses the default socket/);
+});
+
+test('fails closed without a config or a workspace', (t) => {
+  const paths = context(t);
   const noConfig = start(paths, { OTTO_CONNECT_CONFIG: join(paths.dir, 'absent.toml') });
   assert.equal(noConfig.status, 1);
   assert.match(noConfig.stderr, /connect configuration .*absent\.toml.* not found/);
@@ -341,9 +387,9 @@ test('fails closed without a token, a config or a workspace', (t) => {
 
   // A workspace the reader cannot see at all is only reachable through the
   // documented escape hatch, and then OTTO_CWD has to name one.
-  writeFileSync(paths.config, '[agent]\naddress = "127.0.0.1:9001"\n');
+  writeFileSync(paths.config, '[agent]\ncommand = ["otto", "acp", "--attach"]\n');
   writeFileSync(paths.envFile, 'OTTO_PROVIDER=openai-compatible\n');
-  const noWorkspace = start(paths, { OTTO_TCP_SKIP_CHECKS: '1' });
+  const noWorkspace = start(paths, { OTTO_SERVE_CONNECT_SKIP_CHECKS: '1' });
   assert.equal(noWorkspace.status, 1);
   assert.match(noWorkspace.stderr, /no workspace: set OTTO_CWD in otto\.env/);
   assert.equal(existsSync(paths.ottoArgs), false, 'serve must not start');
@@ -363,18 +409,17 @@ test('warns instead of failing when OTTO_CWD is another workspace', (t) => {
 test('skips the configuration checks when told to', (t) => {
   const paths = context(t);
   writeFileSync(paths.config, `[agent]\nworkspace = "${paths.workspace}"\n`);
-  const result = start(paths, { OTTO_TCP_SKIP_CHECKS: '1', OTTO_CWD: paths.workspace });
+  const result = start(paths, { OTTO_SERVE_CONNECT_SKIP_CHECKS: '1', OTTO_CWD: paths.workspace });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /skipping the \[agent\] checks/);
-  assert.match(readFileSync(paths.ottoArgs, 'utf8'), /--acp-listen/);
-  assert.deepEqual(capturedArgs(paths.ottoArgs).slice(-2), ['--acp-listen', '127.0.0.1:9001']);
+  assert.deepEqual(capturedArgs(paths.ottoArgs).slice(-2), ['--socket', paths.socket]);
 });
 
 test('reports usage, unknown commands and a missing stack', (t) => {
   const paths = context(t);
   const help = paths.run(['help']);
   assert.equal(help.status, 0);
-  assert.match(help.stdout, /otto-tcp\.sh start/);
+  assert.match(help.stdout, /otto-serve-connect\.sh start/);
 
   const unknown = paths.run(['frobnicate']);
   assert.equal(unknown.status, 2);
@@ -421,7 +466,7 @@ test('translates the remaining launcher settings into serve options', (t) => {
     '--max-output-bytes', '65536',
     '--no-mcp',
     '--cwd', paths.workspace,
-    '--acp-listen', '127.0.0.1:9001',
+    '--socket', paths.socket,
     '--listen', '127.0.0.1:9100',
   ]);
   paths.run(['stop']);
@@ -436,7 +481,7 @@ test('ignores an empty OTTO_SERVE_EXTRA_ARGS instead of passing an empty argumen
     '--provider', 'openai-compatible',
     '--model', 'example-model',
     '--cwd', paths.workspace,
-    '--acp-listen', '127.0.0.1:9001',
+    '--socket', paths.socket,
   ]);
   paths.run(['stop']);
 });

@@ -37,7 +37,7 @@ Release builds abort on panic: a panic in any task, including one handling a
 single request, ends the whole `otto serve` process with SIGABRT (exit status
 134) after Otto kills the sandboxed bash and MCP stdio process groups it
 started. Run a long-lived server under a supervisor that restarts it, such as
-[`scripts/otto-tcp.sh run`](#the-acp-tcp-stack-script). Debug and test builds unwind.
+[`scripts/otto-serve-connect.sh run`](#the-serve-and-connect-supervisor-script). Debug and test builds unwind.
 
 ### First-run configuration
 
@@ -1208,17 +1208,19 @@ workspace = "/Users/me/work"            # the same workspace the serve clients u
 - Use `/sessions` and `/use` (see [Commands](servers-and-connectors.md#commands)) to bind a chat to a
   session that was started in another client.
 
-### The ACP TCP stack script
+### The serve and connect supervisor script
 
-`scripts/otto-tcp.sh` supervises serve's ACP listener and the connector:
+`scripts/otto-serve-connect.sh` supervises `otto serve` and the connector as a
+pair. Serve listens on its Unix socket, and the connector's `connect.toml` sets
+`[agent] command = ["otto", "acp", "--attach"]`, so each chat session is an
+`otto acp --attach` process that relays to serve over that socket:
 
 ```bash
-export OTTO_ACP_TOKEN=<token>     # read by both programs; never stored
-scripts/otto-tcp.sh start         # serve --acp-listen plus otto-connect
-scripts/otto-tcp.sh status
-scripts/otto-tcp.sh restart       # both; `restart serve` or `restart connect` for one
-scripts/otto-tcp.sh logs connect
-scripts/otto-tcp.sh stop
+scripts/otto-serve-connect.sh start     # otto serve plus otto-connect
+scripts/otto-serve-connect.sh status
+scripts/otto-serve-connect.sh restart   # both; `restart serve` or `restart connect` for one
+scripts/otto-serve-connect.sh logs connect
+scripts/otto-serve-connect.sh stop
 ```
 
 Build the two programs first (`make build`, `make connect-build`), or install
@@ -1231,35 +1233,42 @@ and shell limits are shared with the terminal frontends:
 | Setting | Meaning |
 | --- | --- |
 | `OTTO_BIN`, `OTTO_CONNECT_BIN` | the two binaries; empty uses `<checkout>/otto` and `<checkout>/target/otto-connect`, then `PATH` |
-| `OTTO_ACP_LISTEN` | loopback `HOST:PORT` serve binds ACP on; empty uses `127.0.0.1:9001` |
+| `OTTO_SERVE_CONNECT_SOCKET` | absolute path of the Unix socket serve binds (`--socket`); empty uses `~/.otto/otto.sock`. A different path must also appear in `connect.toml` as `command = ["otto", "acp", "--attach", "--socket", "<path>"]` |
 | `OTTO_CONNECT_CONFIG` | `connect.toml` to run; empty uses `~/.config/otto/connect.toml` |
 | `OTTO_CWD` | workspace serve starts in; empty uses `[agent].workspace` from `connect.toml` |
 | `OTTO_LISTEN` | optional HTTP listener for serve (`--listen`), for `otto --attach` over TCP and the web UI |
 | `OTTO_SERVE_EXTRA_ARGS` | extra `otto serve` options, appended verbatim |
-| `OTTO_TCP_HOME` | state and log directory; empty uses `~/.local/state/otto-tcp` |
+| `OTTO_SERVE_CONNECT_HOME` | state and log directory; empty uses `~/.local/state/otto-serve-connect` |
 | `OTTO_UI`, `OTTO_EXTRA_ARGS` | not used: `otto serve` accepts neither `--ui` nor `--prompt` |
 
-Startup validates the token, absolute workspace and matching connector
-`[agent].address`/token binding. Use `address`, not `command` (which launches
-another ACP process). A different connector workspace warns because serve can
-admit several. Keep checks enabled; `OTTO_TCP_SKIP_CHECKS=1` delegates this
-validation to the operator.
+The script always passes `--socket` to serve, because with `--listen` alone
+serve opens only the TCP listener. No token is used between the two programs,
+and the script removes `OTTO_ACP_TOKEN` from the environment of both.
+
+Startup validates the absolute workspace and the connector `[agent]` table:
+`command` must be the attach command (with the matching `--socket` when the
+socket is not the default), and `address` and `token_env` must be absent. A
+different connector workspace warns because serve can admit several. Keep
+checks enabled; `OTTO_SERVE_CONNECT_SKIP_CHECKS=1` delegates this validation to
+the operator.
 
 `start` backgrounds the supervisor; `run` stays foreground for a supervisor or
-terminal. Connect starts only after serve announces readiness. Exited processes
-restart with 1–60 s exponential delay, reset after 60 s uptime; five fast
-failures stop the stack. Inspect logs/config/credentials before restarting.
-SIGTERM/SIGINT stop connect first, cancelling prompts, then serve. SIGUSR1
-restarts serve; SIGUSR2 restarts connect. After a serve restart, connect reloads
-the chat session on the next message; old running turns were cancelled.
+terminal. Connect starts after the socket file exists, or after 20 s. Exited
+processes restart with 1–60 s exponential delay, reset after 60 s uptime; five
+fast failures stop the stack. Inspect logs/config/credentials before
+restarting. SIGTERM/SIGINT stop connect first, cancelling prompts, then serve.
+SIGUSR1 restarts serve; SIGUSR2 restarts connect. After a serve restart,
+connect reloads the chat session on the next message; old running turns were
+cancelled.
 
-`OTTO_TCP_HOME` holds PID/state and `supervisor.log`, `serve.log`, `connect.log`
-(directory `0700`, files `0600`). `start` retains one previous log generation;
-`logs` follows. Protect them: serve logs can contain its HTTP token URL and
-connector logs contain chat/sender IDs. Tokens come from the launching
-environment or ignored `otto.env`, never a committed supervisor file. For
-launchd or another supervisor use `otto-tcp.sh run` with private environment/
-credential injection. Restart the relevant processes after upgrades or changes.
+`OTTO_SERVE_CONNECT_HOME` holds PID/state and `supervisor.log`, `serve.log`,
+`connect.log` (directory `0700`, files `0600`). `start` retains one previous
+log generation; `logs` follows. Protect them: serve logs can contain its HTTP
+token URL and connector logs contain chat/sender IDs. The connector's platform
+token comes from the launching environment or ignored `otto.env`, never a
+committed supervisor file. For launchd or another supervisor use
+`otto-serve-connect.sh run` with private environment/credential injection.
+Restart the relevant processes after upgrades or changes.
 
 ### Admission
 

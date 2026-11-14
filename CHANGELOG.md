@@ -16,6 +16,15 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- `scripts/otto-tcp.sh` is now `scripts/otto-serve-connect.sh` and supervises
+  `otto serve` on its Unix socket with `otto-connect` configured as
+  `[agent] command = ["otto", "acp", "--attach"]`; it no longer starts serve
+  with `--acp-listen` or uses `OTTO_ACP_TOKEN`. Settings renamed:
+  `OTTO_TCP_*` to `OTTO_SERVE_CONNECT_*` (including `OTTO_TCP_HOME` to
+  `OTTO_SERVE_CONNECT_HOME`), default state directory
+  `~/.local/state/otto-tcp` to `~/.local/state/otto-serve-connect`;
+  `OTTO_ACP_LISTEN` is removed and `OTTO_SERVE_CONNECT_SOCKET` selects a
+  non-default socket.
 - `otto serve` authorizes every API operation, over HTTP and the Unix socket,
   before its handler runs. Every authenticated caller is the owner,
   so no request that succeeded before is refused; `http_request` log lines

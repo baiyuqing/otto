@@ -6,8 +6,9 @@ The [repository rules](../../AGENTS.md) apply. Use the
 
 - Scope: process-wide primitives with no domain knowledge: `hex`, `deadline`,
   `retry`, `fsops` (pinned POSIX file driver and the `FileDriver` contract),
-  `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`,
-  `random`, `child_fence` and `process_identity`.
+  `log`, `tls_provider`, `urlprivacy`, `program_status`, `herdr`, `random`,
+  `child_fence` and `process_identity`. `gourl` is private: it is the URL
+  parser behind `urlprivacy`, and other crates call `urlprivacy`.
 - Dependencies: `otto-core` only. This crate never imports `otto` or a crate
   above it. A new module here must not name a domain concept of `otto`
   (session, workspace, tool, memory); such code stays in `otto`.

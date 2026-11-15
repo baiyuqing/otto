@@ -199,8 +199,7 @@ mod tests {
         env
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn resolves_defaults() {
         let runtime = resolve_memory(&File::default(), &env("/home/u")).expect("resolve");
         assert!(runtime.enabled);
@@ -212,8 +211,7 @@ mod tests {
         assert!(runtime.workspace_ids.is_empty());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn legacy_configuration_resolves_to_files() {
         let file: File = toml::from_str(
             r#"
@@ -231,8 +229,7 @@ busy_timeout = "10s"
         assert_eq!(runtime.store_busy_timeout, Duration::from_secs(10));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn the_legacy_database_path_is_accepted_and_does_not_change_the_store_directory() {
         let mut file = File::default();
         file.memory.turso.path = "/custom/memory.db".into();
@@ -240,8 +237,7 @@ busy_timeout = "10s"
         assert_eq!(runtime.dir, "/home/u/.otto/memory");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn files_turso_and_sqlite_select_the_file_store() {
         for name in ["files", "turso", "sqlite"] {
             let mut file = File::default();
@@ -251,15 +247,13 @@ busy_timeout = "10s"
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_unresolvable_home() {
         let err = resolve_memory(&File::default(), &HashMap::new()).unwrap_err();
         assert!(err.to_string().contains("home"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn applies_toml_overrides() {
         let mut file = File::default();
         file.memory.enabled = Some(false);
@@ -289,8 +283,7 @@ busy_timeout = "10s"
         assert_eq!(runtime.store_busy_timeout, Duration::from_secs(10));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_unsupported_backend() {
         let mut file = File::default();
         file.memory.backend = "postgres".into();
@@ -305,8 +298,7 @@ busy_timeout = "10s"
         assert!(!err.to_string().contains("remote"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn the_removed_remote_backend_gets_a_specific_error() {
         let file: File = toml::from_str("[memory]\nbackend = \"remote\"\n").expect("config");
         let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
@@ -318,8 +310,7 @@ busy_timeout = "10s"
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn a_plugin_backend_names_its_package() {
         let mut file = File::default();
         file.memory.backend = "plugin:x".into();
@@ -330,8 +321,7 @@ busy_timeout = "10s"
         assert_eq!(files.plugin_package(), None);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_invalid_plugin_backends() {
         for value in [
             "plugin:",
@@ -351,8 +341,7 @@ busy_timeout = "10s"
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_non_positive_recall_tokens() {
         let mut file = File::default();
         file.memory.recall_tokens = Some(0);
@@ -360,8 +349,7 @@ busy_timeout = "10s"
         assert!(err.to_string().contains("recall_tokens"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_non_positive_max_results() {
         let mut file = File::default();
         file.memory.max_results = Some(-1);
@@ -369,8 +357,7 @@ busy_timeout = "10s"
         assert!(err.to_string().contains("max_results"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_recall_tokens_above_ceiling() {
         let mut file = File::default();
         file.memory.recall_tokens = Some(MAX_TOKEN_BUDGET + 1);
@@ -378,8 +365,7 @@ busy_timeout = "10s"
         assert!(err.to_string().contains("recall_tokens"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_max_results_above_ceiling() {
         let mut file = File::default();
         file.memory.max_results = Some(MAX_RECALL_RECORDS + 1);
@@ -387,8 +373,7 @@ busy_timeout = "10s"
         assert!(err.to_string().contains("max_results"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_invalid_busy_timeout() {
         // ponytail: core's `home_from_env` deliberately has no fallback to the
         // real environment (core must never touch real env), so this test
@@ -399,8 +384,7 @@ busy_timeout = "10s"
         assert!(err.to_string().contains("busy_timeout"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_non_positive_busy_timeout() {
         // ponytail: see rejects_invalid_busy_timeout above for why HOME is
         // injected rather than passing an empty env.

@@ -269,28 +269,18 @@ pub trait RequestSizer {
 
 /// The stream-event callback a provider writes into.
 ///
-/// Native futures must be `Send` so the agent loop can run on a
-/// multi-threaded tokio runtime, which requires the callback to be `Send`
-/// too. wasm futures are never `Send`, so the bound is dropped there.
-#[cfg(not(target_arch = "wasm32"))]
+/// Futures must be `Send` so the agent loop can run on a multi-threaded tokio
+/// runtime, which requires the callback to be `Send` too.
 pub type StreamSink<'a> = &'a mut (dyn FnMut(StreamEvent) + Send);
-/// See the native definition above.
-#[cfg(target_arch = "wasm32")]
-pub type StreamSink<'a> = &'a mut dyn FnMut(StreamEvent);
 
-#[cfg(not(target_arch = "wasm32"))]
 pub type DiagnosticFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = ProviderSettlement> + Send + 'a>>;
-#[cfg(target_arch = "wasm32")]
-pub type DiagnosticFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = ProviderSettlement> + 'a>>;
 
 /// A model backend.
 ///
 /// See the module documentation for the ownership, concurrency, cancellation,
 /// and error rules every implementation must follow.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 pub trait Provider {
     /// Optional protocols implemented by this concrete provider transport.
     fn capabilities(&self) -> ProviderCapabilities {

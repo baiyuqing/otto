@@ -1,10 +1,8 @@
 //! Provider-neutral core of Otto.
 //!
-//! This crate must build for `wasm32-unknown-unknown`. It therefore uses no
-//! filesystem, network, process, or wall-clock API: callers inject the clock
-//! and the identifier generator. `make rust-wasm-check` (`cargo check -p
-//! otto-core --target wasm32-unknown-unknown`) is the architecture guard for
-//! that rule.
+//! This crate uses no filesystem, network, process, or wall-clock API: callers
+//! inject the clock and the identifier generator. `tests/io_boundary.rs` is
+//! the architecture guard for that rule.
 
 pub mod agent;
 pub mod approval;

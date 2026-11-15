@@ -43,8 +43,7 @@ fn user(text: &str) -> Message {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn append_keeps_messages_in_order() {
     let session = MemorySession::new();
     session.append(user("one")).await.expect("append");
@@ -55,8 +54,7 @@ async fn append_keeps_messages_in_order() {
     assert_eq!(messages[1].text(), "two");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn append_rejects_an_invalid_message_and_stores_nothing() {
     let session = MemorySession::new();
     let error = session
@@ -73,8 +71,7 @@ async fn append_rejects_an_invalid_message_and_stores_nothing() {
     assert!(session.messages().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn tool_result_must_resolve_a_call_from_the_preceding_assistant_message() {
     let session = MemorySession::new();
     session
@@ -88,8 +85,7 @@ async fn tool_result_must_resolve_a_call_from_the_preceding_assistant_message() 
     assert_eq!(session.messages().len(), 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn operation_custom_is_stored_without_interrupting_tool_sequence() {
     let session = MemorySession::new();
     session
@@ -115,8 +111,7 @@ async fn operation_custom_is_stored_without_interrupting_tool_sequence() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_local_compaction_clears_an_older_remote_checkpoint() {
     let session = MemorySession::new();
     session.append(user("before")).await.expect("append");
@@ -148,8 +143,7 @@ async fn a_local_compaction_clears_an_older_remote_checkpoint() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn operation_custom_known_malformed_is_rejected_atomically() {
     let session = MemorySession::new();
     assert!(
@@ -176,8 +170,7 @@ async fn operation_custom_known_malformed_is_rejected_atomically() {
         .expect("other custom unchanged");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn append_rejects_out_of_sequence_tool_traffic() {
     let cases: &[(&str, Vec<Message>, SessionError)] = &[
         (
@@ -242,8 +235,7 @@ fn memory_reference(id: &str, revision: Option<&str>) -> MemoryRecordRef {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn memory_recall_record_is_anchored_to_the_preceding_user_message() {
     let session = MemorySession::new();
     session.append(user("one")).await.expect("append");
@@ -270,8 +262,7 @@ async fn memory_recall_record_is_anchored_to_the_preceding_user_message() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn memory_recall_malformed_data_is_rejected_and_stores_nothing() {
     let session = MemorySession::new();
     session.append(user("one")).await.expect("append");
@@ -293,8 +284,7 @@ async fn memory_recall_malformed_data_is_rejected_and_stores_nothing() {
     assert!(session.memory_references().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn memory_recall_without_a_user_message_is_a_sequence_error() {
     let session = MemorySession::new();
     let error = session
@@ -305,8 +295,7 @@ async fn memory_recall_without_a_user_message_is_a_sequence_error() {
     assert!(session.memory_references().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn memory_references_list_two_turns_in_order_and_survive_compaction() {
     let session = MemorySession::new();
     session.append(user("one")).await.expect("append");
@@ -354,8 +343,7 @@ async fn memory_references_list_two_turns_in_order_and_survive_compaction() {
     assert_eq!(session.memory_references(), expected);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn compaction_details_carry_memory_records_and_coverage() {
     let session = MemorySession::new();
     session.append(user("one")).await.expect("append");

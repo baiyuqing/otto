@@ -6,7 +6,6 @@
 //! are untrusted text that must not reach the request through a notice. The
 //! production code of the two modules that select and render notices must not
 //! read those fields. A comment may name them; code may not.
-#![cfg(not(target_arch = "wasm32"))]
 
 use std::path::Path;
 

@@ -64,8 +64,7 @@ fn item() -> RecallItem {
 }
 
 struct RecallOnly;
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl MemoryService for RecallOnly {
     fn describe(&self) -> ServiceDescription {
         ServiceDescription {
@@ -89,8 +88,7 @@ impl MemoryService for RecallOnly {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[tokio::test]
 async fn recall_only_service_works_and_optional_write_is_unsupported() {
     let service: &dyn MemoryService = &RecallOnly;
     let control = CancellationToken::new();

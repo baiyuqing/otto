@@ -451,7 +451,7 @@ the operation succeeded.
 
 ### Web UI
 
-The browser frontend and its WASM bindings now live in
+The browser frontend now lives in
 [otto-plus](https://github.com/baiyuqing/otto-plus). Follow its README for
 setup, building, and hosting; the [UI guide](https://github.com/baiyuqing/otto-plus/blob/main/docs/web-ui.md)
 describes the migrated features. Otto retains the authenticated HTTP API.

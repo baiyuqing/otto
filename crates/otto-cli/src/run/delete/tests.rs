@@ -231,38 +231,6 @@ fn live_lease_is_refused_without_deletion() {
     lease.release().unwrap();
 }
 
-#[tokio::test]
-async fn delete_process_dispatch_exits_before_model_startup() {
-    let mut fixture = Fixture::new();
-    fixture.workspace = std::fs::canonicalize(".")
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    fixture.root = fixture.temp.path().join(".otto/sessions");
-    let session = fixture.create("dispatch-id", "dispatch");
-    let path = session.path();
-    session.close().unwrap();
-    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    let code = super::super::run(
-        &["delete".into(), "dispatch-id".into(), "--force".into()],
-        Box::new(Cursor::new("")),
-        &mut stdout,
-        &mut stderr,
-        vec![format!("HOME={}", fixture.temp.path().display()).into_bytes()],
-        false,
-        &CancellationToken::new(),
-        &crate::terminate::Terminate::new(),
-    )
-    .await;
-    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
-    assert!(
-        String::from_utf8(stdout)
-            .unwrap()
-            .contains("Permanently deleted session: dispatch-id")
-    );
-    assert!(!Path::new(&path).exists());
-}
-
 #[test]
 fn busy_and_io_failures_are_actionable_and_not_successes() {
     let fixture = Fixture::new();

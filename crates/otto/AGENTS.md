@@ -12,8 +12,14 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <- `otto-cli`.
 - `runtime/startup.rs` is the startup composition root; `otto_cli::run`,
   `otto serve` and `embed` call its phases. `runtime` assembles agents;
-  `app` owns shared lifecycle. Services and `embed` never import frontends.
-  `tests/runtime_boundary.rs` enforces this.
+  `app` owns shared lifecycle.
+- Top-level modules belong to the layers in
+  [Layers inside `otto`](../../docs/development/architecture.md#layers-inside-otto):
+  platform, persistence, capability, orchestration, assembly (`runtime`),
+  application (`app`), frontend. Import only the same or a lower layer, with
+  no cycle inside a layer; move a needed item down instead of importing up.
+  A new module gets a layer in the same PR. `tests/layer_boundary.rs`
+  enforces this; its `KNOWN_VIOLATIONS` list only shrinks.
 - The public API is what the frontend crates need: widen an item from
   `pub(crate)` to `pub` when one calls it, and put new frontend code into
   the frontend crates, not here.

@@ -1,9 +1,9 @@
 use crate::approval::repository::*;
 use crate::approval::{Error, Result};
-use crate::storage::drivers::sqlite::SqliteDriver;
-use crate::storage::{Connection, OptionalExtension, Transaction, params};
-use crate::storage::{OpenOptions, SqlDriver};
 use otto_core::approval::*;
+use otto_storage::drivers::sqlite::SqliteDriver;
+use otto_storage::{Connection, OptionalExtension, Transaction, params};
+use otto_storage::{OpenOptions, SqlDriver};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex, time::Duration};
 
@@ -220,7 +220,7 @@ impl ApprovalStore for Store {
         let mut sessions = statement
             .query_map([workspace], |r| r.get::<String>(0))
             .map_err(storage_error)?
-            .collect::<crate::storage::Result<Vec<_>>>()
+            .collect::<otto_storage::Result<Vec<_>>>()
             .map_err(storage_error)?;
         drop(statement);
         if !sessions.iter().any(|s| s.is_empty()) {
@@ -660,9 +660,9 @@ fn append_event_body(tx: &Transaction<'_>, request: &Request, body: &str) -> Res
     .map_err(storage_error)
 }
 
-fn storage_error(error: crate::storage::Error) -> Error {
+fn storage_error(error: otto_storage::Error) -> Error {
     match error {
-        crate::storage::Error::CommitUnknown => Error::CommitUnknown,
+        otto_storage::Error::CommitUnknown => Error::CommitUnknown,
         _ => Error::Unavailable,
     }
 }

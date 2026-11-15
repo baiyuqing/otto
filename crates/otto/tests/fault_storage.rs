@@ -11,8 +11,8 @@ use std::sync::Arc;
 use otto::faults::sql::{FaultySqlDriver, SqlOp};
 use otto::faults::{Fault, FaultError, FaultPlan, Filter, Rule, SqlFault, Trigger};
 use otto::runtime::storage::SqlRepositories;
-use otto::storage::Connection;
-use otto::storage::drivers::sqlite::SqliteDriver;
+use otto_storage::Connection;
+use otto_storage::drivers::sqlite::SqliteDriver;
 
 /// What a repository's caller learns from one write. Most repositories
 /// collapse every storage error into one opaque domain error.

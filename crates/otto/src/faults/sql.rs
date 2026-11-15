@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::{Fault, FaultError, FaultPlan};
-use crate::storage::{
+use otto_storage::{
     Error, OpenOptions, Params, Result, Row, SqlConnection, SqlDriver, SqlRows, SqlStatement,
 };
 

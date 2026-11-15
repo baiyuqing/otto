@@ -1,6 +1,6 @@
 //! Tests that rows stream from an open statement instead of being buffered.
 use super::*;
-use crate::storage::SqlRows;
+use crate::SqlRows;
 
 fn open_memory() -> Box<dyn SqlConnection> {
     SqliteDriver

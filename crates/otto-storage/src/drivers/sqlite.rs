@@ -5,7 +5,7 @@
 //! Query results stream through `row_stream::SqliteRows`, which owns a
 //! prepared statement and takes that mutex for one `sqlite3_step` at a time,
 //! so other statements can run on the connection while rows are open.
-use crate::storage::{
+use crate::{
     Error, OpenOptions, OpenPolicy, Params, Result, SqlConnection, SqlDriver, SqlRows,
     SqlStatement, Value,
 };

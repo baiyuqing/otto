@@ -20,10 +20,10 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::sandbox::{CommandExecutor, Request as SandboxRequest, Streams};
-use crate::storage::{Connection, OptionalExtension, params};
 use crate::tool::result::decode_strict_json;
 use crate::tool::{ApprovalSpec, Tool, definition, error_result, text_result};
 use otto_platform::hex::to_hex;
+use otto_storage::{Connection, OptionalExtension, params};
 use std::sync::Mutex;
 
 pub const TOOL_NAME: &str = "start_delivery_task";

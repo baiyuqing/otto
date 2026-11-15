@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use otto::storage::Connection;
+use otto_storage::Connection;
 
 pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let result = match args {

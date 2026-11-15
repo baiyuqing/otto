@@ -397,7 +397,7 @@ impl SqliteScheduleStore {
                         item_id: row.get(0)?,
                         due_at: from_ms(row.get(1)?),
                         origin: Origin::parse(&origin).map_err(|_| {
-                            crate::storage::Error::ConversionFailure("bad origin".into())
+                            otto_storage::Error::ConversionFailure("bad origin".into())
                         })?,
                         session_id: row.get(3)?,
                         text: row.get(4)?,

@@ -483,7 +483,7 @@ fn audit_store_records_user_version_one_and_rejects_another() {
     let directory = tempfile::tempdir().expect("dir");
     let path = directory.path().join("memory-advice.db");
     SqliteAuditStore::open(&path).expect("open");
-    let connection = crate::storage::Connection::open(&path).expect("raw");
+    let connection = otto_storage::Connection::open(&path).expect("raw");
     let version: i64 = connection
         .query_row("PRAGMA user_version", (), |row| row.get(0))
         .expect("version");

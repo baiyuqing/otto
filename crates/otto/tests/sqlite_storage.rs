@@ -2,7 +2,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use otto::storage::{Connection, Value, params};
+use otto_storage::{Connection, Value, params};
 use tempfile::tempdir;
 
 fn child(mode: &str, path: &std::path::Path) -> Child {

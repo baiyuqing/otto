@@ -151,7 +151,7 @@ pub(crate) fn params_from_iter<T: IntoValue>(iter: impl IntoIterator<Item = T>) 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row(pub Vec<Value>);
 impl Row {
-    pub(crate) fn column_count(&self) -> usize {
+    pub fn column_count(&self) -> usize {
         self.0.len()
     }
     pub fn get_value(&self, index: usize) -> Result<Value> {

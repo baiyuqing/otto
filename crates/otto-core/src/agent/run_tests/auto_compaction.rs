@@ -78,8 +78,7 @@ pub(super) async fn seeded_session_with_echo_capabilities() -> MemorySession {
     session
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_request_under_the_soft_trigger_is_not_compacted() {
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -104,8 +103,7 @@ async fn a_request_under_the_soft_trigger_is_not_compacted() {
     assert!(agent.provider().summary_requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn crossing_the_soft_trigger_compacts_before_the_request() {
     let provider = FakeProvider::new(vec![Turn::summary(&structured_summary()), Turn::text("ok")]);
     let agent = Agent::new(
@@ -141,8 +139,7 @@ async fn crossing_the_soft_trigger_compacts_before_the_request() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn proactive_compaction_is_attempted_once_per_turn() {
     // Both provider dispatches sit above the soft trigger, but only the first
     // one may compact.
@@ -171,8 +168,7 @@ async fn proactive_compaction_is_attempted_once_per_turn() {
     assert_eq!(agent.provider().normal_requests().len(), 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_soft_compaction_failure_warns_and_sends_the_original_request() {
     let provider = FakeProvider::new(vec![Turn::failure("summary call failed"), Turn::text("ok")]);
     let agent = Agent::new(
@@ -203,8 +199,7 @@ async fn a_soft_compaction_failure_warns_and_sends_the_original_request() {
     assert_eq!(agent.provider().normal_requests().len(), 1);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_summary_response_with_reasoning_writes_a_checkpoint() {
     let mut summary = Turn::summary(&structured_summary());
     summary.events = vec![
@@ -251,8 +246,7 @@ async fn a_summary_response_with_reasoning_writes_a_checkpoint() {
     assert!(!compaction.summary.contains("**Summarizing**"));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_compaction_failure_at_the_hard_limit_stops_the_turn() {
     let provider = FakeProvider::new(vec![Turn::failure("summary call failed")]);
     let agent = Agent::new(
@@ -280,8 +274,7 @@ async fn a_compaction_failure_at_the_hard_limit_stops_the_turn() {
     assert!(agent.provider().normal_requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn unknown_limits_never_compact_proactively() {
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -358,8 +351,7 @@ async fn run_idle_turn(age_minutes: i64, input_tokens: i64) -> (Vec<String>, usi
     (reasons, agent.provider().summary_requests().len())
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_idle_cache_with_a_half_full_context_compacts_before_the_request() {
     // Estimate is about 135 tokens: above 100 (half the soft trigger), below 200.
     let (reasons, summaries) = run_idle_turn(61, 100).await;
@@ -367,16 +359,14 @@ async fn an_idle_cache_with_a_half_full_context_compacts_before_the_request() {
     assert_eq!(summaries, 1);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_recent_response_does_not_trigger_idle_compaction() {
     let (reasons, summaries) = run_idle_turn(59, 100).await;
     assert!(reasons.is_empty());
     assert_eq!(summaries, 0);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_idle_cache_with_a_small_context_is_not_compacted() {
     // Estimate is about 45 tokens, below 100 (half the soft trigger).
     let (reasons, summaries) = run_idle_turn(61, 10).await;
@@ -386,8 +376,7 @@ async fn an_idle_cache_with_a_small_context_is_not_compacted() {
 
 // -- overflow recovery -----------------------------------------------------
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_context_overflow_is_retried_once_after_compaction() {
     let provider = FakeProvider::new(vec![
         Turn::overflow(),
@@ -414,8 +403,7 @@ async fn a_context_overflow_is_retried_once_after_compaction() {
     assert_eq!(agent.provider().normal_requests().len(), 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_overflow_after_visible_text_is_not_retried() {
     let provider = FakeProvider::new(vec![Turn::overflow().with_events(vec![
         StreamEvent::TextDelta {
@@ -442,8 +430,7 @@ async fn an_overflow_after_visible_text_is_not_retried() {
     assert!(agent.provider().summary_requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_overflow_after_visible_reasoning_is_not_retried() {
     assert_overflow_after_visible_delta_is_not_retried(StreamEvent::ReasoningDelta {
         text: "visible reasoning that is long enough to clear redaction buffering".into(),
@@ -451,8 +438,7 @@ async fn an_overflow_after_visible_reasoning_is_not_retried() {
     .await;
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_overflow_after_a_tool_call_delta_is_not_retried() {
     assert_overflow_after_visible_delta_is_not_retried(StreamEvent::ToolCallDelta {
         tool_call_id: "call-1".into(),
@@ -485,8 +471,7 @@ async fn assert_overflow_after_visible_delta_is_not_retried(event: StreamEvent) 
     assert_eq!(agent.provider().normal_requests().len(), 1);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_second_overflow_after_the_retry_stops_the_turn() {
     let provider = FakeProvider::new(vec![
         Turn::overflow(),
@@ -515,8 +500,7 @@ async fn a_second_overflow_after_the_retry_stops_the_turn() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_overflow_with_nothing_to_compact_returns_the_original_error() {
     let provider = FakeProvider::new(vec![Turn::overflow()]);
     let agent = Agent::new(
@@ -559,8 +543,7 @@ async fn an_overflow_with_nothing_to_compact_returns_the_original_error() {
     assert!(agent.provider().summary_requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn automatic_compaction_disabled_skips_both_paths() {
     let provider = FakeProvider::new(vec![Turn::overflow()]);
     let agent = Agent::new(

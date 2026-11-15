@@ -114,8 +114,7 @@ fn fractional_nanos(digits: &str, unit_nanos: u64) -> u64 {
 mod tests {
     use super::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn parses_simple_compound_and_fractional_units() {
         assert_eq!(parse_go_duration("10s").unwrap(), 10_000_000_000);
         assert_eq!(parse_go_duration("0s").unwrap(), 0);
@@ -125,8 +124,7 @@ mod tests {
         assert_eq!(parse_go_duration(".0000000000009h").unwrap(), 3);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn accepts_signed_nanosecond_boundaries() {
         assert_eq!(
             parse_go_duration("9223372036854775807ns").unwrap(),
@@ -138,8 +136,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_direct_compound_and_fractional_overflow() {
         for value in [
             "9223372036854775808ns",
@@ -153,8 +150,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_garbage() {
         assert!(parse_go_duration("not-a-duration").is_err());
     }

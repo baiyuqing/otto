@@ -4,8 +4,7 @@ use super::*;
 
 // -- manual compaction -----------------------------------------------------
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_manual_compaction_persists_the_summary_and_emits_the_plan_first() {
     let mut turn = Turn::summary(&structured_summary());
     turn.events.push(StreamEvent::Retry {
@@ -57,8 +56,7 @@ async fn a_manual_compaction_persists_the_summary_and_emits_the_plan_first() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn remote_compaction_persists_opaque_state_and_reuses_only_the_new_tail() {
     let provider = FakeProvider::new(vec![
         Turn::remote_compaction("compact-1", "opaque-secret"),
@@ -112,8 +110,7 @@ async fn remote_compaction_persists_opaque_state_and_reuses_only_the_new_tail() 
     assert_eq!(requests[1].messages[0].text(), "next");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn remote_compaction_accepts_a_streamed_reasoning_summary() {
     let provider = FakeProvider::new(vec![
         Turn::remote_compaction("compact-1", "opaque").with_events(vec![
@@ -139,8 +136,7 @@ async fn remote_compaction_accepts_a_streamed_reasoning_summary() {
     assert!(agent.session().remote_compaction().is_some());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_remote_tail_usage_anchors_the_estimate_after_an_older_local_checkpoint() {
     let session = seeded_session_with_echo_capabilities().await;
     session
@@ -227,8 +223,7 @@ async fn a_remote_tail_usage_anchors_the_estimate_after_an_older_local_checkpoin
     assert!(agent.provider().requests()[0].request_remote_compaction);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_manual_compaction_with_nothing_to_compact_is_a_bounded_no_op() {
     let provider = FakeProvider::new(Vec::new());
     let agent = Agent::new(
@@ -256,8 +251,7 @@ async fn a_manual_compaction_with_nothing_to_compact_is_a_bounded_no_op() {
     assert!(agent.provider().requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_summary_response_that_streams_past_its_bound_is_rejected() {
     let provider = FakeProvider::new(vec![Turn::summary(&structured_summary()).with_events(
         vec![StreamEvent::TextDelta {
@@ -281,8 +275,7 @@ async fn a_summary_response_that_streams_past_its_bound_is_rejected() {
     assert!(agent.session().latest_compaction().is_none());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_summary_missing_a_heading_is_rejected_before_the_append() {
     let provider = FakeProvider::new(vec![Turn::summary("## Goal\nonly one heading")]);
     let agent = Agent::new(
@@ -302,8 +295,7 @@ async fn a_summary_missing_a_heading_is_rejected_before_the_append() {
     assert!(agent.session().latest_compaction().is_none());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn summarized_user_messages_are_carried_verbatim_across_compactions() {
     async fn exchange(session: &MemorySession, index: usize, text: &str) {
         for (id, role, text) in [
@@ -364,8 +356,7 @@ async fn summarized_user_messages_are_carried_verbatim_across_compactions() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn cancellation_before_the_append_commits_nothing() {
     let provider = FakeProvider::new(vec![Turn::summary(&structured_summary())]);
     let agent = Agent::new(
@@ -385,8 +376,7 @@ async fn cancellation_before_the_append_commits_nothing() {
     assert!(agent.provider().requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_compaction_with_no_request_sizer_is_rejected() {
     let provider = FakeProvider::new(Vec::new());
     let agent = Agent::new(
@@ -409,8 +399,7 @@ async fn a_compaction_with_no_request_sizer_is_rejected() {
     assert!(agent.provider().requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_compacted_context_still_over_the_hard_trigger_stops_the_dispatch() {
     // The system prompt alone is over the hard trigger, and compaction never
     // touches it, so the retry cannot bring the request back under.
@@ -444,8 +433,7 @@ async fn a_compacted_context_still_over_the_hard_trigger_stops_the_dispatch() {
     assert!(agent.provider().normal_requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_later_dispatch_over_the_hard_trigger_reports_the_used_attempt() {
     // The first dispatch spends the one proactive attempt. A very large tool
     // result then pushes the second dispatch past the hard trigger.

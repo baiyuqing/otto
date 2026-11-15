@@ -327,8 +327,7 @@ mod sample_config_tests;
 mod tests {
     use super::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn unknown_tables_and_keys_keep_the_generic_error() {
         for text in [
             "bogus = 1\n",
@@ -341,8 +340,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn removed_memory_remote_table_gets_a_specific_error() {
         let text = parse("[memory.remote]\nurl = \"https://mem.example\"\n")
             .expect_err("memory.remote is removed")
@@ -351,8 +349,7 @@ mod tests {
         assert!(text.contains("[plugins.bindings.otto-mem]"), "{text}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn other_unknown_remote_keys_keep_the_generic_error() {
         for text in [
             "[server]\nremote = 1\n",
@@ -365,8 +362,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn parses_a_provider_with_a_model() {
         let file = parse(
             r#"default_model = "local/test-model"
@@ -387,8 +383,7 @@ thinking = "high"
         assert!(file.profiles.is_empty());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_unknown_top_level_fields() {
         let err = parse(
             r#"default_model = "chatgpt/x"
@@ -399,8 +394,7 @@ unknown = true
         assert!(err.to_string().contains("unknown"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn deadlines_preserve_absent_and_explicit_values() {
         let empty = parse("").expect("parse");
         assert_eq!(empty.agent.turn_timeout, None);
@@ -426,16 +420,14 @@ workflow_step_timeout = "3h"
         assert_eq!(file.agent.workflow_step_timeout.as_deref(), Some("3h"));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_removed_agent_retry_table() {
         let err = parse("[agent.retry]\nmax_attempts = 3\n").unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{err}");
         assert!(err.to_string().contains("retry"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn compaction_preserves_absent_and_explicit_values() {
         let file = parse(
             r#"[agent.compaction]
@@ -465,29 +457,25 @@ compaction_window = -2
         assert_eq!(empty.agent.compaction.keep_recent_tokens, None);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn compaction_rejects_unknown_fields() {
         let err = parse("[agent.compaction]\nunknown = true\n").unwrap_err();
         assert!(err.to_string().contains("unknown"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn ui_decodes_mode() {
         let file = parse("[ui]\nmode = \"auto\"\n").expect("parse");
         assert_eq!(file.ui.mode, "auto");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn ui_rejects_unknown_fields() {
         let err = parse("[ui]\nmode = \"auto\"\nunknown = true\n").unwrap_err();
         assert!(err.to_string().contains("unknown"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn sandbox_preserves_absent_and_explicit_values() {
         let file = parse("").expect("parse");
         assert_eq!(file.sandbox.driver, None);
@@ -510,8 +498,7 @@ allow_env = ["PATH", "PROJECT_TOKEN"]
         assert_eq!(file.sandbox.allow_env, vec!["PATH", "PROJECT_TOKEN"]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn sandbox_decodes_valid_table() {
         let file = parse(
             r#"[sandbox]
@@ -526,15 +513,13 @@ allow_env = ["PROJECT_TOKEN"]
         assert_eq!(file.sandbox.network.as_deref(), Some("deny"));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn sandbox_rejects_unknown_fields() {
         let err = parse("[sandbox]\ndriver = \"auto\"\nunknown = true\n").unwrap_err();
         assert!(err.to_string().contains("unknown"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_raw_secret_field() {
         let err = parse(
             r#"[providers.bad]
@@ -547,8 +532,7 @@ api_key = "secret"
         assert!(err.to_string().contains("unknown"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn set_default_model_updates_existing_line() {
         let content = r#"default_model = "chatgpt/old"
 [providers.chatgpt.models."old"]
@@ -562,8 +546,7 @@ api_key = "secret"
         assert_eq!(file.providers["chatgpt"].models.len(), 2);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn set_default_model_inserts_missing_line_and_rejects_a_bare_id() {
         let content = "[providers.chatgpt.models.\"new\"]\n";
         let updated = set_default_model(content, "chatgpt/new").expect("set");
@@ -572,23 +555,20 @@ api_key = "secret"
         assert!(error.contains("<provider>/<model_id>"), "{error}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn experimental_absent_is_empty() {
         let file = parse("").expect("parse");
         assert_eq!(file.experimental.typesafe_skill_check, None);
         assert_eq!(file.skills.typesafe_skill_check, None);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn typesafe_skill_check_is_a_skills_setting() {
         let file = parse("[skills]\ntypesafe_skill_check = false\n").expect("parse");
         assert_eq!(file.skills.typesafe_skill_check, Some(false));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn experimental_unknown_key_parses() {
         let file = parse(
             r#"[experimental]

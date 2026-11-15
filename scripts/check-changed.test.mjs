@@ -10,7 +10,6 @@ import { plan } from './check-changed.mjs';
 const FMT = 'cargo fmt --all -- --check';
 const CLIPPY = 'cargo clippy --workspace --all-targets -- -D warnings';
 const FULL = 'cargo test --workspace';
-const WASM = 'make rust-wasm-check';
 const LICENSE = 'make license-check';
 
 test('check-fast runs the selector directly without a worktree lock utility', () => {
@@ -55,9 +54,9 @@ test('two modules share one --lib step, no full test', () => {
   assert.deepEqual(unchecked, []);
 });
 
-test('otto-core change selects full tests and wasm check, not --lib', () => {
+test('otto-core change selects full tests, not --lib', () => {
   const { steps } = plan(['crates/otto-core/src/lib.rs', 'crates/otto/src/memory/store.rs']);
-  assert.deepEqual(steps, [FMT, CLIPPY, WASM, FULL]);
+  assert.deepEqual(steps, [FMT, CLIPPY, FULL]);
 });
 
 test('top-level integration test files map to --test', () => {
@@ -96,8 +95,8 @@ test('test support directories and crate entry files select full tests', () => {
   assert.ok(!plan(['testdata/x.json']).steps.includes(FMT));
 });
 
-test('root Cargo files select clippy, wasm check and full tests, no fmt', () => {
-  assert.deepEqual(plan(['Cargo.lock']).steps, [CLIPPY, WASM, FULL, LICENSE]);
+test('root Cargo files select clippy and full tests, no fmt', () => {
+  assert.deepEqual(plan(['Cargo.lock']).steps, [CLIPPY, FULL, LICENSE]);
 });
 
 test('documentation needs no step and is not unchecked', () => {

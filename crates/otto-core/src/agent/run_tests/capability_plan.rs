@@ -29,8 +29,7 @@ fn notices(messages: &[Message]) -> Vec<&Message> {
         .collect()
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_new_session_gets_a_record_and_no_notice() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("one")]),
@@ -50,8 +49,7 @@ async fn a_new_session_gets_a_record_and_no_notice() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_differing_record_appends_one_notice_before_the_user_message() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
@@ -84,8 +82,7 @@ async fn a_differing_record_appends_one_notice_before_the_user_message() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_changed_definition_digest_appends_one_notice() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
@@ -110,8 +107,7 @@ async fn a_changed_definition_digest_appends_one_notice() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn history_without_a_record_gets_the_legacy_notice_once() {
     let session = MemorySession::new();
     for (role, text) in [(Role::User, "old"), (Role::Assistant, "old reply")] {
@@ -143,8 +139,7 @@ async fn history_without_a_record_gets_the_legacy_notice_once() {
     assert!(found[0].text().contains("Current tools: echo\n"));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_matching_record_appends_nothing() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("one")]),
@@ -159,8 +154,7 @@ async fn a_matching_record_appends_nothing() {
     assert_eq!(agent.session().messages().len(), 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_summarized_notice_is_carried_in_the_capability_updates_block() {
     async fn exchange(session: &MemorySession, index: usize, text: &str) {
         for (id, role, text) in [
@@ -244,8 +238,7 @@ async fn a_summarized_notice_is_carried_in_the_capability_updates_block() {
 /// A session one `Arc` shares between the agent and a tool.
 struct SharedMemory(Arc<MemorySession>);
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Session for SharedMemory {
     fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
         self.0.memory_references()
@@ -309,8 +302,7 @@ impl Session for SharedMemory {
 /// An `echo` tool that writes its `steps` argument as the session plan.
 struct PlanWriter(Arc<MemorySession>);
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for PlanWriter {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()
@@ -339,8 +331,7 @@ impl ToolExecutor for PlanWriter {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_tool_call_that_changes_the_plan_emits_plan_updated_once() {
     let memory = Arc::new(MemorySession::new());
     let steps = r#"{"steps":[{"text":"ship","status":"in_progress"}]}"#;

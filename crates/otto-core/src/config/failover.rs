@@ -35,7 +35,7 @@ impl Default for Failover {
 }
 
 /// Must agree with `otto::failover::lease::DEFAULT_LEASE_SECONDS`: otto-core
-/// stays wasm-safe and cannot depend on the native `otto` crate that owns
+/// performs no I/O and cannot depend on the native `otto` crate that owns
 /// the lease protocol, so the two constants are independent and pinned by
 /// tests on both sides rather than shared.
 fn default_lease_seconds() -> u64 {
@@ -68,8 +68,7 @@ mod tests {
     use super::*;
     use crate::config::File;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn defaults_to_disabled_with_thirty_second_lease() {
         let runtime = resolve_failover(&File::default()).expect("resolve");
         assert_eq!(
@@ -81,8 +80,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn explicit_table_is_used() {
         let file =
             super::super::parse("[failover]\nenabled = true\nlease_seconds = 60\n").expect("parse");
@@ -96,8 +94,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_lease_seconds_below_the_minimum() {
         let file = super::super::parse("[failover]\nlease_seconds = 11\n").expect("parse");
         let err = resolve_failover(&file).unwrap_err();
@@ -105,8 +102,7 @@ mod tests {
         assert!(err.to_string().contains("12"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_unknown_key() {
         let err = super::super::parse("[failover]\nenabled = true\nbogus = 1\n").unwrap_err();
         assert!(err.to_string().contains("unknown"), "{err}");

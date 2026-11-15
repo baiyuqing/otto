@@ -101,8 +101,7 @@ mod tests {
         env
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn defaults_to_home_and_workspace_dot_otto_skills() {
         let runtime = resolve_skills(&File::default(), &env("/home/u"), "/work");
         assert!(runtime.enabled);
@@ -112,8 +111,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn expands_home_relative_and_absolute_paths() {
         let mut file = File::default();
         file.skills.paths = Some(vec![
@@ -132,8 +130,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn explicit_empty_paths_means_no_roots() {
         let mut file = File::default();
         file.skills.paths = Some(Vec::new());
@@ -142,8 +139,7 @@ mod tests {
         assert!(runtime.roots.is_empty());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn disabled_yields_no_roots() {
         let mut file = File::default();
         file.skills.enabled = Some(false);
@@ -152,8 +148,7 @@ mod tests {
         assert!(runtime.roots.is_empty());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn skips_empty_entry_and_home_tilde_without_home() {
         let mut file = File::default();
         file.skills.paths = Some(vec![

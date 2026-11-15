@@ -27,8 +27,7 @@ fn every_tool_call_has_its_result(messages: &[Message]) -> bool {
     pending.is_none()
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn identical_calls_stop_the_turn_with_no_progress() {
     let turns: Vec<Turn> = (0..ProgressPolicy::default().repeated_calls)
         .map(|index| Turn::tool_call(&format!("call-{index}"), r#"{"path":"a.txt"}"#))
@@ -62,8 +61,7 @@ async fn identical_calls_stop_the_turn_with_no_progress() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failing_streak_stops_the_turn_with_no_progress() {
     let limit = 3;
     // Distinct arguments, so only the failure streak can stop this turn.
@@ -105,13 +103,11 @@ async fn a_failing_streak_stops_the_turn_with_no_progress() {
     assert!(every_tool_call_has_its_result(&agent.session().messages()));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn alternating_failed_edits_and_unchanged_reads_stop_without_breaking_resume() {
     struct FailedEditAndRead;
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[async_trait::async_trait]
     impl ToolExecutor for FailedEditAndRead {
         fn definitions(&self) -> Vec<ToolDefinition> {
             Vec::new()
@@ -195,8 +191,7 @@ async fn alternating_failed_edits_and_unchanged_reads_stop_without_breaking_resu
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn distinct_calls_never_stop_a_long_turn() {
     // More calls than either limit, all different: a long but productive turn
     // must run to its natural end.
@@ -219,8 +214,7 @@ async fn distinct_calls_never_stop_a_long_turn() {
     assert_eq!(agent.provider().normal_requests().len(), calls + 1);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_disabled_policy_runs_a_repeating_turn_to_its_natural_end() {
     let mut turns: Vec<Turn> = (0..20)
         .map(|index| Turn::tool_call(&format!("call-{index}"), r#"{"path":"a.txt"}"#))
@@ -243,8 +237,7 @@ async fn a_disabled_policy_runs_a_repeating_turn_to_its_natural_end() {
     assert_eq!(agent.provider().normal_requests().len(), 21);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_recovery_discards_redaction_tails_and_persists_only_the_final_answer() {
     let retry = StreamEvent::Retry {
         attempt: 2,
@@ -301,8 +294,7 @@ async fn provider_recovery_discards_redaction_tails_and_persists_only_the_final_
     assert!(!format!("{messages:?}").contains("abandoned"));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn complete_text_recovery_resets_the_per_response_byte_bound() {
     let turn = Turn::text("done").with_events(vec![
         StreamEvent::TextDelta {
@@ -340,8 +332,7 @@ async fn complete_text_recovery_resets_the_per_response_byte_bound() {
     assert!(agent.session().messages().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn compaction_recovery_resets_the_per_response_byte_bound() {
     let summary = structured_summary();
     let turn = Turn::summary(&summary).with_events(vec![

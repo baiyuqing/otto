@@ -20,8 +20,7 @@ pub(super) fn one_record() -> Vec<Record> {
     }]
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_rendered_memory_context_is_prepended_without_being_persisted() {
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -72,8 +71,7 @@ async fn the_rendered_memory_context_is_prepended_without_being_persisted() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn memory_context_keeps_existing_history_as_the_request_prefix() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("first reply"), Turn::text("second reply")]),
@@ -99,8 +97,7 @@ async fn memory_context_keeps_existing_history_as_the_request_prefix() {
     assert_eq!(messages[3].text(), "second");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn per_run_system_context_is_sent_for_one_turn_only() {
     let agent = Agent::new(
         FakeProvider::new(vec![
@@ -148,8 +145,7 @@ async fn per_run_system_context_is_sent_for_one_turn_only() {
     assert_eq!(prompt.items[0].text, "be brief");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn per_run_system_context_is_sent_on_overflow_retry() {
     let provider = FakeProvider::new(vec![
         Turn::overflow(),
@@ -194,8 +190,7 @@ async fn per_run_system_context_is_sent_on_overflow_retry() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn recall_runs_once_across_the_tool_loop() {
     let memory = Arc::new(FakeMemory::with_records(one_record()));
     let provider = FakeProvider::new(vec![
@@ -224,8 +219,7 @@ async fn recall_runs_once_across_the_tool_loop() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_recall_warns_and_the_turn_continues() {
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -252,8 +246,7 @@ async fn a_failed_recall_warns_and_the_turn_continues() {
     }));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn close_reports_the_memory_binding_error() {
     let memory = Arc::new(FakeMemory {
         close_error: Some("close failed".into()),
@@ -284,8 +277,7 @@ async fn close_reports_the_memory_binding_error() {
 
 // -- tool-result overlay ---------------------------------------------------
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_placeholder_is_persisted_and_the_full_text_reaches_the_provider() {
     let provider = FakeProvider::new(vec![
         Turn::tool_call("c1", r#"{"value":1}"#),
@@ -321,8 +313,7 @@ async fn the_placeholder_is_persisted_and_the_full_text_reaches_the_provider() {
     assert_eq!(overlaid.blocks[0].text, "the whole file");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_overlay_does_not_survive_the_turn() {
     let provider = FakeProvider::new(vec![
         Turn::tool_call("c1", r#"{"value":1}"#),
@@ -357,8 +348,7 @@ async fn the_overlay_does_not_survive_the_turn() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_empty_persisted_override_still_overlays_the_live_text() {
     let provider = FakeProvider::new(vec![
         Turn::tool_call("c1", r#"{"value":1}"#),

@@ -2,10 +2,6 @@
 //!
 //! otto-core holds I/O-free contracts, formats and the agent loop. Filesystem,
 //! process, network, environment, stdio and clock access live in `crates/otto`.
-//! `cargo check --target wasm32-unknown-unknown` does not catch std I/O,
-//! because `std::fs`, `std::process`, `std::net` and `std::env` compile on that
-//! target and fail only at runtime.
-#![cfg(not(target_arch = "wasm32"))]
 
 use std::path::{Path, PathBuf};
 

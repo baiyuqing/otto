@@ -15,8 +15,7 @@ use crate::operation::OperationControl;
 /// Required recall port with explicitly optional management operations.
 /// Descriptions declare support, not user authorization. Callers validate
 /// requests and returned projections at their trust boundaries.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 pub trait MemoryService: Send + Sync {
     fn describe(&self) -> ServiceDescription;
 

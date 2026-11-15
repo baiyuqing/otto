@@ -9,8 +9,8 @@
 //! caller owns the event sink and the cancellation token.
 //!
 //! Concurrency and cancellation: `run` takes `&self` but a single agent is
-//! meant to serve one turn at a time. `otto-core` has no async mutex on the
-//! wasm target, so the caller must not overlap `run` and `compact`. Cancelling
+//! meant to serve one turn at a time. `otto-core` holds no async mutex, so the
+//! caller must not overlap `run` and `compact`. Cancelling
 //! the token stops the provider call, skips the remaining tool calls, and ends
 //! the run with an error.
 //!
@@ -95,8 +95,8 @@ use progress::{ProgressGuard, ProgressPolicy};
 use redactor::Redactor;
 
 /// Turn settings and the two injected capabilities the core cannot provide
-/// itself: the clock and the identifier generator. Keeping them here is what
-/// lets `otto-core` build for `wasm32-unknown-unknown`.
+/// itself: the clock and the identifier generator. Injecting them keeps
+/// `otto-core` free of clock and randomness access.
 pub struct Options {
     /// Out-of-band content-free observations; never become model context.
     pub diagnostics: Option<Arc<dyn crate::diagnostics::Diagnostics>>,

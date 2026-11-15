@@ -21,8 +21,7 @@ impl FailingSession {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Session for FailingSession {
     fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
         self.inner.memory_references()
@@ -106,8 +105,7 @@ impl OperationFailingSession {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Session for OperationFailingSession {
     fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
         self.inner.memory_references()
@@ -194,8 +192,7 @@ struct AsyncOrderingSession {
     attempt_persisted: Arc<AtomicBool>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Session for AsyncOrderingSession {
     fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
         self.inner.memory_references()
@@ -276,8 +273,7 @@ impl Session for AsyncOrderingSession {
 
 struct DispatchAfterFactExecutor(Arc<AtomicBool>);
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for DispatchAfterFactExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()
@@ -298,8 +294,7 @@ impl ToolExecutor for DispatchAfterFactExecutor {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for CountingExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()
@@ -318,8 +313,7 @@ impl ToolExecutor for CountingExecutor {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_attempt_fact_stops_before_tool_dispatch() {
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = Agent::new(
@@ -340,8 +334,7 @@ async fn a_failed_attempt_fact_stops_before_tool_dispatch() {
     assert!(agent.session().operation_history().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn async_operation_fact_is_durable_before_tool_dispatch() {
     let attempt_persisted = Arc::new(AtomicBool::new(false));
     let agent = Agent::new(
@@ -365,8 +358,7 @@ async fn async_operation_fact_is_durable_before_tool_dispatch() {
     assert_eq!(agent.session().operation_history().len(), 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_terminal_fact_stops_after_dispatch_without_a_tool_result() {
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = Agent::new(
@@ -420,8 +412,7 @@ async fn a_failed_terminal_fact_stops_after_dispatch_without_a_tool_result() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_user_message_append_stops_before_the_provider() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("never sent")]),
@@ -437,8 +428,7 @@ async fn a_failed_user_message_append_stops_before_the_provider() {
     assert!(agent.provider().requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
     let inbox = Arc::new(Inbox::default());
     inbox.push(Notification {
@@ -502,8 +492,7 @@ async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
     assert!(inbox.is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_assistant_message_is_persisted_before_the_tools_run() {
     // The second append is the assistant message that asks for the tool call.
     let agent = Agent::new(
@@ -531,8 +520,7 @@ async fn the_assistant_message_is_persisted_before_the_tools_run() {
     assert_eq!(agent.provider().requests().len(), 1);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_tool_result_append_stops_before_the_next_provider_call() {
     // Appends: user, assistant, tool result.
     let agent = Agent::new(

@@ -76,8 +76,7 @@ pub fn validate_provider_name(name: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn splits_at_the_first_slash_and_keeps_slashes_in_the_model_id() {
         let selector = ModelSelector::parse("openrouter/anthropic/claude-x").unwrap();
         assert_eq!(selector.provider, "openrouter");
@@ -85,8 +84,7 @@ mod tests {
         assert_eq!(selector.to_string(), "openrouter/anthropic/claude-x");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_malformed_selectors() {
         for text in ["", "gpt-5", "/gpt-5", "chatgpt/", "bad name/x", "a.b/x"] {
             let error = ModelSelector::parse(text).unwrap_err().to_string();
@@ -100,8 +98,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn from_parts_validates_the_provider_name() {
         assert_eq!(
             ModelSelector::from_parts("chatgpt", "a/b")

@@ -19,8 +19,7 @@ fn deadline_tool_stop_is_typed_and_not_started() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn deadline_before_provider_dispatch_is_a_typed_error() {
     let provider = ScriptedProvider::new(Vec::new());
     let agent = Agent::new(
@@ -51,8 +50,7 @@ async fn deadline_before_provider_dispatch_is_a_typed_error() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_reports_cancellation_as_an_agent_error() {
     let agent = Agent::new(
         CancellingProvider,
@@ -96,8 +94,7 @@ async fn run_reports_cancellation_as_an_agent_error() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_rejects_a_non_assistant_provider_response() {
     let provider = ScriptedProvider::new(vec![(
         Vec::new(),
@@ -121,8 +118,7 @@ async fn run_rejects_a_non_assistant_provider_response() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_sends_the_session_transcript_and_tool_definitions() {
     let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
     let agent = Agent::new(provider, EchoExecutor, MemorySession::new(), test_options());
@@ -144,8 +140,7 @@ struct TestHooks {
     deny: bool,
     after_fail: bool,
 }
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl hooks::Hooks for TestHooks {
     async fn run(
         &self,
@@ -182,8 +177,7 @@ impl hooks::Hooks for TestHooks {
         }
     }
 }
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn hooks_rewrite_before_execution_preserve_effects_and_share_session_lifecycle() {
     let hooks = Arc::new(TestHooks::default());
     let mut options = test_options();
@@ -264,8 +258,7 @@ async fn hooks_rewrite_before_execution_preserve_effects_and_share_session_lifec
             .any(|m| m.role == Role::Tool && m.blocks.iter().any(|b| b.text == "filtered"))
     );
 }
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn hook_denial_is_not_started_and_after_failure_keeps_the_tool_result() {
     for deny in [true, false] {
         let hooks = Arc::new(TestHooks {

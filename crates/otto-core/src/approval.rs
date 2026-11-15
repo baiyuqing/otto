@@ -416,7 +416,6 @@ pub enum BatchControl {
 mod tests {
     use super::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn settings_preserve_legacy_projection_and_independent_policy() {
         for mode in [ApprovalMode::Manual, ApprovalMode::Auto, ApprovalMode::Yolo] {
@@ -469,7 +468,6 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn legacy_requests_and_review_states_select_human_pending() {
         let mut request = request(Authority::Boundary, Kind::Authorization, false);
@@ -496,7 +494,6 @@ mod tests {
         assert!(!request.is_human_pending());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn review_metadata_rejects_stale_bindings_and_invalid_assessments() {
         let mut review = metadata(ReviewStatus::Queued);
@@ -536,7 +533,6 @@ mod tests {
         assert!(review.validate().is_err());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn completed_terminal_decisions_need_no_model_assessment() {
         for transport in ["human", "approval-rule", "yolo-mode"] {
@@ -571,7 +567,6 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn pending_completed_reviews_fail_persisted_request_validation() {
         let mut request = request(Authority::Boundary, Kind::Authorization, false);

@@ -113,8 +113,7 @@ pub(crate) fn expand_tilde(
 mod tests {
     use super::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn cleans_dot_dot_and_repeated_separators() {
         assert_eq!(clean("a/b/../c"), "a/c");
         assert_eq!(clean("a//b"), "a/b");
@@ -124,8 +123,7 @@ mod tests {
         assert_eq!(clean("../a"), "../a");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn joins_like_filepath_join() {
         assert_eq!(
             join("/work", "relative/skills-b"),

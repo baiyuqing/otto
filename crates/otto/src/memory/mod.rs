@@ -2,6 +2,7 @@
 
 pub mod adapter;
 pub mod advice;
+pub mod approval;
 pub mod client;
 pub mod codec;
 pub mod contracts;

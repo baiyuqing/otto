@@ -138,7 +138,7 @@ pub(super) async fn local(
                     Ok(Reply::Reviews(
                         rows.into_iter()
                             .filter(|candidate| {
-                                otto::approval::memory::is_human_pending(
+                                otto::memory::approval::is_human_pending(
                                     candidate,
                                     &snapshot.requests,
                                 )

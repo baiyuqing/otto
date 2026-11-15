@@ -1,5 +1,5 @@
 //! Memory retains review data and the atomic candidate/result receipt.
-use super::{Domain, Error, Proposal, Result, Service};
+use crate::approval::{Domain, Error, Proposal, Result, Service};
 use crate::memory::service::PendingSummary;
 use crate::memory::{
     CandidateListRequest, CandidateRef, CandidateState, ReviewDecision, ReviewRequest, Scope,
@@ -154,7 +154,7 @@ impl Domain for Adapter {
                 candidate.result_revision
             ));
         }
-        if super::digest(&format!(
+        if crate::approval::digest(&format!(
             "{}:{}:{:?}",
             candidate.created_at, candidate.base_revision, candidate.proposed
         )) != request.subject.version
@@ -193,7 +193,7 @@ impl Domain for Adapter {
         if candidate.state != CandidateState::Pending {
             return Err(Error::Conflict);
         }
-        if super::digest(&format!(
+        if crate::approval::digest(&format!(
             "{}:{}:{:?}",
             candidate.created_at, candidate.base_revision, candidate.proposed
         )) != request.subject.version
@@ -274,7 +274,7 @@ fn proposal(
                 reference.scope.id,
                 reference.id
             ),
-            version: super::digest(&format!(
+            version: crate::approval::digest(&format!(
                 "{}:{}:{:?}",
                 candidate.created_at, candidate.base_revision, candidate.proposed
             )),
@@ -624,7 +624,7 @@ mod tests {
                 1,
                 true,
                 "",
-                &super::super::Actor::local("test-human"),
+                &crate::approval::Actor::local("test-human"),
             )
             .unwrap();
         service.apply_available("/two").unwrap();
@@ -657,7 +657,7 @@ mod tests {
             memory: memory.clone(),
             scopes: vec![user.clone()],
         };
-        let persisted = service.store.load(&one.id).unwrap();
+        let persisted = service.stored_for_test(&one.id).unwrap();
         adapter.apply(&persisted).unwrap();
         assert!(adapter.details(&persisted).unwrap().contains(&accepted.id));
         let record = memory

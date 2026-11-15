@@ -95,7 +95,7 @@ pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply 
     let approvals = controller
         .approval_snapshot()
         .map_err(|failure| error(INTERNAL_ERROR, failure.to_string()))?;
-    let page = otto::approval::memory::human_pending_candidate_page(
+    let page = otto::memory::approval::human_pending_candidate_page(
         &memory,
         &[user_scope, workspace_scope],
         &approvals.requests,

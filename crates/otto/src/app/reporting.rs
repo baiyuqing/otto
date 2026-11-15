@@ -57,7 +57,7 @@ impl Controller {
             self.builder.workspace_scope.clone(),
         ];
         if let Ok(pending) = self.approval_snapshot()
-            && let Ok(summary) = crate::approval::memory::human_pending_summary(
+            && let Ok(summary) = crate::memory::approval::human_pending_summary(
                 &memory.service,
                 &scopes,
                 &pending.requests,

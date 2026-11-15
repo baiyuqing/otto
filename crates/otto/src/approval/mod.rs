@@ -2,7 +2,6 @@
 pub mod codec;
 mod contracts;
 mod coordinator;
-pub mod memory;
 pub mod model_change;
 mod policy;
 pub mod repository;

@@ -1,7 +1,7 @@
 //! Usage collection and aggregate query contracts.
 
 pub mod repository;
-mod store;
+mod sqlite;
 
 use std::fmt;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ pub trait Sink: Send + Sync {
     }
 }
 
-pub use store::Store;
+pub use sqlite::Store;
 
 /// Persisted token and provider-operation totals. Usage-event counts are not
 /// provider attempts. Cache totals/rate are absent until a provider explicitly

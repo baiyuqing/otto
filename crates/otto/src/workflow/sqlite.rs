@@ -19,7 +19,7 @@ mod runs;
 mod schema;
 
 use progress::*;
-pub(super) use schema::*;
+use schema::*;
 
 /// Run header columns, in the order every read selects them.
 const RUN_COLUMNS: usize = 13;

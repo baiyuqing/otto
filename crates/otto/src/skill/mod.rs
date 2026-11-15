@@ -23,6 +23,7 @@ pub mod check;
 pub mod check_repository;
 pub mod frontmatter;
 pub mod prompt;
+pub mod sqlite;
 
 use std::io;
 use std::io::Read;

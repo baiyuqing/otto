@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(in crate::storage::backends::sqlite) const SCHEMA: &str = r#"
+pub(super) const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS workflow_runs (
     id TEXT PRIMARY KEY,
@@ -97,9 +97,7 @@ CREATE TABLE IF NOT EXISTS workflow_pending (
 CREATE TABLE IF NOT EXISTS workflow_delivery_schema (version INTEGER PRIMARY KEY) STRICT;
 "#;
 
-pub(in crate::storage::backends::sqlite) fn migrate_schema(
-    connection: &Connection,
-) -> Result<(), String> {
+pub(super) fn migrate_schema(connection: &Connection) -> Result<(), String> {
     // One-time legacy backfill, never repeated after acknowledgement or on reopen.
     // Import initializes an empty target first; logical imports do not execute event writers.
     connection.execute_batch("BEGIN IMMEDIATE;

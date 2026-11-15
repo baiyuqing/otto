@@ -39,6 +39,7 @@ use super::{
 pub mod audit;
 pub mod jev;
 pub mod session;
+pub mod sqlite;
 
 /// The longest a model has to answer for one candidate.
 pub const TIMEOUT: Duration = Duration::from_secs(20);

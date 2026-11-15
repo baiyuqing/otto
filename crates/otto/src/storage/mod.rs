@@ -1,7 +1,7 @@
 //! Storage capability families and the SQLite SQL layer.
-pub mod backends;
 pub mod contracts;
 pub mod drivers;
+pub(crate) mod schema_objects;
 pub mod sql;
 pub mod worker;
 pub use contracts::*;

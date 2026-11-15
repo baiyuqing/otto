@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use otto::fixtures::scripted_provider::{Script, serve, text_reply};
 use otto::memory::advice::audit::{AuditStore, NewRow};
+use otto::memory::advice::sqlite;
 use otto::memory::{
     BindOptions, CandidateAction, CandidateListRequest, CandidateState, CopyStatus,
     ForgetCleanupEntry, ForgetRequest, Origin, ProposeRequest, Provenance, RememberRequest,
@@ -20,7 +21,6 @@ use otto::memory::{
 use otto::provider::openaicompat;
 use otto::runtime::builder::{SessionHandle, SharedSession};
 use otto::session::Store;
-use otto::storage::backends::sqlite::memory_advice;
 use otto_core::agent::{Agent, Options};
 use otto_core::config::endpoint::TrustedEndpoint;
 use otto_core::config::memory::MemoryRuntime;
@@ -128,7 +128,7 @@ async fn forget_reports_every_copy_of_the_text_that_remains_on_disk() {
     // An advice audit row keyed by that candidate whose request holds the text.
     let advice_path = home.path().join(".otto").join("memory-advice.db");
     {
-        let advice = memory_advice::Store::open(&advice_path).expect("open advice log");
+        let advice = sqlite::Store::open(&advice_path).expect("open advice log");
         AuditStore::append(
             &advice,
             &NewRow {

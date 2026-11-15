@@ -8,6 +8,7 @@ mod policy;
 pub mod repository;
 pub mod reviewer;
 mod service;
+pub mod sqlite;
 pub mod workflow;
 pub use contracts::*;
 pub use service::{Service, digest};
@@ -17,13 +18,13 @@ mod coordinator_tests;
 // Compatibility constructors; runtime composition supplies ports to services.
 impl Service {
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        Self::from_store(std::sync::Arc::new(
-            crate::storage::backends::sqlite::approval::Store::open(path)?,
-        ))
+        Self::from_store(std::sync::Arc::new(crate::approval::sqlite::Store::open(
+            path,
+        )?))
     }
     pub fn in_memory() -> Result<Self> {
         Self::from_store(std::sync::Arc::new(
-            crate::storage::backends::sqlite::approval::Store::in_memory()?,
+            crate::approval::sqlite::Store::in_memory()?,
         ))
     }
 }

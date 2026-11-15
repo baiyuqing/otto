@@ -430,10 +430,7 @@ impl Checker {
     #[cfg(test)]
     pub(crate) fn open_in_memory(base_url: &str, api_key: &str) -> Self {
         Self::with_store(
-            Arc::new(
-                crate::storage::backends::sqlite::skill_checks::Store::open_in_memory()
-                    .expect("in-memory store"),
-            ),
+            Arc::new(crate::skill::sqlite::Store::open_in_memory().expect("in-memory store")),
             Client::new(base_url, api_key).with_backoff(vec![
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,

@@ -8,12 +8,13 @@
 //! layer sets [`tools::TurnOrigin`], the composition roots build a
 //! [`worker::Worker`] with a [`worker::PromptRunner`] and a [`worker::Sink`].
 
+pub mod sqlite;
 pub mod store;
 pub mod time;
 pub mod tools;
 pub mod worker;
 
-pub use crate::storage::backends::sqlite::schedule::SqliteScheduleStore as Store;
+pub use crate::schedule::sqlite::SqliteScheduleStore as Store;
 pub use store::{
     CreateError, Delivery, Error, Item, NewItem, Result, ScheduleStore, WorkspaceAdmit,
     delivery_text, parse_label, run_text,

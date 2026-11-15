@@ -11,7 +11,7 @@ mod commit;
 mod schema;
 
 use checks::*;
-pub(super) use schema::*;
+use schema::*;
 
 pub struct Store {
     connection: Mutex<Connection>,

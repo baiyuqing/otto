@@ -9,7 +9,7 @@
   stdio or wall-clock access. Provider-specific wire types stay in
   `openaicompat` and `openairesponses`, behind the neutral provider contract.
 - `otto` is a library. It owns native I/O, tools, sandboxing, storage,
-  authentication, the `embed` API and the terminal UI. `app` owns shared use
+  authentication and the terminal UI. `app` owns shared use
   cases; frontends adapt presentation and transport rather than
   reimplementing domain behavior.
 - `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio and attach
@@ -27,7 +27,7 @@
   `#[cfg(any(test, feature = "test-support"))]`, not `#[cfg(test)]`. Dependent
   crates enable `otto/test-support` in `[dev-dependencies]` and take
   scaffolding from `otto::fixtures`.
-- `runtime/startup.rs` is the shared composition root for CLI, serve and embed.
+- `runtime/startup.rs` is the shared composition root for the CLI and serve.
   Inject domain ports there. CLI-only flag/frontend steps stay in
   `otto_cli::run`.
 - `chat-connector/` is an independent Go ACP client; it links no Otto runtime
@@ -48,7 +48,7 @@ layer; the frontend crates are above it.
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
 | assembly | `runtime` | Building one runnable agent from resolved configuration |
 | application | `app` | Session lifecycle shared by every frontend |
-| frontend | `embed`, `cli`, `client`, `tui` | The frontends that stay in this crate |
+| frontend | `cli`, `client`, `tui` | The frontends that stay in this crate |
 | test support | `fixtures`, `faults` | Compiled only for tests or the `fault-injection` feature; production code never imports them |
 
 `crates/otto/tests/layer_boundary.rs` holds this table and checks the
@@ -295,19 +295,3 @@ exact request/version checks described in [contracts](contracts.md#unified-appro
 Authentication captures startup credentials; changing those requires restart.
 Model switches refresh backend state even when saving the default fails.
 Frontends never persist credentials themselves.
-
-## Embedding API
-
-`otto::embed` builds the shared native runtime in process. Its module rustdoc
-is the API contract:
-
-- The compatibility surface is `embed` and the types its signatures name or
-  re-export; other native `pub` items have no blanket stability promise.
-- Changes are additive even before 1.0: no removals, renames or incompatible
-  signatures. Extend non-exhaustive enums and builder methods, not public fields.
-- Component switches only disable into an already-supported runtime state;
-  introduce that state before exposing a new switch.
-- Use one `Otto` per process because the config lock is per-process `fcntl`.
-  Construction tests hold the shared lock in `embed.rs`.
-- New shared startup steps go in `runtime/startup.rs`, not only in an embed or
-  CLI wrapper.

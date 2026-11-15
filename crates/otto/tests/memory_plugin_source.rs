@@ -8,12 +8,13 @@ use otto::fixtures::scripted_provider;
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use fixture::{Fixture, RECALL_MARKER, plugin_memory_config};
-use otto::embed::{ApprovalDecision, Input};
+use otto::app::approval::ApprovalDecision;
+use otto::fixtures::runtime_session::{Runtime, Session};
 use otto_core::agent::Event;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-/// One Otto instance may run per process: tests take this lock in turn.
+/// The config file lock is held per runtime: tests take this lock in turn.
 static ONE_OTTO: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Startup composes a large future; give the test its own stack.
@@ -37,11 +38,11 @@ fn serve(replies: Vec<String>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
 }
 
 /// Runs one turn and returns the events' warning texts.
-async fn turn(session: &otto::embed::Session, text: &str) -> Vec<String> {
+async fn turn(session: &Session, text: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     session
         .prompt(
-            Input::Text(text),
+            text,
             &mut |event| {
                 if let Event::MemoryWarning { message } = event {
                     warnings.push(message);
@@ -84,9 +85,7 @@ fn recall_reaches_the_request_and_the_file_store_stays_closed() {
         let fixture = Fixture::new();
         fixture.install(true, false);
         let (url, requests) = serve(vec![scripted_provider::text_reply("done")]);
-        let otto = fixture
-            .builder(&url, &plugin_memory_config())
-            .build()
+        let otto = Runtime::start(fixture.options(&url, &plugin_memory_config()))
             .await
             .unwrap();
         let session = otto.new_session(None).await.unwrap();
@@ -111,9 +110,7 @@ fn a_failing_recall_command_is_a_warning_and_the_turn_completes() {
         let fixture = Fixture::new();
         fixture.install(true, true);
         let (url, _) = serve(vec![scripted_provider::text_reply("done")]);
-        let otto = fixture
-            .builder(&url, &plugin_memory_config())
-            .build()
+        let otto = Runtime::start(fixture.options(&url, &plugin_memory_config()))
             .await
             .unwrap();
         let session = otto.new_session(None).await.unwrap();
@@ -131,7 +128,9 @@ fn disabled_memory_never_runs_the_package_command() {
         fixture.install(true, false);
         let (url, requests) = serve(vec![scripted_provider::text_reply("done")]);
         let memory = format!("{}\nenabled = false", plugin_memory_config());
-        let otto = fixture.builder(&url, &memory).build().await.unwrap();
+        let otto = Runtime::start(fixture.options(&url, &memory))
+            .await
+            .unwrap();
         let session = otto.new_session(None).await.unwrap();
         turn(&session, "hello").await;
         let bodies = requests.lock().unwrap().clone();
@@ -154,9 +153,7 @@ fn a_finished_turn_is_observed_with_text_tool_call_and_tool_result() {
             scripted_provider::tool_call_reply("call-1", "read", r#"{"path":"notes.txt"}"#),
             scripted_provider::text_reply("assistant-final-text"),
         ]);
-        let otto = fixture
-            .builder(&url, &plugin_memory_config())
-            .build()
+        let otto = Runtime::start(fixture.options(&url, &plugin_memory_config()))
             .await
             .unwrap();
         let session = otto.new_session(None).await.unwrap();
@@ -191,7 +188,7 @@ fn an_untrusted_package_fails_session_creation_when_required() {
         fixture.install(false, false);
         let (url, _) = serve(vec![]);
         let memory = format!("{}\nrequired = true", plugin_memory_config());
-        let otto = fixture.builder(&url, &memory).build().await;
+        let otto = Runtime::start(fixture.options(&url, &memory)).await;
         let error = match otto {
             Ok(otto) => {
                 let created = otto.new_session(None).await;
@@ -208,8 +205,8 @@ fn an_untrusted_package_fails_session_creation_when_required() {
     });
 }
 
-// The runner build writes its warning to the process stderr, which an
-// embedded host cannot capture; the warning text is covered by the unit test
+// The runner build writes its warning to the process stderr, which the test
+// session cannot capture; the warning text is covered by the unit test
 // in `runtime/wiring/plugin_memory_tests.rs`.
 #[test]
 fn an_untrusted_package_gives_no_memory_tools_when_not_required() {
@@ -217,9 +214,7 @@ fn an_untrusted_package_gives_no_memory_tools_when_not_required() {
         let fixture = Fixture::new();
         fixture.install(false, false);
         let (url, requests) = serve(vec![scripted_provider::text_reply("done")]);
-        let otto = fixture
-            .builder(&url, &plugin_memory_config())
-            .build()
+        let otto = Runtime::start(fixture.options(&url, &plugin_memory_config()))
             .await
             .unwrap();
         let session = otto.new_session(None).await.unwrap();
@@ -263,17 +258,15 @@ fn an_injected_extension_with_a_plugin_backend_fails_startup() {
         let fixture = Fixture::new();
         fixture.install(true, false);
         let (url, _) = serve(vec![]);
-        let result = fixture
-            .builder(&url, &plugin_memory_config())
-            .memory_service(otto::runtime::wiring::MemoryExtension::owned(
-                Arc::new(InjectedService),
-                otto_core::memory::Scope {
-                    namespace: "user".into(),
-                    id: "u1".into(),
-                },
-            ))
-            .build()
-            .await;
+        let mut options = fixture.options(&url, &plugin_memory_config());
+        options.memory_extension = Some(otto::runtime::wiring::MemoryExtension::owned(
+            Arc::new(InjectedService),
+            otto_core::memory::Scope {
+                namespace: "user".into(),
+                id: "u1".into(),
+            },
+        ));
+        let result = Runtime::start(options).await;
         let error = match result {
             Ok(_) => panic!("startup must fail"),
             Err(error) => format!("{error} {error:?}"),

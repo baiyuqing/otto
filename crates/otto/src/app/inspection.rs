@@ -313,18 +313,4 @@ impl Controller {
             .map(|current| current.runner.mcp().status())
             .unwrap_or_default()
     }
-
-    /// The names of the tools the current runner offers the model.
-    #[cfg(test)]
-    pub(crate) fn tool_names(&self) -> Vec<String> {
-        self.runner()
-            .map(|runner| {
-                runner
-                    .definitions()
-                    .iter()
-                    .map(|d| d.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
 }

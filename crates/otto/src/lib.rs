@@ -16,7 +16,6 @@ pub mod config;
 pub mod deadline;
 pub mod decision;
 pub mod delivery;
-pub mod embed;
 pub mod failover;
 #[cfg(any(test, feature = "fault-injection"))]
 pub mod faults;

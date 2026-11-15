@@ -1,6 +1,8 @@
 //! A trusted shell-script package whose `memory` command logs each request and
 //! answers with reply files that the test serializes from `otto_core::memory`.
 
+use otto::fixtures::runtime_session::Options;
+use otto::runtime::startup::Disabled;
 use otto_core::memory::*;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -153,8 +155,8 @@ impl Fixture {
             .map(|request| request["operation"].as_str().unwrap().to_string())
             .collect()
     }
-    /// An embed builder over `home/.config/otto/config.toml` with `memory` appended.
-    pub fn builder(&self, url: &str, memory: &str) -> otto::embed::OttoBuilder {
+    /// Options over `home/.config/otto/config.toml` with `memory` appended.
+    pub fn options(&self, url: &str, memory: &str) -> Options {
         let home = self.home();
         let workspace = self.workspace();
         std::fs::create_dir_all(home.join(".config/otto")).unwrap();
@@ -172,14 +174,19 @@ impl Fixture {
             ),
         )
         .unwrap();
-        otto::embed::Otto::builder()
-            .workspace(workspace)
-            .environment([
+        Options {
+            workspace,
+            environment: vec![
                 ("HOME".to_string(), home.to_string_lossy().into_owned()),
                 ("PATH".to_string(), "/usr/bin:/bin".to_string()),
                 ("TEST_KEY".to_string(), "offline-placeholder".to_string()),
-            ])
-            .disable(otto::embed::Component::Subagents)
+            ],
+            memory_extension: None,
+            disabled: Disabled {
+                subagents: true,
+                ..Disabled::default()
+            },
+        }
     }
 }
 

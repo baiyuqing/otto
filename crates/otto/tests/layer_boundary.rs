@@ -51,7 +51,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ),
     ("assembly", &["runtime"]),
     ("application", &["app"]),
-    ("frontend", &["embed", "cli", "client", "tui"]),
+    ("frontend", &["cli", "client", "tui"]),
     ("test-support", &["fixtures", "faults"]),
 ];
 

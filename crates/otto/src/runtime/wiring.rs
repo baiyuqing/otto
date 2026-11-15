@@ -105,7 +105,7 @@ impl MemoryExtension {
         }
     }
 
-    /// Selects a host-authoritative tenant without breaking existing embedding constructors.
+    /// Selects a host-authoritative tenant.
     pub fn with_organization(mut self, organization_id: impl Into<String>) -> Self {
         self.organization_id = Some(organization_id.into());
         self

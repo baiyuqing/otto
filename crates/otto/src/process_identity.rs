@@ -12,6 +12,12 @@ use chrono::{DateTime, SecondsFormat, Utc};
 pub(crate) fn process_matches(pid: i64, started: &str) -> Option<bool> {
     let pid_u32 = u32::try_from(pid).ok()?;
     let recorded = DateTime::parse_from_rfc3339(started).ok()?;
+    // A zombie has exited: it runs no code and holds no file open. It keeps
+    // its pid until its parent waits for it, so `kill(pid, 0)` below would
+    // still succeed for it.
+    if os_process_is_zombie(pid_u32) {
+        return Some(false);
+    }
     if let Some(actual) = os_process_start_time(pid_u32) {
         return Some(actual == recorded.with_timezone(&Utc));
     }
@@ -62,6 +68,48 @@ pub(crate) fn os_process_start_time(pid: u32) -> Option<DateTime<Utc>> {
     )
 }
 
+/// Whether `pid` names a process that has exited and has not been waited for.
+///
+/// For a zombie, `proc_pidinfo(PROC_PIDTBSDINFO)` returns 0 with `ESRCH`
+/// while `kill(pid, 0)` returns 0 (measured on macOS 27: `sysctl
+/// kern.proc.pid` reports `p_stat == SZOMB` for the same pid). A pid that
+/// names no process fails both calls with `ESRCH`; a running process
+/// answers `proc_pidinfo`.
+#[cfg(target_os = "macos")]
+fn os_process_is_zombie(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a writable `proc_bsdinfo` of `size` bytes.
+    let written =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    if written == size || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+        return false;
+    }
+    // SAFETY: signal 0 only tests process existence; it sends no signal.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Whether `pid` names a process that has exited and has not been waited for:
+/// state `Z` (zombie) or `X` (dead) in `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+fn os_process_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let state = stat
+        .rsplit_once(") ")
+        .and_then(|(_, rest)| rest.split_whitespace().next());
+    matches!(state, Some("Z" | "X"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn os_process_is_zombie(_pid: u32) -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn os_process_start_time(pid: u32) -> Option<DateTime<Utc>> {
     // /proc/{pid}/stat's comm field (2nd, parenthesised) may itself contain
@@ -95,4 +143,31 @@ fn linux_boot_time() -> Option<DateTime<Utc>> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn os_process_start_time(_pid: u32) -> Option<DateTime<Utc>> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_exited_child_that_was_not_waited_for_does_not_match() {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let pid = i64::from(child.id());
+        // `true` exits at once; it stays a zombie until `wait` below.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !os_process_is_zombie(child.id()) {
+            assert!(std::time::Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let started = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        assert_eq!(process_matches(pid, &started), Some(false));
+        child.wait().expect("wait");
+    }
+
+    #[test]
+    fn the_current_process_matches_and_is_not_a_zombie() {
+        let (pid, started) = current_process();
+        assert!(!os_process_is_zombie(std::process::id()));
+        assert_eq!(process_matches(pid, &started), Some(true));
+    }
 }

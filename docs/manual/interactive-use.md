@@ -970,11 +970,16 @@ file system can be continued by an Otto process on another host or container
 after the first host is lost. Otto allows one writer per session through a
 lease in `<session-id>.lease/` beside the session file.
 
-- With `[failover] enabled = true`, a new session creates its lease directory
-  on its first write, and opening an existing session without one creates it.
-  Once `<session-id>.lease/` exists, every open, resume, and archive of that
-  session uses the lease, on every host, whatever that host's `[failover]`
-  setting is. There is no command that removes the lease from a session.
+- The lease is on by default. A new session creates its lease directory on
+  its first write, and opening an existing session without one creates it.
+  `[failover] enabled = false` turns this off for sessions that have no
+  lease directory. Once `<session-id>.lease/` exists, every open, resume, and
+  archive of that session uses the lease, on every host, whatever that
+  host's `[failover]` setting is. There is no command that removes the lease
+  from a session.
+- With a lease, `SIGTERM` to the REPL, the TUI or `--prompt` no longer ends
+  the process at once; it runs the migration described below. Without a
+  lease those frontends are ended by the signal.
 - Opening a lease-managed session that another process holds and renews fails
   with `session is held by host <host> pid <pid> (lease epoch <n>)`. When
   the holder exited
@@ -985,8 +990,9 @@ lease in `<session-id>.lease/` beside the session file.
   that no longer exists: same hostname, same machine id (`/etc/machine-id`
   on Linux, the hardware UUID on macOS), and a recorded pid and process start
   time that no longer name a running process. A reused pid, with a different
-  start time, counts as not running. The open then takes the session over at
-  once, with the takeover handling described below. The wait remains when the
+  start time, counts as not running, and so does a process that has exited
+  but has not been waited for by its parent (a zombie). The open then takes
+  the session over at once, with the takeover handling described below. The wait remains when the
   machine id is unknown or differs (for example a cloned container with the
   same hostname), when the holder ran on another host, when the process
   still exists, when the state of the process cannot be determined, or when

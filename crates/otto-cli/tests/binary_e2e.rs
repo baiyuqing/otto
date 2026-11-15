@@ -30,8 +30,11 @@ fn only_session_transcript(home: &std::path::Path) -> String {
     for workspace in workspaces {
         let workspace = workspace.expect("workspace directory");
         for session in std::fs::read_dir(workspace.path()).expect("workspace sessions") {
-            let session = session.expect("session file");
-            transcripts.push(std::fs::read_to_string(session.path()).expect("read session"));
+            let session = session.expect("session entry");
+            // `<id>.lease/` is a directory beside the session file.
+            if session.path().extension().is_some_and(|ext| ext == "jsonl") {
+                transcripts.push(std::fs::read_to_string(session.path()).expect("read session"));
+            }
         }
     }
     assert_eq!(transcripts.len(), 1, "one session per run");

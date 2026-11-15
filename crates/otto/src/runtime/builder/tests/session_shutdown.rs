@@ -344,7 +344,7 @@ async fn create_session_with_failover_enabled_acquires_a_lease_on_first_append()
     session.close().expect("close");
 }
 
-/// R6: `[failover]` disabled (the default) creates no lease directory.
+/// R6: `[failover] enabled = false` creates no lease directory.
 #[tokio::test]
 async fn create_session_with_failover_disabled_creates_no_lease_directory() {
     let root = tempfile::tempdir().expect("root");
@@ -352,6 +352,11 @@ async fn create_session_with_failover_disabled_creates_no_lease_directory() {
     Arc::get_mut(&mut shared)
         .expect("uniquely owned")
         .no_session = false;
+    Arc::get_mut(&mut shared)
+        .expect("uniquely owned")
+        .config
+        .failover
+        .enabled = false;
     let builder = builder_for(shared, root.path());
 
     let session = builder.create_session(&runtime()).expect("create session");

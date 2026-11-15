@@ -1,5 +1,4 @@
-//! Crash rows of the fault-injection matrix ("Crash harness" in
-//! `docs/specs/2026-10-07-fault-injection-testing.md`). Each test re-executes
+//! Crash rows of the fault-injection matrix. Each test re-executes
 //! this binary; the child ends at an injected `Exit` fault and the parent
 //! reopens what the child left with the real drivers.
 //!

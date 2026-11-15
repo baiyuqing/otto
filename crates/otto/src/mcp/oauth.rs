@@ -1,7 +1,6 @@
 //! OAuth 2.1 authorization for HTTP MCP servers: discovery, dynamic client
 //! registration, the PKCE authorization code flow, and the on-disk token
-//! store. Design: `docs/specs/2026-09-19-mcp-design.md`, "OAuth 2.1
-//! authorization" and "Security".
+//! store.
 //!
 //! Reuses `crate::auth`'s PKCE primitives, loopback callback listener, and
 //! atomic secret-file writer rather than duplicating them; the pieces that

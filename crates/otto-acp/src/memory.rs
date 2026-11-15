@@ -1,5 +1,5 @@
 //! The `_otto/memory/*` extension methods: the human side of memory review
-//! for ACP clients (docs/specs/2026-10-02-connect-memory-review.md).
+//! for ACP clients.
 //!
 //! `remember` and `forget` only queue candidates. These methods are requests
 //! from the ACP client, which the model cannot send, and they are the only way

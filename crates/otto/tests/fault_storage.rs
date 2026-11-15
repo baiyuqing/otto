@@ -1,6 +1,5 @@
 //! Storage (SQL) rows of the fault-injection matrix: one `SqlFault` per
 //! repository, injected through `FaultySqlDriver` under `SqlRepositories`.
-//! See "Storage (SQL)" in `docs/specs/2026-10-07-fault-injection-testing.md`.
 //!
 //! Each test covers one row and iterates the repositories; a failure names
 //! the repository. Persisted state is read back through a plain

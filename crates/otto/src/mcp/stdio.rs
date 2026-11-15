@@ -1,8 +1,7 @@
 //! The stdio transport: a child process speaking newline-delimited
 //! JSON-RPC over its stdin/stdout.
 //!
-//! Owned by the stdio/client step; see `docs/specs/2026-09-19-mcp-design.md`
-//! ("Transports > stdio"). The child's environment is exactly what the
+//! The child's environment is exactly what the
 //! caller supplies (`env_clear()` first); the caller is responsible for
 //! adding `PATH`/`HOME`/`TMPDIR`/`LANG`/`TERM` when the config contract
 //! requires it.

@@ -60,8 +60,7 @@ pub struct WorkspaceSandbox {
 ///
 /// Shared by `run`'s startup composition and `load_workspace`, so a workspace
 /// admitted after startup gets the same `--sandbox` override, `/approve`
-/// support, and `/sandbox reload` wiring as the startup workspace — see
-/// `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server structure").
+/// support, and `/sandbox reload` wiring as the startup workspace.
 /// `elevate` gates `bash_approvals`; `sandbox_settings`, `config_path`,
 /// `explicit_config`, `driver_override`, and `api_key_env` are inputs the two
 /// callers resolve differently (startup from CLI flags and a resumed

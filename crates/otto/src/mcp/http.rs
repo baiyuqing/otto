@@ -1,7 +1,6 @@
 //! Streamable HTTP transport for MCP servers.
 //!
-//! Owned by the HTTP transport step; see `docs/specs/2026-09-19-mcp-design.md`
-//! ("Transports > Streamable HTTP"). One `HttpTransport` serializes every
+//! One `HttpTransport` serializes every
 //! `request`/`notify` call as a single POST to the configured URL, adds the
 //! protocol headers for the negotiated [`Era`], and reads either a JSON body
 //! or a `text/event-stream` body for the matching response. Concurrency:

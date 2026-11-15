@@ -3,7 +3,7 @@
 //! Tools (`src/tool/`) run on the model's behalf, so they may only queue
 //! candidates (`Service::propose`). Review is a human act, reached through the
 //! REPL/TUI commands and the ACP `_otto/memory/*` requests, which the model
-//! cannot send. See `docs/specs/2026-10-02-connect-memory-review.md`. Fix a
+//! cannot send. Fix a
 //! failure by moving the review call to a human-driven entry point.
 
 use std::path::{Path, PathBuf};

@@ -4,9 +4,8 @@
 //! arguments or configuration. Each attempt records it, and only
 //! [`RetrySafety::ReadOnly`] has a consumer today: after process loss or a
 //! session takeover, a call left without a result is run again by the agent
-//! when its tool is `ReadOnly` now and was when the attempt started (see
-//! `docs/specs/2026-10-02-replay-readonly-on-takeover.md` and
-//! `docs/specs/2026-10-06-crash-recovery-and-turn-resume.md`). Idempotent writes are not automatically replayed either. Tool implementations
+//! when its tool is `ReadOnly` now and was when the attempt started.
+//! Idempotent writes are not automatically replayed either. Tool implementations
 //! own the metadata aggregated here for recovery before runtime construction.
 
 use otto_core::model::RetrySafety;

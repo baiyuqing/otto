@@ -1,6 +1,5 @@
 //! The per-server client: era negotiation, `tools/list`, `tools/call`.
 //!
-//! Owned by the stdio/client step; see `docs/specs/2026-09-19-mcp-design.md`.
 //! Era negotiation ([`Client::connect`]) probes `server/discover`: a modern
 //! server answers it, a legacy server rejects it with a recognizable error,
 //! and only then is the `initialize`/`notifications/initialized` handshake

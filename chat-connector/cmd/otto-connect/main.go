@@ -1,5 +1,5 @@
 // Command otto-connect connects chat platforms to an ACP agent (by default
-// `otto acp`). See docs/specs/2026-10-02-otto-connect.md.
+// `otto acp`).
 package main
 
 import (

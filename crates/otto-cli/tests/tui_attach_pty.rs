@@ -1,5 +1,5 @@
 //! PTY test for `otto --attach`: the TUI as a client of a running
-//! `otto serve`. docs/specs/2026-10-02-shared-session.md.
+//! `otto serve`.
 
 #![cfg(unix)]
 

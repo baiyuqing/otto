@@ -270,8 +270,7 @@ pub(crate) type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 /// usage, task recording, the skill checker, and the session root. `Builder`
 /// holds one of these behind an `Arc` and adds what one workspace needs.
 ///
-/// See `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server
-/// structure") for why the split exists: a server process that later loads
+/// The split exists because a server process that later loads
 /// more than one workspace builds this once and calls
 /// [`Builder::for_workspace`] once per workspace.
 #[derive(Clone)]

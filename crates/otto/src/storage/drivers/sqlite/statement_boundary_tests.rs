@@ -70,7 +70,6 @@ fn work_limit_rejection_does_not_touch_live_connection() {
             connection: Mutex::new(rusqlite::Connection::open_in_memory().unwrap()),
             poisoned: AtomicBool::new(false),
         }),
-        capabilities: SqliteDriver.capabilities(Path::new(":memory:")),
     };
     connection
         .execute_batch(
@@ -156,7 +155,6 @@ fn rejected_sql_never_changes_security_pragmas_or_rows() {
             connection: Mutex::new(inner),
             poisoned: AtomicBool::new(false),
         }),
-        capabilities: SqliteDriver.capabilities(Path::new(":memory:")),
     };
     for sql in [
         "SELECT 1; PRAGMA foreign_keys=OFF",

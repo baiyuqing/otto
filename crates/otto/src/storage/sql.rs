@@ -3,7 +3,6 @@
 //! The interface is blocking: a network implementation must own its I/O worker,
 //! never poll network futures on the repository thread or enter its runtime.
 //! Rows stream one owned row at a time. CommitUnknown is never a rollback claim.
-use super::{SqlCapabilities, SqlRequirements};
 use std::{path::Path, time::Duration};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -34,8 +33,6 @@ pub enum Error {
     Unavailable,
     #[error("storage closed")]
     Closed,
-    #[error("unsupported storage capability: {0}")]
-    UnsupportedCapability(&'static str),
     #[error("incompatible storage schema")]
     IncompatibleSchema,
     #[error("commit acknowledgement unknown")]
@@ -223,9 +220,8 @@ pub struct OpenOptions {
     pub policy: OpenPolicy,
 }
 
-/// Composition validates capabilities before opening a route and on its connection.
+/// Opens connections. `FaultySqlDriver` wraps another driver for fault injection.
 pub trait SqlDriver: Send + Sync {
-    fn capabilities(&self, path: &Path) -> SqlCapabilities;
     fn open(&self, path: &Path, options: OpenOptions) -> Result<Box<dyn SqlConnection>>;
 }
 
@@ -233,7 +229,6 @@ pub trait SqlDriver: Send + Sync {
 /// Begin must reject nested transactions. Failed rollback must poison the connection.
 /// Commit errors must classify an uncertain acknowledgement as CommitUnknown.
 pub trait SqlConnection: Send + Sync {
-    fn capabilities(&self) -> SqlCapabilities;
     fn busy_timeout(&self, duration: Duration) -> Result<()>;
     fn pragma_update(&self, name: &str, value: &str) -> Result<()>;
     /// Executes controlled trusted schema/migration scripts. Never pass imported DDL.
@@ -256,9 +251,4 @@ pub trait SqlStatement: Send {
 }
 pub trait SqlRows: Send {
     fn next(&mut self) -> Result<Option<Row>>;
-}
-
-/// Validate additional repository features before schema creation.
-pub fn require(connection: &super::Connection, requirements: SqlRequirements) -> Result<()> {
-    connection.capabilities().validate(requirements)
 }

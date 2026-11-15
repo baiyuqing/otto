@@ -32,8 +32,7 @@ use std::time::Duration;
 
 use super::{Fault, FaultError, FaultPlan};
 use crate::storage::{
-    Error, OpenOptions, Params, Result, Row, SqlCapabilities, SqlConnection, SqlDriver, SqlRows,
-    SqlStatement,
+    Error, OpenOptions, Params, Result, Row, SqlConnection, SqlDriver, SqlRows, SqlStatement,
 };
 
 /// The driver operations a fault rule can target. `Step` is
@@ -67,10 +66,6 @@ impl FaultySqlDriver {
 }
 
 impl SqlDriver for FaultySqlDriver {
-    fn capabilities(&self, path: &Path) -> SqlCapabilities {
-        self.inner.capabilities(path)
-    }
-
     fn open(&self, path: &Path, options: OpenOptions) -> Result<Box<dyn SqlConnection>> {
         let name = path.to_string_lossy();
         let inner = apply(&self.plan, SqlOp::Open, &name, || {
@@ -141,9 +136,6 @@ impl FaultyConnection {
 }
 
 impl SqlConnection for FaultyConnection {
-    fn capabilities(&self) -> SqlCapabilities {
-        self.inner.capabilities()
-    }
     fn busy_timeout(&self, duration: Duration) -> Result<()> {
         check(&self.poisoned)?;
         self.inner.busy_timeout(duration)

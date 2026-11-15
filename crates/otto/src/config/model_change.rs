@@ -103,32 +103,8 @@ pub enum ModelChangeError {
     /// `approval.reviewer_model`.
     #[error("{0}")]
     InUse(String),
-    /// The target file still holds `profiles`, `default_profile` or
-    /// `approval.reviewer_profile`; an edit would mix them with the new keys.
-    #[error("{0}")]
-    LegacyProfiles(String),
     #[error(transparent)]
     Native(#[from] NativeConfigError),
-}
-
-/// The legacy keys present in `content`, in the form they are written.
-fn legacy_profile_keys(content: &str) -> Vec<&'static str> {
-    let Ok(table) = content.parse::<toml::Table>() else {
-        return Vec::new();
-    };
-    let mut keys = Vec::new();
-    for key in ["profiles", "default_profile"] {
-        if table.contains_key(key) {
-            keys.push(key);
-        }
-    }
-    let reviewer = table
-        .get("approval")
-        .and_then(|approval| approval.get("reviewer_profile"));
-    if reviewer.is_some() {
-        keys.push("approval.reviewer_profile");
-    }
-    keys
 }
 
 impl From<ConfigError> for ModelChangeError {
@@ -177,15 +153,6 @@ pub(super) fn preview_model_change_impl(
 ) -> Result<ModelChangePreview, ModelChangeError> {
     let (original, file) = load_with_bytes(path, default_path)?;
     let content = String::from_utf8_lossy(&original);
-    let legacy = legacy_profile_keys(&content);
-    if !legacy.is_empty() {
-        return Err(ModelChangeError::LegacyProfiles(format!(
-            "{} holds the deprecated key(s) {}; convert the file to [providers] and default_model \
-             before changing it (the load diagnostic prints the equivalent TOML)",
-            path.display(),
-            legacy.join(", ")
-        )));
-    }
     let (updated, metadata) = apply(&content, &file, change)?;
     // The edit functions prove the text edit is exact; parsing proves the
     // result is a valid Otto configuration (types, fields, selectors).

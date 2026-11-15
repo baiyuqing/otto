@@ -13,13 +13,13 @@ async fn start_honors_the_disabled_components() {
     std::fs::write(
         home.join(".config/otto/config.toml"),
         r#"
-default_profile = "alpha"
+default_model = "alpha/gpt-test"
 
-[profiles.alpha]
-provider = "claude"
+[providers.alpha]
+type = "claude"
 base_url = "https://api.anthropic.com"
-model = "gpt-test"
 api_key_env = "ALPHA_KEY"
+models."gpt-test" = {}
 
 [memory]
 enabled = false

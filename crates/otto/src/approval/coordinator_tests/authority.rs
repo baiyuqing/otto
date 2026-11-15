@@ -98,7 +98,7 @@ async fn restart_retains_pending_authority_basis_without_borrowing_live_review_a
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("approvals.db");
     let config = otto_core::config::ApprovalConfig {
-        reviewer_profile: Some("fixture".into()),
+        reviewer_model: Some("fixture/m".into()),
         ..Default::default()
     };
     let mut context = ReviewContext {

@@ -27,7 +27,7 @@ needs = ["first"]
             diagnostics: Vec::new(),
         },
         Arc::new(FakeExecutor),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity {
             profile: "default".into(),
@@ -69,7 +69,7 @@ needs = ["first"]
             diagnostics: Vec::new(),
         },
         Arc::new(FakeExecutor),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity::default(),
         2,
@@ -137,7 +137,7 @@ needs = ["research"]
         store,
         Catalog::from_definitions(vec![definition]),
         Arc::new(FakeExecutor),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity::default(),
         2,
@@ -168,7 +168,7 @@ needs = ["first"]
 "#,
     );
     store
-        .create_run("run-1", &definition, "/workspace", "", "", "", "")
+        .create_run("run-1", &definition, workspace(), "", "", "", "")
         .expect("create");
     let attempt = store
         .claim_ready("run-1", "first", "/tmp/first.jsonl")
@@ -181,7 +181,7 @@ needs = ["first"]
         store,
         Catalog::from_definitions(vec![definition]),
         Arc::new(FakeExecutor),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity::default(),
         1,
@@ -222,7 +222,7 @@ needs = ["work", "approve"]
         store,
         Catalog::from_definitions(vec![definition]),
         Arc::new(FakeExecutor),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity::default(),
         2,
@@ -271,7 +271,7 @@ needs = ["sibling"]
         Arc::new(FailAndCancelExecutor {
             sibling_stopped: Arc::clone(&stopped),
         }),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity::default(),
         2,
@@ -302,7 +302,7 @@ needs = ["first"]
 "#,
     );
     store
-        .create_run("run-1", &definition, "/workspace", "", "", "", "")
+        .create_run("run-1", &definition, workspace(), "", "", "", "")
         .expect("create");
     let attempt = store
         .claim_ready("run-1", "first", "/tmp/first")
@@ -316,7 +316,7 @@ needs = ["first"]
         store,
         Catalog::from_definitions(vec![definition]),
         Arc::new(CountingExecutor(Arc::clone(&calls))),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity::default(),
         1,
@@ -348,7 +348,7 @@ fn register_delivery_drops_stopped_bindings() {
         Arc::new(Store::open_in_memory()),
         Catalog::from_definitions(Vec::new()),
         Arc::new(FakeExecutor),
-        "/workspace".into(),
+        workspace().into(),
         transcripts.path().into(),
         RuntimeIdentity::default(),
         1,

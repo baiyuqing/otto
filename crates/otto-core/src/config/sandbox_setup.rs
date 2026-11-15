@@ -114,14 +114,14 @@ mod tests {
     fn update_sandbox_rewrites_only_the_sandbox_table() {
         let cases = [
             "",
-            "# keep\n[profiles.demo]\nmodel = '''a\n[sandbox]\nb'''\n",
-            "# keep\n[sandbox] # old\nnetwork = 'allow'\nread_paths = [\n '/tmp/old',\n]\n[profiles.demo]\nmodel = 'keep'\n",
+            "# keep\n[providers.demo]\ntype = '''a\n[sandbox]\nb'''\n",
+            "# keep\n[sandbox] # old\nnetwork = 'allow'\nread_paths = [\n '/tmp/old',\n]\n[providers.demo]\ntype = 'keep'\n",
         ];
         for old in cases {
             let updated = update_sandbox(old.as_bytes(), &raw()).expect("update");
             let got = String::from_utf8(updated).expect("utf-8");
             assert!(got.contains("network = 'deny'"), "{got}");
-            if let Some(index) = old.find("[profiles.demo]") {
+            if let Some(index) = old.find("[providers.demo]") {
                 assert!(
                     got.contains(&old[index..]),
                     "unrelated content changed: {got}"
@@ -132,13 +132,13 @@ mod tests {
 
     #[test]
     fn update_sandbox_keeps_comments_in_and_after_the_sandbox_table() {
-        let old = "[sandbox] # boundary\n# driver = 'off'  # only for debugging\nnetwork = 'allow' # default\nread_paths = []\n\n# profiles follow\n[profiles.demo]\nmodel = 'keep'\n";
+        let old = "[sandbox] # boundary\n# driver = 'off'  # only for debugging\nnetwork = 'allow' # default\nread_paths = []\n\n# providers follow\n[providers.demo]\ntype = 'keep'\n";
         let updated = update_sandbox(old.as_bytes(), &raw()).expect("update");
         assert_eq!(
             String::from_utf8(updated).expect("utf-8"),
             "[sandbox] # boundary\n# driver = 'off'  # only for debugging\nnetwork = \
                 'deny' # default\nread_paths = ['/tmp/gh']\nallow_env = \
-                ['GH_CONFIG_DIR']\n\n# profiles follow\n[profiles.demo]\nmodel = \
+                ['GH_CONFIG_DIR']\n\n# providers follow\n[providers.demo]\ntype = \
                 'keep'\n"
         );
     }

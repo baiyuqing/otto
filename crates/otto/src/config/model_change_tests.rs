@@ -67,21 +67,6 @@ fn create_initial_config_writes_a_default_model_and_only_non_secret_fields() {
 }
 
 #[test]
-fn a_legacy_profiles_config_still_loads_as_providers_and_a_default_model() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let path = write_config(
-        directory.path(),
-        "default_profile = \"work\"\n[profiles.work]\nprovider = \"openai-compatible\"\nmodel = \"m1\"\n\
-         base_url = \"https://example.test/v1\"\napi_key_env = \"WORK_KEY\"\nthinking = \"high\"\n",
-    );
-
-    let file = load_required(&path).expect("legacy config loads");
-
-    assert_eq!(file.default_model, "work/m1");
-    assert_eq!(file.providers["work"].models["m1"].thinking, "high");
-}
-
-#[test]
 fn set_default_model_changes_only_the_value_and_backs_up_the_old_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let default = dir.path().join("unrelated-default.toml");
@@ -391,27 +376,6 @@ fn provider_field_edits_apply_type_rules_and_work_without_a_provider_header() {
         rejected.to_string().contains("chatgpt does not support"),
         "{rejected}"
     );
-}
-
-#[test]
-fn every_change_is_refused_when_the_file_holds_a_legacy_profile_key() {
-    for legacy in [
-        "default_profile = \"work\"\n",
-        "[profiles.work]\nprovider = \"claude\"\nmodel = \"m\"\n",
-        "[approval]\nreviewer_profile = \"work\"\n",
-    ] {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = write_config(directory.path(), legacy);
-        let change = ModelChange::SetDefaultModel {
-            model: "claude/m".into(),
-        };
-        let error = preview(&path, &change).expect_err("legacy file must be refused");
-        assert!(
-            matches!(error, ModelChangeError::LegacyProfiles(_)),
-            "{legacy}: {error}"
-        );
-        assert_eq!(fs::read_to_string(&path).expect("read"), legacy);
-    }
 }
 
 #[test]

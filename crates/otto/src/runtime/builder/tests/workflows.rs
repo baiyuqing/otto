@@ -46,8 +46,12 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
     use otto_core::model::Usage;
     let (dir, catalog) = crate::workflow::conversation_tests::fixture();
     let store = Arc::new(crate::workflow::Store::open(&dir.path().join("flow.db")).unwrap());
-    let owner =
-        crate::workflow::conversation_tests::controller(store.clone(), catalog, "/w", dir.path());
+    let owner = crate::workflow::conversation_tests::controller(
+        store.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let approvals = Arc::new(crate::approval::Service::in_memory().unwrap());
     owner.attach_approvals(&approvals).unwrap();
     let source = SharedSession::new(Arc::new(
@@ -55,7 +59,7 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
             dir.path().join("sessions"),
             Header {
                 id: "0123456789abcdef0123456789abcdef".into(),
-                workspace: "/w".into(),
+                workspace: crate::fixtures::shared_workspace().into(),
                 provider: "openai-compatible".into(),
                 model: "test-model".into(),
                 created_at: Utc::now(),
@@ -112,14 +116,23 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
         .run("Review scope", &mut |_| {}, &CancellationToken::new())
         .await
         .unwrap();
-    let run = store.origin_runs("/w", &source_id).unwrap().pop().unwrap();
+    let run = store
+        .origin_runs(crate::fixtures::shared_workspace(), &source_id)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(owner.wait(&run).await.unwrap().status, RunStatus::Waiting);
     assert!(
         old_mailbox.is_empty(),
         "replaced adapter must not write to retained mailbox"
     );
     let domain = owner.requests(&run).unwrap().pop().unwrap();
-    let request = crate::workflow::approval::publish(&approvals, "/w", &domain).unwrap();
+    let request = crate::workflow::approval::publish(
+        &approvals,
+        crate::fixtures::shared_workspace(),
+        &domain,
+    )
+    .unwrap();
     assert_eq!(request.state, otto_core::approval::State::Pending);
     assert!(request.decision.is_none(), "no human decision exists yet");
     assert!(
@@ -167,7 +180,9 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
             &crate::approval::Actor::local("test-human"),
         )
         .unwrap();
-    approvals.apply_available("/w").unwrap();
+    approvals
+        .apply_available(crate::fixtures::shared_workspace())
+        .unwrap();
     assert_eq!(owner.wait(&run).await.unwrap().status, RunStatus::Succeeded);
     let terminal = owner
         .events(&run, 0)

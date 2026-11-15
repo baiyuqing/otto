@@ -67,7 +67,7 @@ pub(crate) fn session(id: &str) -> SharedSession {
     SharedSession::new(Arc::new(MemoryHandle::new(Header {
         version: CURRENT_VERSION,
         id: id.into(),
-        workspace: "/w".into(),
+        workspace: crate::fixtures::shared_workspace().into(),
         profile: String::new(),
         provider: String::new(),
         model: String::new(),
@@ -120,7 +120,12 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
     let (dir, catalog) = fixture();
     let store = Arc::new(Store::open_in_memory());
     let definition = catalog.lookup("documentation-review").unwrap().clone();
-    let owner = controller(store.clone(), catalog, "/w", dir.path());
+    let owner = controller(
+        store.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let first = owner
         .start_parent("documentation-review", "scope", "source", "operation-1")
         .await
@@ -133,7 +138,9 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
     assert_eq!(first.id, same.id);
     assert_eq!(same.status, RunStatus::Waiting);
     assert_eq!(
-        store.origin_runs("/w", "source").unwrap(),
+        store
+            .origin_runs(crate::fixtures::shared_workspace(), "source")
+            .unwrap(),
         std::slice::from_ref(&first.id)
     );
     assert!(
@@ -163,7 +170,10 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
     assert!(owner.get(&second.id).is_err());
     assert!(
         store
-            .origin_runs("/w", "replacement-new-session")
+            .origin_runs(
+                crate::fixtures::shared_workspace(),
+                "replacement-new-session"
+            )
             .unwrap()
             .is_empty()
     );
@@ -181,7 +191,12 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
 async fn lifecycle_replay_restart_gate_dedup_and_no_new_session_redirect() {
     let (dir, catalog) = fixture();
     let store = Arc::new(Store::open(&dir.path().join("workflows.db")).unwrap());
-    let owner = controller(store.clone(), catalog.clone(), "/w", dir.path());
+    let owner = controller(
+        store.clone(),
+        catalog.clone(),
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let run = owner
         .start_parent("documentation-review", "scope", "source", "op")
         .await
@@ -249,8 +264,13 @@ async fn lifecycle_replay_restart_gate_dedup_and_no_new_session_redirect() {
     drop(owner);
     drop(store);
     let store = Arc::new(Store::open(&dir.path().join("workflows.db")).unwrap());
-    store.recover("/w").unwrap();
-    let reopened = controller(store.clone(), catalog, "/w", dir.path());
+    store.recover(crate::fixtures::shared_workspace()).unwrap();
+    let reopened = controller(
+        store.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     assert_eq!(
         reopened.get(&run.id).unwrap().status,
         RunStatus::Waiting,
@@ -290,7 +310,7 @@ async fn receipt_survives_crash_before_launch_and_does_not_retry_interrupted_eff
         .create_origin_run(
             "crash-run",
             definition,
-            "/w",
+            crate::fixtures::shared_workspace(),
             &RuntimeIdentity::default(),
             "scope",
             "source",
@@ -304,8 +324,15 @@ async fn receipt_survives_crash_before_launch_and_does_not_retry_interrupted_eff
         .unwrap();
     drop(store);
     let reopened = Arc::new(Store::open(&dir.path().join("receipt.db")).unwrap());
-    reopened.recover("/w").unwrap();
-    let owner = controller(reopened.clone(), catalog, "/w", dir.path());
+    reopened
+        .recover(crate::fixtures::shared_workspace())
+        .unwrap();
+    let owner = controller(
+        reopened.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let reconciled = owner
         .start_parent("documentation-review", "scope", "source", "same-op")
         .await
@@ -314,21 +341,36 @@ async fn receipt_survives_crash_before_launch_and_does_not_retry_interrupted_eff
     assert_eq!(reconciled.status, RunStatus::Paused);
     assert_eq!(reconciled.steps[0].status, StepStatus::Interrupted);
     assert_eq!(reconciled.steps[0].attempt, 1);
-    assert_eq!(reopened.origin_runs("/w", "source").unwrap(), [run.id]);
+    assert_eq!(
+        reopened
+            .origin_runs(crate::fixtures::shared_workspace(), "source")
+            .unwrap(),
+        [run.id]
+    );
     owner.close().await;
 }
 #[tokio::test]
 async fn same_operation_returns_original_snapshot_after_catalog_restart() {
     let (dir, catalog) = fixture();
     let store = Arc::new(Store::open_in_memory());
-    let owner = controller(store.clone(), catalog, "/w", dir.path());
+    let owner = controller(
+        store.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let run = owner
         .start_parent("documentation-review", "scope", "source", "op")
         .await
         .unwrap();
     owner.wait(&run.id).await.unwrap();
     owner.close().await;
-    let changed = controller(store, Catalog::default(), "/w", dir.path());
+    let changed = controller(
+        store,
+        Catalog::default(),
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let replay = changed
         .start_parent("documentation-review", "scope", "source", "op")
         .await
@@ -368,7 +410,7 @@ fn pending_ledger_pages_ownership_restart_and_constant_idle_query() {
             .create_origin_run(
                 &format!("run-{i}"),
                 definition,
-                "/w",
+                crate::fixtures::shared_workspace(),
                 &RuntimeIdentity::default(),
                 "",
                 "source",
@@ -379,7 +421,9 @@ fn pending_ledger_pages_ownership_restart_and_constant_idle_query() {
     let mut previous = 0;
     let mut count = 0;
     loop {
-        let page = store.pending_events("/w", "source", usize::MAX).unwrap();
+        let page = store
+            .pending_events(crate::fixtures::shared_workspace(), "source", usize::MAX)
+            .unwrap();
         assert!(page.len() <= 64);
         if page.is_empty() {
             break;
@@ -391,13 +435,22 @@ fn pending_ledger_pages_ownership_restart_and_constant_idle_query() {
                 .acknowledge_event("/other", "source", event.seq)
                 .unwrap();
             store
-                .acknowledge_event("/w", "replacement", event.seq)
+                .acknowledge_event(
+                    crate::fixtures::shared_workspace(),
+                    "replacement",
+                    event.seq,
+                )
                 .unwrap();
             assert_eq!(
-                store.pending_events("/w", "source", 1).unwrap()[0].seq,
+                store
+                    .pending_events(crate::fixtures::shared_workspace(), "source", 1)
+                    .unwrap()[0]
+                    .seq,
                 event.seq
             );
-            store.acknowledge_event("/w", "source", event.seq).unwrap();
+            store
+                .acknowledge_event(crate::fixtures::shared_workspace(), "source", event.seq)
+                .unwrap();
             count += 1;
         }
     }
@@ -406,13 +459,18 @@ fn pending_ledger_pages_ownership_restart_and_constant_idle_query() {
         "must cross multiple SQL pages, including non-lifecycle events"
     );
     for _ in 0..10 {
-        assert!(store.pending_events("/w", "source", 64).unwrap().is_empty());
+        assert!(
+            store
+                .pending_events(crate::fixtures::shared_workspace(), "source", 64)
+                .unwrap()
+                .is_empty()
+        );
     }
     drop(store);
     let reopened = Store::open(&path).unwrap();
     assert!(
         reopened
-            .pending_events("/w", "source", 64)
+            .pending_events(crate::fixtures::shared_workspace(), "source", 64)
             .unwrap()
             .is_empty(),
         "reopen must not backfill acknowledged history"
@@ -423,13 +481,20 @@ fn pending_ledger_pages_ownership_restart_and_constant_idle_query() {
 async fn failed_enqueue_keeps_ordered_page_pending() {
     let (dir, catalog) = fixture();
     let store = Arc::new(Store::open_in_memory());
-    let owner = controller(store.clone(), catalog, "/w", dir.path());
+    let owner = controller(
+        store.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let run = owner
         .start_parent("documentation-review", "scope", "source", "op")
         .await
         .unwrap();
     owner.wait(&run.id).await.unwrap();
-    let before = store.pending_events("/w", "source", 64).unwrap();
+    let before = store
+        .pending_events(crate::fixtures::shared_workspace(), "source", 64)
+        .unwrap();
     let inbox = Inbox::default();
     let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let persist_failing = failing.clone();
@@ -446,7 +511,9 @@ async fn failed_enqueue_keeps_ordered_page_pending() {
         &inbox,
         &mut Default::default(),
     );
-    let after = store.pending_events("/w", "source", 64).unwrap();
+    let after = store
+        .pending_events(crate::fixtures::shared_workspace(), "source", 64)
+        .unwrap();
     assert_eq!(
         before.iter().map(|e| e.seq).collect::<Vec<_>>(),
         after.iter().map(|e| e.seq).collect::<Vec<_>>()
@@ -463,7 +530,10 @@ async fn failed_enqueue_keeps_ordered_page_pending() {
         &mut Default::default(),
     );
     assert_eq!(
-        store.pending_events("/w", "source", 64).unwrap()[0].seq,
+        store
+            .pending_events(crate::fixtures::shared_workspace(), "source", 64)
+            .unwrap()[0]
+            .seq,
         before[0].seq,
         "duplicate memory ID cannot bypass persistence failure"
     );
@@ -475,6 +545,11 @@ async fn failed_enqueue_keeps_ordered_page_pending() {
         &mut Default::default(),
     );
     assert!(!inbox.is_empty());
-    assert!(store.pending_events("/w", "source", 64).unwrap().is_empty());
+    assert!(
+        store
+            .pending_events(crate::fixtures::shared_workspace(), "source", 64)
+            .unwrap()
+            .is_empty()
+    );
     owner.close().await;
 }

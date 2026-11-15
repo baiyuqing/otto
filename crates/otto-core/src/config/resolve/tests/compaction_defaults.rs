@@ -39,7 +39,7 @@ fn compaction_applies_defaults_and_explicit_auto() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            legacy_profile: "local".into(),
+            model: selector_of(&file, "local"),
             ..Default::default()
         },
     )
@@ -63,7 +63,7 @@ fn compaction_applies_defaults_and_explicit_auto() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            legacy_profile: "local".into(),
+            model: selector_of(&file, "local"),
             ..Default::default()
         },
     )
@@ -111,7 +111,7 @@ fn compaction_rejects_non_positive_targets_before_api_key_resolution() {
             &HashMap::new(),
             &SessionDefaults::default(),
             &Overrides {
-                legacy_profile: "local".into(),
+                model: selector_of(&file, "local"),
                 ..Default::default()
             },
         )
@@ -131,7 +131,7 @@ fn compaction_applies_model_table_windows_over_catalog_windows() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            legacy_profile: "local".into(),
+            model: selector_of(&file, "local"),
             ..Default::default()
         },
     )
@@ -161,7 +161,7 @@ fn compaction_context_override_replaces_catalog_windows() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            legacy_profile: "local".into(),
+            model: selector_of(&file, "local"),
             ..Default::default()
         },
     )
@@ -192,7 +192,7 @@ fn compaction_rejects_invalid_profile_windows() {
             &HashMap::new(),
             &SessionDefaults::default(),
             &Overrides {
-                legacy_profile: "local".into(),
+                model: selector_of(&file, "local"),
                 ..Default::default()
             },
         )
@@ -212,7 +212,7 @@ fn compaction_adjusts_targets_for_small_windows() {
             &env_map(&[("PROFILE_KEY", "secret")]),
             &SessionDefaults::default(),
             &Overrides {
-                legacy_profile: "local".into(),
+                model: selector_of(&file, "local"),
                 ..Default::default()
             },
         )
@@ -238,7 +238,7 @@ fn compaction_unknown_model_preserves_configured_targets() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            legacy_profile: "local".into(),
+            model: selector_of(&file, "local"),
             ..Default::default()
         },
     )
@@ -273,7 +273,7 @@ fn applies_agent_defaults() {
         &env_map(&[("PROFILE_KEY", "secret")]),
         &SessionDefaults::default(),
         &Overrides {
-            legacy_profile: "local".into(),
+            model: selector_of(&file, "local"),
             ..Default::default()
         },
     )

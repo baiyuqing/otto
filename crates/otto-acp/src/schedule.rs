@@ -40,13 +40,11 @@ pub(super) fn delivery_platforms(params: &Value) -> Vec<String> {
     platforms
 }
 
-/// A present declaration is authoritative, including an empty list.
-pub(super) fn delivery_chats(
-    params: &Value,
-    platforms: &[String],
-) -> Result<Option<Vec<Origin>>, String> {
+/// The destinations in `scheduleDeliveryChats`. An absent declaration and an
+/// empty list both mean no destinations, so nothing is delivered.
+pub(super) fn delivery_chats(params: &Value, platforms: &[String]) -> Result<Vec<Origin>, String> {
     let Some(value) = params.pointer("/clientCapabilities/_meta/otto/scheduleDeliveryChats") else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let values = value
         .as_array()
@@ -67,11 +65,11 @@ pub(super) fn delivery_chats(
             chats.push(origin);
         }
     }
-    Ok(Some(chats))
+    Ok(chats)
 }
 
 /// The worker of one connection, or `None` without platforms or a store.
-pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -> Option<Worker> {
+pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Option<Worker> {
     let destinations = delivery_chats(
         &connection
             .client_capabilities
@@ -80,14 +78,7 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
         &platforms,
     )
     .ok()?;
-    if let Some(chats) = &destinations {
-        platforms.retain(|p| {
-            chats
-                .iter()
-                .any(|chat| chat.chat_platform() == Some(p.as_str()))
-        });
-    }
-    if platforms.is_empty() {
+    if destinations.is_empty() {
         return None;
     }
     let (store, run, logger, metrics) = match &connection.backend {
@@ -97,10 +88,7 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
                 runtime: local.config.runtime.clone(),
             };
             let run = RunRole {
-                scope: destinations
-                    .as_ref()
-                    .map(|origins| Scope::Origins(origins.clone()))
-                    .unwrap_or_else(|| Scope::Chats(platforms.clone())),
+                scope: Scope::Origins(destinations.clone()),
                 workspace: Some(local.config.workspace.to_string_lossy().into_owned()),
                 admit: None,
                 runner: Arc::new(runner),
@@ -131,12 +119,7 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
     };
     let client_id = otto::random::random_id().ok()?;
     if store
-        .register_delivery_client(
-            &client_id,
-            &platforms,
-            destinations.as_deref(),
-            chrono::Utc::now(),
-        )
+        .register_delivery_client(&client_id, &destinations, chrono::Utc::now())
         .is_err()
     {
         logger.warn("schedule_delivery_registration_failed", &[]);

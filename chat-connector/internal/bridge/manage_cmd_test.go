@@ -197,9 +197,8 @@ func TestConfigSetOtherFieldsAreRefused(t *testing.T) {
 
 func TestConfigChangeErrorsAreMappedToPlainReplies(t *testing.T) {
 	for code, want := range map[string]string{
-		"model_in_use":           "That model is the default model or the approval reviewer model. Select another model first.",
-		"legacy_profiles_config": "The host configuration still uses [profiles]. Convert it on the host to [providers] and default_model.",
-		"provider_not_found":     "Provider not found. Send /config models.",
+		"model_in_use":       "That model is the default model or the approval reviewer model. Select another model first.",
+		"provider_not_found": "Provider not found. Send /config models.",
 	} {
 		var seen []recorded
 		h := newHarness(t, setup{manage: managementServer(t, replyWith(409, `{"error":{"code":"`+code+`","message":"x"}}`, &seen))})

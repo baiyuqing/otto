@@ -394,8 +394,7 @@ fn prepare_of_an_archived_lease_managed_session_acquires_without_waiting() {
 }
 
 #[test]
-fn workspace_identity_adopts_legacy_sessions_and_preserves_listing_resume_and_archive_after_moves()
-{
+fn workspace_identity_preserves_listing_resume_and_archive_after_moves() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");
     let workspace = temp.path().join("workspace");

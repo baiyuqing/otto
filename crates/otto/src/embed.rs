@@ -322,7 +322,7 @@ impl OttoBuilder {
         self
     }
 
-    /// The values of the `--model`, `--provider`, `--profile`, `--base-url`,
+    /// The values of the `--model`, `--provider`, `--base-url`,
     /// `--thinking` and related flags.
     pub fn overrides(mut self, overrides: Overrides) -> Self {
         self.overrides = overrides;

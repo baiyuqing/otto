@@ -258,7 +258,7 @@ impl SqliteScheduleStore {
         self.write(|connection| {
             let resolved;
             let scope = if let Scope::DeliveryClient(id) = scope {
-                resolved = delivery_scope(connection, id, now)?.0;
+                resolved = delivery_scope(connection, id, now)?;
                 &resolved
             } else { scope };
             // ponytail: scan due rows for dynamic scopes; use SQL filters if queues grow.

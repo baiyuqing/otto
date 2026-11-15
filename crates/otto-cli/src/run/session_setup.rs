@@ -109,7 +109,6 @@ pub(super) async fn activate_initial_session(
 
 pub(super) fn overrides_from(options: &CliOptions) -> Overrides {
     Overrides {
-        legacy_profile: options.profile.clone(),
         provider: options.provider.clone(),
         base_url: options.base_url.clone(),
         model: options.model.clone(),

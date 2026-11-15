@@ -59,8 +59,6 @@ func manageError(err error) string {
 			return "Provider not found. Send /config models."
 		case "model_in_use":
 			return "That model is the default model or the approval reviewer model. Select another model first."
-		case "legacy_profiles_config":
-			return "The host configuration still uses [profiles]. Convert it on the host to [providers] and default_model."
 		case "change_not_found":
 			return "That configuration confirmation is unknown or was already used. Submit the change again."
 		case "change_expired":

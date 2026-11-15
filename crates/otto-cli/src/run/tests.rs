@@ -125,9 +125,9 @@ fn skill_checker_is_enabled_by_default_with_an_api_key() {
 }
 
 #[test]
-fn skill_checker_honors_the_legacy_experimental_setting() {
+fn skill_checker_honors_the_skills_setting() {
     let mut file = File::default();
-    file.experimental.typesafe_skill_check = Some(false);
+    file.skills.typesafe_skill_check = Some(false);
     let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
     let mut stderr = Cursor::new(Vec::new());
 
@@ -165,7 +165,6 @@ fn the_config_environment_always_holds_every_fixed_key() {
     for key in [
         "HOME",
         "OTTO_PROVIDER",
-        "OTTO_PROFILE",
         "OTTO_MODEL",
         "OTTO_API_KEY",
         "OTTO_UI",
@@ -271,13 +270,13 @@ async fn startup_trace_environment_writes_timing_lines() {
     std::fs::write(
         home.join(".config/otto/config.toml"),
         r#"
-default_profile = "alpha"
+default_model = "alpha/gpt-test"
 
-[profiles.alpha]
-provider = "openai-compatible"
+[providers.alpha]
+type = "openai-compatible"
 base_url = "https://api.openai.com/v1"
-model = "gpt-test"
 api_key_env = "ALPHA_KEY"
+models."gpt-test" = {}
 
 [memory]
 enabled = false
@@ -385,13 +384,13 @@ async fn startup_warnings_keep_their_order_and_text() {
     std::fs::write(
         &config,
         r#"
-default_profile = "alpha"
+default_model = "alpha/gpt-test"
 
-[profiles.alpha]
-provider = "openai-compatible"
+[providers.alpha]
+type = "openai-compatible"
 base_url = "https://api.openai.com/v1"
-model = "gpt-test"
 api_key_env = "ALPHA_KEY"
+models."gpt-test" = {}
 
 [memory]
 enabled = false

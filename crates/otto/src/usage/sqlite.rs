@@ -126,51 +126,7 @@ impl Store {
     }
 
     fn initialize(connection: Connection) -> Result<Self> {
-        // The original usage database had no user_version. Detect its shape
-        // directly, add only nullable metadata, and never infer history.
         let transaction = connection.unchecked_transaction().map_err(|_| Error)?;
-        let has_usage_table: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_events'",
-                (),
-                |row| row.get(0),
-            )
-            .map_err(|_| Error)?;
-        if has_usage_table != 0 {
-            let mut columns = std::collections::HashSet::new();
-            for name in transaction
-                .prepare("PRAGMA table_info(usage_events)")
-                .map_err(|_| Error)?
-                .query_map((), |row| row.get::<String>(1))
-                .map_err(|_| Error)?
-            {
-                columns.insert(name.map_err(|_| Error)?);
-            }
-            for (column, declaration) in [
-                (
-                    "cached_breakdown_present",
-                    "INTEGER CHECK (cached_breakdown_present IN (0, 1))",
-                ),
-                (
-                    "cache_write_input_tokens",
-                    "INTEGER CHECK (cache_write_input_tokens IS NULL OR (
-                        usage_present=1 AND cache_write_input_tokens >= 0 AND cache_write_input_tokens <= input_tokens - cached_input_tokens))",
-                ),
-                (
-                    "cache_write_1h_input_tokens",
-                    "INTEGER CHECK (cache_write_1h_input_tokens IS NULL OR (
-                        cache_write_input_tokens IS NOT NULL AND cache_write_1h_input_tokens >= 0 AND cache_write_1h_input_tokens <= cache_write_input_tokens))",
-                ),
-            ] {
-                if !columns.contains(column) {
-                    transaction
-                        .execute_batch(&format!(
-                            "ALTER TABLE usage_events ADD COLUMN {column} {declaration}"
-                        ))
-                        .map_err(|_| Error)?;
-                }
-            }
-        }
         transaction.execute_batch(SCHEMA).map_err(|_| Error)?;
         transaction.commit().map_err(|_| Error)?;
         Ok(Self {
@@ -467,47 +423,3 @@ impl UsageRepository for Store {
 
 #[cfg(test)]
 mod cache_usage_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_legacy_usage_table_gains_the_cache_breakdown_column() {
-        let connection = Connection::open_in_memory().expect("connection");
-        connection
-            .execute_batch(
-                "CREATE TABLE usage_events (
-                    id INTEGER PRIMARY KEY,
-                    occurred_at TEXT NOT NULL,
-                    workspace TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    profile TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    input_tokens INTEGER NOT NULL,
-                    output_tokens INTEGER NOT NULL,
-                    cached_input_tokens INTEGER NOT NULL,
-                    usage_present INTEGER NOT NULL
-                ) STRICT;
-                INSERT INTO usage_events (occurred_at, workspace, session_id, task_id,
-                    provider, profile, model, kind, input_tokens, output_tokens,
-                    cached_input_tokens, usage_present)
-                VALUES ('2026-01-01T00:00:00Z', 'w', 's', '', 'chatgpt', 'p', 'm',
-                    'provider', 10, 2, 0, 1);",
-            )
-            .expect("legacy table");
-
-        let store = Store::initialize(connection).expect("upgrade");
-
-        let summary = store.summary(None).expect("summary");
-        assert_eq!(summary.usage_events, 1);
-        assert_eq!(summary.input_tokens, 10);
-        // A legacy row never recorded whether the breakdown was present.
-        assert_eq!(summary.cached_input_tokens, None);
-        assert_eq!(summary.cache_write_input_tokens, None);
-        assert_eq!(summary.cache_write_1h_input_tokens, None);
-    }
-}

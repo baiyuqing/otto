@@ -59,10 +59,6 @@ pub struct ModelEntry {
     pub thinking: String,
     pub context_window: Option<i64>,
     pub compaction_window: Option<i64>,
-    /// Sub-agent model IDs carried over from a legacy `[profiles.*]` table.
-    /// The new format has no such field, so this is never read from TOML.
-    #[serde(skip)]
-    pub legacy_subagent_models: Vec<String>,
 }
 
 /// The connection fields of a provider after the API type's defaults apply.

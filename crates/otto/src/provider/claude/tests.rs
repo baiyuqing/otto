@@ -276,23 +276,14 @@ fn trusted_test_client(
 }
 
 #[tokio::test]
-async fn endpoint_rejection_prevents_secret_body_network_and_injected_redirect_client() {
+async fn endpoint_rejection_prevents_secret_body_and_network() {
     let server = http::spawn(|_| Vec::<u8>::new()).await;
-    let clients = [
-        Client::new(
-            &server.url,
-            "fixture-secret",
-            "2026-10-21",
-            "fixture-workspace",
-        ),
-        Client::with_http_client(
-            &server.url,
-            "fixture-secret",
-            "2026-10-21",
-            "fixture-workspace",
-            reqwest::Client::new(),
-        ),
-    ];
+    let clients = [Client::new(
+        &server.url,
+        "fixture-secret",
+        "2026-10-21",
+        "fixture-workspace",
+    )];
     for client in clients {
         let settlement = client
             .complete(&request(), &mut |_| {}, &CancellationToken::new())

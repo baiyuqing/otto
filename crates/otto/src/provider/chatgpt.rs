@@ -321,19 +321,6 @@ impl Client {
         client
     }
 
-    /// Fails closed: injected clients cannot establish redirect safety.
-    pub fn with_http_client(
-        base_url: &str,
-        tokens: TokenSource,
-        account_id: &str,
-        http: reqwest::Client,
-    ) -> Self {
-        Self::with_client_result(base_url, tokens, account_id, {
-            let _ = http;
-            Err("injected HTTP clients cannot establish redirect safety".into())
-        })
-    }
-
     fn with_client_result(
         base_url: &str,
         tokens: TokenSource,

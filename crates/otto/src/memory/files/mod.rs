@@ -225,7 +225,8 @@ pub struct FileStore {
 impl FileStore {
     /// Opens `root`, creating its layout and identity when absent, and removes
     /// record files whose id has a tombstone (left by an interrupted forget).
-    /// Archives legacy decided candidates while holding the same store lock.
+    /// Archives decided candidates that an interrupted archive left in the active
+    /// directory, while holding the same store lock.
     pub fn open(root: &Path, options: MemoryOptions) -> Result<Self> {
         ensure_layout(root)?;
         let lock = acquire(root, options.busy_timeout)?;

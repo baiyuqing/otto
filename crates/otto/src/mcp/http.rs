@@ -24,8 +24,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::mcp::jsonrpc::{self, Incoming, Notification, Request, RpcError};
-use crate::mcp::sse::SseParser;
 use crate::mcp::{BearerSource, CallError, Era, MODERN_VERSION, Outbound, Transport};
+use otto_platform::sse::SseParser;
 
 /// SSE event size cap: matches the stdio transport's frame cap.
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;

@@ -12,36 +12,6 @@ pub(crate) fn mcp_report(controller: &Controller) -> String {
     }
 }
 
-/// The formatting `mcp_report` applies to `Controller::mcp`'s status rows.
-/// A free function so the per-state line format has a test that does not
-/// need a runner with a real MCP server behind it.
-pub(super) fn format_mcp_report(servers: &[crate::mcp::ServerStatus]) -> String {
-    if servers.is_empty() {
-        return "No MCP servers configured.".to_string();
-    }
-    let mut out = "MCP servers:".to_string();
-    for server in servers {
-        let era = match &server.era {
-            Some(Era::Modern) => "modern".to_string(),
-            Some(Era::Legacy(version)) => format!("legacy {version}"),
-            None => "-".to_string(),
-        };
-        let state = match &server.state {
-            ServerState::Connected { tools } => format!("connected ({tools} tools)"),
-            ServerState::Connecting => "connecting".to_string(),
-            ServerState::Disabled => "disabled".to_string(),
-            ServerState::NeedsLogin => "needs login".to_string(),
-            ServerState::Failed(message) => format!("failed: {message}"),
-        };
-        let _ = write!(
-            out,
-            "\n- {}: {} ({}, {})",
-            server.name, state, server.transport, era
-        );
-    }
-    out
-}
-
 /// Runs the OAuth flow for one configured HTTP server and persists its token.
 async fn mcp_login(
     controller: &Controller,

@@ -292,3 +292,58 @@ async fn an_unknown_model_selector_is_a_command_error() {
     let error = result.expect_err("unknown selector");
     assert!(is_command_error(&error, "/model"), "{error:?}");
 }
+
+#[tokio::test]
+async fn permanent_delete_repl_cancel_and_confirm() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller = controller(workspace.path(), sessions.path()).await;
+    controller
+        .current_session()
+        .append(user("hello"))
+        .await
+        .unwrap();
+    let before = controller.info();
+    {
+        let mut repl = Repl::new(&controller, Box::new(Vec::new()), Box::new(Vec::new()));
+        repl.run(
+            std::io::Cursor::new("/delete\n/delete cancel\n/exit\n"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(Path::new(&before.session_path).exists());
+    {
+        let mut repl = Repl::new(&controller, Box::new(Vec::new()), Box::new(Vec::new()));
+        repl.run(
+            std::io::Cursor::new("/delete\n/delete confirm\n/exit\n"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(!Path::new(&before.session_path).exists());
+}
+
+#[tokio::test]
+async fn permanent_delete_repl_unconfirmed_is_rejected() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller = controller(workspace.path(), sessions.path()).await;
+    controller
+        .current_session()
+        .append(user("hello"))
+        .await
+        .unwrap();
+    let before = controller.info();
+    let mut repl = Repl::new(&controller, Box::new(Vec::new()), Box::new(Vec::new()));
+    let _ = repl
+        .run(
+            std::io::Cursor::new("/delete confirm\n/exit\n"),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(Path::new(&before.session_path).exists());
+    assert_eq!(controller.info().session_id, before.session_id);
+}

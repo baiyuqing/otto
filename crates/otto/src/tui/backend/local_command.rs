@@ -226,7 +226,7 @@ pub(super) async fn local_command(c: Arc<Controller>, command: Command) -> Resul
                     },
                     transport: "tui",
                 })
-                .map(|reply| crate::cli::repl_commands::format_management_reply(&reply))
+                .map(|reply| crate::app::management::format_management_reply(&reply))
             })
             .await?
         }

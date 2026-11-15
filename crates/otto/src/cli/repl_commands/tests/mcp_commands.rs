@@ -2,52 +2,6 @@
 
 use super::*;
 
-#[test]
-fn an_empty_server_list_reports_none_configured() {
-    assert_eq!(format_mcp_report(&[]), "No MCP servers configured.");
-}
-
-#[test]
-fn each_server_state_and_era_renders_its_own_line() {
-    use crate::mcp::ServerStatus;
-
-    let servers = vec![
-        ServerStatus {
-            name: "docs".to_string(),
-            transport: "http",
-            era: Some(Era::Modern),
-            state: ServerState::Connected { tools: 3 },
-        },
-        ServerStatus {
-            name: "legacy-tool".to_string(),
-            transport: "http",
-            era: Some(Era::Legacy("2025-11-25".to_string())),
-            state: ServerState::NeedsLogin,
-        },
-        ServerStatus {
-            name: "shell".to_string(),
-            transport: "stdio",
-            era: None,
-            state: ServerState::Disabled,
-        },
-        ServerStatus {
-            name: "broken".to_string(),
-            transport: "stdio",
-            era: None,
-            state: ServerState::Failed("spawn failed: not found".to_string()),
-        },
-    ];
-
-    assert_eq!(
-        format_mcp_report(&servers),
-        "MCP servers:\n\
-             - docs: connected (3 tools) (http, modern)\n\
-             - legacy-tool: needs login (http, legacy 2025-11-25)\n\
-             - shell: disabled (stdio, -)\n\
-             - broken: failed: spawn failed: not found (stdio, -)"
-    );
-}
-
 /// A controller whose builder carries the given MCP servers, each
 /// reachable through `Controller::builder().mcp.servers` for `/mcp
 /// login`'s validation without a real connection ever being attempted

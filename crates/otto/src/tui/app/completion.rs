@@ -49,7 +49,7 @@ impl App {
                     Ok(Reply::Management(reply)) => self.push_system(format!(
                         "Previous session operation ({}): {}",
                         t.session,
-                        crate::cli::repl_commands::format_management_reply(&reply)
+                        crate::app::management::format_management_reply(&reply)
                     )),
                     // A steering read of a session that is no longer open says
                     // nothing the user needs a line for.
@@ -118,7 +118,7 @@ impl App {
         let management_notice = if mutation {
             match &completion.result {
                 Ok(Reply::Management(reply)) => {
-                    Some(crate::cli::repl_commands::format_management_reply(reply))
+                    Some(crate::app::management::format_management_reply(reply))
                 }
                 _ => None,
             }

@@ -98,40 +98,6 @@ async fn permanent_delete_other_session_and_path_safety() {
 }
 
 #[tokio::test]
-async fn permanent_delete_repl_cancel_and_confirm() {
-    use crate::cli::repl::Repl;
-    let workspace = tempfile::tempdir().unwrap();
-    let sessions = tempfile::tempdir().unwrap();
-    let controller = controller(workspace.path(), sessions.path()).await;
-    controller
-        .current_session()
-        .append(user("hello"))
-        .await
-        .unwrap();
-    let before = controller.info();
-    {
-        let mut repl = Repl::new(&controller, Box::new(Vec::new()), Box::new(Vec::new()));
-        repl.run(
-            std::io::Cursor::new("/delete\n/delete cancel\n/exit\n"),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    }
-    assert!(Path::new(&before.session_path).exists());
-    {
-        let mut repl = Repl::new(&controller, Box::new(Vec::new()), Box::new(Vec::new()));
-        repl.run(
-            std::io::Cursor::new("/delete\n/delete confirm\n/exit\n"),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    }
-    assert!(!Path::new(&before.session_path).exists());
-}
-
-#[tokio::test]
 async fn permanent_delete_current_failure_keeps_current_session() {
     use std::os::unix::fs::PermissionsExt;
     let workspace = tempfile::tempdir().unwrap();
@@ -156,29 +122,6 @@ async fn permanent_delete_current_failure_keeps_current_session() {
         .append(user("still writable"))
         .await
         .unwrap();
-}
-
-#[tokio::test]
-async fn permanent_delete_repl_unconfirmed_is_rejected() {
-    let workspace = tempfile::tempdir().unwrap();
-    let sessions = tempfile::tempdir().unwrap();
-    let controller = controller(workspace.path(), sessions.path()).await;
-    controller
-        .current_session()
-        .append(user("hello"))
-        .await
-        .unwrap();
-    let before = controller.info();
-    let mut repl =
-        crate::cli::repl::Repl::new(&controller, Box::new(Vec::new()), Box::new(Vec::new()));
-    let _ = repl
-        .run(
-            std::io::Cursor::new("/delete confirm\n/exit\n"),
-            &CancellationToken::new(),
-        )
-        .await;
-    assert!(Path::new(&before.session_path).exists());
-    assert_eq!(controller.info().session_id, before.session_id);
 }
 
 #[tokio::test]

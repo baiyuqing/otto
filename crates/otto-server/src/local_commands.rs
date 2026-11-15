@@ -34,7 +34,7 @@ pub(super) async fn execute(
                     otto::app::management::Reply::MemoryServiceResult {
                         status: otto_core::session::local_command::LocalCommandStatus::Error, ..
                     });
-                (otto::cli::repl_commands::format_management_reply(&reply), error)
+                (otto::app::management::format_management_reply(&reply), error)
             }
             Err(error) if error.kind == otto::app::management::ManagementErrorKind::Internal => {
                 return Err(error.message);

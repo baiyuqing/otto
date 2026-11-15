@@ -408,7 +408,7 @@ impl CallGuard for FakeGuard {
         self.before_result.clone()
     }
 
-    fn after(&self) -> Result<(), String> {
+    fn after(&self, _: otto_core::model::RetrySafety) -> Result<(), String> {
         self.after_result.clone()
     }
 }

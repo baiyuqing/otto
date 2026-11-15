@@ -16,11 +16,12 @@ use super::{CONTEXT_CANCELED, Tool};
 
 /// A check run around every registered tool call. `before` can refuse the
 /// call before the tool runs; `after` can flag a call that ran but whose
-/// effects the caller should not trust. Both return operator-facing text
-/// on failure.
+/// effects the caller should not trust. `after` receives the retry safety
+/// the tool declares, so a guard can skip work that only a call with
+/// effects needs. Both return operator-facing text on failure.
 pub(crate) trait CallGuard: Send + Sync {
     fn before(&self) -> Result<(), String>;
-    fn after(&self) -> Result<(), String>;
+    fn after(&self, retry_safety: otto_core::model::RetrySafety) -> Result<(), String>;
 }
 
 /// A named, ordered set of tools.
@@ -276,7 +277,7 @@ impl Registry {
         let mut execution = settle_tool_result(result);
 
         if let Some(guard) = &self.guard
-            && let Err(text) = guard.after()
+            && let Err(text) = guard.after(tool.retry_safety())
         {
             execution.result.content = format!("{text}\n\n{}", execution.result.content);
             execution.result.is_error = true;

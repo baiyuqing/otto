@@ -16,6 +16,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- A lease-managed session on Linux no longer runs `syncfs(2)` after a call
+  of a tool that declares `RetrySafety::ReadOnly`; calls of every other tool
+  are synced as before.
 - `scripts/otto-tcp.sh` is now `scripts/otto-serve-connect.sh` and supervises
   `otto serve` on its Unix socket with `otto-connect` configured as
   `[agent] command = ["otto", "acp", "--attach"]`; it no longer starts serve

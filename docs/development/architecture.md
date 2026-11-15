@@ -42,8 +42,8 @@ layer; the frontend crates are above it.
 
 | Layer | Modules | Owns |
 | --- | --- | --- |
-| platform | `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr` | Process-wide primitives with no domain knowledge |
-| persistence | `storage`, `workspace`, `session`, `usage` | Storage drivers, the SQL and file layers, workspace identity, the session store |
+| platform | `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence` | Process-wide primitives with no domain knowledge; `fsops` holds the pinned POSIX file driver and its `FileDriver` contract, `child_fence` the registry of child processes to kill when a session lease is lost |
+| persistence | `storage`, `workspace`, `session`, `usage` | Storage drivers, the SQL layer, workspace identity, the session store with its writer lease, the usage store |
 | capability | `auth`, `provider`, `typesafe`, `sandbox`, `config`, `tool`, `mcp`, `skill`, `memory`, `approval`, `decision` | What one agent turn uses: model access, the `Tool` trait and `Registry` with the file, Bash and web tools, sandboxed execution, memory, approval |
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
 | assembly | `runtime` | Building one runnable agent from resolved configuration |
@@ -112,8 +112,12 @@ Forking leaves old state untouched and requires stopped workspace processes.
 
 ## Native storage contracts
 
-`storage/{contracts,sql,files}.rs` define guarantees; drivers implement I/O;
-`storage/backends/` owns schemas and row mappings. `runtime/storage.rs` opens
+`storage/{contracts,sql}.rs` and `fsops/files.rs` define guarantees; drivers
+implement I/O (the SQLite driver is in `storage/drivers/`, the POSIX driver is
+`fsops/posix.rs`);
+`storage/backends/` owns schemas and row mappings, except the session store
+(`session/`) and the usage store (`usage/store.rs`), which live in their
+domain modules. `runtime/storage.rs` opens
 repositories at their local paths and injects domain-owned ports. Storage is
 local SQLite (bundled through `rusqlite`) and POSIX session files.
 

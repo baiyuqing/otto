@@ -47,10 +47,10 @@ use otto_core::session::{
     index_context_entries,
 };
 
-use crate::storage::backends::posix::lease::{self, Keeper};
+use crate::session::lease::{self, Keeper};
 
+use crate::fsops::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 use crate::session::fsops;
-use crate::storage::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 
 mod deferred;
 mod lifecycle;

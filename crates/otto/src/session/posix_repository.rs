@@ -1,29 +1,15 @@
-//! POSIX session journal repository and its stable native façade.
+//! The session repository over the POSIX journal files: [`PosixSessionRepository`].
 
-mod fork;
-mod list;
-mod list_for_delete;
-mod permanent_delete;
-pub(crate) mod prepared;
-pub(super) mod store;
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-pub(crate) use crate::session::fsops;
-pub use fork::Forked;
-pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
-pub use prepared::{ArchiveResult, Prepared};
-pub(crate) use store::unanswered_calls_from;
-pub use store::{Recovery, RecoveryCause, Store, UnansweredCall};
-
+use super::{
+    ArchiveResult, Forked, Prepared, Recovery, Store, fork, inspect, list, list_for_delete,
+    prepared, session_directory,
+};
 use std::path::Path;
 use std::sync::Arc;
 
+use super::lease::Keeper;
+use crate::fsops::files::FileDriver;
 use crate::session::{PreparedSession, SessionHandle, SessionRepository};
-use crate::storage::backends::posix::lease::Keeper;
-use crate::storage::files::FileDriver;
 use otto_core::session::{Header, ListResult, SessionInfo, Warning};
 
 impl SessionHandle for Store {

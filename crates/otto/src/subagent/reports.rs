@@ -87,7 +87,7 @@ impl Report {
             Err(error) => return Err(error),
         }
         let parent = create_session_directory(&reports, session_directory_name)?;
-        let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
+        let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
         let name = format!("{task_id}-{id}");
         parent.create_new_child_directory(&name, Mode::S_IRWXU)?;
         Ok(Self {
@@ -130,7 +130,7 @@ fn reports_directory(workspace: &Root) -> io::Result<Root> {
 
 fn publish(directory: &Root, name: &str, content: &str) -> io::Result<()> {
     let (dir, name) = directory.open_parent(Path::new(name), &|_| Ok(()))?;
-    let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
+    let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
     publish_file(
         &dir,
         &Publish {

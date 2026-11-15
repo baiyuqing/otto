@@ -10,7 +10,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::random_bytes;
+use crate::random::random_bytes;
 
 /// OAuth "Sign in with ChatGPT" constants. These mirror the OpenAI Codex CLI
 /// public client. Verify against openai/codex (codex-rs/login) if the flow

@@ -61,13 +61,9 @@ fn a_fork_copies_the_history_before_a_turn_and_leaves_the_source_alone() {
     let source = PathBuf::from(store.path());
     let before = fs::read(&source).expect("read source");
 
-    let forked = super::super::fork::fork(
-        &crate::storage::drivers::posix::PosixDriver,
-        &source,
-        Some(&second),
-        FORK_ID,
-    )
-    .expect("fork");
+    let forked =
+        super::super::fork::fork(&crate::fsops::PosixDriver, &source, Some(&second), FORK_ID)
+            .expect("fork");
     assert_eq!(fs::read(&source).expect("read source"), before);
     assert_eq!(
         forked.path,
@@ -108,7 +104,7 @@ fn a_fork_keeps_a_compaction_before_the_cut() {
     let third = completed_turn(&store, "t3", "three");
 
     let forked = super::super::fork::fork(
-        &crate::storage::drivers::posix::PosixDriver,
+        &crate::fsops::PosixDriver,
         Path::new(&store.path()),
         Some(&third),
         FORK_ID,
@@ -211,7 +207,7 @@ fn a_whole_fork_leaves_out_an_interrupted_turn() {
     assert!(store.interrupted_turn().is_some());
 
     let forked = super::super::fork::fork(
-        &crate::storage::drivers::posix::PosixDriver,
+        &crate::fsops::PosixDriver,
         Path::new(&store.path()),
         None,
         FORK_ID,
@@ -253,13 +249,9 @@ fn an_invalid_fork_point_or_a_taken_id_writes_nothing() {
     let files = session_files(&directory);
 
     for before in [steer.as_str(), "ffffffff"] {
-        let error = super::super::fork::fork(
-            &crate::storage::drivers::posix::PosixDriver,
-            &source,
-            Some(before),
-            FORK_ID,
-        )
-        .expect_err("invalid fork point");
+        let error =
+            super::super::fork::fork(&crate::fsops::PosixDriver, &source, Some(before), FORK_ID)
+                .expect_err("invalid fork point");
         assert!(matches!(error, ForkError::InvalidPoint(_)), "{error}");
         assert_eq!(session_files(&directory), files);
     }
@@ -269,13 +261,8 @@ fn an_invalid_fork_point_or_a_taken_id_writes_nothing() {
     let taken_path = directory.join(format!("{taken}.jsonl"));
     fs::copy(&source, &taken_path).expect("occupy id");
     let files = session_files(&directory);
-    super::super::fork::fork(
-        &crate::storage::drivers::posix::PosixDriver,
-        &source,
-        None,
-        &taken,
-    )
-    .expect_err("taken id");
+    super::super::fork::fork(&crate::fsops::PosixDriver, &source, None, &taken)
+        .expect_err("taken id");
     assert_eq!(session_files(&directory), files);
     store.close().expect("close");
 }
@@ -293,7 +280,7 @@ pub(super) fn fork_failing_at(
         Fault::Before(FaultError::Os(libc::EIO)),
     )]);
     let result = super::super::fork::fork_with(
-        &crate::storage::drivers::posix::PosixDriver,
+        &crate::fsops::PosixDriver,
         &source,
         None,
         FORK_ID,
@@ -398,7 +385,7 @@ fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
     )
     .expect("leftover");
     super::super::fork::fork(
-        &crate::storage::drivers::posix::PosixDriver,
+        &crate::fsops::PosixDriver,
         &source,
         None,
         "fedcba9876543210fedcba9876543210",

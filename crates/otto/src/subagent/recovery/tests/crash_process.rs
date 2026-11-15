@@ -106,10 +106,10 @@ async fn controlled_crash_writer() {
     let boundary = root.join("result-before-record");
     config.child_session = Some(Arc::new(move |task_id, session_id| {
         let name = format!("{task_id}-{session_id}");
-        let driver: Arc<dyn crate::storage::files::FileDriver> = if before_record {
+        let driver: Arc<dyn crate::fsops::files::FileDriver> = if before_record {
             result_boundary::driver(boundary.clone())
         } else {
-            Arc::new(crate::storage::drivers::posix::PosixDriver)
+            Arc::new(crate::fsops::PosixDriver)
         };
         let store = Store::create_child_lazy_with_driver(
             &factory_parent,

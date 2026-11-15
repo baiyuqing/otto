@@ -1194,7 +1194,7 @@ For exact version-specific validation and field definitions, see
 [entry codec](../../crates/otto-core/src/session/codec/entries.rs), the
 [content codec](../../crates/otto-core/src/session/codec/content.rs), the
 [context reducer](../../crates/otto-core/src/session/context.rs) and the
-[POSIX session backend](../../crates/otto/src/storage/backends/posix/session/).
+[POSIX session backend](../../crates/otto/src/session/).
 The tables are a format-reading reference, not a second execution API. Records
 from another Otto version may differ; inspect the matching version's writer and
 reader before assigning semantics to an unfamiliar extension.

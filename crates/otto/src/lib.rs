@@ -9,6 +9,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("OTTO_BUI
 pub mod app;
 pub mod approval;
 pub mod auth;
+pub mod child_fence;
 pub mod cli;
 pub mod client;
 pub mod config;
@@ -34,6 +35,7 @@ pub mod metrics;
 pub mod plugin;
 pub mod program_status;
 pub mod provider;
+pub(crate) mod random;
 pub mod retry;
 pub mod runtime;
 pub mod sandbox;

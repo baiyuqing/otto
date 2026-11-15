@@ -1,6 +1,6 @@
 //! Test-only pinned file decorator: tool returned, result not yet recorded.
 
-use crate::storage::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
+use crate::fsops::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ pub(super) struct ResultBoundary {
 impl FileDriver for ResultBoundary {
     fn open_root(&self, path: &Path) -> io::Result<Box<dyn FileRoot>> {
         Ok(Box::new(BoundaryRoot {
-            inner: crate::storage::drivers::posix::PosixDriver.open_root(path)?,
+            inner: crate::fsops::PosixDriver.open_root(path)?,
             marker: self.marker.clone(),
         }))
     }

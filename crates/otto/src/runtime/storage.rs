@@ -68,9 +68,7 @@ impl SqlRepositories {
     }
     pub fn usage(&self, path: &Path) -> crate::usage::Result<Arc<dyn UsageRepository>> {
         let connection = self.connection(path).map_err(|_| crate::usage::Error)?;
-        Ok(Arc::new(
-            crate::storage::backends::sqlite::usage::Store::from_connection(connection)?,
-        ))
+        Ok(Arc::new(crate::usage::Store::from_connection(connection)?))
     }
     pub fn tasks(&self, path: &Path) -> crate::subagent::record::Result<Arc<dyn TaskRepository>> {
         let connection = self
@@ -116,12 +114,10 @@ impl Default for Storage {
             repositories: SqlRepositories::new(Arc::new(
                 crate::storage::drivers::sqlite::SqliteDriver,
             )),
-            sessions: Arc::new(
-                crate::storage::backends::posix::session::PosixSessionRepository::new(
-                    Arc::new(crate::storage::drivers::posix::PosixDriver),
-                    crate::failover::lease::new_keeper(),
-                ),
-            ),
+            sessions: Arc::new(crate::session::PosixSessionRepository::new(
+                Arc::new(crate::fsops::PosixDriver),
+                crate::session::lease::new_keeper(),
+            )),
         }
     }
 }

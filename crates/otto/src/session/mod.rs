@@ -1,21 +1,35 @@
-//! Stable native session façade; the POSIX implementation lives under
-//! `storage::backends::posix::session`.
+//! Native session store: the `SessionRepository` contracts, the JSONL
+//! journal [`Store`] with its listing, fork, archive and delete operations,
+//! and the writer lease in [`lease`]. The journal files are read and written
+//! through the `fsops::files` contract.
 
+mod fork;
 pub(crate) mod fsops;
+pub mod lease;
 mod legacy;
+mod list;
+mod list_for_delete;
+mod permanent_delete;
+mod posix_repository;
+pub(crate) mod prepared;
 mod repository;
+pub(crate) mod store;
+
+#[cfg(test)]
+mod tests;
 
 pub use crate::fsops::clean_go_path;
-pub(crate) use crate::storage::backends::posix::session::unanswered_calls_from;
-pub use crate::storage::backends::posix::session::{
-    ArchiveResult, Forked, MAX_LIST_SESSIONS, Prepared, Recovery, RecoveryCause, Store,
-    UnansweredCall, inspect, list, session_directory,
-};
+pub use fork::Forked;
 pub use fsops::workspace_key;
 pub use legacy::archive;
+pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
+pub use posix_repository::PosixSessionRepository;
+pub use prepared::{ArchiveResult, Prepared};
 pub use repository::{
     DeleteCandidate, PreparedSession, SessionHandle, SessionRepository, WriterOwnership,
 };
+pub(crate) use store::unanswered_calls_from;
+pub use store::{Recovery, RecoveryCause, Store, UnansweredCall};
 
 /// A session id is 32 lowercase hexadecimal characters. Checked before an id
 /// from a client becomes `<session directory>/<id>.jsonl`, so it cannot name

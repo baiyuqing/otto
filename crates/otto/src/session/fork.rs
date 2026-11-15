@@ -20,11 +20,11 @@ use otto_core::session::{
 use super::store::{
     Store, decode_pi_file_read_only, open_path_journal, reject_oversized_session_file,
 };
+use crate::fsops::files::{FileDriver, JournalOpen};
 use crate::fsops::{
     PosixPublish, Publish, PublishMode, PublishOps, PublishStep, open_dir_no_follow, publish_file,
 };
 use crate::session::fsops;
-use crate::storage::files::{FileDriver, JournalOpen};
 
 /// A session created by [`fork`].
 #[derive(Debug, Clone)]

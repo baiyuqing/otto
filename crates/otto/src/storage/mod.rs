@@ -2,7 +2,6 @@
 pub mod backends;
 pub mod contracts;
 pub mod drivers;
-pub mod files;
 pub mod sql;
 pub mod worker;
 pub use contracts::*;

@@ -130,7 +130,7 @@ impl Writer {
         let dir = fsops::open_dir_at_no_follow(&otto, "logs")?;
         fsops::fchmod_dir(&dir)?;
         cleanup(&dir, SystemTime::now(), RETENTION);
-        let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
+        let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
         let prefix = format!("diagnostic-{}-{id}", std::process::id());
         let owner = regular(fsops::create_at_no_follow(
             &dir,

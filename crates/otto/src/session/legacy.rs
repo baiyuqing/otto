@@ -5,11 +5,9 @@ use std::sync::Arc;
 
 use otto_core::session::{Header, PiError, Warning};
 
-use crate::failover::lease::new_keeper;
-use crate::storage::backends::posix::session::{
-    ArchiveResult, Prepared, Store, prepared::archive_with_driver_and_keeper,
-};
-use crate::storage::files::FileDriver;
+use super::lease::new_keeper;
+use super::{ArchiveResult, Prepared, Store, prepared::archive_with_driver_and_keeper};
+use crate::fsops::files::FileDriver;
 
 impl Store {
     pub fn create(root: impl AsRef<Path>, header: Header) -> Result<Self, PiError> {
@@ -19,11 +17,7 @@ impl Store {
     }
 
     pub fn create_lazy(root: impl AsRef<Path>, header: Header) -> Result<Self, PiError> {
-        Self::create_lazy_with_driver(
-            root,
-            header,
-            Arc::new(crate::storage::drivers::posix::PosixDriver),
-        )
+        Self::create_lazy_with_driver(root, header, Arc::new(crate::fsops::PosixDriver))
     }
 
     pub fn create_lazy_with_driver(
@@ -43,7 +37,7 @@ impl Store {
             parent,
             name,
             header,
-            Arc::new(crate::storage::drivers::posix::PosixDriver),
+            Arc::new(crate::fsops::PosixDriver),
         )
     }
 
@@ -63,11 +57,7 @@ impl Store {
 
 impl Prepared {
     pub fn prepare(path: &Path, create_lease: Option<u64>) -> Result<Self, PiError> {
-        Self::prepare_with_driver(
-            path,
-            create_lease,
-            Arc::new(crate::storage::drivers::posix::PosixDriver),
-        )
+        Self::prepare_with_driver(path, create_lease, Arc::new(crate::fsops::PosixDriver))
     }
 
     pub fn prepare_with_driver(
@@ -89,7 +79,7 @@ impl Prepared {
             workspace,
             path,
             create_lease,
-            Arc::new(crate::storage::drivers::posix::PosixDriver),
+            Arc::new(crate::fsops::PosixDriver),
         )
     }
 
@@ -116,7 +106,7 @@ pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResul
         root,
         workspace,
         path,
-        Arc::new(crate::storage::drivers::posix::PosixDriver),
+        Arc::new(crate::fsops::PosixDriver),
         new_keeper(),
     )
 }

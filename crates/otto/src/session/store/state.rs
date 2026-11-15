@@ -138,7 +138,7 @@ impl StoreState {
         // The suffix is not `.jsonl`: session scans read only `*.jsonl`.
         let temp_name = format!(
             "{filename}.{}.tmp",
-            crate::auth::random_hex::<8>()
+            crate::random::random_hex::<8>()
                 .map_err(|error| PiError::other(format!("name session file: {error}")))?
         );
         let mut file = session_dir

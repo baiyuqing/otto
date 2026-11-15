@@ -13,7 +13,6 @@ pub const MAX_RECORD_TEXT_BYTES: usize = 8 * 1024;
 pub const MAX_NAMESPACE_BYTES: usize = 32;
 pub const MAX_KIND_BYTES: usize = 32;
 pub const MAX_ID_BYTES: usize = 64;
-pub const MAX_SCOPE_ID_BYTES: usize = 128;
 pub const MAX_SESSION_ID_BYTES: usize = 128;
 pub const MAX_MESSAGE_ID_BYTES: usize = 128;
 pub const MAX_SEMANTIC_KEY_BYTES: usize = 256;
@@ -179,16 +178,6 @@ pub fn invalid_request(detail: &str) -> Error {
 
 pub fn sensitive(category: &str) -> Error {
     Error::detailed(ErrorKind::SensitiveMemory, category)
-}
-
-/// `validOpaqueID`: non-empty, within `max_bytes`, ASCII alphanumerics plus
-/// `.`, `_`, `:` and `-`.
-pub fn valid_opaque_id(id: &str, max_bytes: usize) -> bool {
-    if id.is_empty() || id.len() > max_bytes {
-        return false;
-    }
-    id.bytes()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-'))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

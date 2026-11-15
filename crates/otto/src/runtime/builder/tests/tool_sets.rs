@@ -78,7 +78,7 @@ async fn builtin_file_tools_are_registered_in_a_fixed_order() {
 #[tokio::test]
 async fn with_lease_guard_refuses_a_tool_call_once_the_session_lease_is_lost() {
     let tmp = tempfile::tempdir().expect("tmp");
-    let lease = failover::lease::Lease::for_test(tmp.path());
+    let lease = crate::session::lease::Lease::for_test(tmp.path());
     lease.mark_lost_for_test("test fence");
     let header = Header {
         id: "session-1".to_string(),

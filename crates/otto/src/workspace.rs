@@ -20,6 +20,52 @@ use crate::hex::to_hex;
 pub const MARKER: &str = ".otto/workspace.json";
 /// Protect the marker and its parent entry from model-originated replacement.
 pub(crate) const READ_ONLY_PATHS: [(&str, bool); 2] = [(".otto", false), (MARKER, false)];
+/// The longest memory scope ID, in bytes.
+pub const MAX_SCOPE_ID_BYTES: usize = 128;
+
+/// `validOpaqueID`: non-empty, within `max_bytes`, ASCII alphanumerics plus
+/// `.`, `_`, `:` and `-`.
+pub fn valid_opaque_id(id: &str, max_bytes: usize) -> bool {
+    if id.is_empty() || id.len() > max_bytes {
+        return false;
+    }
+    id.bytes()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-'))
+}
+
+/// Default workspace ID for a canonical path: `<name>-<12 hex of SHA-256(path)>`.
+pub fn workspace_id(physical: &str) -> String {
+    named_workspace_id(physical, &to_hex(&Sha256::digest(physical.as_bytes())))
+}
+
+/// `<sanitized last component of path>-<first 12 chars of hex>`. The name keeps
+/// `[A-Za-z0-9._]`, maps other characters to `-`, collapses and trims `-`,
+/// is cut at 64 bytes, and falls back to `workspace` when empty.
+pub fn named_workspace_id(path: &str, hex: &str) -> String {
+    let base = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let mapped: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let joined = mapped
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let name = joined[..joined.len().min(64)].trim_end_matches('-');
+    let name = if name.is_empty() { "workspace" } else { name };
+    format!("{name}-{}", &hex[..12])
+}
+
 const NAME: &str = "workspace.json";
 const MAX_BYTES: u64 = 64 * 1024;
 
@@ -56,7 +102,7 @@ fn validate(identity: &Identity) -> Result<(), PiError> {
         || !matches!(uuid[19], b'8' | b'9' | b'a' | b'b')
         || ![16, 32].contains(&identity.session_key.len())
         || !identity.session_key.bytes().all(|b| b.is_ascii_hexdigit())
-        || crate::memory::scope::new_workspace_scope("", &identity.memory_scope).is_err()
+        || !valid_opaque_id(&identity.memory_scope, MAX_SCOPE_ID_BYTES)
         || identity.paths.is_empty()
         || identity.paths.iter().any(|p| {
             !Path::new(p).is_absolute()
@@ -107,7 +153,7 @@ pub fn read(workspace: &Path) -> Result<Option<Identity>, PiError> {
 }
 
 fn uuid() -> Result<String, PiError> {
-    let mut bytes = crate::auth::random_bytes::<16>().map_err(io_error)?;
+    let mut bytes = crate::random::random_bytes::<16>().map_err(io_error)?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -133,7 +179,7 @@ fn publish(
     }
     let temp_name = format!(
         ".workspace-{}",
-        crate::auth::random_hex::<8>().map_err(io_error)?
+        crate::random::random_hex::<8>().map_err(io_error)?
     );
     fsops::publish_file(
         dir,
@@ -188,9 +234,9 @@ fn update(workspace: &Path, memory_override: &str, fork: bool) -> Result<Identit
             legacy_session_key(&path)
         };
         let memory_scope = if fork {
-            crate::memory::scope::named_workspace_id(&path, &session_key)
+            named_workspace_id(&path, &session_key)
         } else if memory_override.is_empty() {
-            crate::memory::scope::workspace_id(&path)
+            workspace_id(&path)
         } else {
             memory_override.to_owned()
         };
@@ -259,6 +305,17 @@ pub(crate) fn owns_session(workspace: &str, recorded: &str) -> Result<bool, PiEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_ids_accept_only_the_id_alphabet() {
+        assert!(valid_opaque_id("abc.DEF_09:-", MAX_SCOPE_ID_BYTES));
+        assert!(!valid_opaque_id("", MAX_SCOPE_ID_BYTES));
+        assert!(!valid_opaque_id("has space", MAX_SCOPE_ID_BYTES));
+        assert!(!valid_opaque_id(
+            &"a".repeat(MAX_SCOPE_ID_BYTES + 1),
+            MAX_SCOPE_ID_BYTES
+        ));
+    }
     use crate::faults::publish::FaultyPublishOps;
     use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
     use crate::fsops::PublishStep;
@@ -363,7 +420,7 @@ mod tests {
         let dir = root.path().join("my project");
         fs::create_dir(&dir).unwrap();
         let canonical = fs::canonicalize(&dir).unwrap();
-        let expected = crate::memory::scope::workspace_id(canonical.to_str().unwrap());
+        let expected = workspace_id(canonical.to_str().unwrap());
         let identity = initialize(&dir, "").unwrap();
         assert_eq!(identity.memory_scope, expected);
         assert!(expected.starts_with("my-project-"));

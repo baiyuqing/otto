@@ -227,3 +227,62 @@ fn workspace_move_continues_the_same_session_and_executes_in_the_new_directory()
             .starts_with(&transcript_before)
     );
 }
+
+/// `otto delete <id> --force` is dispatched before model startup: the run has
+/// no provider configuration and still deletes the session and exits 0.
+///
+/// `otto delete` takes no `--cwd`; it uses the process working directory as
+/// the workspace and writes `.otto/workspace.json` there. The binary runs
+/// with a temporary working directory so the test leaves the source tree
+/// unchanged.
+#[test]
+fn delete_is_dispatched_before_model_startup_in_the_process_working_directory() {
+    use otto_core::session::{CURRENT_VERSION, Header};
+
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_path = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let storage = otto::runtime::storage::Storage::default();
+    let session = storage
+        .sessions()
+        .create_lazy(
+            &home.path().join(".otto/sessions"),
+            Header {
+                version: CURRENT_VERSION,
+                id: "dispatch-id".into(),
+                workspace: workspace_path.to_string_lossy().into_owned(),
+                created_at: chrono::Utc::now(),
+                provider: "openai-compatible".into(),
+                profile: "local".into(),
+                model: "test-model".into(),
+            },
+            None,
+        )
+        .expect("create session");
+    session.rename("dispatch").expect("rename");
+    let session_file = session.path();
+    session.close().expect("close");
+    assert!(std::path::Path::new(&session_file).exists());
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_otto"));
+    command
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .current_dir(&workspace_path)
+        .args(["delete", "dispatch-id", "--force"]);
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        command.env("TMPDIR", tmpdir);
+    }
+    let output = command.output().expect("run the otto binary");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Permanently deleted session: dispatch-id"),
+        "{stderr}"
+    );
+    assert!(!std::path::Path::new(&session_file).exists());
+    assert!(workspace_path.join(".otto/workspace.json").exists());
+}

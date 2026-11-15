@@ -53,7 +53,11 @@ impl SessionGuard {
     }
     fn after(&self, event: &str) -> Result<(), String> {
         self.before(event)?;
-        crate::tool::registry::CallGuard::after(&self.inner)
+        // A hook command can change the workspace, so it is synced as a call with effects.
+        crate::tool::registry::CallGuard::after(
+            &self.inner,
+            otto_core::model::RetrySafety::NonIdempotent,
+        )
     }
 }
 

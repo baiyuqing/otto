@@ -6,7 +6,7 @@
 pub mod child_fence;
 pub mod deadline;
 pub mod fsops;
-pub mod gourl;
+mod gourl;
 pub mod herdr;
 pub mod hex;
 pub mod log;

@@ -15,7 +15,7 @@ The [repository rules](../../AGENTS.md) apply. Use the
   `otto-acp`. A command module calls them; it does not reimplement them.
 - `cli::{login, repl, repl_commands}` stay in `otto` because `tui` uses them.
 - Unit tests sit beside the modules. Integration tests are in `tests/`: the
-  binary, ACP, serve, signal, PTY, version, embed parity and plugin CLI
+  binary, ACP, serve, signal, PTY, version and plugin CLI
   tests, plus `binary_harness/`.
   Run one with `cargo test -p otto-cli --test <name>`.
 - `tests/version.rs` checks the shared version in `Cargo.lock` for `otto`,

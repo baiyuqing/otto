@@ -409,10 +409,10 @@ mod tests {
         assert!(normalized.content.contains("## Memory"));
         assert!(normalized.content.contains("enabled by default"));
 
-        let ambiguous = run(&help, r#"{"topic":"memory service review"}"#).await;
+        let ambiguous = run(&help, r#"{"topic":"memory source review"}"#).await;
         assert!(ambiguous.is_error);
         assert!(ambiguous.content.contains("Related section titles:"));
-        assert!(ambiguous.content.contains("Rust memory service extensions"));
+        assert!(ambiguous.content.contains("Plugin memory source"));
         assert!(ambiguous.content.contains("Memory review"));
 
         let unrelated = run(&help, r#"{"topic":"invented"}"#).await;

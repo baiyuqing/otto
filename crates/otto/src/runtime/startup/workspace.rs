@@ -94,8 +94,9 @@ pub async fn load_workspace(
 
 // ---- components ----
 
-/// Components the embedding API switched off. Each disabled state is one the
-/// CLI already reaches through a config key, a flag or a failed store open.
+/// Component switches the tests of the startup composition set. Each disabled
+/// state is one the CLI already reaches through a config key, a flag or a
+/// failed store open.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Disabled {
     pub bash: bool,

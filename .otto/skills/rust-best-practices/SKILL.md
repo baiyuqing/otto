@@ -26,8 +26,8 @@ reasoning or when the sources disagree.
    Pin unclear behavior with a test before refactoring it.
 4. Keep the requested scope small. Do not add dependencies, lint policy, public API
    changes, or unrelated cleanup merely because a general guide recommends them.
-5. Distinguish library surfaces from application internals. `otto-core` contracts and
-   `otto::embed` need stronger API stability; native implementation code should favor
+5. Distinguish library surfaces from application internals. `otto-core` contracts need
+   stronger API stability; native implementation code should favor
    concrete, direct designs.
 
 ## Working loop

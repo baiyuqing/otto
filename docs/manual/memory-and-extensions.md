@@ -112,16 +112,6 @@ busy_timeout = "5s"
 `backend` is `files` or `plugin:<package>`. Restart affected runtimes after
 configuration changes.
 
-### Rust memory service extensions
-
-Embedders may inject a `MemoryExtension`; this is not a CLI plugin or an
-external service implementation. Keep memory contracts in `otto-core` and
-native persistence/access in `otto`. Organization scope is available only to
-embedders, through `MemoryExtension::with_organization`. Use the public
-embedding API and its tests for the current constructor/interface contract
-rather than copying a historical example. An injected extension together with
-`backend = "plugin:<package>"` fails startup.
-
 ### Plugin memory source
 
 A plugin package provides memory by declaring a `memory` command (see

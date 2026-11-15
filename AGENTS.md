@@ -11,7 +11,7 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 | Change | Start here |
 | --- | --- |
 | I/O-free contracts, formats, agent loop | [otto-core](crates/otto-core/AGENTS.md) |
-| Native services, tools, persistence, sandbox, TUI, `embed` | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
+| Native services, tools, persistence, sandbox, TUI | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
 | HTTP routes and `otto serve` | [otto-server](crates/otto-server/AGENTS.md), `src/lib.rs` |
 | ACP stdio and attach | [otto-acp](crates/otto-acp/AGENTS.md), `src/lib.rs` |
 | Binary, commands, composition root | [otto-cli](crates/otto-cli/AGENTS.md), `src/run.rs` |

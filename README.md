@@ -73,7 +73,6 @@ one-off CLI flags, the launcher script and Docker setup.
 | Browser/API server, ACP or Telegram | [Servers and connectors](docs/manual/servers-and-connectors.md) |
 | Durable workflows and workspace identity | [Automation](docs/manual/automation.md) |
 | Memory, skills, MCP and extensions | [Memory and extensions](docs/manual/memory-and-extensions.md) |
-| Embed Otto in a Rust application | [Embedding API](docs/development/architecture.md#embedding-api) |
 | Diagnose failures | [Troubleshooting](docs/manual/troubleshooting.md) |
 
 ## Safety and limitations

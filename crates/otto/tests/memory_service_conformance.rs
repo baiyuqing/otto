@@ -552,5 +552,5 @@ async fn host_close_is_once_and_rejects_new_requests_without_forgetting() {
     assert_eq!(service.count(Operation::Forget), 0);
 }
 
-#[path = "memory_service_conformance/embedding.rs"]
-mod embedding;
+#[path = "memory_service_conformance/injected_extension.rs"]
+mod injected_extension;

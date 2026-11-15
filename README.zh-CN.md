@@ -72,7 +72,6 @@ OpenAI-compatible provider 还需选择接口地址。启动前在进程环境�
 | 浏览器/API、ACP 或 Telegram | [服务端与连接器](docs/manual/servers-and-connectors.md) |
 | 持久化 workflow 与工作区身份 | [自动化](docs/manual/automation.md) |
 | 记忆、skills、MCP 和扩展 | [记忆与扩展](docs/manual/memory-and-extensions.md) |
-| 在 Rust 应用中嵌入 Otto | [嵌入 API](docs/development/architecture.md#embedding-api) |
 | 排查故障 | [故障排查](docs/manual/troubleshooting.md) |
 
 ## 安全与限制

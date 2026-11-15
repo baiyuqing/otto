@@ -1,10 +1,8 @@
-//! Storage capability families and the SQLite SQL layer.
-pub mod contracts;
+//! The SQL layer over SQLite: connections, statements, transactions and the driver trait.
 pub mod drivers;
 pub(crate) mod schema_objects;
 pub mod sql;
 pub mod worker;
-pub use contracts::*;
 pub use sql::*;
 
 use std::ops::Deref;
@@ -51,11 +49,6 @@ impl Connection {
                     OpenPolicy::CreateIfMissing
                 },
             },
-            if path == Path::new(":memory:") {
-                SqlRequirements::EPHEMERAL
-            } else {
-                SqlRequirements::DURABLE
-            },
         )
     }
 
@@ -63,23 +56,12 @@ impl Connection {
         driver: &dyn SqlDriver,
         path: &Path,
         options: OpenOptions,
-        requirements: SqlRequirements,
     ) -> Result<Self> {
-        // Reject unsupported routes before opening or creating any state.
-        driver.capabilities(path).validate(requirements)?;
-        Self::from_driver(driver.open(path, options)?, requirements)
+        Ok(Self::from_driver(driver.open(path, options)?))
     }
 
-    pub(crate) fn from_driver(
-        inner: Box<dyn SqlConnection>,
-        requirements: SqlRequirements,
-    ) -> Result<Self> {
-        inner.capabilities().validate(requirements)?;
-        Ok(Self { inner })
-    }
-
-    pub fn capabilities(&self) -> SqlCapabilities {
-        self.inner.capabilities()
+    pub(crate) fn from_driver(inner: Box<dyn SqlConnection>) -> Self {
+        Self { inner }
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -262,27 +244,12 @@ mod tests {
     struct EchoStatement;
     struct EchoRows(Option<Row>);
 
-    fn capabilities() -> SqlCapabilities {
-        SqlCapabilities {
-            dialect: SqlDialect::Sqlite,
-            write_isolation: WriteIsolation::ImmediateSerializable,
-            atomic_transactions: true,
-            durable_commits: false,
-            multiprocess_writers: false,
-        }
-    }
     impl SqlDriver for EchoDriver {
-        fn capabilities(&self, _: &Path) -> SqlCapabilities {
-            capabilities()
-        }
         fn open(&self, _: &Path, _: OpenOptions) -> Result<Box<dyn SqlConnection>> {
             Ok(Box::new(EchoConnection::default()))
         }
     }
     impl SqlConnection for EchoConnection {
-        fn capabilities(&self) -> SqlCapabilities {
-            capabilities()
-        }
         fn busy_timeout(&self, _: Duration) -> Result<()> {
             Ok(())
         }
@@ -332,13 +299,9 @@ mod tests {
 
     #[test]
     fn injected_driver_uses_owned_values_and_streams() {
-        let connection = Connection::open_with_driver(
-            &EchoDriver,
-            Path::new("unused"),
-            OpenOptions::default(),
-            SqlRequirements::EPHEMERAL,
-        )
-        .unwrap();
+        let connection =
+            Connection::open_with_driver(&EchoDriver, Path::new("unused"), OpenOptions::default())
+                .unwrap();
         assert_eq!(
             connection
                 .execute("ignored", params![1, "two", None::<String>])
@@ -358,74 +321,13 @@ mod tests {
         assert!(connection.execute("ignored", params![u64::MAX]).is_err());
     }
 
-    struct UnsupportedDriver(Arc<AtomicBool>);
-    impl SqlDriver for UnsupportedDriver {
-        fn capabilities(&self, _: &Path) -> SqlCapabilities {
-            capabilities()
-        }
-        fn open(&self, _: &Path, _: OpenOptions) -> Result<Box<dyn SqlConnection>> {
-            self.0.store(true, Ordering::Relaxed);
-            Ok(Box::new(EchoConnection::default()))
-        }
-    }
-    #[test]
-    fn capability_rejection_precedes_open_and_checks_connection() {
-        let opened = Arc::new(AtomicBool::new(false));
-        let driver = UnsupportedDriver(opened.clone());
-        assert!(matches!(
-            Connection::open_with_driver(
-                &driver,
-                Path::new("unused"),
-                OpenOptions::default(),
-                SqlRequirements::DURABLE
-            ),
-            Err(Error::UnsupportedCapability(_))
-        ));
-        assert!(!opened.load(Ordering::Relaxed));
-        assert!(matches!(
-            Connection::from_driver(
-                Box::new(EchoConnection::default()),
-                SqlRequirements::DURABLE
-            ),
-            Err(Error::UnsupportedCapability(_))
-        ));
-        for invalid in [
-            SqlCapabilities {
-                dialect: SqlDialect::Other,
-                ..capabilities()
-            },
-            SqlCapabilities {
-                write_isolation: WriteIsolation::Other,
-                ..capabilities()
-            },
-            SqlCapabilities {
-                atomic_transactions: false,
-                ..capabilities()
-            },
-        ] {
-            assert!(invalid.validate(SqlRequirements::EPHEMERAL).is_err());
-        }
-        assert!(
-            capabilities()
-                .validate(SqlRequirements {
-                    multiprocess_writers: true,
-                    ..SqlRequirements::EPHEMERAL
-                })
-                .is_err()
-        );
-    }
-
     #[test]
     fn unknown_commit_does_not_trigger_rollback() {
         let rolled_back = Arc::new(AtomicBool::new(false));
-        let connection = Connection::from_driver(
-            Box::new(EchoConnection {
-                unknown_commit: true,
-                rolled_back: rolled_back.clone(),
-            }),
-            SqlRequirements::EPHEMERAL,
-        )
-        .unwrap();
+        let connection = Connection::from_driver(Box::new(EchoConnection {
+            unknown_commit: true,
+            rolled_back: rolled_back.clone(),
+        }));
         let transaction = connection.unchecked_transaction().unwrap();
         assert!(matches!(transaction.commit(), Err(Error::CommitUnknown)));
         assert!(!rolled_back.load(Ordering::Relaxed));
@@ -445,7 +347,6 @@ mod tests {
             &drivers::sqlite::SqliteDriver,
             Path::new(":memory:"),
             OpenOptions::default(),
-            SqlRequirements::EPHEMERAL,
         )
         .unwrap();
         connection

@@ -7,7 +7,7 @@ use crate::schedule::{
 use crate::session::origin::Origin;
 use crate::storage::drivers::sqlite::SqliteDriver;
 use crate::storage::{Connection, params};
-use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
+use crate::storage::{OpenOptions, SqlDriver};
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, Utc};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -152,13 +152,8 @@ impl SqliteScheduleStore {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| Error)?;
         }
-        let connection = Connection::open_with_driver(
-            driver,
-            path,
-            OpenOptions::default(),
-            SqlRequirements::DURABLE,
-        )
-        .map_err(|_| Error)?;
+        let connection = Connection::open_with_driver(driver, path, OpenOptions::default())
+            .map_err(|_| Error)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error)?;
         Self::from_connection(connection)

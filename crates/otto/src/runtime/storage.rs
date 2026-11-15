@@ -7,12 +7,12 @@ use crate::memory::advice::audit::AuditStore;
 use crate::schedule::ScheduleStore;
 use crate::session::SessionRepository;
 use crate::skill::check_repository::CheckStore;
-use crate::storage::{Connection, OpenOptions, OpenPolicy, SqlDriver, SqlRequirements};
+use crate::storage::{Connection, OpenOptions, OpenPolicy, SqlDriver};
 use crate::subagent::record::TaskRepository;
 use crate::usage::repository::UsageRepository;
 use crate::workflow::WorkflowStore;
 
-/// Opens the current repository schemas with any conforming SQLite-profile driver.
+/// Opens the current repository schemas through one `SqlDriver`.
 pub struct SqlRepositories {
     driver: Arc<dyn SqlDriver>,
 }
@@ -24,11 +24,6 @@ impl SqlRepositories {
 
     /// Opens the database at `path`, creating it when missing.
     fn connection(&self, path: &Path) -> crate::storage::Result<Connection> {
-        let requirements = if path == Path::new(":memory:") {
-            SqlRequirements::EPHEMERAL
-        } else {
-            SqlRequirements::DURABLE
-        };
         Connection::open_with_driver(
             self.driver.as_ref(),
             path,
@@ -36,7 +31,6 @@ impl SqlRepositories {
                 read_only: false,
                 policy: OpenPolicy::CreateIfMissing,
             },
-            requirements,
         )
     }
 

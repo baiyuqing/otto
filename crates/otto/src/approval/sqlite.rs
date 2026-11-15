@@ -2,7 +2,7 @@ use crate::approval::repository::*;
 use crate::approval::{Error, Result};
 use crate::storage::drivers::sqlite::SqliteDriver;
 use crate::storage::{Connection, OptionalExtension, Transaction, params};
-use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
+use crate::storage::{OpenOptions, SqlDriver};
 use otto_core::approval::*;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex, time::Duration};
@@ -39,13 +39,8 @@ impl Store {
             .map_err(|_| Error::Unavailable)?;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error::Unavailable)?;
-        let mut connection = Connection::open_with_driver(
-            driver,
-            path,
-            OpenOptions::default(),
-            SqlRequirements::DURABLE,
-        )
-        .map_err(storage_error)?;
+        let mut connection = Connection::open_with_driver(driver, path, OpenOptions::default())
+            .map_err(storage_error)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(storage_error)?;

@@ -213,13 +213,8 @@ pub(super) fn backup_before_v4(
             .open(&partial_path)
             .map_err(|_| Error::Unavailable)?;
     }
-    let mut backup = Connection::open_with_driver(
-        driver,
-        &partial_path,
-        OpenOptions::default(),
-        SqlRequirements::DURABLE,
-    )
-    .map_err(storage_error)?;
+    let mut backup = Connection::open_with_driver(driver, &partial_path, OpenOptions::default())
+        .map_err(storage_error)?;
     let destination = backup.transaction().map_err(storage_error)?;
     for schema in trusted_tables.into_iter().chain(trusted_indexes) {
         destination.execute_batch(&schema).map_err(storage_error)?;

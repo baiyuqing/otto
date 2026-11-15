@@ -4,7 +4,7 @@ use crate::skill::check_repository::{
 };
 use crate::storage::{Connection, params};
 #[cfg(any(test, feature = "test-support"))]
-use crate::storage::{OpenOptions, SqlRequirements, drivers::sqlite::SqliteDriver};
+use crate::storage::{OpenOptions, drivers::sqlite::SqliteDriver};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -35,13 +35,9 @@ impl Store {
     /// Production code receives its connection from the storage registry.
     #[cfg(any(test, feature = "test-support"))]
     pub fn open(filename: &std::path::Path) -> StoreResult<Self> {
-        let connection = Connection::open_with_driver(
-            &SqliteDriver,
-            filename,
-            OpenOptions::default(),
-            SqlRequirements::DURABLE,
-        )
-        .map_err(|_| StoreError::Io)?;
+        let connection =
+            Connection::open_with_driver(&SqliteDriver, filename, OpenOptions::default())
+                .map_err(|_| StoreError::Io)?;
         Self::from_connection(connection)
     }
     pub(crate) fn from_connection(connection: Connection) -> StoreResult<Self> {

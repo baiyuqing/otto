@@ -25,7 +25,7 @@ impl Connection {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
                 if let Some(input_id) = input_id {
                     if session.controller.has_input(input_id) {
-                        return Err(invalid_params(otto::app::task_control::DUPLICATE_INPUT));
+                        return Err(invalid_params(otto::runtime::task_control::DUPLICATE_INPUT));
                     }
                     session
                         .controller

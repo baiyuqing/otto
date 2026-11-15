@@ -56,7 +56,7 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
         // directory give the same preview.
         Request::SandboxPath(path) => {
             let home = std::env::var("HOME").unwrap_or_default();
-            crate::runtime::sandbox_config::resolve_read_path(&path, &home).map(Reply::SandboxPath)
+            crate::sandbox::config_edit::resolve_read_path(&path, &home).map(Reply::SandboxPath)
         }
         Request::ForkPoints => Ok(Reply::Sessions(fork_point_choices(
             client

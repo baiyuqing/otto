@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 pub struct RequestApproval {
     pub service: Arc<Service>,
     pub scope: Scope,
-    pub turn_origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
+    pub turn_origin: Option<Arc<crate::session::origin::TurnOrigin>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,7 +103,7 @@ impl Tool for RequestApproval {
                     .as_ref()
                     .and_then(|origin| origin.get())
                     .as_ref()
-                    .map_or("", crate::schedule::Origin::as_str),
+                    .map_or("", crate::session::origin::Origin::as_str),
             ),
             (None, Some(id)) => {
                 self.service

@@ -63,10 +63,11 @@ use serde_json::value::RawValue;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use super::format::{comma_int, first_runes, one_line, round_to_seconds};
+use super::format::{comma_int, first_runes, one_line};
 use super::interrupted;
 use super::tasks::{REPORT_BUDGET, Task, TaskError, TaskStatus, Tasks};
 use super::{Catalog, Definition, WritePolicy, inherit_snapshot};
+use crate::deadline::round_to_seconds;
 use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::tool::registry::Registry;
@@ -276,7 +277,7 @@ pub struct StartRequest {
 /// Builds and runs sub-agent tasks for one session.
 pub struct Runner {
     reports: super::reports::Reports,
-    scratch_root: std::sync::OnceLock<crate::tool::root::Root>,
+    scratch_root: std::sync::OnceLock<crate::fsops::root::Root>,
     /// Owning session of the scratch and report directories.
     scratch_session_id: std::sync::OnceLock<String>,
     output_logs: std::sync::OnceLock<Arc<crate::tool::bash_output::Logs>>,
@@ -404,7 +405,7 @@ impl Runner {
         ))
     }
 
-    pub(crate) fn bind_scratch_root(&self, root: crate::tool::root::Root, session_id: &str) {
+    pub(crate) fn bind_scratch_root(&self, root: crate::fsops::root::Root, session_id: &str) {
         assert!(
             self.scratch_root.set(root).is_ok(),
             "scratch root already bound"

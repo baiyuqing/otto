@@ -21,10 +21,10 @@ use tokio_util::sync::CancellationToken;
 use otto::sandbox::{CommandExecutor, Request, Streams};
 
 use super::run::{fail, sandbox_provider_environment_names};
-use otto::runtime::sandbox_config::quote;
 use otto::runtime::sandbox_runtime::{
     OpenOptions, SandboxRuntime, canonical_directory, open_sandbox_runtime, settings_from_config,
 };
+use otto::sandbox::config_edit::quote;
 
 const USAGE: &str = "usage: otto sandbox setup [--config PATH] [--cwd PATH]";
 

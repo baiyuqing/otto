@@ -31,7 +31,7 @@ pub(super) fn validate(
 }
 pub(super) fn source(root: &Path, path: &str) -> Result<Vec<u8>, String> {
     validate(&[], Some(path), "")?;
-    let root = crate::tool::root::Root::open(root).map_err(|_| "cannot open Lua package")?;
+    let root = crate::fsops::root::Root::open(root).map_err(|_| "cannot open Lua package")?;
     let file = root
         .open_file(
             Path::new(path),

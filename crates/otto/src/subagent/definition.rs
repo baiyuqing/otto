@@ -9,7 +9,7 @@
 //! [`Catalog::discover`] returns. Concurrency: nothing here holds shared
 //! mutable state.
 //!
-//! Security: every read goes through [`crate::tool::root::Root`], so an
+//! Security: every read goes through [`crate::fsops::root::Root`], so an
 //! `AGENT.md` symbolic link pointing outside its definition directory is
 //! skipped rather than followed. A definition is untrusted text; its `tools`
 //! list can only narrow the child tool set the runner already built, never
@@ -20,8 +20,8 @@ use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::fsops::root::{self, Root};
 use crate::skill::frontmatter::{self, Fields};
-use crate::tool::root::{self, Root};
 
 /// The largest `AGENT.md` this loader will read.
 pub const MAX_AGENT_FILE_BYTES: u64 = 64 << 20;

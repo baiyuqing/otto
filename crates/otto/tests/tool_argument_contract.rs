@@ -14,6 +14,18 @@
 
 use std::path::Path;
 
+/// Tool sources outside `src/tool`, relative to `src`: the tools of a feature
+/// live in the feature's module.
+const FEATURE_TOOLS: &[&str] = &[
+    "delivery/tool.rs",
+    "runtime/task_control/tools.rs",
+    "runtime/verification.rs",
+    "schedule/remind.rs",
+    "schedule/tools.rs",
+    "subagent/tools.rs",
+    "workflow/tool.rs",
+];
+
 /// Field declarations that are not tool arguments, as `file:field`.
 const EXEMPT: &[&str] = &[];
 
@@ -41,6 +53,8 @@ fn every_optional_list_argument_reads_an_empty_list_as_absent() {
         .map(|entry| entry.expect("a readable directory entry").path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
         .collect();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    entries.extend(FEATURE_TOOLS.iter().map(|path| src.join(path)));
     entries.sort();
     assert!(!entries.is_empty(), "no tool sources found in {dir:?}");
 

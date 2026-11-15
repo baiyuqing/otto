@@ -19,12 +19,12 @@ use tokio_util::sync::CancellationToken;
 
 use nix::sys::stat::Mode;
 
-use super::gopath::{bytes, dir, path_from};
 use super::result::decode_strict_json;
-use super::root::is_dir;
-use super::workspace::Workspace;
 use super::{Tool, definition, error_result, preflight_error, text_result};
+use crate::fsops::gopath::{bytes, dir, path_from};
+use crate::fsops::root::is_dir;
 use crate::fsops::{PosixPublish, Publish, PublishMode, PublishOps, publish_file};
+use crate::workspace::confined::Workspace;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,14 +236,14 @@ pub(crate) fn write_file_atomic(
                     path.display()
                 )));
             }
-            mode = super::root::mode_bits(&stat) & 0o777;
+            mode = crate::fsops::root::mode_bits(&stat) & 0o777;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(before_rename(error.to_string())),
     }
 
     let refuse_git = |resolved: &[std::ffi::OsString]| {
-        super::git_read_only::refuse_git_read_only(
+        crate::workspace::git_read_only::refuse_git_read_only(
             resolved.iter().map(|part| part.as_os_str()),
             path,
         )

@@ -37,10 +37,10 @@ use otto_core::safetext::{dynamic_redaction_marker, secret_forms};
 
 use super::bash_output::{Logs, Output, PREVIEW_BYTES};
 use super::result::{RedactingCollector, decode_strict_json, redact_exact_text};
-use super::root::Root;
-use super::shell;
-use super::workspace::Workspace;
 use super::{Tool, definition};
+use crate::approval::shell;
+use crate::fsops::root::Root;
+use crate::workspace::confined::Workspace;
 
 mod approvals;
 mod execute;
@@ -191,7 +191,7 @@ pub struct InvalidConfiguration;
 
 /// Executes a shell command in the sandbox.
 pub struct BashTool {
-    grant_control: Option<(PathBuf, Arc<dyn crate::app::SandboxControl>)>,
+    grant_control: Option<(PathBuf, Arc<dyn crate::sandbox::control::SandboxControl>)>,
     workspace_root: PathBuf,
     output_root: Arc<Root>,
     output_logs: Arc<Logs>,
@@ -335,7 +335,7 @@ impl BashTool {
     pub fn with_grant_control(
         mut self,
         path: PathBuf,
-        control: Arc<dyn crate::app::SandboxControl>,
+        control: Arc<dyn crate::sandbox::control::SandboxControl>,
     ) -> Self {
         self.grant_control = Some((path, control));
         self

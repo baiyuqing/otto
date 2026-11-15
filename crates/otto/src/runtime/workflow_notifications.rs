@@ -118,7 +118,7 @@ pub(crate) fn replay(
     for event in events {
         let id = format!("workflow:{}:{}", event.run_id, event.seq);
         if lifecycle(&event.kind) && !session.has_input(&id) {
-            let Ok(snapshot) = crate::tool::workflow::status(controller, &event.run_id) else {
+            let Ok(snapshot) = crate::workflow::tool::status(controller, &event.run_id) else {
                 return;
             };
             let notification = Notification {
@@ -130,7 +130,7 @@ pub(crate) fn replay(
                     event.kind,
                     event.occurred_at,
                     event.status,
-                    crate::tool::workflow::bounded(snapshot).content
+                    crate::workflow::tool::bounded(snapshot).content
                 ),
                 ..Notification::default()
             };

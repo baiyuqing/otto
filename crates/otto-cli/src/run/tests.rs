@@ -540,7 +540,7 @@ async fn load_workspace_opens_its_own_sandbox() {
 
     assert_eq!(
         builder.sandbox_info.mode,
-        otto::runtime::info::SandboxMode::Off
+        otto::sandbox::info::SandboxMode::Off
     );
     assert!(builder.sandbox_info.bash_available);
     assert!(builder.command_executor.is_some());
@@ -614,7 +614,7 @@ async fn load_workspace_honors_the_shared_sandbox_driver_override() {
 
     assert_eq!(
         builder.sandbox_info.mode,
-        otto::runtime::info::SandboxMode::Off
+        otto::sandbox::info::SandboxMode::Off
     );
 }
 
@@ -658,7 +658,7 @@ async fn load_workspace_seatbelt_gets_bash_approvals() {
 
     assert_eq!(
         builder.sandbox_info.mode,
-        otto::runtime::info::SandboxMode::Seatbelt,
+        otto::sandbox::info::SandboxMode::Seatbelt,
         "{}",
         String::from_utf8_lossy(&stderr)
     );

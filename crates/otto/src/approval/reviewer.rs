@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::deadline::{Control, Deadline};
 use crate::runtime::builder::{ProviderClient, SharedSession};
-use crate::tool::registry::Registry;
 use otto_core::approval::{Request, ReviewAssessment, ReviewOutcome, RiskLevel, UserAuthorization};
+use otto_core::tool::ToolExecutor;
 
 pub const CONTEXT_CUSTOM_TYPE: &str = "otto.authorization";
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -53,13 +53,13 @@ pub trait ReviewProvider: Send + Sync {
 }
 
 /// Owns an independent provider snapshot and no live runner or session locks.
-pub struct SessionReviewer {
-    agent: Agent<ProviderClient, Registry, SharedSession>,
+pub struct SessionReviewer<T> {
+    agent: Agent<ProviderClient, T, SharedSession>,
     usage: Option<crate::usage::Collector>,
 }
 
-impl SessionReviewer {
-    pub fn new(agent: Agent<ProviderClient, Registry, SharedSession>) -> Self {
+impl<T> SessionReviewer<T> {
+    pub fn new(agent: Agent<ProviderClient, T, SharedSession>) -> Self {
         Self { agent, usage: None }
     }
 
@@ -87,7 +87,7 @@ const SYSTEM: &str = "You assess an exact prepared operation for Otto's approval
     consent. Do not disclose secrets or private context in the reason.";
 
 #[async_trait::async_trait]
-impl ReviewProvider for SessionReviewer {
+impl<T: ToolExecutor + Send + Sync + 'static> ReviewProvider for SessionReviewer<T> {
     async fn assess(
         &self,
         request: &Request,
@@ -116,7 +116,7 @@ impl ReviewProvider for SessionReviewer {
             // Any static `push` word, or `push` anywhere in a command the
             // parser cannot read completely (`$GIT push`, `bash -c '...'`).
             let pushing = details["command"].as_str().is_some_and(|command| {
-                let analysis = crate::tool::shell::analyze(command);
+                let analysis = crate::approval::shell::analyze(command);
                 analysis
                     .segments
                     .iter()
@@ -204,6 +204,7 @@ impl ReviewProvider for SessionReviewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::registry::Registry;
     use otto_core::agent::{Options, redactor::Redactor};
     use otto_core::model::{Block, FinishReason, Message, Role};
     use otto_core::operation::OperationControl;
@@ -240,7 +241,7 @@ mod tests {
             )
         }
     }
-    fn reviewer(reply: &str) -> (SessionReviewer, Arc<Fake>) {
+    fn reviewer(reply: &str) -> (SessionReviewer<Registry>, Arc<Fake>) {
         let fake = Arc::new(Fake {
             reply: reply.into(),
             requests: Mutex::new(Vec::new()),
@@ -292,7 +293,7 @@ mod tests {
     }
 
     async fn shell_request(root: &std::path::Path, command: &str) -> Request {
-        let workspace = crate::tool::workspace::Workspace::new(root).unwrap();
+        let workspace = crate::workspace::confined::Workspace::new(root).unwrap();
         let executor = std::sync::Arc::new(
             crate::sandbox::Executor::new(
                 Arc::new(crate::sandbox::direct::DirectDriver::new()),
@@ -365,7 +366,7 @@ mod tests {
                     &[rule],
                     "sandbox",
                     "bash",
-                    Some(&crate::tool::shell::analyze(command))
+                    Some(&crate::approval::shell::analyze(command))
                 ),
                 allowed
             );

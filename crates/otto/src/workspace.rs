@@ -7,6 +7,9 @@
 //! directory lock and atomically published through pinned, no-follow handles.
 //! Recorded paths identify historical transcripts, never execution authority.
 
+pub mod confined;
+pub(crate) mod git_read_only;
+
 use std::io::Read;
 use std::path::Path;
 

@@ -4,10 +4,11 @@
 //! Every function here is pure. The column widths and the exact strings are
 //! pinned by the tests, because this output goes straight to a terminal.
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use otto_core::model::{BlockType, Message, Role};
 
 use super::tasks::{Task, TaskStatus};
+use crate::deadline::round_to_seconds;
 
 /// One task in the layout shared with `agent_status`: id, name, status,
 /// elapsed time, tool count, last tool (or the final token total) and a
@@ -145,27 +146,10 @@ pub fn task_steps(history: &[Message]) -> String {
     out
 }
 
-/// The Go `time.Duration` spelling, rounded to the second, for the whole-second
-/// durations this module produces: `"0s"`, `"42s"`, `"2m0s"`, `"1h0m0s"`.
-/// Rounding is half away from zero.
-pub(crate) fn round_to_seconds(delta: TimeDelta) -> String {
-    let milliseconds = delta.num_milliseconds();
-    let negative = milliseconds < 0;
-    let total = (milliseconds.abs() + 500) / 1000;
-    let (hours, minutes, seconds) = (total / 3600, (total / 60) % 60, total % 60);
-    let sign = if negative && total != 0 { "-" } else { "" };
-    if hours != 0 {
-        format!("{sign}{hours}h{minutes}m{seconds}s")
-    } else if minutes != 0 {
-        format!("{sign}{minutes}m{seconds}s")
-    } else {
-        format!("{sign}{seconds}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeDelta;
     use otto_core::model::Block;
     use serde_json::value::RawValue;
 

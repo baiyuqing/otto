@@ -28,16 +28,16 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     crate::tool::otto::APPROVAL_QUEUE_RETRY,
     crate::tool::approval::REQUEST_APPROVAL_RETRY,
     crate::tool::models::LIST_MODELS_RETRY,
-    crate::tool::verification::SUBMIT_VERIFICATION_RETRY,
+    crate::runtime::verification::SUBMIT_VERIFICATION_RETRY,
     crate::tool::plan::UPDATE_PLAN_RETRY,
-    crate::tool::remind::REMIND_RETRY,
-    crate::tool::remind::REMIND_STATUS_RETRY,
-    crate::tool::remind::REMIND_CANCEL_RETRY,
+    crate::schedule::remind::REMIND_RETRY,
+    crate::schedule::remind::REMIND_STATUS_RETRY,
+    crate::schedule::remind::REMIND_CANCEL_RETRY,
     crate::tool::web::WEB_FETCH_RETRY,
     crate::tool::web::WEB_SEARCH_RETRY,
-    crate::tool::task_control::TASK_QUEUE_RETRY,
-    crate::tool::task_control::TASK_REPLY_RETRY,
-    crate::tool::task_control::TASK_STEER_RETRY,
+    crate::runtime::task_control::tools::TASK_QUEUE_RETRY,
+    crate::runtime::task_control::tools::TASK_REPLY_RETRY,
+    crate::runtime::task_control::tools::TASK_STEER_RETRY,
     crate::schedule::tools::SCHEDULE_RETRY,
     crate::schedule::tools::SCHEDULE_LIST_RETRY,
     crate::schedule::tools::SCHEDULE_CANCEL_RETRY,
@@ -139,7 +139,7 @@ mod tests {
             assert!(
                 declared_safety(name).is_some(),
                 "built-in tool {name:?} has no declared retry safety; declare owner metadata in its implementation and aggregate it in \
-                 crates/otto/src/tool/safety.rs (NonIdempotent unless it is read-only)"
+                 crates/otto/src/runtime/retry_safety.rs (NonIdempotent unless it is read-only)"
             );
         }
     }

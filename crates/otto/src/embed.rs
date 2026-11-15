@@ -90,17 +90,18 @@ use otto_core::model::{Block, Message};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::approval::Step;
-use crate::app::{CLOSED, Controller, PROMPT_ACTIVE, SandboxControl};
+use crate::app::{CLOSED, Controller, PROMPT_ACTIVE};
 use crate::runtime::builder::Builder;
 use crate::runtime::sandbox_switch::SandboxReloader;
 use crate::runtime::startup::{self, Disabled, StartOptions, WorkspaceSandbox};
 pub use crate::runtime::wiring::MemoryExtension;
 use crate::runtime::workspace_admission::{self as admission, Admission};
+use crate::sandbox::control::SandboxControl;
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
 
 pub use crate::app::approval::{ApprovalDecision, ApprovalRequest, Stop};
 pub use crate::app::{ForkedFrom, Info};
-pub use crate::runtime::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
+pub use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 /// Why an operation failed. The text never contains a configured secret.
 #[derive(Debug, thiserror::Error)]

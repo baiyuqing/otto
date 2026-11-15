@@ -39,20 +39,21 @@ use tokio_util::sync::CancellationToken;
 use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::provider::openaicompat::Client;
+use crate::runtime::verification;
 use crate::sandbox::CommandExecutor;
 pub use crate::session::SessionHandle;
 #[cfg(test)]
 use crate::session::Store;
 use crate::skill::Catalog;
 use crate::tool::registry::Registry;
-use crate::tool::workspace::Workspace;
-use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, verification, write};
+use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, write};
+use crate::workspace::confined::Workspace;
 
 use super::boundary::{self, BoundaryInputs, FixedText};
-use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 use super::prompt::{subagent_model_guidance, system_prompt_for};
 use super::sandbox_runtime::canonical_directory;
 use super::workspace_context::{layered_workspace_context, split_workspace_instructions};
+use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 mod builder_inputs;
 mod memory_session;
@@ -253,12 +254,12 @@ pub struct Runner {
     /// when this runner was built without connecting MCP. Once the session
     /// holds connected servers, [`Runner::mcp`] reads those instead.
     connecting_mcp: Option<Arc<crate::mcp::Servers>>,
-    pub(crate) task_control: Arc<crate::app::task_control::TaskControl>,
+    pub(crate) task_control: Arc<crate::runtime::task_control::TaskControl>,
     /// The origin of the current user turn, read by the schedule tools.
-    pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
+    pub(crate) schedule_origin: Arc<crate::session::origin::TurnOrigin>,
     /// Exact passive-presentation origin for the current logical user turn.
     /// Unlike scheduling, a wake turn clears this instead of inheriting it.
-    pub(crate) presentation_origin: Arc<crate::schedule::tools::TurnOrigin>,
+    pub(crate) presentation_origin: Arc<crate::session::origin::TurnOrigin>,
 }
 
 /// The tool-less agent behind the session-model advice backend.
@@ -427,7 +428,7 @@ pub struct Builder {
     pub workspace_path: String,
     pub command_executor: Option<Arc<dyn CommandExecutor>>,
     pub bash_approvals: Option<Arc<bash::BashApprovals>>,
-    pub grant_control: Option<Arc<dyn crate::app::SandboxControl>>,
+    pub grant_control: Option<Arc<dyn crate::sandbox::control::SandboxControl>>,
     pub excluded_commands: Option<Arc<bash::ExcludedCommands>>,
     pub sandbox_environment: Option<Vec<String>>,
     pub sandbox_info: SandboxInfo,

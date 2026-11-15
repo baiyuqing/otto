@@ -44,7 +44,7 @@ impl Builder {
         &self,
         max_output: usize,
         advisor: Option<Arc<crate::memory::advice::Advisor>>,
-        turn: Option<(&str, Arc<crate::schedule::tools::TurnOrigin>)>,
+        turn: Option<(&str, Arc<crate::session::origin::TurnOrigin>)>,
     ) -> Vec<Box<dyn Tool + Send + Sync>> {
         if self.memory.external() {
             return self

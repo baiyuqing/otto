@@ -15,8 +15,8 @@ use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
 use super::result::{capped_text_result, decode_strict_json};
-use super::workspace::Workspace;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
+use crate::workspace::confined::Workspace;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use otto_core::config::resolve::Runtime;
 use tokio_util::sync::CancellationToken;
 
-use otto::app::SandboxControl;
+use otto::sandbox::control::SandboxControl;
 use otto_acp as acp;
 
 use super::terminate::Terminate;

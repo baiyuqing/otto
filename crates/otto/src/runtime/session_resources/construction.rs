@@ -10,10 +10,10 @@ use otto_core::agent::inbox::Inbox;
 use super::SessionResources;
 use crate::failover;
 use crate::runtime::builder::{Builder, SharedSession};
+use crate::schedule::remind::Reminders;
 use crate::subagent;
 use crate::subagent::tasks::Tasks;
 use crate::tool::bash_output::Logs;
-use crate::tool::remind::Reminders;
 
 impl Builder {
     /// Returns the session's resources, creating them on the first call for

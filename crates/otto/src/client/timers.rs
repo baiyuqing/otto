@@ -1,7 +1,7 @@
 //! Session timer list and cancel calls.
 
 use super::*;
-use crate::tool::remind::StoredReminder;
+use crate::schedule::remind::StoredReminder;
 
 impl Client {
     /// `GET /v1/sessions/{id}/timers`: the session's timers.

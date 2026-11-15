@@ -42,7 +42,7 @@ use super::{
 use otto::app::ApprovalDecision;
 use otto::app::Channel;
 use otto::client::{Client, Error as ClientError};
-use otto::schedule::Origin;
+use otto::session::origin::Origin;
 use otto_server::authorization::Principal;
 
 const LOST: &str = "connection to otto serve lost";

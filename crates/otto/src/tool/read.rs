@@ -17,8 +17,8 @@ use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
 use super::result::{CappedByteCollector, RETRIEVAL_BYTES, decode_strict_json, valid_utf8_prefix};
-use super::workspace::Workspace;
 use super::{Tool, definition, error_result, text_result};
+use crate::workspace::confined::Workspace;
 
 /// The largest file the read and edit tools will load, matching
 /// `maxReadFileBytes`.

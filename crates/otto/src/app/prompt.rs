@@ -12,7 +12,7 @@ impl Controller {
         self.prompt_with_system_context(
             text,
             "",
-            Some(crate::schedule::Origin::terminal()),
+            Some(crate::session::origin::Origin::terminal()),
             emit,
             cancel,
         )
@@ -23,7 +23,7 @@ impl Controller {
         &self,
         text: &str,
         system_context: &str,
-        origin: Option<crate::schedule::Origin>,
+        origin: Option<crate::session::origin::Origin>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -74,7 +74,7 @@ impl Controller {
     pub(super) async fn run_followups_held(
         &self,
         runner: &Runner,
-        task_run: &task_control::Run,
+        task_run: &crate::runtime::task_control::Run,
         system_context: &str,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
@@ -173,7 +173,7 @@ impl Controller {
     pub(crate) async fn begin_user_turn(
         &self,
         runner: &Runner,
-        origin: Option<crate::schedule::Origin>,
+        origin: Option<crate::session::origin::Origin>,
     ) -> PresentationOriginGuard {
         runner.schedule_origin.set(origin.clone());
         runner.presentation_origin.set(origin.clone());
@@ -272,7 +272,7 @@ impl Controller {
             text,
             image,
             "",
-            Some(crate::schedule::Origin::terminal()),
+            Some(crate::session::origin::Origin::terminal()),
             emit,
             cancel,
         )
@@ -284,7 +284,7 @@ impl Controller {
         text: &str,
         image: Block,
         system_context: &str,
-        origin: Option<crate::schedule::Origin>,
+        origin: Option<crate::session::origin::Origin>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {

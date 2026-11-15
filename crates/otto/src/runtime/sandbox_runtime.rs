@@ -29,7 +29,7 @@ use crate::sandbox::{
     Driver, DriverMode, Error, Executor, FilesystemMode, NetworkMode, Policy, Settings,
 };
 
-use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
+use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 mod child_environment;
 use child_environment::{resolve_child, resolve_host};

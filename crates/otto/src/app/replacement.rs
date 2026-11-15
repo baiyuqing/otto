@@ -235,7 +235,7 @@ async fn open_current(
         let _ = prepared.close();
         return Err(SESSION_OPERATION_UNAVAILABLE.to_string());
     }
-    let prepared = prepared.with_replayable(crate::tool::safety::is_replayable);
+    let prepared = prepared.with_replayable(crate::runtime::retry_safety::is_replayable);
     let (session, warnings) = tokio::task::spawn_blocking(move || prepared.activate())
         .await
         .map_err(|error| format!("session activation task panicked: {error}"))?

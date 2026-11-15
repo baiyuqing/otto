@@ -84,7 +84,7 @@ pub(super) async fn activate_initial_session(
     runtime: &Runtime,
 ) -> Result<(SharedSession, Vec<String>), String> {
     if let Some(prepared) = prepared {
-        let prepared = prepared.with_replayable(otto::tool::safety::is_replayable);
+        let prepared = prepared.with_replayable(otto::runtime::retry_safety::is_replayable);
         let (session, warnings) = tokio::task::spawn_blocking(move || prepared.activate())
             .await
             .map_err(|error| format!("session activation task panicked: {error}"))?

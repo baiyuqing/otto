@@ -290,7 +290,7 @@ fn presentation_route_only(metadata: &BTreeMap<String, String>) -> bool {
         || (metadata.len() == 1
             && metadata
                 .get(super::PRESENTATION_ORIGIN_METADATA)
-                .is_some_and(|origin| crate::schedule::Origin::parse(origin).is_ok()))
+                .is_some_and(|origin| crate::session::origin::Origin::parse(origin).is_ok()))
 }
 
 pub fn validate_metadata(metadata: &BTreeMap<String, String>, record_base: bool) -> Result<()> {

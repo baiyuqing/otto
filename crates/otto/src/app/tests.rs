@@ -2,8 +2,8 @@ mod session_delete;
 
 use super::*;
 use crate::fixtures::{FakeSandbox, builder, controller, initial_runtime, seatbelt_info, user};
-use crate::runtime::info::SandboxNetwork;
-use crate::runtime::sandbox_config::SandboxChange;
+use crate::sandbox::config_edit::SandboxChange;
+use crate::sandbox::info::SandboxNetwork;
 
 /// The `heartbeat` file layout `session::lease` writes, reproduced here
 /// to simulate a running holder without a live `Lease` of this process's

@@ -1,17 +1,17 @@
 //! The optional sandbox-reload capability.
 //!
 //! The composition root owns exactly one sandbox, so every
-//! [`Controller`](super::Controller) built from it reports the same live state
-//! rather than the value captured at startup.
+//! [`Controller`](crate::app::Controller) built from it reports the same live
+//! state rather than the value captured at startup.
 //!
 //! Ownership: the implementation is `runtime::sandbox_switch::SandboxReloader`,
 //! built by the composition root in `runtime::startup` and shared by the REPL,
 //! the TUI, `otto serve` and `otto::embed`. A process whose bash never came up
 //! gets no control at all, so `/sandbox reload` reports
-//! [`SANDBOX_RELOAD_UNAVAILABLE`](super::SANDBOX_RELOAD_UNAVAILABLE) rather
+//! [`SANDBOX_RELOAD_UNAVAILABLE`](crate::app::SANDBOX_RELOAD_UNAVAILABLE) rather
 //! than a failure with nothing to re-point.
 
-use crate::runtime::info::SandboxInfo;
+use crate::sandbox::info::SandboxInfo;
 use crate::sandbox::read_denylist::ReadDenylist;
 
 /// Reads the live sandbox state and replaces it.

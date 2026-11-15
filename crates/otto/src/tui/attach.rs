@@ -37,8 +37,9 @@ use super::{TerminalInput, TuiEvent, frame_gate, render, spawn_key_reader};
 use crate::app::Info;
 use crate::cli::repl::Error as ReplError;
 use crate::client::{Client, Error, StatusRow, StatusStream, TurnStream};
+use crate::schedule::Scope;
 use crate::schedule::worker::{DeliverRole, Sink, Worker};
-use crate::schedule::{Origin, Scope};
+use crate::session::origin::Origin;
 
 mod event_loop;
 mod frames;

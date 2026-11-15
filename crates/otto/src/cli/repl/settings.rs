@@ -205,7 +205,7 @@ impl<'a> Repl<'a> {
 
     /// Prints one line per read exception that changes nothing and per
     /// built-in denylist entry that is not applied.
-    pub(super) fn print_sandbox_read_notes(&mut self, info: &crate::runtime::info::SandboxInfo) {
+    pub(super) fn print_sandbox_read_notes(&mut self, info: &crate::sandbox::info::SandboxInfo) {
         for path in &info.inert_read_paths {
             let _ = writeln!(
                 self.stdout,
@@ -220,7 +220,7 @@ impl<'a> Repl<'a> {
         }
     }
 
-    fn print_sandbox(&mut self, info: crate::runtime::info::SandboxInfo) {
+    fn print_sandbox(&mut self, info: crate::sandbox::info::SandboxInfo) {
         let _ = writeln!(self.stdout, "Sandbox: {}", info.summary());
         self.print_sandbox_read_notes(&info);
         let reason = info.reason_code();

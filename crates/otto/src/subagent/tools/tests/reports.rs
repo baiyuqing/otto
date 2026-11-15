@@ -38,7 +38,9 @@ async fn parent_handoffs_are_bounded_but_the_full_child_result_is_retained() {
 
 #[tokio::test]
 async fn long_final_report_is_readable_after_child_exit_without_another_model_call() {
-    use crate::tool::{read::ReadTool, root::Root, workspace::Workspace};
+    use crate::fsops::root::Root;
+    use crate::tool::read::ReadTool;
+    use crate::workspace::confined::Workspace;
     let dir = tempfile::tempdir().unwrap();
     let provider = FakeProvider::new();
     let report = format!("# 摘要\n{}\n## 证据\n末尾证据", "中文研究内容".repeat(5000));
@@ -110,7 +112,7 @@ async fn long_final_report_is_readable_after_child_exit_without_another_model_ca
 
 #[tokio::test]
 async fn tiny_preview_keeps_the_read_pointer_and_persisted_report_is_redacted() {
-    use crate::tool::root::Root;
+    use crate::fsops::root::Root;
     let dir = tempfile::tempdir().unwrap();
     let provider = FakeProvider::new();
     let private = "private-report-marker";
@@ -158,7 +160,7 @@ async fn tiny_preview_keeps_the_read_pointer_and_persisted_report_is_redacted() 
 
 #[tokio::test]
 async fn report_storage_failure_preserves_success_and_reports_the_missing_artifact() {
-    use crate::tool::root::Root;
+    use crate::fsops::root::Root;
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".otto"), "blocks directory creation").unwrap();
     let provider = FakeProvider::new();

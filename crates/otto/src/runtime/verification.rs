@@ -13,9 +13,9 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
-use super::result::decode_strict_json;
-use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 use crate::runtime::builder::SharedSession;
+use crate::tool::result::decode_strict_json;
+use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
 const DESCRIPTION: &str = "Validate a verification verdict against prior, durably persisted typed \
     ToolResult blocks in this current session. This tool does not run \

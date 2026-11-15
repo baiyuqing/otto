@@ -375,7 +375,7 @@ impl Runner {
         self.agent.set_next_input_id(input_id);
     }
 
-    pub fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
+    pub fn task_control(&self) -> Arc<crate::runtime::task_control::TaskControl> {
         Arc::clone(&self.task_control)
     }
 
@@ -445,7 +445,7 @@ impl Runner {
 
     /// The session's timer registry, absent when sub-agents are off. `/timers`
     /// lists it and archiving the session clears it.
-    pub(crate) fn reminders(&self) -> Option<&Arc<crate::tool::remind::Reminders>> {
+    pub(crate) fn reminders(&self) -> Option<&Arc<crate::schedule::remind::Reminders>> {
         self.session().resources()?.reminders()
     }
 
@@ -517,7 +517,7 @@ impl Runner {
     ) -> Self {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
-        let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        let task_control = Arc::new(crate::runtime::task_control::TaskControl::default());
         let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = tasks.notifications().clone();
         session.install_test_resources(
             super::super::session_resources::SessionResources::for_tests(

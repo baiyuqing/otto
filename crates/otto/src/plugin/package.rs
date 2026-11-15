@@ -1,5 +1,5 @@
 //! Package discovery. All reads are confined to the supplied package root.
-use crate::tool::root::Root;
+use crate::fsops::root::Root;
 use nix::{fcntl::OFlag, sys::stat::Mode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

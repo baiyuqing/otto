@@ -77,14 +77,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use otto::app::task_control::DUPLICATE_INPUT;
 use otto::app::{self, ApprovalDecision, ApprovalRequest, Channel, Controller, Step, Stop};
 pub use otto::log::Logger;
 pub(crate) use otto::log::request_id;
 use otto::metrics::{Metrics, SessionContext};
-use otto::runtime::info::SandboxInfo;
+use otto::runtime::task_control::DUPLICATE_INPUT;
+use otto::sandbox::info::SandboxInfo;
 #[cfg(test)]
-use otto::runtime::info::{SandboxMode, SandboxNetwork, SandboxReason};
+use otto::sandbox::info::{SandboxMode, SandboxNetwork, SandboxReason};
 use otto_core::wire::events::WireEvent;
 use turn::{TRIGGER_RECOVERY, TRIGGER_TASK, TRIGGER_USER, Turn};
 
@@ -187,7 +187,7 @@ struct QueuedTurn {
     text: String,
     image: Option<Block>,
     channel: Option<Channel>,
-    origin: Option<otto::schedule::Origin>,
+    origin: Option<otto::session::origin::Origin>,
     input_id: Option<String>,
     input_provenance: Option<otto_core::model::InputProvenance>,
 }

@@ -5,7 +5,7 @@
 //! `urlprivacy` treats a value that [`parse`] rejects as an ambiguous
 //! credential, so a change to what parses changes which proxy settings are
 //! refused. Only the parts Otto reaches are ported: [`parse`],
-//! [`path_unescape`], and [`Userinfo`]. `gourl_tests.rs` checks them against
+//! [`path_unescape`], and [`Userinfo`]. `gourl/tests.rs` checks them against
 //! vectors produced by Go 1.27.3.
 //!
 //! Everything works on bytes rather than `str` because Go strings may hold
@@ -476,5 +476,4 @@ pub(crate) fn parse(raw: &[u8]) -> Result<Url, ()> {
 }
 
 #[cfg(test)]
-#[path = "gourl_tests.rs"]
-mod gourl_tests;
+mod tests;

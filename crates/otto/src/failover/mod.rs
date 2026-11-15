@@ -8,7 +8,8 @@
 //! [`CommitGuard`], a `tool::registry::CallGuard` that keeps a
 //! lease-managed session's on-disk state ahead of a tool result reaching
 //! the session log: it refuses a call when the lease has been lost, and
-//! syncs the workspace to disk once a call finishes.
+//! syncs the workspace to disk once a call finishes, unless the tool
+//! declares `RetrySafety::ReadOnly`.
 //!
 //! Ownership: `CommitGuard` holds a [`LeaseSource`] closure rather than a
 //! lease directly, and re-reads the current lease at call time, since the
@@ -23,6 +24,8 @@ pub mod ownership;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use otto_core::model::RetrySafety;
 
 use crate::session::WriterOwnership;
 use crate::tool::registry::CallGuard;
@@ -60,7 +63,9 @@ type SyncFn = fn(&Path) -> std::io::Result<()>;
 /// against a session another host may already have taken over; `after`
 /// syncs the workspace to disk once the tool has finished, so a
 /// successfully returned result's effects are durable before it is
-/// appended to the session log.
+/// appended to the session log. A tool that declares
+/// `RetrySafety::ReadOnly` has no effects to make durable, so `after`
+/// returns without syncing.
 pub(crate) struct CommitGuard {
     lease: LeaseSource,
     workspace: PathBuf,
@@ -91,8 +96,8 @@ impl CallGuard for CommitGuard {
         }
     }
 
-    fn after(&self) -> Result<(), String> {
-        if (self.lease)().is_none() {
+    fn after(&self, retry_safety: RetrySafety) -> Result<(), String> {
+        if retry_safety == RetrySafety::ReadOnly || (self.lease)().is_none() {
             return Ok(());
         }
         (self.sync)(&self.workspace).map_err(|error| {
@@ -143,7 +148,7 @@ mod tests {
         let guard = CommitGuard::with_sync(no_lease(), PathBuf::from("/tmp"), noop_sync);
 
         assert!(guard.before().is_ok());
-        assert!(guard.after().is_ok());
+        assert!(guard.after(RetrySafety::NonIdempotent).is_ok());
     }
 
     #[test]
@@ -173,8 +178,31 @@ mod tests {
         }
         let guard = CommitGuard::with_sync(source, PathBuf::from("/workspace"), fake_sync);
 
-        assert!(guard.after().is_ok());
+        assert!(guard.after(RetrySafety::NonIdempotent).is_ok());
         assert!(SYNCED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn after_does_not_sync_for_a_read_only_tool() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lease = lease::Lease::for_test(temp_dir.path());
+        let source: LeaseSource =
+            Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
+        fn failing_sync(_p: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other(
+                "sync must not run for a read-only tool",
+            ))
+        }
+        let guard = CommitGuard::with_sync(source, PathBuf::from("/workspace"), failing_sync);
+
+        assert!(guard.after(RetrySafety::ReadOnly).is_ok());
+        for with_effects in [
+            RetrySafety::Idempotent,
+            RetrySafety::IdempotentWithKey,
+            RetrySafety::NonIdempotent,
+        ] {
+            assert!(guard.after(with_effects).is_err(), "{with_effects:?}");
+        }
     }
 
     #[tokio::test]
@@ -214,6 +242,59 @@ mod tests {
         assert_eq!(execution.outcome.effect_certainty, EffectCertainty::Unknown);
     }
 
+    struct ReadOnlyTool;
+
+    #[async_trait::async_trait]
+    impl Tool for ReadOnlyTool {
+        fn definition(&self) -> ToolDefinition {
+            definition("read", "", serde_json::json!({"type": "object"}))
+        }
+
+        fn retry_safety(&self) -> RetrySafety {
+            RetrySafety::ReadOnly
+        }
+
+        async fn execute(&self, _arguments: &RawValue, _cancel: &CancellationToken) -> ToolResult {
+            text_result("contents")
+        }
+    }
+
+    #[tokio::test]
+    async fn the_registry_passes_the_tool_retry_safety_so_a_read_only_call_is_not_synced() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lease = lease::Lease::for_test(temp_dir.path());
+        let source: LeaseSource =
+            Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
+        fn failing_sync(_p: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("disk full"))
+        }
+        let registry = Registry::new(vec![Box::new(ReadOnlyTool)])
+            .unwrap()
+            .with_guard(Arc::new(CommitGuard::with_sync(
+                source,
+                PathBuf::from("/workspace"),
+                failing_sync,
+            )));
+        let operation_id: OperationId = serde_json::from_str(r#""op_read_only_test""#).unwrap();
+        let arguments = RawValue::from_string("{}".to_owned()).unwrap();
+
+        let execution = registry
+            .execute(
+                ToolCall {
+                    tool_call_id: "",
+                    operation_id: &operation_id,
+                    name: "read",
+                    arguments: &arguments,
+                    attempt: 1,
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(!execution.result.is_error, "{}", execution.result.content);
+        assert_eq!(execution.result.content, "contents");
+    }
+
     #[test]
     fn after_wraps_a_sync_failure_with_operator_facing_text() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -225,7 +306,7 @@ mod tests {
         }
         let guard = CommitGuard::with_sync(source, PathBuf::from("/workspace"), failing_sync);
 
-        let err = guard.after().unwrap_err();
+        let err = guard.after(RetrySafety::NonIdempotent).unwrap_err();
         assert!(
             err.contains("syncing the workspace to disk failed"),
             "got: {err}"

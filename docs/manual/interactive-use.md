@@ -1026,7 +1026,9 @@ lease in `<session-id>.lease/` beside the session file.
   refused once the lease is lost.
 - On Linux, after each tool call of a lease-managed session Otto runs
   `syncfs(2)` on the workspace's file system before the result is written; a
-  sync failure turns the result into an error. macOS has no such sync, so
+  sync failure turns the result into an error. A call of a read-only tool
+  (`read`, `grep`, `find`, `ls` and the other tools that declare no effects)
+  is not followed by a sync. macOS has no such sync, so
   `bash` and MCP effects of a call with a result can be missing on the next
   host.
 - Requirements and limits: the file system must make data durable when `fsync`

@@ -11,7 +11,7 @@
 //! ownership protocol and are extension concerns, not properties an in-memory
 //! mailbox can truthfully offer.
 //!
-//! `otto-core` owns this WASM-safe port and payload semantics. Native runtime
+//! `otto-core` owns this I/O-free port and payload semantics. Native runtime
 //! code owns adapter construction and persistence. The bundled [`Inbox`]
 //! implementation is the default in-memory adapter; it exists for backwards
 //! compatibility while consumers migrate to this port.

@@ -66,7 +66,7 @@ pub struct ServerRuntime {
     /// TLS files for the TCP listener, when both are configured.
     pub tls: Option<ServerTls>,
     /// `workspace_roots` with `~` expanded, in file order. Not yet
-    /// canonicalized: `otto-core` stays wasm-safe and does no filesystem
+    /// canonicalized: `otto-core` does no filesystem
     /// access, so the native caller resolves symlinks and checks each entry
     /// is an existing directory.
     pub workspace_roots: Vec<String>,
@@ -217,8 +217,7 @@ mod tests {
         env
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn socket_override_wins_over_file() {
         let mut file = File::default();
         file.server.socket = "/file/otto.sock".into();
@@ -237,8 +236,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn file_wins_over_default() {
         let mut file = File::default();
         file.server.socket = "/file/otto.sock".into();
@@ -246,21 +244,18 @@ mod tests {
         assert_eq!(runtime.socket, "/file/otto.sock");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn default_expands_tilde_to_env_home() {
         let runtime = resolve_server(&File::default(), &env("/home"), "", "").expect("resolve");
         assert_eq!(runtime.socket, "/home/.otto/otto.sock");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn tilde_with_no_home_errors() {
         assert!(resolve_server(&File::default(), &HashMap::new(), "", "").is_err());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn plain_absolute_path_is_cleaned_unchanged() {
         let mut file = File::default();
         file.server.socket = "/x/y/../otto.sock".into();
@@ -268,8 +263,7 @@ mod tests {
         assert_eq!(runtime.socket, "/x/otto.sock");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn listen_override_wins_over_everything() {
         let mut file = File::default();
         file.server.socket = "/file/otto.sock".into();
@@ -289,8 +283,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn socket_override_wins_over_file_listen() {
         let mut file = File::default();
         file.server.listen = "127.0.0.1:1".into();
@@ -309,8 +302,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn file_listen_wins_over_file_socket_and_leaves_socket_empty() {
         let mut file = File::default();
         file.server.socket = "/file/otto.sock".into();
@@ -329,8 +321,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn file_listen_needs_no_home() {
         let mut file = File::default();
         file.server.listen = "127.0.0.1:1".into();
@@ -338,24 +329,21 @@ mod tests {
         assert_eq!(runtime.listen, "127.0.0.1:1");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_unknown_fields() {
         let err = super::super::parse("[server]\nsocket = \"/x/otto.sock\"\nunknown = true\n")
             .unwrap_err();
         assert!(err.to_string().contains("unknown"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn workspace_roots_default_to_empty() {
         assert!(File::default().server.workspace_roots.is_empty());
         let runtime = resolve_server(&File::default(), &env("/home"), "", "").expect("resolve");
         assert!(runtime.workspace_roots.is_empty());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn workspace_roots_parse_from_toml() {
         let file = super::super::parse("[server]\nworkspace_roots = [\"/a\", \"~/Work\"]\n")
             .expect("parse");
@@ -365,8 +353,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn workspace_roots_expand_tilde_like_the_socket() {
         let mut file = File::default();
         file.server.workspace_roots = vec!["/a".into(), "~/Work".into()];
@@ -377,16 +364,14 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn workspace_roots_tilde_with_no_home_errors() {
         let mut file = File::default();
         file.server.workspace_roots = vec!["~/Work".into()];
         assert!(resolve_server(&file, &HashMap::new(), "", "").is_err());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn session_lifetime_defaults_are_on() {
         assert_eq!(File::default().server.session_idle_timeout, None);
         assert_eq!(File::default().server.max_open_sessions, None);
@@ -398,8 +383,7 @@ mod tests {
         assert_eq!(runtime.max_open_sessions, Some(64));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn session_lifetime_settings_parse_from_toml() {
         let file =
             super::super::parse("[server]\nsession_idle_timeout = \"2h\"\nmax_open_sessions = 8\n")
@@ -412,8 +396,7 @@ mod tests {
         assert_eq!(runtime.max_open_sessions, Some(8));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn zero_turns_one_session_lifetime_limit_off_at_a_time() {
         let mut file = File::default();
         file.server.session_idle_timeout = Some("0".into());
@@ -431,8 +414,7 @@ mod tests {
         assert_eq!(runtime.max_open_sessions, None);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn session_lifetime_settings_reject_bad_values() {
         for (timeout, cap) in [
             (Some("30 minutes"), None),
@@ -453,15 +435,13 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn tls_defaults_to_none() {
         let runtime = resolve_server(&File::default(), &env("/home"), "", "").expect("resolve");
         assert_eq!(runtime.tls, None);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn tls_files_parse_from_toml_and_expand_tilde() {
         let file = super::super::parse(
             "[server]\nlisten = \"0.0.0.0:8443\"\ntls_cert = \"~/certs/otto.pem\"\ntls_key = \"/etc/otto/key.pem\"\n",
@@ -477,8 +457,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn tls_cert_without_key_is_an_error_naming_both_fields() {
         let mut file = File::default();
         file.server.tls_cert = "/etc/otto/cert.pem".into();
@@ -491,8 +470,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn tls_key_without_cert_is_an_error_naming_both_fields() {
         let mut file = File::default();
         file.server.tls_key = "/etc/otto/key.pem".into();
@@ -505,8 +483,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn tls_tilde_with_no_home_errors() {
         let mut file = File::default();
         file.server.listen = "0.0.0.0:8443".into();

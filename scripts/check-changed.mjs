@@ -45,7 +45,6 @@ export function plan(paths) {
   const steps = [];
   if (has((p) => p.endsWith('.rs'))) steps.push('cargo fmt --all -- --check');
   if (rustPath) steps.push('cargo clippy --workspace --all-targets -- -D warnings');
-  if (has((p) => ROOT_RUST.includes(p)) || under('crates/otto-core/')) steps.push('make rust-wasm-check');
   if (full) steps.push('cargo test --workspace');
   else {
     // --workspace, not -p <crate>: -p unifies features differently and rebuilds dependencies.

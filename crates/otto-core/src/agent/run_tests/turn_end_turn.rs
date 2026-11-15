@@ -7,8 +7,7 @@ struct TurnEndHooks {
     turn_end_data: Mutex<Vec<serde_json::Value>>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl crate::agent::hooks::Hooks for TurnEndHooks {
     async fn run(
         &self,
@@ -42,8 +41,7 @@ fn turn_summary(data: &serde_json::Value) -> Vec<String> {
     summary
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn turn_end_carries_the_messages_appended_during_the_run() {
     let hooks = Arc::new(TurnEndHooks::default());
     let mut opts = options();
@@ -88,8 +86,7 @@ async fn turn_end_carries_the_messages_appended_during_the_run() {
     assert_eq!(call["arguments"], serde_json::json!({"value": 1}));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn turn_end_keeps_messages_appended_before_a_compaction_in_the_run() {
     let hooks = Arc::new(TurnEndHooks::default());
     let agent = Agent::new(

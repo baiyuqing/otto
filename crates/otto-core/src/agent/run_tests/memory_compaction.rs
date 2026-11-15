@@ -59,8 +59,7 @@ async fn compact_once(agent: &Agent<FakeProvider, EchoExecutor, MemorySession>) 
         .expect("compaction");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_checkpoint_carries_the_references_of_the_summarized_turns_only() {
     let session = MemorySession::new();
     turn(&session, 0, Some(&[record("a", "1")])).await;
@@ -86,8 +85,7 @@ async fn a_checkpoint_carries_the_references_of_the_summarized_turns_only() {
     assert_eq!(details.memory_coverage, MemoryReferenceCoverage::Complete);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn turns_without_reference_records_give_unknown_coverage() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::summary(&structured_summary())]),
@@ -106,8 +104,7 @@ async fn turns_without_reference_records_give_unknown_coverage() {
     assert_eq!(details.memory_coverage, MemoryReferenceCoverage::Unknown);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn one_summarized_turn_without_a_record_keeps_the_others_and_gives_unknown() {
     let session = MemorySession::new();
     turn(&session, 0, None).await;
@@ -130,8 +127,7 @@ async fn one_summarized_turn_without_a_record_keeps_the_others_and_gives_unknown
     assert_eq!(details.memory_coverage, MemoryReferenceCoverage::Unknown);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_later_checkpoint_carries_the_previous_references_forward() {
     let session = MemorySession::new();
     turn(&session, 0, Some(&[record("a", "1")])).await;

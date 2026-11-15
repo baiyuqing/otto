@@ -266,8 +266,7 @@ impl FakeProvider {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Provider for FakeProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
@@ -338,8 +337,7 @@ struct EchoExecutor {
     content: Option<String>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for EchoExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
@@ -443,8 +441,7 @@ impl FakeMemory {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl MemoryRecall for FakeMemory {
     async fn recall(
         &self,

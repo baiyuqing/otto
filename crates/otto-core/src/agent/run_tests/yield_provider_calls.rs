@@ -8,8 +8,7 @@ struct YieldExecutor {
     fail: bool,
     replan: bool,
 }
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for YieldExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()
@@ -49,8 +48,7 @@ impl ToolExecutor for YieldExecutor {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn yielding_settles_the_entire_batch_without_another_provider_request() {
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = Agent::new(
@@ -81,8 +79,7 @@ async fn yielding_settles_the_entire_batch_without_another_provider_request() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn completion_racing_with_yield_is_processed_without_an_extra_user_prompt() {
     let inbox = Arc::new(Inbox::new(None));
     let agent = Agent::new(
@@ -115,8 +112,7 @@ async fn completion_racing_with_yield_is_processed_without_an_extra_user_prompt(
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn failures_and_approval_replanning_take_precedence_over_yield() {
     for (fail, replan) in [(true, false), (false, true)] {
         let agent = Agent::new(
@@ -141,8 +137,7 @@ async fn failures_and_approval_replanning_take_precedence_over_yield() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_yielded_turn_can_resume_from_a_later_child_notification() {
     let inbox = Arc::new(Inbox::new(None));
     let agent = Agent::new(
@@ -176,8 +171,7 @@ async fn a_yielded_turn_can_resume_from_a_later_child_notification() {
     assert_eq!(agent.provider().requests().len(), 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn steering_racing_with_yield_is_preserved() {
     let steering = Arc::new(crate::agent::steering::Steering::default());
     let agent = Agent::new(
@@ -221,8 +215,7 @@ async fn steering_racing_with_yield_is_preserved() {
 }
 
 struct EditAdviceExecutor;
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for EditAdviceExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
@@ -242,8 +235,7 @@ impl ToolExecutor for EditAdviceExecutor {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn batching_advice_is_persisted_with_the_third_successful_edit() {
     let agent = Agent::new(
         FakeProvider::new(vec![
@@ -314,8 +306,7 @@ fn ticking_options() -> Options {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_retried_request_appends_one_provider_call_record() {
     use crate::session::ProviderCallKind;
     let mut turn = Turn::text("final").with_events(vec![
@@ -379,8 +370,7 @@ async fn a_retried_request_appends_one_provider_call_record() {
     assert!(request.memory_record_ids.is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_call_record_lists_the_recalled_memory_records() {
     let mut records = one_record();
     records.push(Record {
@@ -414,8 +404,7 @@ async fn provider_call_record_lists_the_recalled_memory_records() {
     assert_eq!(request.message_tokens, user_only);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_compaction_appends_a_provider_call_record_of_its_kind() {
     use crate::session::ProviderCallKind;
     let mut turn = Turn::summary(&structured_summary());

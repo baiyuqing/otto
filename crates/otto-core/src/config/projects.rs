@@ -26,15 +26,13 @@ pub enum TrustLevel {
 mod tests {
     use crate::config::{File, parse};
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn no_projects_table_resolves_empty() {
         let file = File::default();
         assert!(file.projects.is_empty());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn trusted_project_resolves_to_its_path() {
         let file = parse(
             r#"[projects."/Users/me/src/app"]
@@ -48,8 +46,7 @@ trust_level = "trusted"
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn untrusted_level_is_a_config_error_naming_the_key() {
         let err = parse(
             r#"[projects."/Users/me/src/app"]
@@ -61,8 +58,7 @@ trust_level = "untrusted"
         assert!(err.to_string().contains("untrusted"), "{err}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn project_table_rejects_unknown_fields() {
         let err = parse(
             r#"[projects."/Users/me/src/app"]

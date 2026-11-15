@@ -3,8 +3,8 @@
 //! `serde_json` is not interchangeable here: Go's `encoding/json` escapes `<`,
 //! `>`, `&`, U+2028 and U+2029 by default, so the same map produces different
 //! bytes. The store compares a decoded blob against its re-encoded form to
-//! detect corruption, and an existing database file may have been written by
-//! the previously released binary, so the encoder has to agree byte for byte.
+//! detect corruption, and existing records hold the Go form, so a change to
+//! this encoder makes existing records read as corrupt.
 
 use std::collections::BTreeMap;
 

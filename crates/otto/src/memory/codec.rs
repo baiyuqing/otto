@@ -1,8 +1,10 @@
 //! The canonical portable encoding of a record's columns.
 //!
-//! Every blob is written in Go's canonical `encoding/json` form and, on read,
-//! re-encoded and compared byte for byte: a row whose stored bytes are not
-//! exactly what this encoder would produce is corrupt, not merely unusual.
+//! Every blob is written in Go's canonical `encoding/json` form, which is the
+//! on-disk format of existing records. A read re-encodes the blob and compares
+//! it byte for byte, so a row whose stored bytes differ from this encoder's
+//! output reads as corrupt, and changing the encoder makes existing records
+//! read as corrupt.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 

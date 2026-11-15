@@ -16,6 +16,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- Session failover is on by default: `[failover] enabled` now defaults to
+  `true`, so each session gets a `<session-id>.lease/` directory on its next
+  write or open. `[failover] enabled = false` keeps sessions without a lease
+  directory as they are. With a lease, `SIGTERM` to the REPL, the TUI or
+  `--prompt` runs the session migration instead of ending the process at
+  once. See
+  [Continuing a session on another host](docs/manual/interactive-use.md#continuing-a-session-on-another-host).
+- A process that has exited but has not been waited for by its parent (a
+  zombie) counts as not running in process liveness checks: the same-host
+  lease takeover, approval claim recovery, delivery receipt recovery. Before,
+  its pid still answered `kill(pid, 0)`, so the check returned "unknown".
 - A process that holds a session lease and was stopped for longer than 5/6 of
   `lease_seconds` (`SIGSTOP`, a terminal suspend, a debugger) no longer exits
   on resume when no other host took the session over. It checks for a

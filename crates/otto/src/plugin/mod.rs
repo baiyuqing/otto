@@ -8,7 +8,7 @@ pub(crate) mod runtime;
 use crate::hex::to_hex;
 use crate::{
     fsops,
-    tool::root::{self, Root},
+    fsops::root::{self, Root},
 };
 use nix::{fcntl::OFlag, sys::stat::Mode};
 use package::Package;

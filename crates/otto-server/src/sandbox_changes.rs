@@ -12,7 +12,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use otto::runtime::sandbox_config::SandboxChange;
+use otto::sandbox::config_edit::SandboxChange;
 use serde::Deserialize;
 
 use super::sandbox::reload_body;

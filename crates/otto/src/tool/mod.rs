@@ -1,6 +1,8 @@
-//! Workspace-confined file tools, plus in-process `remind` and `list_models`.
+//! The `Tool` trait, the `Registry`, and the workspace-confined file tools, plus
+//! `list_models`. Feature tools (`remind`, `schedule`, sub-agents, workflows,
+//! delivery, task control) live in their feature modules.
 //!
-//! Every filesystem tool resolves paths through [`workspace::Workspace`], which
+//! Every filesystem tool resolves paths through [`crate::workspace::confined::Workspace`], which
 //! rejects escapes from the selected workspace after canonical-path and symlink
 //! validation, and every tool caps its output and reports failures in band as
 //! an error `ToolResult` rather than as a `Result`, because the text is fed
@@ -17,9 +19,7 @@ pub mod bash;
 pub(crate) mod bash_output;
 pub mod edit;
 pub mod find;
-pub(crate) mod git_read_only;
 pub(crate) mod gitignore;
-pub(crate) mod gopath;
 pub mod grep;
 pub mod ls;
 pub mod mcp;
@@ -31,20 +31,12 @@ pub mod plan;
 pub mod project_guard;
 pub mod read;
 pub mod registry;
-pub mod remind;
 pub mod result;
-pub(crate) mod root;
-pub mod safety;
 mod search;
 pub(crate) mod session_directory;
 pub(crate) mod session_info;
-pub mod shell;
 pub mod skill;
-pub(crate) mod task_control;
-pub mod verification;
 pub mod web;
-pub(crate) mod workflow;
-pub mod workspace;
 pub mod write;
 
 use otto_core::model::ToolDefinition;
@@ -225,7 +217,9 @@ pub mod testutil {
         std::fs::write(path, contents).expect("test files are writable");
     }
 
-    pub fn workspace(root: &Path) -> std::sync::Arc<workspace::Workspace> {
-        std::sync::Arc::new(workspace::Workspace::new(root).expect("workspace should open"))
+    pub fn workspace(root: &Path) -> std::sync::Arc<crate::workspace::confined::Workspace> {
+        std::sync::Arc::new(
+            crate::workspace::confined::Workspace::new(root).expect("workspace should open"),
+        )
     }
 }

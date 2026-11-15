@@ -40,8 +40,8 @@ use serde_json::{Value, json};
 
 use crate::app::{ActiveInputAdmission, Channel};
 use crate::mcp::sse::SseParser;
-use crate::runtime::info::{SandboxMode, SandboxNetwork};
-use crate::schedule::Origin;
+use crate::sandbox::info::{SandboxMode, SandboxNetwork};
+use crate::session::origin::Origin;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 mod approvals;
@@ -408,7 +408,7 @@ impl SessionWire {
             context_window: self.context_window,
             context_input_tokens_present: self.context_input_tokens > 0,
             context_input_tokens: self.context_input_tokens,
-            sandbox: crate::runtime::info::SandboxInfo {
+            sandbox: crate::sandbox::info::SandboxInfo {
                 mode,
                 network,
                 bash_available: self.sandbox.bash_available,

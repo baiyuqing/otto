@@ -22,9 +22,9 @@ use tokio_util::sync::CancellationToken;
 use super::read::MAX_READ_FILE_BYTES;
 use super::result::capped_text_result;
 use super::result::decode_strict_json;
-use super::workspace::Workspace;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
 use crate::skill::{Catalog, Skill, list_files, load, too_large};
+use crate::workspace::confined::Workspace;
 
 /// The number of skill files named in a loaded skill's header.
 const MAX_SKILL_FILE_LISTING: usize = 50;

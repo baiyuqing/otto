@@ -918,7 +918,7 @@ components:
       required: [tasks]
     Timer:
       type: object
-      description: tool::remind::StoredReminder; the record the session sidecar stores.
+      description: schedule::remind::StoredReminder; the record the session sidecar stores.
       properties:
         id:
           type: string

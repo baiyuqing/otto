@@ -13,7 +13,7 @@
 use otto_core::model::ToolDefinition;
 use otto_core::tool::safe_prompt_tool_name;
 
-use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
+use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 /// The delegation-policy element appended when the registry offers an `agent`
 /// tool. `can_list_models` says whether the registry also offers `list_models`.

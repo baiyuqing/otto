@@ -25,7 +25,7 @@ use otto_core::model::{Block, BlockType, Message, Role};
 
 use crate::app::Controller;
 use crate::runtime::builder::{Builder, Shared, resolve_initial_runtime};
-use crate::runtime::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
+use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 pub fn config() -> File {
     let mut providers = std::collections::BTreeMap::new();
@@ -98,7 +98,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
     let mut builder = Builder::for_workspace(
         shared,
         std::sync::Arc::new(
-            crate::tool::workspace::Workspace::new(workspace_root).expect("workspace"),
+            crate::workspace::confined::Workspace::new(workspace_root).expect("workspace"),
         ),
         workspace_root.to_string_lossy().into_owned(),
         otto_core::config::McpRuntime {
@@ -379,7 +379,7 @@ impl FakeSandbox {
 }
 
 #[async_trait::async_trait]
-impl crate::app::SandboxControl for FakeSandbox {
+impl crate::sandbox::control::SandboxControl for FakeSandbox {
     fn info(&self) -> SandboxInfo {
         self.info.clone()
     }

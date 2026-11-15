@@ -11,17 +11,18 @@
 pub mod advice;
 pub mod boundary;
 pub mod builder;
-pub mod info;
 #[cfg(test)]
 pub(crate) mod mcp_server_fixture_tests;
 pub mod prompt;
-pub mod sandbox_config;
+pub mod retry_safety;
 pub mod sandbox_runtime;
 pub mod sandbox_switch;
 pub(crate) mod session_resources;
 pub mod sidecar_mailbox;
 pub mod startup;
 pub mod storage;
+pub mod task_control;
+pub mod verification;
 pub mod wiring;
 pub mod workflow;
 pub mod workflow_notifications;

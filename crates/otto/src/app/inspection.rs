@@ -143,7 +143,8 @@ impl Controller {
 
     /// The session's durable turn queue; `None` under `--no-session`.
     pub fn turn_queue(&self) -> Option<Arc<turn_queue::TurnQueue>> {
-        self.current_runner()?.task_control().turn_queue()
+        let journal = self.current_runner()?.task_control().turn_queue_journal()?;
+        Some(Arc::new(turn_queue::TurnQueue::new(journal)))
     }
 
     /// The prompts saved in the turn queue that have not started, oldest

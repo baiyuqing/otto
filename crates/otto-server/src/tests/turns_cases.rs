@@ -339,7 +339,7 @@ pub(super) async fn post_turn_with_origin(harness: &Harness, session: &str, extr
 /// next user turn of that session appends when its origin matches.
 pub(super) fn confirmed_delivery(
     store: &otto::schedule::Store,
-    origin: otto::schedule::Origin,
+    origin: otto::session::origin::Origin,
     session: &str,
 ) {
     let now = chrono::Utc::now();
@@ -375,7 +375,7 @@ pub(super) fn confirmed_delivery(
 
 pub(super) fn pending(
     store: &otto::schedule::Store,
-    origin: &otto::schedule::Origin,
+    origin: &otto::session::origin::Origin,
     session: &str,
 ) -> usize {
     store
@@ -392,7 +392,7 @@ async fn a_turn_origin_defaults_to_web_and_is_validated() {
         ..HarnessOptions::default()
     });
     let id = harness.create().await;
-    let web = otto::schedule::Origin::web();
+    let web = otto::session::origin::Origin::web();
     confirmed_delivery(&store, web.clone(), &id);
 
     let bad = post_turn_with_origin(&harness, &id, serde_json::json!({"origin": "mars"})).await;
@@ -428,7 +428,7 @@ async fn a_queued_turn_keeps_its_own_origin() {
     options.schedule = Some(store.clone());
     let harness = Harness::with(options);
     let id = harness.create().await;
-    let chat = otto::schedule::Origin::parse("chat:telegram:c1").expect("origin");
+    let chat = otto::session::origin::Origin::parse("chat:telegram:c1").expect("origin");
     confirmed_delivery(&store, chat.clone(), &id);
 
     let first = post_turn_with_channel(&harness, &id, "first", None, false).await;
@@ -455,7 +455,7 @@ pub(super) fn schedule_harness() -> (Harness, Arc<otto::schedule::Store>) {
 
 pub(super) fn due_text_item(
     store: &otto::schedule::Store,
-    origin: otto::schedule::Origin,
+    origin: otto::session::origin::Origin,
     body: &str,
 ) -> otto::schedule::Item {
     let now = chrono::Utc::now();
@@ -479,8 +479,12 @@ pub(super) fn due_text_item(
 #[tokio::test]
 async fn claim_returns_due_web_items_once_and_delivered_confirms_them() {
     let (harness, store) = schedule_harness();
-    let web = due_text_item(&store, otto::schedule::Origin::web(), "stretch");
-    due_text_item(&store, otto::schedule::Origin::terminal(), "terminal only");
+    let web = due_text_item(&store, otto::session::origin::Origin::web(), "stretch");
+    due_text_item(
+        &store,
+        otto::session::origin::Origin::terminal(),
+        "terminal only",
+    );
 
     let claim = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
     assert_eq!(claim.status, StatusCode::OK, "{}", claim.body);
@@ -500,7 +504,7 @@ async fn claim_returns_due_web_items_once_and_delivered_confirms_them() {
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
     assert_eq!(done.json(), serde_json::json!({}));
     let writebacks = store
-        .pending_writebacks(&otto::schedule::Origin::web(), "sess", 10)
+        .pending_writebacks(&otto::session::origin::Origin::web(), "sess", 10)
         .expect("writebacks");
     assert_eq!(writebacks.len(), 1);
     assert_eq!(writebacks[0].item_id, web.id);

@@ -15,8 +15,8 @@ use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 
 use super::result::{CappedByteCollector, RedactedSink};
-use super::root::Root;
 use super::session_directory::{create_session_directory, session_directory_name};
+use crate::fsops::root::Root;
 
 pub(super) const PREVIEW_BYTES: usize = 4096;
 const DIRECTORY: &str = ".otto/tool-output";

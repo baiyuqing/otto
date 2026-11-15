@@ -26,7 +26,7 @@ use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resolve_environment};
 use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 
-use crate::tool::workspace::Workspace;
+use crate::workspace::confined::Workspace;
 
 use super::boundary::{self, BoundaryInputs};
 use super::builder::{Builder, Shared, resolve_initial_runtime};

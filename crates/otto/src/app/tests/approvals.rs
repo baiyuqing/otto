@@ -134,7 +134,7 @@ async fn a_followup_whose_step_already_ran_is_not_run_again() {
 #[tokio::test]
 async fn read_approval_reload_failure_rolls_back_and_does_not_grant() {
     use crate::fixtures::{FakeSandbox, seatbelt_info};
-    use crate::runtime::info::SandboxNetwork;
+    use crate::sandbox::info::SandboxNetwork;
     let workspace = tempfile::tempdir().unwrap();
     let sessions = tempfile::tempdir().unwrap();
     let path = workspace.path().canonicalize().unwrap();

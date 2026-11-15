@@ -41,7 +41,7 @@ pub(super) fn rule(
         .as_ref()
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str());
-    let analysis = command.map(crate::tool::shell::analyze);
+    let analysis = command.map(crate::approval::shell::analyze);
     evaluate_rules(
         &config.rules,
         &request.subject.source,

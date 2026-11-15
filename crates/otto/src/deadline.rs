@@ -1,9 +1,11 @@
-//! Monotonic deadlines for native asynchronous operations.
+//! Monotonic deadlines for native asynchronous operations, and the Go-style
+//! spelling of elapsed durations ([`round_to_seconds`]).
 
 use std::future::pending;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use chrono::TimeDelta;
 use otto_core::model::OperationStopReason;
 use otto_core::operation::OperationControl;
 use tokio::time::Instant;
@@ -135,6 +137,24 @@ impl OperationControl for Control {
             self.stop(OperationStopReason::Deadline);
         }
         self.stop_reason()
+    }
+}
+
+/// The Go `time.Duration` spelling, rounded to the second, for the whole-second
+/// durations this module produces: `"0s"`, `"42s"`, `"2m0s"`, `"1h0m0s"`.
+/// Rounding is half away from zero.
+pub fn round_to_seconds(delta: TimeDelta) -> String {
+    let milliseconds = delta.num_milliseconds();
+    let negative = milliseconds < 0;
+    let total = (milliseconds.abs() + 500) / 1000;
+    let (hours, minutes, seconds) = (total / 3600, (total / 60) % 60, total % 60);
+    let sign = if negative && total != 0 { "-" } else { "" };
+    if hours != 0 {
+        format!("{sign}{hours}h{minutes}m{seconds}s")
+    } else if minutes != 0 {
+        format!("{sign}{minutes}m{seconds}s")
+    } else {
+        format!("{sign}{seconds}s")
     }
 }
 

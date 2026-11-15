@@ -205,6 +205,10 @@ The other modules group native responsibilities:
   `otto-cli/src/plugin.rs` exposes management commands; shared runner construction loads
   packages for every native frontend.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
+  `sandbox/info.rs` holds `SandboxInfo`, `sandbox/control.rs` the
+  `SandboxControl` contract that `app::Controller` accepts,
+  `sandbox/config_edit.rs` the `[sandbox]` configuration edits behind
+  `/sandbox allow`, and `sandbox/git.rs` the bounded `git` runner.
   `sandbox/read_denylist.rs` owns the built-in read denylist constants and
   `ReadDenylist`, which decides whether a path is covered; the Seatbelt profile
   module renders the read denylist and the `read_paths` exceptions
@@ -273,8 +277,19 @@ capability and compatibility boundaries.
 final-answer overflow capture; `subagent/scratch.rs` owns temporary downloads
 that are removed when the child exits. Both use pinned workspace handles.
 
-Place native tool execution and workspace enforcement in `tool/`; `bash`
-execution goes through `sandbox/`. Keep session persistence append-only.
+Place native tool execution in `tool/`; `bash` execution goes through
+`sandbox/`. `tool/` holds the `Tool` trait, the `Registry` and the tools that
+need only the platform, persistence and capability layers. A tool that belongs
+to a feature lives in that feature's module and `runtime` registers it:
+`schedule/tools.rs` (`schedule`, `schedule_list`, `schedule_cancel`),
+`schedule/remind.rs` (`remind`, `remind_status`, `remind_cancel`),
+`subagent/tools.rs`, `workflow/tool.rs`, `delivery/tool.rs`,
+`runtime/task_control/tools.rs` (`task_queue`, `task_steer`, `task_reply`) and
+`runtime/verification.rs` (`submit_verification`). Workspace path enforcement
+is `workspace/confined.rs` (`Workspace`) over the pinned directory handles in
+`fsops/root.rs` and the Go-style path helpers in `fsops/gopath.rs`. The
+declared retry safety of every built-in tool is aggregated in
+`runtime/retry_safety.rs`. Keep session persistence append-only.
 
 The TUI separates terminal interaction from feature behavior. `tui/features/`
 contains injected presenters and the command catalog; `tui/interaction.rs`
@@ -321,11 +336,11 @@ coordinate. Direction changes, keys, paste, and drag start/end retain exact orde
 | Provider HTTP behavior | `crates/otto/src/provider/` | The matching wire module in `otto-core` |
 | Shared approvals and model-initiated consent | `approval/`, `otto-core/src/approval.rs`, `tool/approval.rs` | Domain adapters, TUI, HTTP, ACP and chat connector |
 | Agent self-help and pending approval dialogue | `tool/otto.rs`, `app/approval_control.rs` | `runtime/builder.rs`, ACP, HTTP, chat and TUI input paths |
-| Active-task guidance and model follow-ups | `otto-core/src/agent/steering.rs`, `app/task_control.rs`, `tool/task_control.rs` | runtime tool/prompt wiring, HTTP/ACP and connector routing |
+| Active-task guidance and model follow-ups | `otto-core/src/agent/steering.rs`, `app/task_control.rs`, `runtime/task_control.rs`, `runtime/task_control/tools.rs` | runtime tool/prompt wiring, HTTP/ACP and connector routing |
 | Per-turn chat channel context | `app/channel.rs`, then ACP prompt parsing | Core per-run system context, HTTP turn queue, `client/`, and `chat-connector/` |
 | Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | `runtime/builder/runner_entry.rs` (`web_tools`) |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
-| Bash command parsing for approval rules, review facts and effect classification | `crates/otto/src/tool/shell.rs` | `tool/bash.rs`, `approval/policy.rs`, `otto-core/src/approval/rules.rs` |
+| Bash command parsing for approval rules, review facts and effect classification | `crates/otto/src/approval/shell.rs` | `tool/bash.rs`, `approval/policy.rs`, `otto-core/src/approval/rules.rs` |
 | Web API or browser behavior | `crates/otto-server/src/` or external otto-plus | `otto-core` for shared wire codecs |
 | ACP integrations | `crates/otto-acp/src/` | `client/` for attach mode; `chat-connector/` for chat connector behavior |
 | Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `crates/otto-acp/src/lib.rs` wake loop | the `wake-replies` HTTP route, `client/`, `chat-connector/internal/bridge` |

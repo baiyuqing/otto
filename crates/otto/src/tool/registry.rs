@@ -32,7 +32,7 @@ pub struct Registry {
     approval: Option<(
         Arc<crate::approval::Service>,
         otto_core::approval::Scope,
-        Option<Arc<crate::schedule::tools::TurnOrigin>>,
+        Option<Arc<crate::session::origin::TurnOrigin>>,
     )>,
 }
 
@@ -66,7 +66,7 @@ impl Registry {
         mut self,
         service: Arc<crate::approval::Service>,
         scope: otto_core::approval::Scope,
-        origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
+        origin: Option<Arc<crate::session::origin::TurnOrigin>>,
     ) -> Self {
         self.approval = Some((service, scope, origin));
         self
@@ -98,7 +98,7 @@ impl Registry {
     ) -> Option<(
         Arc<crate::approval::Service>,
         otto_core::approval::Scope,
-        Option<Arc<crate::schedule::tools::TurnOrigin>>,
+        Option<Arc<crate::session::origin::TurnOrigin>>,
     )> {
         self.approval.clone()
     }
@@ -163,7 +163,9 @@ impl Registry {
                         blocking: true,
                         expires_at: Some(chrono::Utc::now().timestamp() + 600),
                     },
-                    origin.as_ref().map_or("", crate::schedule::Origin::as_str),
+                    origin
+                        .as_ref()
+                        .map_or("", crate::session::origin::Origin::as_str),
                 ) {
                     Ok(r) => r,
                     Err(e) => return not_started(ToolResult::error(e.to_string())),

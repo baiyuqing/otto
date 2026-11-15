@@ -60,7 +60,7 @@ impl Controller {
 
     /// [`Self::steer`] with the client's `input_id`: a retry while the
     /// guidance is queued returns the same message, and one after it was
-    /// delivered fails with [`task_control::DUPLICATE_INPUT`].
+    /// delivered fails with [`crate::runtime::task_control::DUPLICATE_INPUT`].
     pub fn steer_input(
         &self,
         text: &str,
@@ -75,9 +75,9 @@ impl Controller {
         input_id: Option<&str>,
         provenance: Option<otto_core::model::InputProvenance>,
     ) -> Result<otto_core::agent::steering::Message, String> {
-        let text = task_control::checked_text(text)?;
+        let text = crate::runtime::task_control::checked_text(text)?;
         if input_id.is_some_and(|id| self.has_input(id)) {
-            return Err(task_control::DUPLICATE_INPUT.into());
+            return Err(crate::runtime::task_control::DUPLICATE_INPUT.into());
         }
         if self.pending_approval().is_some() {
             return Err("the task is waiting for approval; guidance is not accepted yet".into());
@@ -145,9 +145,9 @@ impl Controller {
         input_id: Option<&str>,
         provenance: Option<otto_core::model::InputProvenance>,
     ) -> Result<ActiveInputAdmission, String> {
-        let text = task_control::checked_text(text)?;
+        let text = crate::runtime::task_control::checked_text(text)?;
         if input_id.is_some_and(|id| self.has_input(id)) {
-            return Err(task_control::DUPLICATE_INPUT.into());
+            return Err(crate::runtime::task_control::DUPLICATE_INPUT.into());
         }
         if self.pending_approval().is_some() {
             return Ok(ActiveInputAdmission::ApprovalPending);

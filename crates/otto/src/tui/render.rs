@@ -17,7 +17,8 @@ use super::layout::{
     format_token_count,
 };
 use super::transcript;
-use crate::subagent::format::{one_line, round_to_seconds};
+use crate::deadline::round_to_seconds;
+use crate::subagent::format::one_line;
 use crate::subagent::tasks::{Task, TaskStatus};
 
 /// Draws one frame.

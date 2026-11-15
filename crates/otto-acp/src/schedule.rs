@@ -19,7 +19,8 @@ use serde_json::{Value, json};
 use super::{Backend, Connection};
 use otto::app::scheduled::run_new_session;
 use otto::schedule::worker::{DeliverRole, PromptRunner, RunRole, Sink, Worker};
-use otto::schedule::{Origin, RunOutcome, Scope};
+use otto::schedule::{RunOutcome, Scope};
+use otto::session::origin::Origin;
 use otto_core::config::resolve::Runtime;
 
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(60);

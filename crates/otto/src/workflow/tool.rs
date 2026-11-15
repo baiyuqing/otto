@@ -1,5 +1,5 @@
 //! Parent-only conversational access to the workspace workflow controller.
-use super::{Tool, definition, text_result};
+use crate::tool::{Tool, definition, text_result};
 use crate::workflow::Controller;
 use otto_core::model::{RetrySafety, ToolDefinition};
 use otto_core::tool::{ToolCall, ToolResult};
@@ -175,7 +175,7 @@ impl Tool for WorkflowTool {
     fn approval_spec(
         &self,
         arguments: &RawValue,
-    ) -> Result<Option<super::ApprovalSpec>, ToolResult> {
+    ) -> Result<Option<crate::tool::ApprovalSpec>, ToolResult> {
         if self.name != "workflow_start" {
             return Ok(None);
         }
@@ -200,7 +200,7 @@ impl Tool for WorkflowTool {
             // otherwise start_parent returns not-found without creating a run.
             Err(_) => return Ok(None),
         };
-        Ok(Some(super::ApprovalSpec {
+        Ok(Some(crate::tool::ApprovalSpec {
             version: crate::approval::digest(&format!("{}:{}", definition.hash, arguments.get())),
             source: "workflow_start".into(), authority: otto_core::approval::Authority::Bounded,
             title: format!("Start workflow {}?",args.name),

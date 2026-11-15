@@ -92,7 +92,6 @@ mod prompt;
 mod replacement;
 mod reporting;
 mod runtime_control;
-pub mod sandbox;
 mod sandbox_approval;
 pub mod scheduled;
 mod session_delete;
@@ -116,15 +115,15 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::builder::{Builder, Runner, RuntimeInfo, SharedSession};
-use crate::runtime::info::SandboxInfo;
-use crate::runtime::sandbox_config::{self, SandboxChange};
+use crate::sandbox::config_edit::{self as sandbox_config, SandboxChange};
+use crate::sandbox::info::SandboxInfo;
+use crate::schedule::remind::Reminders;
 use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
-use crate::tool::remind::Reminders;
 pub use channel::Channel;
 
+use crate::sandbox::control::SandboxControl;
 pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
 use otto_core::approval::ApprovalMode;
-pub use sandbox::SandboxControl;
 pub use tasks::{Task, TaskStatus, TaskView};
 pub use wake::WakeOperation;
 
@@ -390,7 +389,7 @@ pub struct Controller {
 }
 
 /// Clears passive presentation routing when one logical user turn ends.
-pub(crate) struct PresentationOriginGuard(Arc<crate::schedule::tools::TurnOrigin>);
+pub(crate) struct PresentationOriginGuard(Arc<crate::session::origin::TurnOrigin>);
 
 impl Drop for PresentationOriginGuard {
     fn drop(&mut self) {
@@ -543,8 +542,8 @@ pub(crate) async fn controller_with_approvals_and_schedule(
     Arc<Mutex<usize>>,
 ) {
     use crate::fixtures::{FakeSandbox, builder, initial_runtime, seatbelt_info};
-    use crate::runtime::info::SandboxNetwork;
     use crate::sandbox::direct::DirectDriver;
+    use crate::sandbox::info::SandboxNetwork;
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 
     let executor = Executor::new(

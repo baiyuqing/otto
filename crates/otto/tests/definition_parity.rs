@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use otto::runtime::verification::verification_definition;
 use otto::subagent::tools::tool_definitions as agent_tool_definitions;
 use otto::tool::Tool;
 use otto::tool::bash::bash_definition;
@@ -18,7 +19,6 @@ use otto::tool::memory::{forget_definition, memory_search_definition, remember_d
 use otto::tool::models::list_models_definition;
 use otto::tool::read::read_definition;
 use otto::tool::skill::skill_definition;
-use otto::tool::verification::verification_definition;
 use otto::tool::web::{fetch_definition, search_definition};
 use otto::tool::write::write_definition;
 use otto_core::model::ToolDefinition;

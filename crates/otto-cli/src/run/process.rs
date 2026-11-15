@@ -591,8 +591,9 @@ pub async fn run_with_extensions(
     // One process sandbox serves every controller, so each one reports the live
     // state rather than the value captured when it was built.
     let controller = match &reloader {
-        Some(reloader) => controller
-            .with_sandbox_control(Arc::clone(reloader) as Arc<dyn otto::app::SandboxControl>),
+        Some(reloader) => controller.with_sandbox_control(
+            Arc::clone(reloader) as Arc<dyn otto::sandbox::control::SandboxControl>
+        ),
         None => controller,
     };
     let controller = Arc::new(controller);

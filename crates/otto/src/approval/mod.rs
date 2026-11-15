@@ -8,6 +8,7 @@ mod policy;
 pub mod repository;
 pub mod reviewer;
 mod service;
+pub mod shell;
 pub mod sqlite;
 pub mod workflow;
 pub use contracts::*;

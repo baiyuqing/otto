@@ -19,8 +19,8 @@ use super::search::{
     WalkAction, match_glob_segments, resolve_search_limit, search_relative_path,
     search_root_inside_git, validated_glob_segments, walk_dir_ignoring,
 };
-use super::workspace::Workspace;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
+use crate::workspace::confined::Workspace;
 
 const DEFAULT_FIND_LIMIT: usize = 1000;
 const MAXIMUM_FIND_LIMIT: usize = 10000;

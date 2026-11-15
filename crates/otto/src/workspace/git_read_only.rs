@@ -7,7 +7,7 @@
 //!
 //! Refused, after case folding and removal of `.` components:
 //!
-//! - the root paths in `crate::sandbox::GIT_READ_ONLY` and
+//! - the root paths in `GIT_READ_ONLY` and
 //!   `crate::workspace::READ_ONLY_PATHS`;
 //! - at any depth, a path whose last component is `.git`, which is the git
 //!   directory or the gitfile of a nested repository or submodule checkout;
@@ -79,9 +79,22 @@ pub(crate) fn refuse_git_read_only<'a>(
     Ok(())
 }
 
+/// Workspace paths that stay read-only because git runs hooks and the
+/// configuration's program settings outside the sandbox: `(suffix, subpath)`,
+/// where `subpath` also covers everything below the path. The Seatbelt profile
+/// (through `crate::workspace::git_read_only::GIT_READ_ONLY`) and the `write`/`edit` tools both
+/// enforce this one list.
+pub(crate) const GIT_READ_ONLY: [(&str, bool); 5] = [
+    (".git", false),
+    (".git/config", false),
+    (".git/config.worktree", false),
+    (".git/commondir", false),
+    (".git/hooks", true),
+];
+
 /// Reports whether the folded components name protected git metadata.
 fn is_protected_git_path(parts: &[String]) -> bool {
-    for (name, subpath) in crate::sandbox::GIT_READ_ONLY {
+    for (name, subpath) in GIT_READ_ONLY {
         let protected: Vec<&str> = name.split('/').collect();
         let hit = if subpath {
             parts.len() >= protected.len() && parts[..protected.len()] == protected[..]

@@ -9,7 +9,7 @@
 //! I/O after [`Catalog::discover`] returns, so it is safe to share across
 //! tasks. Concurrency: every function here is free of shared mutable state.
 //!
-//! Security: every read goes through [`crate::tool::root::Root`], which pins an
+//! Security: every read goes through [`crate::fsops::root::Root`], which pins an
 //! open directory file descriptor and resolves each component beneath it, so a
 //! path that escapes the skill directory is rejected after canonical-path and
 //! symlink validation rather than followed. Skill content is untrusted text: it
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 pub use frontmatter::{Fields, parse as parse_frontmatter};
 pub use prompt::{MAX_LISTING_BYTES, prompt_section};
 
-use crate::tool::root::{self, Root};
+use crate::fsops::root::{self, Root};
 
 /// The largest `SKILL.md`, or sibling skill file, this loader will read.
 pub const MAX_SKILL_FILE_BYTES: u64 = 64 << 20;

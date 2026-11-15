@@ -51,9 +51,9 @@ fn candidate_id(content: &str) -> String {
 #[tokio::test]
 async fn remember_records_the_session_and_exact_presentation_origin() {
     let (_directory, service) = service();
-    let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+    let origin = Arc::new(crate::session::origin::TurnOrigin::default());
     origin.set(Some(
-        crate::schedule::Origin::chat("telegram", "42").unwrap(),
+        crate::session::origin::Origin::chat("telegram", "42").unwrap(),
     ));
     let tool = RememberTool::new(Arc::clone(&service), scope(), workspace_scope())
         .with_turn_context("session-1", origin);
@@ -376,9 +376,9 @@ async fn remember_requires_a_kind_and_a_text() {
 async fn forget_queues_a_forget_candidate_for_human_review() {
     let (_directory, service) = service();
     let target = remember_record(&service, "editor", "prefers vim");
-    let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+    let origin = Arc::new(crate::session::origin::TurnOrigin::default());
     origin.set(Some(
-        crate::schedule::Origin::chat("telegram", "c_42").unwrap(),
+        crate::session::origin::Origin::chat("telegram", "c_42").unwrap(),
     ));
     let tool =
         ForgetTool::new(Arc::clone(&service), vec![scope()]).with_turn_context("session-1", origin);

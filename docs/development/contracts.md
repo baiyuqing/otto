@@ -77,7 +77,7 @@ uses permission requests for tools, negotiated elicitation for confirmation and
 unadvertised inbound elicitation is never authorization.
 
 `presentation_origin` is passive delivery metadata, not authority: `Scope`
-controls listing/decision. Producers snapshot exact `schedule::Origin`; an
+controls listing/decision. Producers snapshot exact `session::origin::Origin`; an
 originless background request is discoverable, not an inferred broadcast.
 Connector cards/commands require an exact admitted chat and request/version.
 Feedback reaches waiting models and non-TUI clients; TUI has no feedback field.

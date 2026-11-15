@@ -11,8 +11,9 @@ use tokio_util::sync::CancellationToken;
 use super::Controller;
 use super::approval::{ApprovalDecision, Step, Stop};
 use crate::runtime::builder::Builder;
+use crate::schedule::RunOutcome;
 use crate::schedule::worker::{PromptRunner, Sink};
-use crate::schedule::{Origin, RunOutcome};
+use crate::session::origin::Origin;
 use otto_core::config::resolve::Runtime;
 
 const BOUNDARY_CLOSED: &str =
@@ -270,7 +271,7 @@ mod tests {
             .await
             .unwrap();
         let store = Arc::new(crate::schedule::Store::open_in_memory().unwrap());
-        let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        let origin = Arc::new(crate::session::origin::TurnOrigin::default());
         origin.set(Some(Origin::terminal()));
         let context = crate::schedule::tools::Context {
             store: Some(store.clone()),

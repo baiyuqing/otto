@@ -59,11 +59,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use otto::app::{
-    ActiveInputAdmission, ApprovalDecision, CLOSED, Channel, Controller, PROMPT_ACTIVE,
-    SandboxControl, Step, Stop,
+    ActiveInputAdmission, ApprovalDecision, CLOSED, Channel, Controller, PROMPT_ACTIVE, Step, Stop,
 };
 use otto::runtime::builder::Builder;
-use otto::schedule::Origin;
+use otto::sandbox::control::SandboxControl;
+use otto::session::origin::Origin;
 use otto::session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
 
 use approval::request_permission;

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
-use otto::runtime::info::SandboxInfo;
+use otto::sandbox::info::SandboxInfo;
 use serde::Serialize;
 
 use super::{SandboxWire, Server, error_response, json_response, sandbox_wire};

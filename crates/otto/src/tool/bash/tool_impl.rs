@@ -189,7 +189,7 @@ impl Tool for BashTool {
             let mut git = serde_json::Map::new();
             git.insert("cwd".into(), json!(target));
             for (name, argv) in commands {
-                let body = crate::runtime::workspace_context::run_git(
+                let body = crate::sandbox::git::run_git(
                     &self.executor,
                     &target.to_string_lossy(),
                     &self.environment,
@@ -269,14 +269,14 @@ impl Tool for BashTool {
             if expected["path"].as_str() != Some(path) {
                 return Err("read path changed after approval".into());
             }
-            let amendment = crate::runtime::sandbox_config::amend_sandbox_config_checked(
+            let amendment = crate::sandbox::config_edit::amend_sandbox_config_checked(
                 config,
-                &crate::runtime::sandbox_config::SandboxChange::AllowReadPath(path.into()),
+                &crate::sandbox::config_edit::SandboxChange::AllowReadPath(path.into()),
                 expected["config"].as_str(),
             )?;
             if let Err(error) = control.reload().await {
                 let rollback =
-                    crate::runtime::sandbox_config::revert_sandbox_config(config, &amendment);
+                    crate::sandbox::config_edit::revert_sandbox_config(config, &amendment);
                 return Err(format!("{error}; rollback: {rollback:?}"));
             }
         }

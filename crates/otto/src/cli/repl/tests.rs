@@ -5,7 +5,7 @@ use super::*;
 use crate::cli::controller::SANDBOX_RELOAD_UNAVAILABLE;
 use crate::fixtures::{self, controller, user};
 use crate::runtime::builder::Runner;
-use crate::runtime::info::SandboxNetwork;
+use crate::sandbox::info::SandboxNetwork;
 use crate::subagent::tasks::Tasks;
 use otto_core::agent::inbox::Notification;
 use otto_core::agent::{CompactionResult, Event};

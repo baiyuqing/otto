@@ -19,9 +19,9 @@ async fn user_turns_set_the_origin_and_wake_turns_keep_it() {
         .unwrap();
     assert_eq!(
         origin_of(&controller),
-        Some(crate::schedule::Origin::terminal())
+        Some(crate::session::origin::Origin::terminal())
     );
-    let chat = crate::schedule::Origin::chat("telegram", "42").unwrap();
+    let chat = crate::session::origin::Origin::chat("telegram", "42").unwrap();
     turn(&controller, "hi", Some(chat.clone())).await;
     assert_eq!(origin_of(&controller), Some(chat.clone()));
     queue_wake(&controller);
@@ -44,7 +44,7 @@ async fn the_next_user_turn_appends_a_delivery_once_before_the_user_message() {
     )
     .await;
     let session_id = controller.info().session_id;
-    let terminal = crate::schedule::Origin::terminal();
+    let terminal = crate::session::origin::Origin::terminal();
     let row = delivered_row(&store, terminal.clone(), &session_id, "drink water");
 
     // A wake turn appends nothing.
@@ -87,8 +87,8 @@ async fn a_chat_turn_appends_deliveries_created_by_another_session() {
         Some(store.clone()),
     )
     .await;
-    let chat = crate::schedule::Origin::chat("telegram", "42").unwrap();
-    let other = crate::schedule::Origin::chat("telegram", "7").unwrap();
+    let chat = crate::session::origin::Origin::chat("telegram", "42").unwrap();
+    let other = crate::session::origin::Origin::chat("telegram", "7").unwrap();
     delivered_row(&store, chat.clone(), "old-session", "for chat 42");
     delivered_row(&store, other, "old-session", "for chat 7");
 

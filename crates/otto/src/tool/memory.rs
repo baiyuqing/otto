@@ -184,7 +184,7 @@ pub struct RememberTool {
     workspace_scope: Scope,
     advisor: Option<Arc<Advisor>>,
     session_id: String,
-    turn_origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
+    turn_origin: Option<Arc<crate::session::origin::TurnOrigin>>,
 }
 
 impl RememberTool {
@@ -202,7 +202,7 @@ impl RememberTool {
     pub fn with_turn_context(
         mut self,
         session_id: impl Into<String>,
-        origin: Arc<crate::schedule::tools::TurnOrigin>,
+        origin: Arc<crate::session::origin::TurnOrigin>,
     ) -> Self {
         self.session_id = session_id.into();
         self.turn_origin = Some(origin);
@@ -350,7 +350,7 @@ pub struct ForgetTool {
     service: Arc<Service>,
     scopes: Vec<Scope>,
     session_id: String,
-    turn_origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
+    turn_origin: Option<Arc<crate::session::origin::TurnOrigin>>,
 }
 
 impl ForgetTool {
@@ -366,7 +366,7 @@ impl ForgetTool {
     pub fn with_turn_context(
         mut self,
         session_id: impl Into<String>,
-        origin: Arc<crate::schedule::tools::TurnOrigin>,
+        origin: Arc<crate::session::origin::TurnOrigin>,
     ) -> Self {
         self.session_id = session_id.into();
         self.turn_origin = Some(origin);

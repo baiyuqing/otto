@@ -124,7 +124,7 @@ pub async fn compose_workspace_sandbox(
 
     let mut approval_executor: Option<Arc<Executor>> = None;
     let mut approval_environment: Option<Vec<String>> = None;
-    if sandbox_info.mode == crate::runtime::info::SandboxMode::Seatbelt {
+    if sandbox_info.mode == crate::sandbox::info::SandboxMode::Seatbelt {
         let elevated_environment = resolve_environment(&EnvironmentOptions {
             host_entries: builder.host_entries.clone(),
             provider_names: sandbox_provider_environment_names(&builder.config, api_key_env),
@@ -184,7 +184,7 @@ pub async fn compose_workspace_sandbox(
 
     builder.grant_control = reloader
         .as_ref()
-        .map(|control| control.clone() as Arc<dyn crate::app::SandboxControl>);
+        .map(|control| control.clone() as Arc<dyn crate::sandbox::control::SandboxControl>);
 
     WorkspaceSandbox {
         control,

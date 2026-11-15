@@ -38,8 +38,10 @@ use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 
 use super::git_read_only::refuse_git_read_only;
-use super::gopath::{base, bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel};
-use super::root::{Root, is_symlink};
+use crate::fsops::gopath::{
+    base, bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel,
+};
+use crate::fsops::root::{Root, is_symlink};
 
 /// Maximum number of symbolic links followed while resolving a write target.
 const MAX_WRITE_SYMLINKS: usize = 40;

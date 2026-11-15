@@ -63,15 +63,19 @@ non-test source of every module. Rules:
 - `tool` holds the `Tool` trait, the `Registry`, and tools that need only the
   platform, persistence and capability layers. A tool that belongs to a
   feature (scheduling, sub-agents, workflows, task control, delivery) lives in
-  that feature's module and is registered by `runtime`.
+  that feature's module and is registered by `runtime`. Inside the capability
+  layer `tool` imports `sandbox`, `skill`, `config`, `approval`, `memory` and
+  `mcp`; those modules do not import `tool`. A type they share with `tool`
+  lives in `tool` or in a lower module (`fsops`, `workspace`, `approval::shell`,
+  `session::origin`, `sandbox::info`).
 - A domain's repository implementation (SQLite or file) lives in the domain
   module. `storage` provides the drivers, the SQL layer and the capability
   contracts.
 - `KNOWN_VIOLATIONS` in the test lists the imports that broke these rules
   when the table was introduced. A PR that fixes one removes its entry; the
   test fails when an entry no longer occurs, so the list only shrinks. No
-  entry is added. Until the list is empty, the two rules above about `tool`
-  and repository placement describe the target state, not the current code.
+  entry is added. Until the list is empty, the rule above about repository
+  placement describes the target state, not the current code.
 - Extracting a layer into its own crate happens only after its imports satisfy
   these rules; then the extraction moves files and changes no imports.
 

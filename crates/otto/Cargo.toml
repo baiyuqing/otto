@@ -20,7 +20,7 @@ fault-injection = []
 test-support = ["fault-injection"]
 
 [dependencies]
-# Static shell analysis for approval rules and review facts (`tool::shell`).
+# Static shell analysis for approval rules and review facts (`approval::shell`).
 # Native-only C grammar; otto-core must stay wasm32-buildable.
 tree-sitter = "=0.27.1"
 tree-sitter-bash = "=0.25.1"

@@ -2,7 +2,7 @@
 use crate::hex::to_hex;
 use crate::{
     sandbox::{CommandExecutor, Request, Streams},
-    tool::workspace::Workspace,
+    workspace::confined::Workspace,
 };
 use otto_core::{
     agent::hooks::{Decision, Hooks, Response},

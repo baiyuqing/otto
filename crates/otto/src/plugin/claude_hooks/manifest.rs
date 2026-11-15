@@ -4,7 +4,7 @@
 use super::{
     ClaudeHook, MAX_TIMEOUT_SECONDS, default_timeout_seconds, matcher::Matcher, otto_event,
 };
-use crate::tool::root::Root;
+use crate::fsops::root::Root;
 use serde_json::{Map, Value};
 use std::path::{Component, Path};
 

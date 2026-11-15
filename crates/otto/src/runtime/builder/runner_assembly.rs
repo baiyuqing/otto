@@ -36,8 +36,8 @@ impl Builder {
             warnings,
         );
         let output_logs = Arc::clone(resources.output_logs());
-        let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
-        let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        let schedule_origin = Arc::new(crate::session::origin::TurnOrigin::default());
+        let presentation_origin = Arc::new(crate::session::origin::TurnOrigin::default());
         let mut tools = self.builtin_file_tools(max_output);
         tools.push(Box::new(crate::tool::session_info::SessionInfo {
             session_id: session.header().id,
@@ -333,7 +333,7 @@ impl Builder {
         }
         mark_build_trace(&mut trace, "runner/subagents");
 
-        let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        let task_control = Arc::new(crate::runtime::task_control::TaskControl::default());
         if let Some(journal) = self.session_journal(session, "inputs.json", warnings) {
             // Local TUI intent lives in the session submission journal. Process-loss
             // guidance is uncertain and must be recovered explicitly, never replayed.
@@ -384,10 +384,12 @@ impl Builder {
                 },
                 session.handle().clone(),
             ));
-            tools.push(Box::new(crate::tool::task_control::TaskQueue::new(
-                Arc::clone(&task_control),
-                &redaction_values,
-            )));
+            tools.push(Box::new(
+                crate::runtime::task_control::tools::TaskQueue::new(
+                    Arc::clone(&task_control),
+                    &redaction_values,
+                ),
+            ));
             // Parent-only: a child's plan would be shown nowhere.
             tools.push(Box::new(crate::tool::plan::UpdatePlan::new(
                 Arc::new(session.clone()),
@@ -408,7 +410,7 @@ impl Builder {
                             as Arc<dyn otto_core::mailbox::Mailbox>),
                     );
                 }
-                let parent = crate::tool::workflow::Parent::new(
+                let parent = crate::workflow::tool::Parent::new(
                     controller,
                     session.header().id.clone(),
                     !self.no_session,

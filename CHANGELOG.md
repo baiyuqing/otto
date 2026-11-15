@@ -39,6 +39,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Removed
 
+- `otto-core` is no longer built or tested for `wasm32-unknown-unknown`: the
+  wasm32 toolchain target, `make rust-wasm-check`, `make rust-wasm-test`, the
+  `wasm-bindgen-test` dev-dependency and the wasm32 `cfg` variants (non-`Send`
+  sinks and futures, `async_trait(?Send)`) are removed. `otto-core` stays
+  I/O-free; `tests/io_boundary.rs` enforces that.
 - `otto serve --acp-listen` and `OTTO_ACP_TOKEN`. The loopback ACP TCP
   transport sent its token to whatever process held the port. Reach a running
   `otto serve` with `otto acp --attach` over its Unix socket, for example

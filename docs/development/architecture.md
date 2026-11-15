@@ -5,7 +5,7 @@
 ## Package boundaries
 
 - `otto-core` owns portable contracts, formats and the agent loop. It must
-  remain WASM-safe and I/O-free: no filesystem, network, process, environment,
+  remain I/O-free: no filesystem, network, process, environment,
   stdio or wall-clock access. Provider-specific wire types stay in
   `openaicompat` and `openairesponses`, behind the neutral provider contract.
 - `otto` is a library. It owns native I/O, tools, sandboxing, storage,

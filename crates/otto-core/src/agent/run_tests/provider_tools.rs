@@ -4,8 +4,7 @@ use super::*;
 
 // -- provider contract -----------------------------------------------------
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn text_deltas_and_usage_reach_the_event_sink() {
     let mut turn = Turn::text("hi");
     turn.events = vec![
@@ -77,8 +76,7 @@ async fn text_deltas_and_usage_reach_the_event_sink() {
     assert_eq!(status, crate::agent::ApiStatus::Ok);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_response_without_usage_still_emits_the_event_marked_absent() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("hi")]),
@@ -104,8 +102,7 @@ async fn a_response_without_usage_still_emits_the_event_marked_absent() {
     }));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_negative_usage_count_is_rejected() {
     let mut turn = Turn::text("hi");
     if let Ok(response) = &mut turn.outcome {
@@ -132,8 +129,7 @@ async fn a_negative_usage_count_is_rejected() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_thinking_setting_is_sent_to_the_provider() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("hi")]),
@@ -151,8 +147,7 @@ async fn the_thinking_setting_is_sent_to_the_provider() {
     assert_eq!(agent.provider().requests()[0].thinking, "high");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_provider_failure_ends_the_run_and_is_reported_once() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::failure("upstream refused")]),
@@ -214,8 +209,7 @@ pub(super) fn two_tool_calls() -> Turn {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn several_tool_calls_run_in_order_and_emit_paired_events() {
     let agent = Agent::new(
         FakeProvider::new(vec![two_tool_calls(), Turn::text("done")]),
@@ -256,8 +250,7 @@ async fn several_tool_calls_run_in_order_and_emit_paired_events() {
     assert_eq!(results, [r#"{"value":1}"#, r#"{"value":2}"#]);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_unknown_tool_is_persisted_as_an_error_result() {
     let unknown = Turn {
         events: Vec::new(),
@@ -297,8 +290,7 @@ async fn an_unknown_tool_is_persisted_as_an_error_result() {
     assert!(result.blocks[0].text.contains("missing"));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn cancellation_persists_the_first_result_and_skips_the_rest() {
     let cancel = CancellationToken::new();
     let child = cancel.clone();
@@ -335,8 +327,7 @@ pub(super) struct CancellingExecutor {
     pub(super) cancel: CancellationToken,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for CancellingExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()

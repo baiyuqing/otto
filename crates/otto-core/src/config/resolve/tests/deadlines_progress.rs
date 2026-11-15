@@ -2,8 +2,7 @@
 
 use super::*;
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn resolves_deadline_defaults_and_explicit_values() {
     let file = file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
     let runtime = resolve(
@@ -47,8 +46,7 @@ fn resolves_deadline_defaults_and_explicit_values() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn resolves_progress_defaults_and_explicit_values() {
     let file = file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
     let runtime = resolve(
@@ -85,8 +83,7 @@ fn resolves_progress_defaults_and_explicit_values() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn progress_defaults_match_the_agents_own_defaults() {
     assert_eq!(
         ProgressRuntime::default().repeated_calls,
@@ -98,8 +95,7 @@ fn progress_defaults_match_the_agents_own_defaults() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_out_of_range_progress_limits() {
     for (field, values) in [
         ("no_progress_repeats", [-1_i64, 1001]),
@@ -131,8 +127,7 @@ fn rejects_out_of_range_progress_limits() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn deadline_defaults_match_the_public_contract() {
     assert_eq!(
         ResilienceRuntime::default(),
@@ -149,8 +144,7 @@ fn deadline_defaults_match_the_public_contract() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn resolves_unattended_turn_timeout() {
     let resolve_with = |value: Option<&str>| {
         let mut file = file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
@@ -182,8 +176,7 @@ fn resolves_unattended_turn_timeout() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_invalid_deadline_durations() {
     let fields = [
         "turn_timeout",
@@ -221,8 +214,7 @@ fn rejects_invalid_deadline_durations() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_invalid_shell_timeout() {
     for timeout in ["not-a-duration", "0s", "-1s"] {
         let mut file = file_with_profiles(
@@ -258,8 +250,7 @@ fn rejects_invalid_shell_timeout() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_base_urls_rejected_by_openai_client() {
     for base_url in [
         "https://example.com/v1?tenant=x",
@@ -292,8 +283,7 @@ fn rejects_base_urls_rejected_by_openai_client() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn normalizes_base_url_like_openai_client() {
     let file = file_with_profiles(
         "",

@@ -20,9 +20,8 @@ unsafe_code = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
-# Exact versions. otto-core must stay buildable for wasm32-unknown-unknown, so
-# every dependency it takes is default-features = false unless a feature is
-# required by name.
+# Exact versions. Every dependency is default-features = false unless a
+# feature is required by name.
 [workspace.dependencies]
 # Native plugin computation only; Lua 5.4 is statically vendored (MIT).
 mlua = { version = "=0.12.2", default-features = false, features = ["lua54", "vendored", "serialize", "send"] }
@@ -33,7 +32,6 @@ serde_json = { version = "=1.0.154", default-features = false, features = ["std"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", default-features = false }
 tokio-util = { version = "=0.7.20", default-features = false }
-wasm-bindgen-test = "=0.3.80"
 regex = "=1.13.1"
 # Substring search for the egress secret scan; already in the lockfile through regex.
 memchr = { version = "=2.8.3", default-features = false, features = ["std"] }

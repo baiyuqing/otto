@@ -1,7 +1,6 @@
 //! Server-sent-event assembler for a Responses API response stream.
 //!
-//! The assembler is push-based, so it depends on no I/O trait and builds for
-//! `wasm32-unknown-unknown`. The caller feeds response bytes to
+//! The assembler is push-based, so it depends on no I/O trait. The caller feeds response bytes to
 //! [`StreamAssembler::push`] in whatever sizes the transport delivers and calls
 //! [`StreamAssembler::finish`] at end of body. Line assembly spans pushes, so
 //! the result does not depend on where the chunk boundaries fall.

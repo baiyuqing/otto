@@ -81,8 +81,7 @@ mod tests {
         env
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn defaults_to_home_and_workspace_dot_otto_agents() {
         let runtime = resolve_agents(&File::default(), &env("/home/u"), "/work").expect("resolve");
         assert!(runtime.enabled);
@@ -93,8 +92,7 @@ mod tests {
         assert_eq!(runtime.max_parallel, DEFAULT_AGENTS_MAX_PARALLEL);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn disabled_yields_no_roots_but_keeps_max_parallel() {
         let mut file = File::default();
         file.agents.enabled = Some(false);
@@ -104,8 +102,7 @@ mod tests {
         assert_eq!(runtime.max_parallel, DEFAULT_AGENTS_MAX_PARALLEL);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn explicit_empty_paths_means_no_roots() {
         let mut file = File::default();
         file.agents.paths = Some(Vec::new());
@@ -114,8 +111,7 @@ mod tests {
         assert!(runtime.roots.is_empty());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn expands_home_relative_and_absolute_paths() {
         let mut file = File::default();
         file.agents.paths = Some(vec![
@@ -134,8 +130,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn skips_home_tilde_without_home() {
         let mut file = File::default();
         file.agents.paths = Some(vec![
@@ -147,8 +142,7 @@ mod tests {
         assert_eq!(runtime.roots, vec!["/work/relative/agents-b"]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn max_parallel_boundaries_accepted() {
         for value in [1_i64, 16] {
             let mut file = File::default();
@@ -158,8 +152,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn max_parallel_out_of_range_rejected() {
         for value in [0_i64, 17] {
             let mut file = File::default();
@@ -168,8 +161,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn max_parallel_error_message_names_the_allowed_range() {
         let mut file = File::default();
         file.agents.max_parallel = Some(0);
@@ -180,8 +172,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn max_parallel_rejected_even_when_disabled() {
         let mut file = File::default();
         file.agents.enabled = Some(false);

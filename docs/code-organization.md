@@ -51,7 +51,7 @@ crates/otto: app, native services, TUI, embed
  crates/otto-core: I/O-free contracts, formats and agent loop
               ▲
               │
-otto-plus (separate repository): browser UI and WASM bindings
+otto-plus (separate repository): browser UI
               ▲
               │
         React/TypeScript browser client
@@ -65,8 +65,7 @@ the sandbox, startup composition and frontends. A domain service stays in
 `otto` even where a part of it performs no I/O. `otto` imports core items as
 `otto_core::...` and does not re-export them. The
 [otto-core rules](../crates/otto-core/AGENTS.md) state the rule and the source
-guards that check it; `otto-core` also remains buildable for
-`wasm32-unknown-unknown`.
+guards that check it.
 
 ### `crates/otto-core`: I/O-free contracts, formats and agent loop
 
@@ -81,7 +80,7 @@ modules are:
 - `tool`: model-visible tool definitions and schema assembly.
 - `session`: Pi v3 session codec, compaction, and context association types.
 - `agent`: provider/tool turn orchestration and emitted events.
-- `mailbox`: WASM-safe FIFO notification contract, delivery acknowledgement semantics, and the default in-memory adapter. Native runtime code composes persistence or external implementations.
+- `mailbox`: I/O-free FIFO notification contract, delivery acknowledgement semantics, and the default in-memory adapter. Native runtime code composes persistence or external implementations.
 - `memory`: service-neutral capabilities, scoped requests, context projections,
   prepared changes and receipts; native `memory::client::Client` admits calls,
   and `memory::adapter::BuiltinAdapter` projects the existing domain service.
@@ -322,8 +321,9 @@ coordinate. Direction changes, keys, paste, and drag start/end retain exact orde
 ### Browser and chat clients
 
 - [otto-plus](https://github.com/baiyuqing/otto-plus) owns the browser UI and
-  thin WASM bindings. It consumes `otto-core` at a pinned revision and calls
-  Otto HTTP APIs; Otto does not depend on it.
+  WASM bindings over `otto-core` at a pinned revision, and calls Otto HTTP
+  APIs; Otto does not depend on it. Since 2026-11-15 `otto-core` is not
+  built or tested for `wasm32-unknown-unknown`.
 - `chat-connector/` does not link Otto code. It starts `otto acp` over stdio,
   either a local agent or `otto acp --attach` to reach `otto serve` through its
   Unix socket. Both use ACP v1; see [ACP guide](manual/servers-and-connectors.md#acp-agent-server).
@@ -333,7 +333,7 @@ coordinate. Direction changes, keys, paste, and drag start/end retain exact orde
 | If you are changing… | Start with… | Then check… |
 | --- | --- | --- |
 | A CLI command, flag, REPL command, or process lifecycle behavior | `crates/otto-cli/src/` | `app/` and the relevant frontend tests |
-| Shared agent turn behavior, messages, tool schemas, or session encoding | `crates/otto-core/src/agent/`, `model.rs`, `tool.rs`, or `session/` | Native callers and WASM compatibility |
+| Shared agent turn behavior, messages, tool schemas, or session encoding | `crates/otto-core/src/agent/`, `model.rs`, `tool.rs`, or `session/` | Native callers |
 | Provider HTTP behavior | `crates/otto/src/provider/` | The matching wire module in `otto-core` |
 | Shared approvals and model-initiated consent | `approval/`, `otto-core/src/approval.rs`, `tool/approval.rs` | Domain adapters, TUI, HTTP, ACP and chat connector |
 | Agent self-help and pending approval dialogue | `tool/otto.rs`, `app/approval_control.rs` | `runtime/builder.rs`, ACP, HTTP, chat and TUI input paths |

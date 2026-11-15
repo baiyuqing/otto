@@ -2,8 +2,7 @@
 
 use super::*;
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn session_defaults_win_over_default_profile() {
     let file = file_with_profiles(
         "configured",
@@ -32,8 +31,7 @@ fn session_defaults_win_over_default_profile() {
     assert_eq!(runtime.base_url, "https://config.example/v1");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_applies_defaults_and_explicit_auto() {
     let mut file = compaction_test_file("gpt-5.6-sol");
     let runtime = resolve(
@@ -73,8 +71,7 @@ fn compaction_applies_defaults_and_explicit_auto() {
     assert!(!runtime.compaction.auto);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_rejects_non_positive_targets_before_api_key_resolution() {
     let cases: &[(Compaction, &str)] = &[
         (
@@ -124,8 +121,7 @@ fn compaction_rejects_non_positive_targets_before_api_key_resolution() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_applies_model_table_windows_over_catalog_windows() {
     let mut file = compaction_test_file("gpt-5.6-sol");
     set_windows(&mut file, Some(131_072), Some(100_000));
@@ -155,8 +151,7 @@ fn compaction_applies_model_table_windows_over_catalog_windows() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_context_override_replaces_catalog_windows() {
     let mut file = compaction_test_file("gpt-5.6-sol");
     set_windows(&mut file, Some(65_536), None);
@@ -177,8 +172,7 @@ fn compaction_context_override_replaces_catalog_windows() {
     assert_eq!(runtime.compaction.max_output_tokens, 128_000);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_rejects_invalid_profile_windows() {
     let cases: &[(Option<i64>, Option<i64>, &str)] = &[
         (Some(0), None, "context_window"),
@@ -208,8 +202,7 @@ fn compaction_rejects_invalid_profile_windows() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_adjusts_targets_for_small_windows() {
     for (window, reserve, keep) in [(4_096_i64, 1_024_i64, 1_536_i64), (8_192, 2_048, 3_072)] {
         let mut file = compaction_test_file("private-model");
@@ -235,8 +228,7 @@ fn compaction_adjusts_targets_for_small_windows() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_unknown_model_preserves_configured_targets() {
     let mut file = compaction_test_file("private-model");
     file.agent.compaction.reserve_tokens = Some(99_999);
@@ -262,8 +254,7 @@ fn compaction_unknown_model_preserves_configured_targets() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn applies_agent_defaults() {
     let file = file_with_profiles(
         "",

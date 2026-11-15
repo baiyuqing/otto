@@ -213,8 +213,7 @@ mod tests {
         parse(text).expect_err("must be rejected").to_string()
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn builtin_providers_need_no_table_and_accept_models_and_overrides() {
         let file = parse(
             r#"default_model = "chatgpt/gpt-5.6-luna"
@@ -244,8 +243,7 @@ compaction_window = 100000
         assert!(file.provider_entry("deepseek").is_none());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn custom_provider_with_models_parses() {
         let file = parse(
             r#"[providers.deepseek]
@@ -262,8 +260,7 @@ thinking = "high"
         assert_eq!(provider.models["deepseek-chat"].thinking, "high");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn validation_errors_name_the_table_and_field() {
         let cases = [
             (
@@ -309,8 +306,7 @@ thinking = "high"
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn unknown_provider_and_model_fields_are_rejected() {
         assert!(parse_error("[providers.chatgpt]\napi_key = \"secret\"\n").contains("unknown"));
         assert!(

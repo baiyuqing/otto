@@ -132,8 +132,7 @@ reasoning or when the sources disagree.
   to satisfy a generic layout rule.
 - Follow the repository's exact dependency pins and workspace dependency declarations.
   Review license, build, binary-size, and supply-chain cost before adding a crate.
-- Features are additive and named for the capability they enable. Preserve WASM
-  compatibility for `otto-core`.
+- Features are additive and named for the capability they enable.
 - Keep code within repository file-size and naming limits; split by domain before a file
   crosses the limit.
 

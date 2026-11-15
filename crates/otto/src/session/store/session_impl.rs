@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[async_trait::async_trait]
 impl Session for Store {
     fn session_id(&self) -> Option<String> {
         Some(self.header().id)

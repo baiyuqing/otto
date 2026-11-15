@@ -37,8 +37,7 @@ fn resolve_with(
     resolve(&two_providers(), env, &session, &overrides)
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn default_model_selects_provider_connection_and_model_thinking() {
     let runtime =
         resolve_with(&keys(), SessionDefaults::default(), Overrides::default()).expect("resolve");
@@ -51,8 +50,7 @@ fn default_model_selects_provider_connection_and_model_thinking() {
     assert_eq!(runtime.thinking, "low");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn same_model_id_under_two_providers_resolves_two_connections() {
     let runtime = resolve_with(
         &keys(),
@@ -68,8 +66,7 @@ fn same_model_id_under_two_providers_resolves_two_connections() {
     assert_eq!(runtime.thinking, "");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn model_id_may_contain_slashes() {
     let runtime = resolve_with(
         &keys(),
@@ -84,8 +81,7 @@ fn model_id_may_contain_slashes() {
     assert_eq!(runtime.model, "vendor/with-slash");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn precedence_is_cli_then_environment_then_session_then_default_model() {
     let file = two_providers();
     let session = SessionDefaults {
@@ -119,8 +115,7 @@ fn precedence_is_cli_then_environment_then_session_then_default_model() {
     assert_eq!(runtime.model_selector.to_string(), "alpha/shared");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn deprecated_provider_and_model_pairs_form_a_selector() {
     let runtime = resolve_with(
         &keys(),
@@ -143,8 +138,7 @@ fn deprecated_provider_and_model_pairs_form_a_selector() {
     assert_eq!(runtime.model_selector.to_string(), "beta/shared");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn bare_model_id_and_lone_provider_are_errors_with_a_hint() {
     let bare = resolve_with(
         &keys(),
@@ -175,8 +169,7 @@ fn bare_model_id_and_lone_provider_are_errors_with_a_hint() {
     assert!(lone_env.contains("OTTO_PROVIDER"), "{lone_env}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn unknown_provider_is_an_error() {
     let error = resolve_with(
         &keys(),
@@ -191,8 +184,7 @@ fn unknown_provider_is_an_error() {
     assert!(error.contains("unknown provider \"gamma\""), "{error}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn missing_model_is_an_error() {
     let error = resolve(
         &File::default(),
@@ -205,8 +197,7 @@ fn missing_model_is_an_error() {
     assert!(error.contains("missing model"), "{error}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn old_session_uses_default_model_provider_of_the_same_type_else_builtin() {
     let session = |provider: &str| SessionDefaults {
         provider: provider.into(),
@@ -220,8 +211,7 @@ fn old_session_uses_default_model_provider_of_the_same_type_else_builtin() {
     assert_eq!(runtime.model_selector.to_string(), "chatgpt/old-model");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn model_without_a_table_uses_builtin_provider_defaults() {
     let runtime = resolve(
         &File::default(),
@@ -239,8 +229,7 @@ fn model_without_a_table_uses_builtin_provider_defaults() {
     assert_eq!(runtime.api_key, "");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn cli_thinking_wins_over_model_thinking() {
     let runtime = resolve_with(
         &keys(),
@@ -254,8 +243,7 @@ fn cli_thinking_wins_over_model_thinking() {
     assert_eq!(runtime.thinking, "max");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn missing_named_api_key_environment_variable_still_resolves_the_model() {
     let runtime = resolve_with(
         &HashMap::new(),
@@ -268,8 +256,7 @@ fn missing_named_api_key_environment_variable_still_resolves_the_model() {
     assert!(runtime.api_key.is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn a_missing_key_is_not_a_policy_violating_credential_binding() {
     let mut file = two_providers();
     file.policy = Some(crate::config::layered::ManagedPolicy {
@@ -299,8 +286,7 @@ fn a_missing_key_is_not_a_policy_violating_credential_binding() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn otto_api_key_is_the_fallback_when_no_key_variable_is_named() {
     let file = crate::config::parse(
         r#"default_model = "local/m"

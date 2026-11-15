@@ -10,12 +10,12 @@
 //! one provider, so the authorize-URL and token-exchange helpers here are
 //! generic over `client_id` and the discovered endpoints.
 //!
-//! Ownership: one [`TokenStore`] per server, held behind `Arc` by the
-//! server's [`super::http::HttpTransport`]. `bearer` and `refresh` take
+//! Ownership: one `TokenStore` per server, held behind `Arc` by the
+//! server's `super::http::HttpTransport`. `bearer` and `refresh` take
 //! `&self`; the cached token is behind a `std::sync::Mutex` held only for the
 //! duration of a read or write, never across an `.await`. Errors: every
 //! failure collapses to a fieldless [`McpLoginError`] (for `login`/`logout`)
-//! or [`super::CallError`] (for [`BearerSource`]); no token, code, or
+//! or [`super::CallError`] (for `BearerSource`); no token, code, or
 //! endpoint response body is ever formatted into one.
 
 use std::path::{Path, PathBuf};

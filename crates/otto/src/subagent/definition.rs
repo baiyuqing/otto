@@ -9,7 +9,7 @@
 //! [`Catalog::discover`] returns. Concurrency: nothing here holds shared
 //! mutable state.
 //!
-//! Security: every read goes through [`crate::fsops::root::Root`], so an
+//! Security: every read goes through `crate::fsops::root::Root`, so an
 //! `AGENT.md` symbolic link pointing outside its definition directory is
 //! skipped rather than followed. A definition is untrusted text; its `tools`
 //! list can only narrow the child tool set the runner already built, never
@@ -54,7 +54,7 @@ pub struct Definition {
     pub directory: PathBuf,
     /// The absolute path of `AGENT.md`.
     pub path: PathBuf,
-    /// Set only by [`from_skill`]: this definition came from a skill's
+    /// Set only by `from_skill`: this definition came from a skill's
     /// `SKILL.md`, not a real `AGENT.md`. The automatic contract check
     /// (`crate::skill::check`) triggers only for these.
     pub is_skill_derived: bool,

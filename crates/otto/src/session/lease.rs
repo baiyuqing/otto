@@ -11,13 +11,13 @@
 //! and, once an epoch has been taken over from a holder that had not
 //! released it, one `fenced-<n>.jsonl` per taken-over epoch: that epoch's
 //! session log, moved aside so the new epoch starts from a log holding only
-//! complete records (see [`acquire_with`]). The liveness decision itself
+//! complete records (see `acquire_with`). The liveness decision itself
 //! compares raw heartbeat bytes across a poll window, so no cross-host
 //! clock or process ever has to agree with another on wall-clock time;
 //! heartbeat JSON is parsed to read `released`, to report the current
 //! holder's host and pid, and for one shortcut: an unreleased holder whose
 //! heartbeat names this host's name and machine id (see
-//! [`local_machine_id`]) and whose recorded pid and start time no longer
+//! `local_machine_id`) and whose recorded pid and start time no longer
 //! name a running process is taken over without the wait. The machine id
 //! must be non-empty on both sides; an unknown or unequal machine id, or a
 //! process that cannot be classified, keeps the wait.
@@ -26,7 +26,7 @@
 //! for its entire lifetime, so a later rename of `<id>.lease/` does not
 //! break renewal or release. Concurrency: [`Lease::acquire`] blocks the
 //! calling thread while it polls; once acquired, one process-wide
-//! [`Keeper`] renews and watches every held lease on its own threads.
+//! `Keeper` renews and watches every held lease on its own threads.
 //! `write_lock` serializes heartbeat writes between that renewal thread and
 //! an explicit [`Lease::release`] call. Errors: [`AcquireError`] reports
 //! why acquisition failed; [`Lease::check`] reports whether the lease has
@@ -444,7 +444,7 @@ impl std::fmt::Debug for Lease {
 }
 
 impl Lease {
-    /// [`Lease::acquire_with_keeper`] with a keeper from [`new_keeper`]. Runtime
+    /// `Lease::acquire_with_keeper` with a keeper from `new_keeper`. Runtime
     /// repositories reuse their composed keeper instead.
     pub fn acquire(path: &Path) -> Result<(Arc<Lease>, Acquired), AcquireError> {
         Self::acquire_with_keeper(path, &new_keeper())
@@ -483,7 +483,7 @@ impl Lease {
     /// session may have moved to another host.
     ///
     /// Evaluates the same two conditions the watchdog fences on --
-    /// [`Lease::should_fence`] -- itself, rather than only trusting the
+    /// `Lease::should_fence` -- itself, rather than only trusting the
     /// `fenced` flag the watchdog sets: a caller between renewal thread
     /// ticks must see a lease it can no longer trust before that thread
     /// gets to it.

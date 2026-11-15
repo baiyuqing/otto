@@ -185,7 +185,7 @@ pub struct Outbound {
 }
 
 /// One JSON-RPC transport. Two implementations: [`stdio::StdioTransport`]
-/// and [`http::HttpTransport`].
+/// and `http::HttpTransport`.
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
     /// Sends a request and waits for its response. `Ok(Err(..))` is a JSON-RPC

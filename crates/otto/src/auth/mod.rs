@@ -3,7 +3,7 @@
 //! The credential file at `~/.otto/auth/chatgpt.json` keeps the byte layout the
 //! previously released binary wrote, so an existing file still loads:
 //! `encoding/json`'s `MarshalIndent(c, "", " ")` field order and two-space
-//! indent, and `time.RFC3339Nano` for the expiry (see [`go_time`]).
+//! indent, and `time.RFC3339Nano` for the expiry (see `go_time`).
 //!
 //! Every error is a fieldless [`AuthError`] variant. The cause is dropped
 //! rather than wrapped, so no token, path, or upstream message can reach a log

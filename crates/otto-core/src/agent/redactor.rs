@@ -260,7 +260,7 @@ impl Redactor {
     /// the re-encoded result.
     ///
     /// `raw` is JSON text; it does not have to be valid. Anything that fails
-    /// to parse, nests deeper than [`MAXIMUM_JSON_DEPTH`], or carries trailing
+    /// to parse, nests deeper than `MAXIMUM_JSON_DEPTH`, or carries trailing
     /// content becomes the literal `null`. Object members whose keys collide
     /// after redaction lose their values to `null` rather than letting the
     /// caller pick an attacker-controlled winner. Number literals are copied

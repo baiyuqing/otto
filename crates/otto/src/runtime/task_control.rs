@@ -43,7 +43,7 @@ pub(crate) struct Followup {
 
 /// Shared control state for one runner. Undelivered follow-ups exist only for
 /// the logical turn that accepted them; with a journal
-/// ([`TaskControl::set_followup_journal`]) they also survive process loss for
+/// (`TaskControl::set_followup_journal`) they also survive process loss for
 /// that turn's automatic resume.
 #[derive(Default)]
 pub struct TaskControl {

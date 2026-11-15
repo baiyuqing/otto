@@ -6,7 +6,7 @@
 //!
 //! Fail-closed is the rule. Every failure path produces an unavailable runtime
 //! with no executor and no environment rather than a usable one with a warning,
-//! and [`normalize_sandbox_runtime`] re-checks that invariant so a runtime can
+//! and `normalize_sandbox_runtime` re-checks that invariant so a runtime can
 //! never claim `bash` it cannot actually run safely.
 //!
 //! ponytail: there is no dependency-injection struct for the driver. The tests
@@ -73,7 +73,7 @@ enum Closer {
 /// The outcome of one sandbox open.
 ///
 /// `executor` and `environment` are both `Some` exactly when
-/// `info.bash_available` is true; [`normalize_sandbox_runtime`] enforces it.
+/// `info.bash_available` is true; `normalize_sandbox_runtime` enforces it.
 pub struct SandboxRuntime {
     pub executor: Option<Arc<Executor>>,
     pub environment: Option<Vec<String>>,

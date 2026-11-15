@@ -4,7 +4,7 @@
 //! tool or any other non-human writer) and `/memory review <id> accept|reject`
 //! decides one. Like `/memory forget`, it is a human command.
 //!
-//! [`repl_memory_command`] and [`repl_remember_command`] are free functions,
+//! `repl_memory_command` and `repl_remember_command` are free functions,
 //! not [`Repl`] methods, so `tui::app`'s `/memory`/`/remember` dispatch can
 //! call them directly against its own captured-output buffers; [`Repl`]'s own
 //! `memory_command`/`remember_command` are thin wrappers over the same two

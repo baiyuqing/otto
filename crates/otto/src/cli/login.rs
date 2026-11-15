@@ -69,7 +69,7 @@ fn launch_browser(url: &str) {
 }
 
 /// The writer the opener shares with its caller. A plain `&mut` cannot cross
-/// the `Send + Sync` bound on [`Opener`], and the lock is only ever held
+/// the `Send + Sync` bound on `Opener`, and the lock is only ever held
 /// inside the synchronous closure body, never across an await point.
 ///
 /// Public so `repl_commands.rs`'s `/mcp login` and `otto mcp login` reuse the same

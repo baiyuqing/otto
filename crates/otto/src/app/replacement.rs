@@ -84,7 +84,7 @@ impl Controller {
     // ---- the `otto serve` factories ----
 
     /// A controller over a brand new session. There is nothing to replace, so
-    /// the built session and runner become the controller's first [`Current`]
+    /// the built session and runner become the controller's first `Current`
     /// directly.
     ///
     /// The caller has already confirmed the redaction boundary is open, so

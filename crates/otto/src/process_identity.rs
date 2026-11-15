@@ -30,8 +30,8 @@ pub(crate) fn process_matches(pid: i64, started: &str) -> Option<bool> {
     }
 }
 
-/// The current process's pid and start time, for [`TaskContext::pid`] and
-/// [`TaskContext::process_started_at`].
+/// The current process's pid and start time, for [`crate::subagent::record::TaskContext::pid`] and
+/// [`crate::subagent::record::TaskContext::process_started_at`].
 pub fn current_process() -> (i64, String) {
     let pid = std::process::id();
     // ponytail: when the platform cannot report a start time (see

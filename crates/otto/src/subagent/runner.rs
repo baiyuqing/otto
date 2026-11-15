@@ -10,7 +10,7 @@
 //! Concurrency and cancellation: every child runs in its own Tokio task,
 //! admitted by a semaphore that caps [`Config::max_parallel`] concurrent
 //! children. The semaphore belongs to the session's [`Tasks`]
-//! ([`Tasks::child_slots`]), so runners rebuilt on one session share the cap.
+//! (`Tasks::child_slots`), so runners rebuilt on one session share the cap.
 //! Each task's [`CancellationToken`] is held by the registry, so
 //! cancelling it either releases a queued child before it starts or stops a
 //! running one mid-turn. [`Runner::start`] itself never blocks.
@@ -27,10 +27,10 @@
 //! - [`Options`] holds boxed closures and is not `Clone`, so
 //!   [`OptionsTemplate`] carries the copyable settings plus the shared clock
 //!   and id generator, and each child builds its own `Options` from it.
-//! - The provider sits behind [`SharedProvider`], because [`Agent`] owns its
+//! - The provider sits behind `SharedProvider`, because [`Agent`] owns its
 //!   provider.
 //! - [`Registry`] owns boxed tools and cannot be subset, so a child gets a
-//!   [`ChildTools`] view over one shared child registry plus an allowlist.
+//!   `ChildTools` view over one shared child registry plus an allowlist.
 //! - A persisted child transcript is named after its task id, which exists
 //!   only after `Tasks::add`, so the transcript is chosen after the task is
 //!   added and the registry's history hook reads it through a `OnceLock`. A
@@ -235,7 +235,7 @@ pub struct Config {
     /// write; returns `None` while that is still the case. `None` (the field
     /// itself) disables `Runner::resume`.
     pub children_dir: Option<Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>>,
-    /// Queried once per child tool call by the [`failover::CommitGuard`]
+    /// Queried once per child tool call by the `failover::CommitGuard`
     /// installed on the child registry: the lease backing the parent
     /// session, or `None` when it is not lease-managed. `None` (the field
     /// itself) installs no guard, which is what every test config uses.

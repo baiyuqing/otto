@@ -10,12 +10,12 @@
 //! a person still decides.
 //!
 //! Two backends answer through the [`Backend`] contract: the session model
-//! ([`session`] holds its prompt and parser; the backend itself is built at the
-//! composition root) and the auxiliary Jev model ([`jev`]), which is used
+//! ([`crate::decision::session`] holds its prompt and parser; the backend itself is built at the
+//! composition root) and the auxiliary Jev model (`crate::decision::jev`), which is used
 //! when `TYPESAFE_API_KEY` is set. Both are limited to [`TIMEOUT`].
 //!
 //! Order: the proposal is first checked without writing
-//! ([`super::Service::check_proposal`]); a proposal that would be refused
+//! (`super::Service::check_proposal`); a proposal that would be refused
 //! reaches no model. A timeout, an error, or an invalid answer queues the
 //! candidate without advice. Every request is appended to the [`audit`] log.
 //!
@@ -390,7 +390,7 @@ impl Advisor {
     /// valid answer within the limit. Returns one result per request, in
     /// order, exactly as [`Service::propose`] would, or `None` without
     /// queueing anything when `cancel` fires first. Forget requests and
-    /// requests [`Service::check_proposal`] refuses reach no model.
+    /// requests `Service::check_proposal` refuses reach no model.
     pub async fn propose(
         &self,
         service: &Service,

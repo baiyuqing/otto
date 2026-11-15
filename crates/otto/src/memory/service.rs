@@ -17,7 +17,7 @@
 //! - `close` rejects later service operations; each adapter owns its in-flight
 //!   operation lifecycle.
 //! - The synchronous methods cannot be cancelled; only the async
-//!   [`MemoryRecall`] adapter checks a token.
+//!   [`otto_core::agent::memory::MemoryRecall`] adapter checks a token.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

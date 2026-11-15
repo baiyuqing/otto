@@ -2,10 +2,10 @@
 //!
 //! The first time a skill is delegated to as a sub-agent, [`Checker::trigger`]
 //! runs in the background: deterministic rules run first
-//! ([`context_reference_fires`], [`vague_output_fires`]); if none fires,
+//! (`context_reference_fires`, `vague_output_fires`); if none fires,
 //! [`typesafe::Client`] asks four questions about the skill's `SKILL.md`. Every
 //! result is appended to a local SQLite database and never overwritten. Verdicts
-//! ([`hint_for`]) are computed from the stored answers when displayed, not
+//! (`hint_for`) are computed from the stored answers when displayed, not
 //! stored, so a threshold change is visible immediately.
 
 use std::collections::{HashMap, HashSet};

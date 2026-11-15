@@ -7,7 +7,7 @@
 //! - the root is canonicalized once at construction and kept open as a
 //!   directory handle, so renaming or replacing the root directory afterwards
 //!   cannot redirect a tool to another tree;
-//! - relative paths are resolved through that handle ([`super::root::Root`]),
+//! - relative paths are resolved through that handle (`crate::fsops::root::Root`),
 //!   which refuses `..` that leaves the root and refuses absolute symlink
 //!   targets;
 //! - absolute paths, paths containing `..`, and paths crossing a symlink are

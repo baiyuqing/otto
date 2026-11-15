@@ -237,7 +237,7 @@ fn decide_wait(dir: &fsops::Dir, highest: u64, host: &LocalHost) -> std::io::Res
     })
 }
 
-/// A wait that [`acquire_with`] would enter before taking over a lease.
+/// A wait that `acquire_with` would enter before taking over a lease.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaseWait {
     /// The length of the wait, 7`L`/6 in whole seconds.

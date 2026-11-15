@@ -1,8 +1,8 @@
 //! SQLite local I/O through `rusqlite` (bundled SQLite). No Tokio runtime is
 //! created or entered.
 //!
-//! One `rusqlite::Connection` sits behind a mutex in [`ConnectionState`].
-//! Query results stream through [`row_stream::SqliteRows`], which owns a
+//! One `rusqlite::Connection` sits behind a mutex in `ConnectionState`.
+//! Query results stream through `row_stream::SqliteRows`, which owns a
 //! prepared statement and takes that mutex for one `sqlite3_step` at a time,
 //! so other statements can run on the connection while rows are open.
 use crate::storage::{

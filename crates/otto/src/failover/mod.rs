@@ -5,13 +5,13 @@
 //! `crate::session::fsops`'s `openat` primitives. `children` tracks process
 //! ids this process started, so a fenced process can kill them before it
 //! stops. This module also defines
-//! [`CommitGuard`], a `tool::registry::CallGuard` that keeps a
+//! `CommitGuard`, a `tool::registry::CallGuard` that keeps a
 //! lease-managed session's on-disk state ahead of a tool result reaching
 //! the session log: it refuses a call when the lease has been lost, and
 //! syncs the workspace to disk once a call finishes, unless the tool
 //! declares `RetrySafety::ReadOnly`.
 //!
-//! Ownership: `CommitGuard` holds a [`LeaseSource`] closure rather than a
+//! Ownership: `CommitGuard` holds a `LeaseSource` closure rather than a
 //! lease directly, and re-reads the current lease at call time, since the
 //! lease backing a session can be acquired, released, or lost
 //! independently of the guard's own lifetime. Concurrency: `before`/`after`

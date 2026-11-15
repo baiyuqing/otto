@@ -9,7 +9,7 @@
 //! I/O after [`Catalog::discover`] returns, so it is safe to share across
 //! tasks. Concurrency: every function here is free of shared mutable state.
 //!
-//! Security: every read goes through [`crate::fsops::root::Root`], which pins an
+//! Security: every read goes through `crate::fsops::root::Root`, which pins an
 //! open directory file descriptor and resolves each component beneath it, so a
 //! path that escapes the skill directory is rejected after canonical-path and
 //! symlink validation rather than followed. Skill content is untrusted text: it

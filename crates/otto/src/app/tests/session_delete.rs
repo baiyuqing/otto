@@ -169,7 +169,7 @@ async fn permanent_delete_current_lease_leaves_no_heartbeat() {
         .unwrap();
     let before = controller.info();
     controller.new_session().await.unwrap();
-    crate::session::lease::create_lease_dir(Path::new(&before.session_path), 30).unwrap();
+    otto_session::lease::create_lease_dir(Path::new(&before.session_path), 30).unwrap();
     controller
         .resume_session(&before.session_path)
         .await

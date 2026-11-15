@@ -101,7 +101,7 @@ impl Updates {
 /// The per-session sub-agent task registry.
 pub struct Tasks {
     state: Mutex<State>,
-    admission_transcript: Option<Arc<dyn crate::session::SessionHandle>>,
+    admission_transcript: Option<Arc<dyn otto_session::SessionHandle>>,
     inbox: Arc<Inbox>,
     /// `inbox` as the port every consumer uses.
     mailbox: Arc<dyn Mailbox>,

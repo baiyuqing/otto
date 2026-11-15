@@ -78,7 +78,7 @@ async fn builtin_file_tools_are_registered_in_a_fixed_order() {
 #[tokio::test]
 async fn with_lease_guard_refuses_a_tool_call_once_the_session_lease_is_lost() {
     let tmp = tempfile::tempdir().expect("tmp");
-    let lease = crate::session::lease::Lease::for_test(tmp.path());
+    let lease = otto_session::lease::Lease::for_test(tmp.path());
     lease.mark_lost_for_test("test fence");
     let header = Header {
         id: "session-1".to_string(),
@@ -89,7 +89,7 @@ async fn with_lease_guard_refuses_a_tool_call_once_the_session_lease_is_lost() {
         ..Header::default()
     };
     let store = Store::create_lazy(tmp.path().join("sessions"), header).expect("store");
-    store.set_lease_check(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>);
+    store.set_lease_check(Arc::clone(&lease) as Arc<dyn otto_session::WriterOwnership>);
     let session = SharedSession::new(Arc::new(store));
 
     let stub = crate::fixtures::subagent_doubles::StubTool::new(

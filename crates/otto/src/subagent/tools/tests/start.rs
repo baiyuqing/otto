@@ -12,7 +12,7 @@ async fn agent_records_the_spawning_tool_call_in_the_child_task_spec() {
     let mut config = test_config(&provider, &tasks, Vec::new());
     config.child_session = Some(Arc::new(move |task_id: &str, _session_id: &str| {
         let name = format!("{task_id}-child");
-        let store = crate::session::Store::create_child_lazy(
+        let store = otto_session::Store::create_child_lazy(
             &parent,
             &name,
             otto_core::session::Header {
@@ -25,7 +25,7 @@ async fn agent_records_the_spawning_tool_call_in_the_child_task_spec() {
             },
         )
         .expect("child store");
-        let path = crate::session::Store::child_path(&parent, &name);
+        let path = otto_session::Store::child_path(&parent, &name);
         Ok(Some((Arc::new(store), path.to_string_lossy().into_owned())))
     }));
     let runner = runner(config);

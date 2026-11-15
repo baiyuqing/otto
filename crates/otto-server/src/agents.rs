@@ -99,7 +99,7 @@ fn task_history(row: &TaskRow) -> Option<Vec<Message>> {
         return None;
     }
 
-    otto::session::Store::read_transcript(canonical_file).ok()
+    otto_session::Store::read_transcript(canonical_file).ok()
 }
 
 pub async fn list(State(server): State<Arc<Server>>, Query(filter): Query<ListFilter>) -> Response {

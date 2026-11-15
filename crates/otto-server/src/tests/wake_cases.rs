@@ -141,8 +141,8 @@ async fn a_recovery_notification_starts_a_wake_turn_while_idle() {
     });
     harness.create().await;
 
-    let takeover = otto::session::Recovery {
-        cause: otto::session::RecoveryCause::TakenOver(otto::session::lease::Holder {
+    let takeover = otto_session::Recovery {
+        cause: otto_session::RecoveryCause::TakenOver(otto_session::lease::Holder {
             epoch: 1,
             host: "stopped-host".to_string(),
             pid: 4242,

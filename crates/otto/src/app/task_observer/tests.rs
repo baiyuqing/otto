@@ -10,7 +10,7 @@ fn read_history(root: &std::path::Path, row: &TaskRow) -> Option<Vec<ObserverEnt
 async fn observer_restart_history_is_read_only_bounded_and_rejects_symlink_escape() {
     let directory = tempfile::tempdir().expect("sessions");
     let parent = directory.path().join("parent.jsonl");
-    let store = crate::session::Store::create_child_lazy(
+    let store = otto_session::Store::create_child_lazy(
         &parent,
         "t1-child",
         Header {
@@ -306,7 +306,7 @@ async fn observer_includes_stored_rows_recorded_without_parent_session_path() {
         )
     };
     assert!(!parent_path.is_empty());
-    let child_store = crate::session::Store::create_child_lazy(
+    let child_store = otto_session::Store::create_child_lazy(
         std::path::Path::new(&parent_path),
         "t1-child",
         Header {

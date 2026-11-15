@@ -5,7 +5,7 @@ use super::*;
 impl Tasks {
     pub(crate) fn with_admission_transcript(
         mut self,
-        transcript: Arc<dyn crate::session::SessionHandle>,
+        transcript: Arc<dyn otto_session::SessionHandle>,
     ) -> Self {
         self.admission_transcript = Some(transcript);
         self
@@ -133,7 +133,7 @@ impl Tasks {
         }
     }
 
-    pub(crate) fn recovery_writer(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+    pub(crate) fn recovery_writer(&self) -> Option<Arc<dyn otto_session::WriterOwnership>> {
         self.admission_transcript
             .as_ref()
             .and_then(|transcript| transcript.lease())

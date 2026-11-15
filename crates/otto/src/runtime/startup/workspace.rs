@@ -51,7 +51,7 @@ pub async fn load_workspace(
         .get(&workspace_path)
         .map(String::as_str)
         .unwrap_or_default();
-    crate::workspace::initialize(canonical_path, memory_override)
+    otto_session::workspace::initialize(canonical_path, memory_override)
         .map_err(|error| error.to_string())?;
     let workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
@@ -268,7 +268,9 @@ pub fn prepare_workspace(
         .get(workspace_path)
         .map(String::as_str)
         .unwrap_or_default();
-    if let Err(error) = crate::workspace::initialize(Path::new(workspace_path), memory_override) {
+    if let Err(error) =
+        otto_session::workspace::initialize(Path::new(workspace_path), memory_override)
+    {
         return Err(startup.redact(&error.to_string()));
     }
     let workspace = match Workspace::new(Path::new(workspace_path)) {

@@ -81,7 +81,7 @@ pub(crate) fn activate(
         // Key from the latest durable lifecycle entry, not process time. Both
         // queued and delivered inbox input ids prevent repeated-open duplicates.
         if child.final_status.is_some()
-            && let Ok((entries, _)) = crate::session::Store::read_entries(&child.path)
+            && let Ok((entries, _)) = otto_session::Store::read_entries(&child.path)
             && let Some(entry) = entries.iter().rev().find(|entry| {
                 entry
                     .custom
@@ -120,7 +120,7 @@ pub(crate) fn activate(
     }
     // Admissions describe the pre-spec window. Never reconstruct executable
     // definitions from these minimal receipts or hide a missing transcript.
-    match crate::session::Store::read_entries(parent) {
+    match otto_session::Store::read_entries(parent) {
         Ok((entries, _)) => {
             for entry in entries {
                 let Some(custom) = entry.custom else {

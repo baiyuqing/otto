@@ -268,7 +268,7 @@ pub(super) fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::
 }
 
 /// Reads the list, applies `change` and writes it back while holding an
-/// exclusive lock on `~/.otto`, the lock `otto::workspace` takes for
+/// exclusive lock on `~/.otto`, the lock `otto_session::workspace` takes for
 /// `workspace.json`. The lock is across processes, so two `otto serve`
 /// processes cannot overwrite each other's change. A currently unparsable
 /// file is treated as an empty list rather than preserved, matching the

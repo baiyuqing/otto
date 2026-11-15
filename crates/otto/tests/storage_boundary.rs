@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 const DOMAIN_MODULES: &[&str] = &[
-    "approval", "memory", "session", "schedule", "workflow", "skill", "usage", "subagent",
+    "approval", "memory", "schedule", "workflow", "skill", "usage", "subagent",
 ];
 const FRONTENDS: &[&str] = &["cli", "tui", "acp", "server", "client"];
 
@@ -235,144 +235,7 @@ fn is_pure_legacy_facade(path: &Path, source: &str) -> bool {
         && !has_sql(&code)
 }
 
-fn associated_calls(source: &str, owner: &str) -> Vec<String> {
-    let mut rest = source;
-    let mut calls = Vec::new();
-    let prefix = format!("{owner}::");
-    while let Some(index) = rest.find(&prefix) {
-        rest = &rest[index + prefix.len()..];
-        let end = rest
-            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-            .unwrap_or(rest.len());
-        if rest[end..].trim_start().starts_with('(') {
-            calls.push(rest[..end].to_owned());
-        }
-        rest = &rest[end..];
-    }
-    calls
-}
-
-fn method_calls(source: &str) -> Vec<String> {
-    let bytes = source.as_bytes();
-    let mut calls = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'.'
-            || index + 1 >= bytes.len()
-            || !bytes[index + 1].is_ascii_alphabetic()
-        {
-            index += 1;
-            continue;
-        }
-        let start = index + 1;
-        index = start + 1;
-        while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-        {
-            index += 1;
-        }
-        let name = &source[start..index];
-        if source[index..].trim_start().starts_with('(') {
-            calls.push(name.to_owned());
-        }
-    }
-    calls
-}
-
-fn session_legacy_violations(source: &str) -> Vec<String> {
-    let source = without_line_comments(&non_test(source));
-    let mut problems = Vec::new();
-    let allowed_functions = [
-        "create",
-        "create_lazy",
-        "create_lazy_with_driver",
-        "create_lazy_with_driver_and_keeper",
-        "create_child_lazy",
-        "create_child_lazy_with_driver",
-        "create_child_lazy_with_driver_and_keeper",
-        "open",
-        "prepare",
-        "prepare_with_driver",
-        "prepare_listed",
-        "prepare_listed_with_driver",
-        "archive",
-    ];
-    let mut rest = source.as_str();
-    while let Some(index) = rest.find("fn ") {
-        rest = &rest[index + 3..];
-        let end = rest
-            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-            .unwrap_or(rest.len());
-        let name = &rest[..end];
-        if !allowed_functions.contains(&name) {
-            problems.push(format!("non-constructor function `{name}`"));
-        }
-        rest = &rest[end..];
-    }
-    if source.contains("::sqlite::") {
-        problems.push("session compatibility facade imports a SQLite repository".into());
-    }
-    if source.contains("otto_storage::drivers::") {
-        problems.push("session compatibility facade imports a storage driver".into());
-    }
-    for forbidden in [
-        "otto_storage::Connection",
-        "otto_storage::Transaction",
-        "otto_storage::params",
-        "otto_storage::drivers::sqlite::",
-        "crate::app::",
-        "crate::runtime::",
-        "crate::cli::",
-        "crate::tui::",
-        "crate::client::",
-    ] {
-        if source.contains(forbidden) {
-            problems.push(format!("forbidden compatibility dependency `{forbidden}`"));
-        }
-    }
-    if has_sql(&source) {
-        problems.push("SQL/schema logic in compatibility constructors".into());
-    }
-    let allowed_self = [
-        "create_lazy",
-        "create_lazy_with_driver",
-        "create_lazy_with_driver_and_keeper",
-        "create_child_lazy_with_driver",
-        "create_child_lazy_with_driver_and_keeper",
-        "prepare_with_driver",
-        "prepare_with_driver_and_keeper",
-        "prepare_listed_with_driver",
-        "prepare_listed_with_driver_and_keeper",
-    ];
-    for call in associated_calls(&source, "Self") {
-        if !allowed_self.contains(&call.as_str()) {
-            problems.push(format!("non-constructor forwarding call `Self::{call}`"));
-        }
-    }
-    if !associated_calls(&source, "Store").is_empty() {
-        problems.push("direct Store operation in compatibility facade".into());
-    }
-    if associated_calls(&source, "Prepared")
-        .iter()
-        .any(|call| call != "prepare")
-    {
-        problems.push("non-constructor Prepared operation in compatibility facade".into());
-    }
-    let allowed_methods = ["as_ref", "lock", "ensure_file", "activate"];
-    for call in method_calls(&source) {
-        if !allowed_methods.contains(&call.as_str()) {
-            problems.push(format!("non-constructor method call `.{call}`"));
-        }
-    }
-    problems
-}
-
 fn domain_violations(path: &Path, source: &str) -> Vec<String> {
-    if path
-        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
-        .is_ok_and(|relative| relative == Path::new("session/legacy.rs"))
-    {
-        return session_legacy_violations(source);
-    }
     let source = non_test(source);
     if is_domain_repository(path) {
         return ["rusqlite::", "libsql::"]
@@ -575,21 +438,6 @@ fn fixtures_prove_forbidden_edges_are_detected() {
         )
         .is_empty()
     );
-    let legacy_session = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/session/legacy.rs");
-    let allowed_constructor = "use super::Store;\nuse \
-        otto_platform::fsops::PosixDriver;\nimpl Store { fn \
-        create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }";
-    assert!(domain_violations(&legacy_session, allowed_constructor).is_empty());
-    let service_call =
-        "use super::Store;\nimpl Store { fn create_lazy() { Store::recover(\"scope\"); } }";
-    assert!(!domain_violations(&legacy_session, service_call).is_empty());
-    let mutating_constructor = "use super::Store;\nimpl Store { fn \
-        create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }\nconst \
-        SQL: &str = \"UPDATE sessions SET status='closed'\";";
-    assert!(!domain_violations(&legacy_session, mutating_constructor).is_empty());
-    let session_backend_import =
-        "use crate::usage::sqlite::Store;\nimpl Store { fn create_lazy() {} }";
-    assert!(!domain_violations(&legacy_session, session_backend_import).is_empty());
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let usage_store = src.join("usage/sqlite.rs");
     let usage_sql = "use otto_storage::drivers::sqlite::SqliteDriver;\nconst SQL: &str = \"SELECT * FROM usage_events\";";

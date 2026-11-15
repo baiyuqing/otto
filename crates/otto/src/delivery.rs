@@ -547,7 +547,7 @@ impl SandboxPreflight {
         request: &Request,
         cancel: &CancellationToken,
     ) -> Result<Preview, String> {
-        let admitted = crate::workspace::admission::admit_workspace(
+        let admitted = otto_session::workspace::admission::admit_workspace(
             &request.target,
             &self.policy.startup,
             &self.policy.roots,

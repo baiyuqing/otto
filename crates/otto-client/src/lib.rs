@@ -40,9 +40,9 @@ use serde_json::{Value, json};
 
 use otto::app::{ActiveInputAdmission, Channel};
 use otto::sandbox::info::{SandboxMode, SandboxNetwork};
-use otto::session::origin::Origin;
 use otto::subagent::record::{ListQuery, ListResult, TaskRow};
 use otto_platform::sse::SseParser;
+use otto_session::origin::Origin;
 
 mod approvals;
 mod mcp;

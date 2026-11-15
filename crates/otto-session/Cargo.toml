@@ -1,0 +1,32 @@
+[package]
+name = "otto-session"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Test-only accessors on the store, for the tests of dependent crates. Off in
+# every shipped build.
+test-support = []
+
+[dependencies]
+otto-core.workspace = true
+otto-platform.workspace = true
+async-trait.workspace = true
+chrono = { workspace = true, features = ["clock", "std"] }
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+otto-faults.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }

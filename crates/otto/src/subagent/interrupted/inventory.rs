@@ -21,14 +21,14 @@ impl std::fmt::Debug for Evidence {
 
 /// Reopen without following links, acquire the write lock, and compare the
 /// descriptor with the exact validated inventory snapshot before any repair.
-pub(crate) fn open_validated(record: &ChildRecord) -> Result<crate::session::Store, String> {
+pub(crate) fn open_validated(record: &ChildRecord) -> Result<otto_session::Store, String> {
     use std::io::SeekFrom;
     let evidence = record
         .evidence
         .as_ref()
         .ok_or("missing pinned recovery evidence")?;
     let prepared =
-        crate::session::Prepared::prepare(&record.path, None).map_err(|error| error.to_string())?;
+        otto_session::Prepared::prepare(&record.path, None).map_err(|error| error.to_string())?;
     let (store, _) = prepared
         .activate_checked(|file, metadata| {
             let changed = || {
@@ -144,7 +144,7 @@ pub fn inventory(parent: &Path) -> Inventory {
             if bytes.len() as u64 > MAX_CHILD_BYTES {
                 return Err("child grew beyond scan limit".into());
             }
-            let (decoded, messages) = crate::session::Store::decode_recovery_bytes(&bytes)
+            let (decoded, messages) = otto_session::Store::decode_recovery_bytes(&bytes)
                 .map_err(|error| error.to_string())?;
             let mut has_spec = false;
             for entry in &decoded.entries {

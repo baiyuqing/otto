@@ -1,14 +1,12 @@
 //! Sandboxed lifecycle hooks and custom tools on installed, content-authorized packages.
-use crate::{
-    sandbox::{CommandExecutor, Request, Streams},
-    workspace::confined::Workspace,
-};
+use crate::sandbox::{CommandExecutor, Request, Streams};
 use otto_core::{
     agent::hooks::{Decision, Hooks, Response},
     config::plugins::{Components, Hook},
     operation::OperationControl,
 };
 use otto_platform::hex::to_hex;
+use otto_session::workspace::confined::Workspace;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{

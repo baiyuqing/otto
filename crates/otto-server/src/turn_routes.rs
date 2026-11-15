@@ -82,11 +82,11 @@ pub(super) async fn start_turn(
     let origin = match parsed
         .origin
         .as_deref()
-        .map(otto::session::origin::Origin::parse)
+        .map(otto_session::origin::Origin::parse)
     {
         Some(Ok(origin)) => origin,
         Some(Err(message)) => return bad_request(&message),
-        None => otto::session::origin::Origin::web(),
+        None => otto_session::origin::Origin::web(),
     };
     if let (Some(channel), Some(platform)) = (parsed.channel, origin.chat_platform()) {
         let expected = match channel {

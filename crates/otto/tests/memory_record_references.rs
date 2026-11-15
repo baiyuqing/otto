@@ -9,7 +9,6 @@ use std::sync::Arc;
 use otto::fixtures::scripted_provider::{Script, serve, text_reply};
 use otto::provider::openaicompat;
 use otto::runtime::builder::{SessionHandle, SharedSession};
-use otto::session::Store;
 use otto_core::agent::memory::{
     MemoryError, MemoryRecall, RecallRequest, RecallResult, Record, Scope,
 };
@@ -22,6 +21,7 @@ use otto_core::session::{
     Session, encode_memory_recall,
 };
 use otto_core::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
+use otto_session::Store;
 use tokio_util::sync::CancellationToken;
 
 const RECORD_TEXT_MARKER: &str = "MARKER-7f3a-record-text";

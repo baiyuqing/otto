@@ -221,9 +221,9 @@ async fn async_approval_subject_is_prepared_and_revalidated() {
     let calls = Arc::new(AtomicUsize::new(0));
     let applied = Arc::new(AtomicUsize::new(0));
     let service = Arc::new(crate::approval::Service::in_memory().unwrap());
-    let origin = Arc::new(crate::session::origin::TurnOrigin::default());
+    let origin = Arc::new(otto_session::origin::TurnOrigin::default());
     origin.set(Some(
-        crate::session::origin::Origin::chat("telegram", "42").unwrap(),
+        otto_session::origin::Origin::chat("telegram", "42").unwrap(),
     ));
     let registry = Registry::new(vec![Box::new(AsyncApprovalTool {
         calls: Arc::clone(&calls),

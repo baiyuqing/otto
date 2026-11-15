@@ -164,9 +164,9 @@ fn workspace_move_continues_the_same_session_and_executes_in_the_new_directory()
         Arc::new(AtomicUsize::new(0)),
     );
     assert!(ok, "{stderr}");
-    let identity = otto::workspace::read(&original).unwrap().unwrap();
+    let identity = otto_session::workspace::read(&original).unwrap().unwrap();
     let root = home.path().join(".otto/sessions");
-    let first = otto::session::list(&root, original.to_str().unwrap(), "", 20).unwrap();
+    let first = otto_session::list(&root, original.to_str().unwrap(), "", 20).unwrap();
     let session_id = first.sessions[0].id.clone();
     let session_path = first.sessions[0].path.clone();
     let transcript_before = std::fs::read(&session_path).unwrap();
@@ -214,10 +214,10 @@ fn workspace_move_continues_the_same_session_and_executes_in_the_new_directory()
         "new directory"
     );
     assert_eq!(
-        otto::workspace::read(&moved).unwrap().unwrap().id,
+        otto_session::workspace::read(&moved).unwrap().unwrap().id,
         identity.id
     );
-    let listed = otto::session::list(&root, moved.to_str().unwrap(), "", 20).unwrap();
+    let listed = otto_session::list(&root, moved.to_str().unwrap(), "", 20).unwrap();
     assert_eq!(listed.sessions.len(), 1);
     assert_eq!(listed.sessions[0].id, session_id);
     assert_eq!(listed.sessions[0].path, session_path);

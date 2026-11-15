@@ -13,7 +13,6 @@ use otto::memory::{
 };
 use otto::provider::openaicompat;
 use otto::runtime::builder::{SessionHandle, SharedSession};
-use otto::session::Store;
 use otto_core::agent::memory_retraction::SUMMARY_INSTRUCTIONS_HEADING;
 use otto_core::agent::{Agent, CompactionSettings, Event, Options};
 use otto_core::config::endpoint::TrustedEndpoint;
@@ -22,6 +21,7 @@ use otto_core::model::ToolDefinition;
 use otto_core::operation::OperationControl;
 use otto_core::session::Header;
 use otto_core::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
+use otto_session::Store;
 use tokio_util::sync::CancellationToken;
 
 const MARKER_A: &str = "MARKER-summary-a-5d13";

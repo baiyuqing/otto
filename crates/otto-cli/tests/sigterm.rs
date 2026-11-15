@@ -20,8 +20,8 @@ use otto::fixtures::scripted_provider::{
     Script, serve, text_reply, tool_call_reply, two_tool_call_reply,
 };
 
-use otto::session::Store;
 use otto_core::model::{Block, BlockType};
+use otto_session::Store;
 
 fn configure(home: &Path, base_url: &str, failover: bool) {
     std::fs::create_dir_all(home.join("Library/Caches")).expect("cache base");

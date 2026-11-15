@@ -4,8 +4,8 @@ use crate::schedule::{
     CreateError, Delivery, Error, Item, Kind, NewItem, Repeat, Result, RunOutcome, ScheduleStore,
     Scope, State, WorkspaceAdmit,
 };
-use crate::session::origin::Origin;
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, Utc};
+use otto_session::origin::Origin;
 use otto_storage::drivers::sqlite::SqliteDriver;
 use otto_storage::{Connection, params};
 use otto_storage::{OpenOptions, SqlDriver};

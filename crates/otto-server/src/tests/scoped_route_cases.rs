@@ -564,7 +564,7 @@ async fn the_v1_tasks_detail_route_reads_the_child_transcript_and_reports_a_miss
 
     // A task whose child transcript file exists beside its parent.
     let parent_path = sessions.path().join("s1.jsonl");
-    let child_store = otto::session::Store::create_child_lazy(
+    let child_store = otto_session::Store::create_child_lazy(
         &parent_path,
         "with-transcript-child",
         Header {

@@ -385,13 +385,13 @@ impl TestFactory {
             // A session file per id under the builder's session root:
             // an existing one (a fork) is opened, a new one created.
             let root = std::path::Path::new(&self.builder.session_root);
-            let path = otto::session::session_directory(root, &header.workspace)
+            let path = otto_session::session_directory(root, &header.workspace)
                 .expect("session directory")
                 .join(format!("{id}.jsonl"));
             let store = if path.exists() {
-                otto::session::Store::open(&path).expect("open session").0
+                otto_session::Store::open(&path).expect("open session").0
             } else {
-                otto::session::Store::create(root, header).expect("create session")
+                otto_session::Store::create(root, header).expect("create session")
             };
             SharedSession::new(Arc::new(store))
         } else {
@@ -493,7 +493,7 @@ impl Factory for TestFactory {
             return Err(error.clone());
         }
         if self.persistent {
-            let path = otto::session::session_directory(
+            let path = otto_session::session_directory(
                 std::path::Path::new(&self.builder.session_root),
                 workspace.unwrap_or(&self.builder.workspace_path),
             )

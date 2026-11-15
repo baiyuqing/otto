@@ -7,7 +7,7 @@ struct Recorder {
     requests: Mutex<Vec<port::RememberRequest>>,
     observations: Mutex<usize>,
     outcome: Mutex<Option<(port::Completion, port::ItemState)>>,
-    close_on_remember: Mutex<Option<Arc<dyn crate::session::SessionHandle>>>,
+    close_on_remember: Mutex<Option<Arc<dyn otto_session::SessionHandle>>>,
 }
 
 #[async_trait::async_trait]

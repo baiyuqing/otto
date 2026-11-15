@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Datelike, Utc};
 
 use super::contracts::*;
-use crate::workspace::{MAX_SCOPE_ID_BYTES, valid_opaque_id};
+use otto_session::workspace::{MAX_SCOPE_ID_BYTES, valid_opaque_id};
 
 /// Timestamps default to this and validation rejects it, so an unset time can
 /// never reach the store.
@@ -290,7 +290,7 @@ fn presentation_route_only(metadata: &BTreeMap<String, String>) -> bool {
         || (metadata.len() == 1
             && metadata
                 .get(super::PRESENTATION_ORIGIN_METADATA)
-                .is_some_and(|origin| crate::session::origin::Origin::parse(origin).is_ok()))
+                .is_some_and(|origin| otto_session::origin::Origin::parse(origin).is_ok()))
 }
 
 pub(crate) fn validate_metadata(

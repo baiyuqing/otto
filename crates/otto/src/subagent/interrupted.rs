@@ -17,8 +17,8 @@ pub(crate) use inventory::open_validated;
 use otto_core::model::{Message, Role};
 use otto_core::session::context::pending_tool_calls;
 
-pub(crate) use crate::session::UnansweredCall;
-use crate::session::unanswered_calls_from;
+pub(crate) use otto_session::UnansweredCall;
+use otto_session::unanswered_calls_from;
 
 use super::runner::{
     TASK_RESULT_CUSTOM_TYPE, TASK_SPEC_CUSTOM_TYPE, TaskResultData, TaskSpecData,
@@ -84,7 +84,7 @@ fn task_counter(id: &str) -> u64 {
 }
 
 fn scan_one(path: &Path) -> Option<ChildRecord> {
-    let (raw_entries, messages) = crate::session::Store::read_entries(path).ok()?;
+    let (raw_entries, messages) = otto_session::Store::read_entries(path).ok()?;
     record_from_entries(path, &raw_entries, &messages)
 }
 
@@ -205,7 +205,7 @@ pub(crate) fn mark_interrupted(path: &Path) -> Result<(), String> {
 
 pub(crate) fn mark_interrupted_with_writer(
     record: &ChildRecord,
-    writer: Option<std::sync::Arc<dyn crate::session::WriterOwnership>>,
+    writer: Option<std::sync::Arc<dyn otto_session::WriterOwnership>>,
 ) -> Result<(), String> {
     if let Some(writer) = &writer {
         writer.check()?;
@@ -227,10 +227,10 @@ pub(crate) fn mark_interrupted_with_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Store;
     use chrono::Utc;
     use otto_core::model::{Block, BlockType, FinishReason};
     use otto_core::session::Header;
+    use otto_session::Store;
 
     /// A lazy child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`,
     /// matching the file [`super::super::runner::spawn`] creates.

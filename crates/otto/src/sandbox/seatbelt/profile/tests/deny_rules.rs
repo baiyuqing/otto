@@ -114,7 +114,7 @@ fn managed_worktrees_are_writable_but_keep_their_git_metadata_read_only() {
     let write = section(&profile, "WRITE");
     assert!(write.contains(&filter("subpath", &linked)));
     assert!(write.contains(&quote(&join(&linked, ".git"))));
-    assert!(write.contains(&quote(&join(&linked, crate::workspace::MARKER))));
+    assert!(write.contains(&quote(&join(&linked, otto_session::workspace::MARKER))));
     for (prefix, pattern) in GIT_DIR_PROGRAM_SETTINGS {
         assert!(
             write.contains(&pattern_filter(&join(&linked, prefix), pattern)),

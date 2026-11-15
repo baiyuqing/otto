@@ -32,7 +32,7 @@ use otto_server::{self, Factory, Info, Options, SESSION_NOT_FOUND, Server};
 use otto::fsops::canonical_directory;
 use otto::runtime::builder::Builder;
 use otto::runtime::sandbox_switch::{SandboxReloader, SandboxSwitch};
-use otto::runtime::startup::{Disabled, load_workspace};
+use otto::runtime::startup::load_workspace;
 use otto::sandbox::info::SandboxInfo;
 use otto::workspace::admission::{
     Admission, admit_workspace, canonicalize_workspace_roots, trusted_projects,

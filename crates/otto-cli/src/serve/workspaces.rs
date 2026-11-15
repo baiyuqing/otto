@@ -121,14 +121,8 @@ impl Workspaces {
         if let Some(host) = loaded.get(&path) {
             return Ok((Arc::clone(host), false));
         }
-        let (builder, sandbox) = load_workspace(
-            Arc::clone(shared),
-            canonical,
-            &Disabled::default(),
-            cancel,
-            stderr,
-        )
-        .await?;
+        let (builder, sandbox) =
+            load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?;
         let builder = Arc::new(builder);
         let workspace_runtime = otto::runtime::builder::resolve_initial_runtime(
             &builder.config,

@@ -2,7 +2,6 @@
 //! answers with reply files that the test serializes from `otto_core::memory`.
 
 use otto::fixtures::runtime_session::Options;
-use otto::runtime::startup::Disabled;
 use otto_core::memory::*;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -169,7 +168,7 @@ impl Fixture {
                 \"openai-compatible\"\nbase_url = \"{url}\"\n\
                 api_key_env = \"TEST_KEY\"\ntrusted_origins = [\"{origin}\"]\n\
                 allow_http_origins = [\"{origin}\"]\n[providers.test.models.offline-test]\n[sandbox]\ndriver = \
-                \"off\"\n[server]\nworkspace_roots = [\"{}\"]\n{memory}\n",
+                \"off\"\n[agents]\nenabled = false\n[server]\nworkspace_roots = [\"{}\"]\n{memory}\n",
                 self.root.path().to_string_lossy()
             ),
         )
@@ -182,10 +181,6 @@ impl Fixture {
                 ("TEST_KEY".to_string(), "offline-placeholder".to_string()),
             ],
             memory_extension: None,
-            disabled: Disabled {
-                subagents: true,
-                ..Disabled::default()
-            },
         }
     }
 }

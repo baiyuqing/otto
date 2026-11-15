@@ -76,22 +76,9 @@ pub async fn compose_workspace_sandbox(
     driver_override: Option<&str>,
     api_key_env: &str,
     elevate: bool,
-    disabled: &Disabled,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
 ) -> WorkspaceSandbox {
-    if disabled.bash {
-        // No sandbox opens and bash stays unavailable; the switch still
-        // exists because every frontend reads sandbox state through it.
-        let runtime = crate::runtime::sandbox_runtime::policy_disabled_runtime();
-        builder.sandbox_info = runtime.info.clone();
-        return WorkspaceSandbox {
-            control: SandboxSwitch::new(runtime),
-            approval_executor: None,
-            approval_environment: None,
-            reloader: None,
-        };
-    }
     let open_options = OpenOptions {
         settings: settings_from_config(sandbox_settings),
         workspace: builder.workspace_path.clone(),

@@ -3,7 +3,6 @@
 use super::*;
 use otto::app::approval::ApprovalDecision;
 use otto::fixtures::runtime_session::{Options, Runtime};
-use otto::runtime::startup::Disabled;
 
 fn options(root: &std::path::Path, url: &str, memory: &str, service: Arc<External>) -> Options {
     let home = root.join("home");
@@ -17,7 +16,7 @@ fn options(root: &std::path::Path, url: &str, memory: &str, service: Arc<Externa
             "default_model = \"test/offline-test\"\n[providers.test]\ntype = \
             \"openai-compatible\"\nbase_url = \"{url}\"\napi_key_env = \"TEST_KEY\"\ntrusted_origins = [\"{origin}\"]\n\
             allow_http_origins = [\"{origin}\"]\n[providers.test.models.offline-test]\n[sandbox]\ndriver = \
-            \"off\"\n[server]\nworkspace_roots = [\"{}\"]\n{memory}\n",
+            \"off\"\n[agents]\nenabled = false\n[server]\nworkspace_roots = [\"{}\"]\n{memory}\n",
             root.to_string_lossy()
         ),
     )
@@ -32,11 +31,6 @@ fn options(root: &std::path::Path, url: &str, memory: &str, service: Arc<Externa
             service,
             context().scopes[0].clone(),
         )),
-        disabled: Disabled {
-            bash: true,
-            subagents: true,
-            ..Disabled::default()
-        },
     }
 }
 

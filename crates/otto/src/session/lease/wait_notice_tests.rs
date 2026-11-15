@@ -171,9 +171,12 @@ fn pending_wait_leaves_the_lease_directory_unchanged() {
     }
 }
 
+/// A state name and the function that builds a session in that state under a directory.
+type Case = (&'static str, fn(&Path) -> PathBuf);
+
 #[test]
 fn pending_wait_agrees_with_whether_acquire_sleeps() {
-    let cases: [(&str, fn(&Path) -> PathBuf); 7] = [
+    let cases: [Case; 7] = [
         ("no epoch marker", session_without_epoch),
         ("released", session_released),
         ("dead local holder", session_dead_local),

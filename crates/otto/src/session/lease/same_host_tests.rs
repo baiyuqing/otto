@@ -271,7 +271,7 @@ fn the_largest_record_with_a_255_byte_hostname_fits_the_fixed_slot() {
         started: "2026-11-15T01:02:03.123456789Z".into(),
     };
     let json_len = serde_json::to_string(&largest).unwrap().len();
-    assert!(json_len <= HEARTBEAT_SIZE - 1, "{json_len} bytes");
+    assert!(json_len < HEARTBEAT_SIZE, "{json_len} bytes");
     write_heartbeat_record(&dir, &largest).unwrap();
 }
 

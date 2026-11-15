@@ -3,17 +3,24 @@
 //! Layout: a session file `<id>.jsonl` has a sibling directory
 //! `<id>.lease/` holding `lease.json` (fixed metadata: the lease seconds
 //! `L`), one `epoch-<n>` marker file per epoch an acquirer has held or
-//! attempted (JSON: the host, pid, and RFC 3339 UTC time that opened it),
-//! one `heartbeat` file: a 512-byte record (JSON padded with spaces to 511
-//! bytes, plus a trailing `\n`) the current holder rewrites periodically,
+//! attempted (JSON: the host, machine id, pid, and RFC 3339 UTC time that
+//! opened it), one `heartbeat` file: a 512-byte record (JSON padded with
+//! spaces to 511 bytes, plus a trailing `\n`) the current holder rewrites
+//! periodically (it also carries the holder's machine id and process start
+//! time),
 //! and, once an epoch has been taken over from a holder that had not
 //! released it, one `fenced-<n>.jsonl` per taken-over epoch: that epoch's
 //! session log, moved aside so the new epoch starts from a log holding only
 //! complete records (see [`acquire_with`]). The liveness decision itself
 //! compares raw heartbeat bytes across a poll window, so no cross-host
 //! clock or process ever has to agree with another on wall-clock time;
-//! heartbeat JSON is parsed only to read `released` and to report the
-//! current holder's host and pid.
+//! heartbeat JSON is parsed to read `released`, to report the current
+//! holder's host and pid, and for one shortcut: an unreleased holder whose
+//! heartbeat names this host's name and machine id (see
+//! [`local_machine_id`]) and whose recorded pid and start time no longer
+//! name a running process is taken over without the wait. The machine id
+//! must be non-empty on both sides; an unknown or unequal machine id, or a
+//! process that cannot be classified, keeps the wait.
 //!
 //! Ownership: a [`Lease`] owns an open descriptor on its lease directory
 //! for its entire lifetime, so a later rename of `<id>.lease/` does not
@@ -191,6 +198,64 @@ pub(crate) fn local_hostname() -> String {
     String::from_utf8_lossy(&buf[..nul]).into_owned()
 }
 
+/// Identifier of the machine this process runs on, or an empty string when
+/// it cannot be read. Two hosts with the same hostname (for example cloned
+/// containers) have different ids, which a heartbeat's pid check needs:
+/// a pid from another machine says nothing about this machine's processes.
+///
+/// Linux: the trimmed content of `/etc/machine-id`, else
+/// `/var/lib/dbus/machine-id`. macOS: `gethostuuid`, formatted as a
+/// lowercase hyphenated UUID. Other platforms and any failure: empty.
+/// Read once per process.
+pub(crate) fn local_machine_id() -> String {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(read_machine_id).clone()
+}
+
+#[cfg(target_os = "linux")]
+fn read_machine_id() -> String {
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let id = text.trim();
+            // A machine id is 32 hexadecimal digits; a longer value is not
+            // one, and would not fit the heartbeat record.
+            if !id.is_empty() && id.len() <= 64 {
+                return id.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+#[cfg(target_os = "macos")]
+fn read_machine_id() -> String {
+    let mut uuid = [0u8; 16];
+    let timeout = libc::timespec {
+        tv_sec: 5,
+        tv_nsec: 0,
+    };
+    // SAFETY: `uuid` has the 16 writable bytes gethostuuid fills, and
+    // `timeout` is a valid timespec that outlives the call.
+    let result = unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &timeout) };
+    if result != 0 {
+        return String::new();
+    }
+    let hex: String = uuid.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_machine_id() -> String {
+    String::new()
+}
+
 fn highest_epoch(dir_path: &Path) -> std::io::Result<u64> {
     let mut highest = 0u64;
     for entry in std::fs::read_dir(dir_path)? {
@@ -212,6 +277,9 @@ struct EpochMarker {
     host: String,
     pid: u32,
     started_at: String,
+    /// [`local_machine_id`] of the opener; empty in a marker without it.
+    #[serde(default)]
+    machine: String,
 }
 
 /// Creates `epoch-<epoch>` exclusively and writes its content -- the host
@@ -224,6 +292,7 @@ fn create_epoch_marker(dir: &fsops::Dir, epoch: u64) -> std::io::Result<()> {
         host: local_hostname(),
         pid: std::process::id(),
         started_at: chrono::Utc::now().to_rfc3339(),
+        machine: local_machine_id(),
     };
     let json = serde_json::to_vec(&marker).map_err(std::io::Error::other)?;
     let mut file = fsops::create_at_no_follow(
@@ -331,6 +400,12 @@ pub struct Lease {
     epoch: u64,
     host: String,
     pid: u32,
+    /// [`local_machine_id`], written in every heartbeat.
+    machine: String,
+    /// This process's start time (RFC 3339, nanoseconds), written in every
+    /// heartbeat so an acquirer can tell this process from a later one that
+    /// reuses the pid.
+    started: String,
     duration_secs: u64,
     dir: fsops::Dir,
     write_lock: Mutex<()>,
@@ -471,6 +546,8 @@ impl Lease {
             pid: self.pid,
             released,
             seq,
+            machine: self.machine.clone(),
+            started: self.started.clone(),
         };
         write_heartbeat_record(&self.dir, &record)
     }
@@ -563,6 +640,8 @@ impl Lease {
             epoch: 1,
             host: "test-host".into(),
             pid: std::process::id(),
+            machine: local_machine_id(),
+            started: crate::process_identity::current_process().1,
             duration_secs,
             dir,
             write_lock: Mutex::new(()),
@@ -600,5 +679,7 @@ impl Lease {
     }
 }
 
+#[cfg(test)]
+mod same_host_tests;
 #[cfg(test)]
 mod tests;

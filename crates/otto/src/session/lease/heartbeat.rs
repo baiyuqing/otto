@@ -7,13 +7,20 @@ pub(super) struct LeaseMeta {
     pub(super) lease_seconds: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct HeartbeatRecord {
     pub(super) epoch: u64,
     pub(super) host: String,
     pub(super) pid: u32,
     pub(super) released: bool,
     pub(super) seq: u64,
+    /// [`local_machine_id`] of the holder; empty in a record without it.
+    #[serde(default)]
+    pub(super) machine: String,
+    /// The holder's process start time, RFC 3339 with nanoseconds; empty in
+    /// a record without it.
+    #[serde(default)]
+    pub(super) started: String,
 }
 
 pub(super) fn write_heartbeat_record(

@@ -981,6 +981,18 @@ lease in `<session-id>.lease/` beside the session file.
   cleanly, the open succeeds at once. When the holder stopped without
   releasing the lease, the open waits 7/6 of `lease_seconds` (35 s with the
   default) without output, then takes the session over.
+- The wait is skipped when the heartbeat shows a process of the same host
+  that no longer exists: same hostname, same machine id (`/etc/machine-id`
+  on Linux, the hardware UUID on macOS), and a recorded pid and process start
+  time that no longer name a running process. A reused pid, with a different
+  start time, counts as not running. The open then takes the session over at
+  once, with the takeover handling described below. The wait remains when the
+  machine id is unknown or differs (for example a cloned container with the
+  same hostname), when the holder ran on another host, when the process
+  still exists, when the state of the process cannot be determined, or when
+  the heartbeat was written by an older Otto and has no machine id or start
+  time. `otto delete` still refuses an unreleased holder,
+  also a stopped one on the same host.
 - On a takeover Otto moves the old log to
   `<session-id>.lease/fenced-<n>.jsonl` and continues from a copy that holds
   only its complete records, so a write from the stopped host after that point

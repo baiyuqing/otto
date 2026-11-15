@@ -2,6 +2,29 @@
 
 use super::*;
 
+/// What acquisition knows about this host: its hostname, its machine id and
+/// how to classify a recorded process. Production uses [`LocalHost::current`];
+/// a test builds one to stand in for another machine or for a process of a
+/// chosen state.
+pub(super) struct LocalHost {
+    pub(super) hostname: String,
+    pub(super) machine: String,
+    /// `Some(true)`: the process with this pid and start time is running;
+    /// `Some(false)`: it is not; `None`: unknown. See
+    /// [`crate::process_identity::process_matches`].
+    pub(super) process_matches: fn(i64, &str) -> Option<bool>,
+}
+
+impl LocalHost {
+    pub(super) fn current() -> Self {
+        LocalHost {
+            hostname: local_hostname(),
+            machine: local_machine_id(),
+            process_matches: crate::process_identity::process_matches,
+        }
+    }
+}
+
 /// Acquires `session_path`'s lease, using `clock` for the liveness-window
 /// wait and `keeper` to register the lease once held. Implements the
 /// protocol: with no epoch file, create epoch 1; otherwise read the
@@ -11,14 +34,16 @@ use super::*;
 /// highest epoch marker present; a released heartbeat behind a newer marker
 /// waits, for the same reason. Otherwise poll the heartbeat's raw bytes once
 /// a second for 7`L`/6 — any change means the holder is live and acquisition
-/// fails, no change for the whole window means it takes over. `EEXIST` on
-/// the epoch create means a concurrent acquirer won the race.
+/// fails, no change for the whole window means it takes over. The wait is
+/// skipped for an unreleased holder that is provably a dead process of this
+/// host (see [`acquire_with_mode`]). `EEXIST` on the epoch create means a
+/// concurrent acquirer won the race.
 pub(crate) fn acquire_with(
     session_path: &Path,
     clock: &dyn Clock,
     keeper: &Arc<Keeper>,
 ) -> Result<(Arc<Lease>, Acquired), AcquireError> {
-    acquire_with_mode(session_path, clock, keeper, false)
+    acquire_with_mode(session_path, clock, keeper, false, &LocalHost::current())
 }
 
 /// Deletion never waits for, fences or takes over an unreleased holder.
@@ -26,14 +51,30 @@ pub(crate) fn acquire_for_delete(
     session_path: &Path,
     keeper: &Arc<Keeper>,
 ) -> Result<(Arc<Lease>, Acquired), AcquireError> {
-    acquire_with_mode(session_path, &RealClock, keeper, true)
+    acquire_with_mode(
+        session_path,
+        &RealClock,
+        keeper,
+        true,
+        &LocalHost::current(),
+    )
 }
 
-fn acquire_with_mode(
+/// The acquisition protocol of [`acquire_with`]. The liveness wait is
+/// skipped, and the unreleased-holder takeover (log moved aside, result
+/// [`Acquired::TakenOver`]) happens at once, only when all of these hold:
+/// the heartbeat parsed; its epoch equals the highest epoch marker; it is
+/// not released; its host equals `host.hostname`; its machine id is
+/// non-empty and equals `host.machine`; and `host.process_matches` returns
+/// `Some(false)` for its pid and start time. `None` and `Some(true)` keep
+/// the wait. With `deleting`, any unreleased holder, dead or not, is
+/// [`AcquireError::Held`].
+pub(super) fn acquire_with_mode(
     session_path: &Path,
     clock: &dyn Clock,
     keeper: &Arc<Keeper>,
     deleting: bool,
+    host: &LocalHost,
 ) -> Result<(Arc<Lease>, Acquired), AcquireError> {
     let dir_path = lease_dir(session_path);
     let dir = fsops::open_dir_no_follow(&dir_path).map_err(|e| {
@@ -73,7 +114,20 @@ fn acquire_with_mode(
     // concurrent acquirer already created that marker but has not written
     // its heartbeat yet, so waiting is needed here too, or two acquirers
     // would both take over and append to the log concurrently.
-    let should_wait = !matches!(&heartbeat, Some(h) if h.released && h.epoch == highest);
+    let released = matches!(&heartbeat, Some(h) if h.released && h.epoch == highest);
+    // A holder of this host whose process no longer exists cannot renew, so
+    // the window would only repeat what the process table already shows.
+    // Both the machine id and the start time are required: the hostname
+    // alone can be shared by cloned machines, and a bare pid can be reused.
+    let dead_local_holder = matches!(&heartbeat, Some(h)
+        if !h.released
+            && h.epoch == highest
+            && h.host == host.hostname
+            && !h.machine.is_empty()
+            && h.machine == host.machine
+            && (host.process_matches)(i64::from(h.pid), &h.started) == Some(false));
+    let unreleased = !released;
+    let should_wait = unreleased && !dead_local_holder;
 
     let mut prior_holder = heartbeat.as_ref().map(|h| Holder {
         epoch: highest,
@@ -81,7 +135,7 @@ fn acquire_with_mode(
         pid: h.pid,
     });
 
-    if should_wait && deleting {
+    if unreleased && deleting {
         return Err(AcquireError::Held(prior_holder.unwrap_or(Holder {
             epoch: highest,
             host: "unknown".into(),
@@ -127,7 +181,7 @@ fn acquire_with_mode(
 
     let next = highest + 1;
     match create_epoch_marker(&dir, next) {
-        Ok(()) if should_wait => {
+        Ok(()) if unreleased => {
             // Taking over an unreleased epoch: the prior holder may still
             // hold a descriptor open on the session log, so its tail may
             // hold an incomplete record. Move it aside before any new write
@@ -280,6 +334,8 @@ pub(super) fn finish_acquire(
         epoch,
         host: local_hostname(),
         pid: std::process::id(),
+        machine: local_machine_id(),
+        started: crate::process_identity::current_process().1,
         duration_secs: lease_seconds,
         dir,
         write_lock: Mutex::new(()),

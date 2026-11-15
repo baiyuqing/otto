@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{FENCED_EXIT_STATUS, Keeper};
-use crate::child_fence::Children;
+use otto_platform::child_fence::Children;
 
 /// The runtime composition root supplies this keeper to the POSIX session
 /// repository. The local session constructors use the same process-fencing

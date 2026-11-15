@@ -1,8 +1,8 @@
 //! Model and provider changes retain typed operations and hashes, not whole config copies.
 use super::{Domain, Error, Result};
 use crate::config::{ModelChange, ModelChangePreview};
-use crate::hex::to_hex;
 use otto_core::approval::{Request, State};
+use otto_platform::hex::to_hex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 #[derive(Serialize, Deserialize)]

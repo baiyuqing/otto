@@ -7,7 +7,11 @@ use std::sync::Arc;
 pub(crate) struct FakeExecutor;
 #[async_trait::async_trait]
 impl Executor for FakeExecutor {
-    async fn execute(&self, _: Attempt, _: &crate::deadline::Control) -> Result<String, String> {
+    async fn execute(
+        &self,
+        _: Attempt,
+        _: &otto_platform::deadline::Control,
+    ) -> Result<String, String> {
         Ok("review findings".into())
     }
 }

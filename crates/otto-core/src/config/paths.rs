@@ -2,7 +2,7 @@
 //! resolution, on the forward-slash paths Otto resolves against (Otto runs on
 //! macOS only).
 //!
-//! These duplicate a subset of the byte-exact algorithm in `otto::fsops::gopath`
+//! These duplicate a subset of the byte-exact algorithm in `otto_platform::fsops::gopath`
 //! rather than reusing it: this crate cannot depend on the native `otto` crate,
 //! and only `Clean`/`Join`'s ordinary behavior is needed here (no
 //! `..`-traversal security checks, which stay owned by the workspace-boundary

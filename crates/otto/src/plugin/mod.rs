@@ -5,12 +5,12 @@ pub mod claude_hooks;
 pub mod hooks;
 pub mod package;
 pub(crate) mod runtime;
-use crate::hex::to_hex;
-use crate::{
+use nix::{fcntl::OFlag, sys::stat::Mode};
+use otto_platform::hex::to_hex;
+use otto_platform::{
     fsops,
     fsops::root::{self, Root},
 };
-use nix::{fcntl::OFlag, sys::stat::Mode};
 use package::Package;
 pub(crate) use runtime::GuardedServer;
 pub use runtime::Snapshot;

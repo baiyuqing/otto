@@ -163,8 +163,9 @@ async fn expired_deadline_refuses_dispatch_before_polling_the_tool() {
     let calls = Arc::new(AtomicUsize::new(0));
     let registry =
         Registry::new(vec![Box::new(CountingTool(Arc::clone(&calls)))]).expect("registry");
-    let control =
-        crate::deadline::Control::new(crate::deadline::Deadline::after(std::time::Duration::ZERO));
+    let control = otto_platform::deadline::Control::new(otto_platform::deadline::Deadline::after(
+        std::time::Duration::ZERO,
+    ));
     let operation_id = operation_id();
     let execution = registry
         .execute(

@@ -3,12 +3,12 @@
 //! uncertain external action is never automatically replayed.
 use super::contracts::*;
 use super::repository::{ApprovalStore, Claim, ClaimChange};
-use crate::hex::to_hex;
 use chrono::Utc;
 use otto_core::approval::{
     ApplicationState, ApprovalMode, ApprovalSettings, Change, Choice, Decision, Kind, Request,
     ReviewStatus, Scope, Snapshot, State,
 };
+use otto_platform::hex::to_hex;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -280,10 +280,12 @@ impl Service {
         let Some(claim) = self.store.claim(id)? else {
             return Ok(Recovery::Active);
         };
-        if crate::process_identity::process_matches(claim.pid, &claim.started) != Some(false) {
+        if otto_platform::process_identity::process_matches(claim.pid, &claim.started)
+            != Some(false)
+        {
             return Ok(Recovery::Active);
         }
-        let (pid, started) = crate::process_identity::current_process();
+        let (pid, started) = otto_platform::process_identity::current_process();
         let next = Claim {
             owner: self.owner.clone(),
             pid,

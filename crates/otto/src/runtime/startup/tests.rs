@@ -45,7 +45,7 @@ driver = "off"
             explicit_config: false,
             cwd: workspace.to_string_lossy().into_owned(),
             overrides: Overrides::default(),
-            logger: Arc::new(crate::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
         },
         &cancel,
         &mut stderr,

@@ -4,8 +4,8 @@ use std::io::Read;
 
 use super::format::{MAX_FILE_BYTES, parse_candidate};
 use super::{FileStore, Snapshot, guard_candidate, publish_at, unavailable};
-use crate::fsops;
 use crate::memory::{Candidate, CandidateRef, CandidateState, Error, ErrorKind, Result};
+use otto_platform::fsops;
 
 const ARCHIVE: &str = "candidates/archive";
 

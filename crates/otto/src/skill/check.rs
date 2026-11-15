@@ -16,11 +16,11 @@ use std::sync::{Arc, Mutex};
 use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 
-use crate::fsops::root::Root;
-use crate::hex::to_hex;
 use crate::skill::check_repository::{CheckStore, NewRow, ResultJson, Row};
 use crate::skill::frontmatter;
 use crate::typesafe::{self, AnswerMap, Client, Error as CheckError, Reply, WireQuestion};
+use otto_platform::fsops::root::Root;
+use otto_platform::hex::to_hex;
 
 // ---------------------------------------------------------------------------
 // Stage 1: deterministic rules

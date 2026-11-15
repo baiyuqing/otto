@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 otto.workspace = true
 otto-core.workspace = true
+otto-platform.workspace = true
 otto-client.workspace = true
 async-trait.workspace = true
 chrono = { workspace = true, features = ["clock", "std"] }

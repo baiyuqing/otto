@@ -9,11 +9,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use otto::herdr::{Config, Reporter, SessionRef};
 use otto_core::agent::Event;
 use otto_core::approval::{
     ApplicationState, Authority, Choice, Kind, Request, Scope, State as ApprovalState, Subject,
 };
+use otto_platform::herdr::{Config, Reporter, SessionRef};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;

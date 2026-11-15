@@ -2,8 +2,8 @@
 
 #![allow(unsafe_code)]
 
-pub(crate) use crate::fsops::*;
 use otto_core::session::PiError;
+pub(crate) use otto_platform::fsops::*;
 use std::io;
 use std::path::Path;
 

@@ -65,7 +65,7 @@ pub(super) struct Relay {
     /// The store this connection delivers scheduled items from.
     pub(super) schedule: Option<Arc<dyn otto::schedule::ScheduleStore>>,
     /// The process log, for the connection's schedule worker.
-    pub(super) logger: Arc<otto::log::Logger>,
+    pub(super) logger: Arc<otto_platform::log::Logger>,
     /// Sessions this connection opened, with their prompt slots.
     sessions: Mutex<HashMap<String, Arc<PromptSlot>>>,
     lost: CancellationToken,
@@ -79,7 +79,7 @@ impl Relay {
             client: Client::in_process(router),
             principal: Principal::Owner,
             schedule: None,
-            logger: Arc::new(otto::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
             sessions: Mutex::new(HashMap::new()),
             lost: CancellationToken::new(),
         }
@@ -92,7 +92,7 @@ impl Relay {
             client: Client::new(Path::new("/nonexistent/otto.sock")).expect("client"),
             principal: Principal::Owner,
             schedule,
-            logger: Arc::new(otto::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
             sessions: Mutex::new(HashMap::new()),
             lost: CancellationToken::new(),
         }
@@ -516,7 +516,7 @@ pub async fn run(
     socket: &Path,
     workspace: PathBuf,
     schedule: Option<Arc<dyn otto::schedule::ScheduleStore>>,
-    logger: Arc<otto::log::Logger>,
+    logger: Arc<otto_platform::log::Logger>,
     stdin: Box<dyn BufRead + Send + 'static>,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),

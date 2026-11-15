@@ -15,7 +15,7 @@ impl Store {
     #[cfg(test)]
     pub fn read_header(path: impl AsRef<Path>) -> Result<Header, PiError> {
         let mut file = open_path_journal(
-            &crate::fsops::PosixDriver,
+            &otto_platform::fsops::PosixDriver,
             path.as_ref(),
             JournalOpen::ReadOnly,
         )?;
@@ -39,7 +39,7 @@ impl Store {
         path: impl AsRef<Path>,
     ) -> Result<(Vec<PiEntry>, Vec<Message>), PiError> {
         let mut file = open_path_journal(
-            &crate::fsops::PosixDriver,
+            &otto_platform::fsops::PosixDriver,
             path.as_ref(),
             JournalOpen::ReadOnly,
         )?;

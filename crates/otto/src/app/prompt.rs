@@ -56,7 +56,7 @@ impl Controller {
         let reporter = self.herdr_reporter();
         let session = match &reporter {
             Some(_) => self.herdr_session(),
-            None => crate::herdr::SessionRef {
+            None => otto_platform::herdr::SessionRef {
                 id: String::new(),
                 path: String::new(),
             },
@@ -65,7 +65,7 @@ impl Controller {
             .run_with_system_context(
                 text,
                 system_context,
-                &mut crate::herdr::observing(emit, reporter.as_deref(), &session),
+                &mut otto_platform::herdr::observing(emit, reporter.as_deref(), &session),
                 cancel,
             )
             .await

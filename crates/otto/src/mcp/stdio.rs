@@ -74,7 +74,7 @@ struct ChildOwner {
     done: Arc<AtomicBool>,
     done_notify: Arc<Notify>,
     pid: u32,
-    _fence_registration: crate::child_fence::Registration,
+    _fence_registration: otto_platform::child_fence::Registration,
 }
 
 /// A child process reached over stdin/stdout. See the module documentation
@@ -135,8 +135,8 @@ impl StdioTransport {
         let pid = child.id().ok_or_else(|| {
             CallError::Transport("mcp server exited before it could be tracked".to_string())
         })?;
-        let fence_registration = crate::child_fence::Children::register(
-            crate::child_fence::Children::global(),
+        let fence_registration = otto_platform::child_fence::Children::register(
+            otto_platform::child_fence::Children::global(),
             pid as i32,
             true,
         );

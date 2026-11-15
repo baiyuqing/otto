@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use crate::approval::reviewer::{
     MAX_INPUT_BYTES, ReviewContext, ReviewProvider, STANDING_CONSTRAINTS_UNAVAILABLE,
 };
-use crate::deadline::{Control, Deadline};
 use crate::runtime::builder::{ProviderClient, SharedSession};
+use otto_platform::deadline::{Control, Deadline};
 
 const MAX_OUTPUT_BYTES: usize = 2048;
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(30);

@@ -228,9 +228,9 @@ pub(super) async fn run_turn<B: Backend>(
     let parent_cancelled = cancel.is_cancelled();
     let turn_cancelled = result.as_ref().err().is_some_and(AgentError::is_cancelled);
     let completion = if parent_cancelled || turn_cancelled {
-        otto::program_status::Completion::Canceled
+        otto_platform::program_status::Completion::Canceled
     } else {
-        otto::program_status::Completion::from_result(&result)
+        otto_platform::program_status::Completion::from_result(&result)
     };
     app.finish_turn(completion);
     if !error_rendered && let Err(error) = &result {

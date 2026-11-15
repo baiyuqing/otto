@@ -21,7 +21,9 @@ impl Controller {
         };
         if is_current {
             let current_path = self.info().session_path;
-            if crate::fsops::clean_go_path(path) != crate::fsops::clean_go_path(&current_path) {
+            if otto_platform::fsops::clean_go_path(path)
+                != otto_platform::fsops::clean_go_path(&current_path)
+            {
                 return Err(
                     "permanent delete requires the listed session path, not a path alias".into(),
                 );

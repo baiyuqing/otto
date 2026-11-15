@@ -8,9 +8,9 @@ use std::sync::Mutex;
 
 use nix::sys::stat::Mode;
 
-use crate::fsops::root::Root;
-use crate::fsops::{PosixPublish, Publish, PublishMode, publish_file};
 use crate::tool::session_directory::{create_session_directory, session_directory_name};
+use otto_platform::fsops::root::Root;
+use otto_platform::fsops::{PosixPublish, Publish, PublishMode, publish_file};
 
 #[derive(Default)]
 pub(super) struct Reports {
@@ -87,7 +87,7 @@ impl Report {
             Err(error) => return Err(error),
         }
         let parent = create_session_directory(&reports, session_directory_name)?;
-        let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
+        let id = otto_platform::random::random_hex::<16>().map_err(io::Error::other)?;
         let name = format!("{task_id}-{id}");
         parent.create_new_child_directory(&name, Mode::S_IRWXU)?;
         Ok(Self {
@@ -130,7 +130,7 @@ fn reports_directory(workspace: &Root) -> io::Result<Root> {
 
 fn publish(directory: &Root, name: &str, content: &str) -> io::Result<()> {
     let (dir, name) = directory.open_parent(Path::new(name), &|_| Ok(()))?;
-    let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
+    let id = otto_platform::random::random_hex::<16>().map_err(io::Error::other)?;
     publish_file(
         &dir,
         &Publish {

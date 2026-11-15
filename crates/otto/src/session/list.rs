@@ -13,8 +13,8 @@ use otto_core::session::context::preview_text;
 use otto_core::session::{ListResult, PiError, SessionInfo, Warning, build_context};
 
 use super::store::{decode_pi_file_read_only, reject_oversized_session_file, validate_pi_header};
-use crate::fsops::files::JournalFile;
 use crate::session::fsops::{self, Dir};
+use otto_platform::fsops::files::JournalFile;
 
 /// The most sessions one [`list`] call may return.
 pub const MAX_LIST_SESSIONS: usize = 20;

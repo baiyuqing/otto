@@ -383,8 +383,8 @@ fn concurrent_adds_to_the_workspace_list_keep_both_paths() {
     let home_str = home.path().to_str().expect("utf-8 home").to_string();
     let directory = home.path().join(".otto");
     std::fs::create_dir_all(&directory).expect("otto dir");
-    let handle = otto::fsops::open_dir_no_follow(&directory).expect("open dir");
-    let lock = otto::fsops::lock_directory(&handle).expect("lock");
+    let handle = otto_platform::fsops::open_dir_no_follow(&directory).expect("open dir");
+    let lock = otto_platform::fsops::lock_directory(&handle).expect("lock");
     let mut first = read_workspace_list(&home_str).expect("first read");
     let second = {
         let home_str = home_str.clone();

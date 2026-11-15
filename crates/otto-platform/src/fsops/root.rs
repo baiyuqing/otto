@@ -84,7 +84,7 @@ fn symlink_signal() -> io::Error {
 /// conversion is widening on one target and a no-op on the other; the lint
 /// that fires on the no-op is silenced here instead of at every call site.
 #[allow(clippy::useless_conversion)]
-pub(crate) fn mode_bits(stat: &FileStat) -> u32 {
+pub fn mode_bits(stat: &FileStat) -> u32 {
     u32::from(stat.st_mode)
 }
 
@@ -92,7 +92,7 @@ pub fn is_dir(stat: &FileStat) -> bool {
     SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFDIR
 }
 
-pub(crate) fn is_regular(stat: &FileStat) -> bool {
+pub fn is_regular(stat: &FileStat) -> bool {
     SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFREG
 }
 
@@ -149,7 +149,7 @@ impl Root {
     }
 
     /// Use a directory already pinned by a caller's no-follow open.
-    pub(crate) fn from_directory(directory: File) -> io::Result<Self> {
+    pub fn from_directory(directory: File) -> io::Result<Self> {
         let stat = nix::sys::stat::fstat(&directory).map_err(nix_error)?;
         if !is_dir(&stat) {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
@@ -159,14 +159,14 @@ impl Root {
         })
     }
 
-    pub(crate) fn try_clone(&self) -> io::Result<Self> {
+    pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             fd: self.fd.try_clone()?,
         })
     }
 
     /// Exclusively creates and pins one normal child component, never a link.
-    pub(crate) fn create_new_child_directory(&self, name: &str, mode: Mode) -> io::Result<Self> {
+    pub fn create_new_child_directory(&self, name: &str, mode: Mode) -> io::Result<Self> {
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -179,7 +179,7 @@ impl Root {
         })
     }
 
-    pub(crate) fn remove_directory(&self, name: &Path) -> io::Result<()> {
+    pub fn remove_directory(&self, name: &Path) -> io::Result<()> {
         self.do_in_root(name, false, &mut |dirfd, component| {
             unlinkat(dirfd, component, UnlinkatFlags::RemoveDir).map_err(nix_error)
         })
@@ -285,7 +285,7 @@ impl Root {
 
     /// Opens a file in the tree. Symbolic links in every position, including
     /// the last, are followed as long as they stay inside the tree.
-    pub(crate) fn open_file(&self, name: &Path, flags: OFlag, mode: Mode) -> io::Result<File> {
+    pub fn open_file(&self, name: &Path, flags: OFlag, mode: Mode) -> io::Result<File> {
         let fd = self.do_in_root(name, true, &mut |dirfd, component| {
             openat(
                 dirfd,
@@ -299,7 +299,7 @@ impl Root {
     }
 
     /// Stats `name` without following a final symbolic link.
-    pub(crate) fn lstat(&self, name: &Path) -> io::Result<FileStat> {
+    pub fn lstat(&self, name: &Path) -> io::Result<FileStat> {
         self.do_in_root(name, false, &mut |dirfd, component| {
             fstatat(dirfd, component, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW).map_err(nix_error)
         })
@@ -319,7 +319,7 @@ impl Root {
     }
 
     /// Reads the target of the symbolic link at `name`.
-    pub(crate) fn read_link(&self, name: &Path) -> io::Result<PathBuf> {
+    pub fn read_link(&self, name: &Path) -> io::Result<PathBuf> {
         self.do_in_root(name, false, &mut |dirfd, component| {
             readlinkat(dirfd, component)
                 .map(PathBuf::from)
@@ -349,7 +349,7 @@ impl Root {
     /// Creates and pins one child directory without following a symlink.
     /// Only one normal component is accepted, so callers can build private
     /// artifact directories without resolving aliases into protected paths.
-    pub(crate) fn create_child_directory(&self, name: &str, mode: Mode) -> io::Result<Self> {
+    pub fn create_child_directory(&self, name: &str, mode: Mode) -> io::Result<Self> {
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -370,7 +370,7 @@ impl Root {
     // ponytail: each prefix is resolved from the root again, so this is
     // O(components^2) syscalls. Paths here are a handful of components deep;
     // add an incremental walk if a deep tree ever shows up in a profile.
-    pub(crate) fn mkdir_all(&self, name: &Path, mode: Mode) -> io::Result<()> {
+    pub fn mkdir_all(&self, name: &Path, mode: Mode) -> io::Result<()> {
         let parts = split_path_in_root(name, &[], &[])?;
         let mut prefix = PathBuf::new();
         for part in &parts {
@@ -397,9 +397,9 @@ impl Root {
     /// Pins the directory that holds `name`, resolved inside the tree without
     /// following a final symbolic link, and returns it with the final
     /// component. `check` receives the resolved components (see
-    /// [`Self::walk`]) and refuses by returning an error. Operations on the
+    /// `Self::walk`) and refuses by returning an error. Operations on the
     /// returned directory cannot be redirected by a later symbolic-link swap.
-    pub(crate) fn open_parent(
+    pub fn open_parent(
         &self,
         name: &Path,
         check: &dyn Fn(&[OsString]) -> io::Result<()>,

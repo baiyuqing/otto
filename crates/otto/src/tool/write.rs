@@ -21,10 +21,10 @@ use nix::sys::stat::Mode;
 
 use super::result::decode_strict_json;
 use super::{Tool, definition, error_result, preflight_error, text_result};
-use crate::fsops::gopath::{bytes, dir, path_from};
-use crate::fsops::root::is_dir;
-use crate::fsops::{PosixPublish, Publish, PublishMode, PublishOps, publish_file};
 use crate::workspace::confined::Workspace;
+use otto_platform::fsops::gopath::{bytes, dir, path_from};
+use otto_platform::fsops::root::is_dir;
+use otto_platform::fsops::{PosixPublish, Publish, PublishMode, PublishOps, publish_file};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,7 +236,7 @@ pub(crate) fn write_file_atomic(
                     path.display()
                 )));
             }
-            mode = crate::fsops::root::mode_bits(&stat) & 0o777;
+            mode = otto_platform::fsops::root::mode_bits(&stat) & 0o777;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(before_rename(error.to_string())),
@@ -251,8 +251,8 @@ pub(crate) fn write_file_atomic(
     let (parent, name) = root
         .open_parent(path, &refuse_git)
         .map_err(|error| before_rename(error.to_string()))?;
-    let suffix =
-        crate::random::random_hex::<8>().map_err(|error| before_rename(error.to_string()))?;
+    let suffix = otto_platform::random::random_hex::<8>()
+        .map_err(|error| before_rename(error.to_string()))?;
     let temp_name = format!(".otto-{suffix}");
     // The publish fsyncs the directory after the rename: `fsync` on the
     // temporary file covers the file's data and metadata but not the
@@ -303,9 +303,9 @@ mod tests {
     use super::*;
     use crate::faults::publish::FaultyPublishOps;
     use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
-    use crate::fsops::PublishStep;
     use crate::tool::testutil::{run, workspace};
     use otto_core::model::{EffectCertainty, OperationDisposition};
+    use otto_platform::fsops::PublishStep;
     use std::os::unix::fs::PermissionsExt;
 
     fn publish_fault(step: PublishStep) -> std::sync::Arc<FaultPlan<PublishStep>> {

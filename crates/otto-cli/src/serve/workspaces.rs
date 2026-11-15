@@ -261,7 +261,7 @@ pub(super) fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::
     std::fs::create_dir_all(&directory)?;
     let json = serde_json::to_vec(&WorkspaceListFile { workspaces })
         .expect("a list of strings always serializes");
-    let suffix = otto::random::random_id()?;
+    let suffix = otto_platform::random::random_id()?;
     let temp_path = directory.join(format!(".serve-workspaces-{suffix}.json"));
     std::fs::write(&temp_path, &json)?;
     std::fs::rename(&temp_path, workspace_list_path(home))
@@ -277,8 +277,8 @@ pub(super) fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::
 fn update_workspace_list(home: &str, change: impl FnOnce(&mut Vec<String>)) -> std::io::Result<()> {
     let directory = Path::new(home).join(".otto");
     std::fs::create_dir_all(&directory)?;
-    let handle = otto::fsops::open_dir_no_follow(&directory)?;
-    let _lock = otto::fsops::lock_directory(&handle)
+    let handle = otto_platform::fsops::open_dir_no_follow(&directory)?;
+    let _lock = otto_platform::fsops::lock_directory(&handle)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let mut workspaces = read_workspace_list(home).unwrap_or_default();
     change(&mut workspaces);

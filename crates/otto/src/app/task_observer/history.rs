@@ -4,10 +4,10 @@ use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 
-use crate::fsops::{Dir, open_at_no_follow, open_dir_at_no_follow, open_dir_no_follow};
 use crate::subagent::record::TaskRow;
 use crate::subagent::tasks::observed::ObserverEntry;
 use crate::subagent::tasks::observer::Projection;
+use otto_platform::fsops::{Dir, open_at_no_follow, open_dir_at_no_follow, open_dir_no_follow};
 
 const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 

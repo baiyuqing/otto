@@ -49,7 +49,7 @@ pub(super) fn run_history(
             "history, diff and restore require --scope current, user, or workspace",
         );
     }
-    let Ok(workspace) = otto::fsops::canonical_directory(Path::new(input.cwd)) else {
+    let Ok(workspace) = otto_platform::fsops::canonical_directory(Path::new(input.cwd)) else {
         return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
     };
     let mut warning = Vec::new();

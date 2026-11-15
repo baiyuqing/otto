@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/otto-core",
+    "crates/otto-platform",
     "crates/otto",
     "crates/otto-client",
     "crates/otto-terminal",
@@ -88,6 +89,7 @@ tokio-rustls = { version = "=0.26.6", default-features = false, features = ["rin
 # Embedded SQLite, compiled from the bundled C source.
 rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }
+otto-platform = { path = "crates/otto-platform" }
 otto = { path = "crates/otto" }
 otto-client = { path = "crates/otto-client" }
 otto-terminal = { path = "crates/otto-terminal" }

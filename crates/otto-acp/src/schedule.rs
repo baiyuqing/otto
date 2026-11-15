@@ -117,7 +117,7 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
             )
         }
     };
-    let client_id = otto::random::random_id().ok()?;
+    let client_id = otto_platform::random::random_id().ok()?;
     if store
         .register_delivery_client(&client_id, &destinations, chrono::Utc::now())
         .is_err()

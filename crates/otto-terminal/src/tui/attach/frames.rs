@@ -70,9 +70,9 @@ impl<'a> Ui<'a> {
         self.remote.finish(&id);
         self.last_done = Some(id);
         let completion = match event.status.as_str() {
-            "error" => otto::program_status::Completion::Failed,
-            "canceled" => otto::program_status::Completion::Canceled,
-            _ => otto::program_status::Completion::Succeeded,
+            "error" => otto_platform::program_status::Completion::Failed,
+            "canceled" => otto_platform::program_status::Completion::Canceled,
+            _ => otto_platform::program_status::Completion::Succeeded,
         };
         self.app.finish_turn(completion);
         match event.status.as_str() {
@@ -106,9 +106,9 @@ impl<'a> Ui<'a> {
     pub(super) fn on_compact(&mut self, result: Result<Option<WireCompaction>, Error>) {
         self.compacting = None;
         let completion = match &result {
-            Ok(Some(_)) => otto::program_status::Completion::Succeeded,
-            Ok(None) => otto::program_status::Completion::Canceled,
-            Err(_) => otto::program_status::Completion::Failed,
+            Ok(Some(_)) => otto_platform::program_status::Completion::Succeeded,
+            Ok(None) => otto_platform::program_status::Completion::Canceled,
+            Err(_) => otto_platform::program_status::Completion::Failed,
         };
         self.app.finish_turn(completion);
         self.transcript = self.transcript.wrapping_add(1);

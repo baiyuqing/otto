@@ -8,9 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::lease::{Keeper, LeaseWait};
-use crate::fsops::files::FileDriver;
 use crate::session::{PreparedSession, SessionHandle, SessionRepository};
 use otto_core::session::{Header, ListResult, SessionInfo, Warning};
+use otto_platform::fsops::files::FileDriver;
 
 impl SessionHandle for Store {
     fn append_input_submissions(&self, encoded: &str) -> Result<(), String> {

@@ -5,7 +5,7 @@ use std::io::{self, ErrorKind};
 
 use nix::sys::stat::Mode;
 
-use crate::fsops::root::Root;
+use otto_platform::fsops::root::Root;
 
 /// Accepts a session id only when it is exactly one normal path component.
 pub(crate) fn session_directory_name(session_id: &str) -> io::Result<&str> {

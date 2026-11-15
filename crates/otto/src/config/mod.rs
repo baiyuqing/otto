@@ -20,10 +20,10 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::fsops::{self, PosixPublish, Publish, PublishMode, PublishOps, PublishStep};
 use chrono::Utc;
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, fcntl};
+use otto_platform::fsops::{self, PosixPublish, Publish, PublishMode, PublishOps, PublishStep};
 
 use otto_core::config::{
     ConfigError, File, Overrides, PROVIDER_CHATGPT, PROVIDER_CLAUDE, PROVIDER_OPENAI_COMPATIBLE,
@@ -167,7 +167,8 @@ fn write_bytes_with(
     if let Some(current) = current {
         back_up(directory, &current)?;
     }
-    let suffix = crate::random::random_id().map_err(|_| "cannot create temporary configuration")?;
+    let suffix =
+        otto_platform::random::random_id().map_err(|_| "cannot create temporary configuration")?;
     let temp_name = format!(".otto-config-{suffix}");
     let (parent, name) =
         fsops::open_parent(path).map_err(|_| "cannot create temporary configuration")?;
@@ -430,7 +431,8 @@ fn create_bytes_if_absent(path: &Path, contents: &[u8]) -> Result<(), &'static s
         return Err("configuration already exists; no changes made");
     }
     let directory = parent_directory(path);
-    let suffix = crate::random::random_id().map_err(|_| "cannot create temporary configuration")?;
+    let suffix =
+        otto_platform::random::random_id().map_err(|_| "cannot create temporary configuration")?;
     let temp_path = directory.join(format!(".otto-config-{suffix}"));
     let result = fs::OpenOptions::new()
         .write(true)

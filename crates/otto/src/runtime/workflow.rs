@@ -10,12 +10,12 @@ use nix::fcntl::{Flock, FlockArg};
 use otto_core::config::resolve::Runtime;
 use otto_core::session::{CURRENT_VERSION, Header, Session};
 
-use crate::deadline::Control;
-use crate::random::random_id;
 use crate::runtime::builder::{Builder, MemoryHandle, Runner, SharedSession};
 use crate::subagent::runner::{Runner as SubagentRunner, StartRequest};
 use crate::subagent::tasks::TaskStatus;
 use crate::workflow::{Attempt, Catalog, Controller, DeadlinePolicy, Executor, RuntimeIdentity};
+use otto_platform::deadline::Control;
+use otto_platform::random::random_id;
 
 struct AgentExecutor {
     owner: Arc<Runner>,

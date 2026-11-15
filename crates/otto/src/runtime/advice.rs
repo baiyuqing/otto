@@ -13,9 +13,9 @@ use std::time::Duration;
 use otto_core::agent::Agent;
 use otto_core::agent::oneshot::TextRequest;
 
-use crate::deadline::{Control, Deadline};
 use crate::decision::{Answer, Backend, Exchange, Failure, Question, session};
 use crate::tool::registry::Registry;
+use otto_platform::deadline::{Control, Deadline};
 
 use super::builder::{ProviderClient, SharedSession};
 

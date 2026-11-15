@@ -38,13 +38,13 @@ use self::format::{
     IdentityWire, MAX_FILE_BYTES, encode_candidate_file, encode_record_file, encode_tombstone_file,
     parse_candidate, parse_record, parse_tombstone, valid_file_id,
 };
-use crate::fsops::{self, PosixPublish, Publish, PublishMode};
 use crate::memory::guard::{ContentGuard, guard_candidate, guard_record};
 use crate::memory::repository::MemoryOptions;
 use crate::memory::{
     Candidate, Error, ErrorKind, GuardField, GuardInput, MAX_ID_BYTES, Record, RecordState, Result,
     Scope, StoreIdentity, Tombstone,
 };
+use otto_platform::fsops::{self, PosixPublish, Publish, PublishMode};
 
 #[cfg(test)]
 pub(crate) use self::retrieve::record_cost;
@@ -119,7 +119,7 @@ fn publish_path(path: &Path, content: &str) -> Result<()> {
     let (parent, name) = fsops::open_parent(path).map_err(unavailable)?;
     let temp_name = format!(
         ".{name}.{}.tmp",
-        crate::random::random_hex::<8>().map_err(unavailable)?
+        otto_platform::random::random_hex::<8>().map_err(unavailable)?
     );
     fsops::publish_file(
         &parent,

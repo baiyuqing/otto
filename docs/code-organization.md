@@ -15,6 +15,7 @@ guide rather than being copied into those instruction files.
 | Path | Owns | Start here |
 | --- | --- | --- |
 | `crates/otto-core/` | I/O-free shared domain logic and protocol codecs | `src/lib.rs` |
+| `crates/otto-platform/` | Process-wide primitives with no domain knowledge: `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | `src/lib.rs` |
 | `crates/otto/` | Native runtime library: services, persistence, integrations, tools and sandbox | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-client/` | HTTP client of a running `otto serve`, used by the TUI `--attach` mode and by `otto-acp` | `src/lib.rs` (`otto_client::Client`) |
 | `crates/otto-terminal/` | Terminal frontend: the TUI (`tui/`) and the REPL, login and slash commands (`cli/`) | `src/lib.rs`, `src/tui/mod.rs`, `src/cli/repl.rs` |
@@ -23,16 +24,16 @@ guide rather than being copied into those instruction files.
 | `crates/otto-eval/` | `otto eval` development evaluations (`memory-retraction`); linked into `otto` only with the `eval` feature of `otto-cli` | `src/lib.rs`, `src/eval_command.rs` |
 | `crates/otto-cli/` | The `otto` executable: command parsing, process lifecycle and composition root | `src/main.rs`, then `otto_cli::run` in `src/run.rs` |
 | `chat-connector/` | Independent Go Telegram connector that communicates with Otto through ACP | `chat-connector/cmd/otto-connect/` and `chat-connector/internal/` |
-| `crates/otto/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`), canonical directory and executable-file resolution (`canonical.rs`) | Native session and workspace callers |
-| `crates/otto/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
-| `crates/otto/src/process_identity.rs` | Process id with start time, and the check that a recorded identity still names a live process | `current_process`, `process_matches` |
+| `crates/otto-platform/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`), canonical directory and executable-file resolution (`canonical.rs`) | Native session and workspace callers |
+| `crates/otto-platform/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
+| `crates/otto-platform/src/process_identity.rs` | Process id with start time, and the check that a recorded identity still names a live process | `current_process`, `process_matches` |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, and delivery | `initialize`, `read`, `fork`, `admission::admit_workspace` |
 | `crates/otto/src/storage/` | The SQL layer over SQLite: connection, statement and transaction types, the `SqlDriver` trait and the SQLite driver | `runtime/storage.rs` composition |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-serve-connect.sh` supervises `otto serve` and an `otto-connect` that reaches it through `otto acp --attach` | `Makefile` |
 
-The root Cargo workspace contains `otto-core`, `otto`, `otto-client`,
+The root Cargo workspace contains `otto-core`, `otto-platform`, `otto`, `otto-client`,
 `otto-terminal`, `otto-server`, `otto-acp`, `otto-eval` and `otto-cli`.
 `chat-connector/` has its own build definition and is not a root workspace crate.
 
@@ -52,6 +53,9 @@ HTTP serve          client of `otto serve`
 crates/otto: app, native services
               │
               ▼
+ crates/otto-platform: file driver, log, retry, URL parsing
+              │
+              ▼
  crates/otto-core: I/O-free contracts, formats and agent loop
               ▲
               │
@@ -61,8 +65,10 @@ otto-plus (separate repository): browser UI
         React/TypeScript browser client
 ```
 
-The diagram is a partial order, not one chain. `otto-client`, `otto-server`
-and `otto-eval` each depend on `otto` and `otto-core`; `otto-acp` depends on
+The diagram is a partial order, not one chain. `otto-platform` depends on
+`otto-core` only, and every crate above it may import it directly.
+`otto-client`, `otto-server` and `otto-eval` each depend on `otto` and
+`otto-core`; `otto-acp` depends on
 `otto-server` and `otto-client`; `otto-terminal` depends on `otto`,
 `otto-core` and `otto-client`; `otto-cli` depends on all of them, and on
 `otto-eval` only when built with the `eval` feature. `otto-server` does not
@@ -138,11 +144,11 @@ exposes the shared application lifecycle used by frontends.
 
 Items that `otto-client`, `otto-terminal`, `otto-server`, `otto-acp` and `otto-cli` call are `pub` in `otto`
 (for example `runtime::startup`, `app::{management, task_control,
-turn_queue, scheduled, notices}`, `fsops`, `hex`); widening visibility is the
-mechanism, and new frontend code goes into the frontend crates, not into `otto`.
+turn_queue, scheduled, notices}`; in `otto-platform`, `fsops` and `hex`);
+widening visibility is the mechanism, and new frontend code goes into the frontend crates, not into `otto`.
 
 `otto` does not depend on the frontend crates. Within `otto`, every top-level
-module belongs to a layer (platform, persistence, capability, orchestration,
+module belongs to a layer (persistence, capability, orchestration,
 assembly, application) and imports only its own or a lower layer;
 see [layers inside `otto`](development/architecture.md#layers-inside-otto).
 `crates/otto/tests/layer_boundary.rs` fails on an import that breaks the
@@ -273,7 +279,7 @@ The other modules group native responsibilities:
   `memory::files::testsupport`, in-memory SQLite store constructors,
   `workflow::Catalog::from_definitions`). Such items are public and gated
   `#[cfg(any(test, feature = "test-support"))]`, not `#[cfg(test)]`.
-- **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
+- **Cross-cutting native helpers** (all in `crates/otto-platform/src/`): `deadline.rs`, `retry.rs`, `gourl.rs`,
   `urlprivacy.rs`, `tls_provider.rs` (installs `ring` as the process-wide
   rustls crypto provider; every reqwest client is built through its
   `http_client_builder()` or `http_client()`, and `otto-server/src/tls.rs` takes its
@@ -291,7 +297,7 @@ or `sqlite/` files; the session store lives in `session/`. `storage/` holds the
 SQLite driver, the SQL layer (`sql.rs`, `worker.rs`), the small capability
 contracts and the generic schema validation helper `schema_objects.rs`, and
 imports no domain module. The POSIX file driver and the `FileDriver` contract
-are in `fsops/`. `runtime/storage.rs`
+are in `otto-platform/src/fsops/`. `runtime/storage.rs`
 opens concrete repositories at their local paths and injects domain ports into
 consumers. Backend packages retain their physical mappings and I/O.
 
@@ -324,7 +330,8 @@ to a feature lives in that feature's module and `runtime` registers it:
 `runtime/task_control/tools.rs` (`task_queue`, `task_steer`, `task_reply`) and
 `runtime/verification.rs` (`submit_verification`). Workspace path enforcement
 is `workspace/confined.rs` (`Workspace`) over the pinned directory handles in
-`fsops/root.rs` and the Go-style path helpers in `fsops/gopath.rs`. The
+`otto-platform/src/fsops/root.rs` and the Go-style path helpers in
+`otto-platform/src/fsops/gopath.rs`. The
 declared retry safety of every built-in tool is aggregated in
 `runtime/retry_safety.rs`. Keep session persistence append-only.
 

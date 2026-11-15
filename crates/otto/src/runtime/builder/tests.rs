@@ -50,7 +50,7 @@ fn shared_with_no_session(root: &Path, no_session: bool) -> Arc<Shared> {
         schedule: None,
         skill_checker: None,
         memory: Default::default(),
-        logger: Arc::new(crate::log::Logger::discard()),
+        logger: Arc::new(otto_platform::log::Logger::discard()),
         parent_tool_factory: ParentToolSlot::default(),
     })
 }

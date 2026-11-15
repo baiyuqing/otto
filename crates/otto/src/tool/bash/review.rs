@@ -1,7 +1,7 @@
 //! Review facts and git/script targets bound into a bash approval version.
 
 use super::*;
-use crate::hex::to_hex;
+use otto_platform::hex::to_hex;
 
 impl BashTool {
     /// Bounded read-only payload snapshots become part of the exact prepared
@@ -115,7 +115,7 @@ impl BashTool {
             .split_whitespace()
             .filter(|token| token.contains("://"))
         {
-            let (values, incomplete) = crate::urlprivacy::userinfo_forms(token.as_bytes());
+            let (values, incomplete) = otto_platform::urlprivacy::userinfo_forms(token.as_bytes());
             if incomplete {
                 return None;
             }

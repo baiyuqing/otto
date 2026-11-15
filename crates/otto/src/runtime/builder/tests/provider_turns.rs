@@ -44,7 +44,7 @@ impl Provider for PendingProvider {
 #[tokio::test]
 async fn remote_compaction_logs_safe_diagnostic_metadata_without_opaque_content() {
     let bytes = Arc::new(Mutex::new(Vec::new()));
-    let logger = crate::log::Logger::new(Box::new(LogSink(Arc::clone(&bytes))));
+    let logger = otto_platform::log::Logger::new(Box::new(LogSink(Arc::clone(&bytes))));
     let session = SharedSession::memory(Header::default());
     session
         .append_remote_compaction(otto_core::session::RemoteCompaction {
@@ -112,7 +112,7 @@ async fn remote_compaction_logs_safe_diagnostic_metadata_without_opaque_content(
 #[tokio::test]
 async fn a_noop_compaction_does_not_log_an_unnamed_remote_checkpoint() {
     let bytes = Arc::new(Mutex::new(Vec::new()));
-    let logger = crate::log::Logger::new(Box::new(LogSink(Arc::clone(&bytes))));
+    let logger = otto_platform::log::Logger::new(Box::new(LogSink(Arc::clone(&bytes))));
     let session = SharedSession::memory(Header::default());
     session
         .append_remote_compaction(otto_core::session::RemoteCompaction {

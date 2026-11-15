@@ -115,7 +115,7 @@ async fn package_binding_reaches_only_its_own_package_commands() {
         .into(),
         guard: None,
         secrets: Vec::new(),
-        logger: Arc::new(crate::log::Logger::discard()),
+        logger: Arc::new(otto_platform::log::Logger::discard()),
     };
     let host = HashMap::from([(
         "HOME".to_string(),
@@ -165,7 +165,7 @@ fn unconfined_execution(workspace: &Path) -> hooks::Execution {
         package_environment: Default::default(),
         guard: None,
         secrets: Vec::new(),
-        logger: Arc::new(crate::log::Logger::discard()),
+        logger: Arc::new(otto_platform::log::Logger::discard()),
     }
 }
 

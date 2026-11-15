@@ -77,14 +77,14 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use otto::app::{self, ApprovalDecision, ApprovalRequest, Channel, Controller, Step, Stop};
-pub use otto::log::Logger;
-pub(crate) use otto::log::request_id;
 use otto::metrics::{Metrics, SessionContext};
 use otto::runtime::task_control::DUPLICATE_INPUT;
 use otto::sandbox::info::SandboxInfo;
 #[cfg(test)]
 use otto::sandbox::info::{SandboxMode, SandboxNetwork, SandboxReason};
 use otto_core::wire::events::WireEvent;
+pub use otto_platform::log::Logger;
+pub(crate) use otto_platform::log::request_id;
 use turn::{TRIGGER_RECOVERY, TRIGGER_TASK, TRIGGER_USER, Turn};
 
 /// A [`Factory::open`] that answers with exactly this text produces 404

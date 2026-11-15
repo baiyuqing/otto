@@ -168,7 +168,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                     ui.last_row = None;
                     ui.fresh = true;
                     ui.app
-                        .finish_turn(otto::program_status::Completion::Canceled);
+                        .finish_turn(otto_platform::program_status::Completion::Canceled);
                 }
                 if changed {
                     frame_gate::Redraw::Immediate

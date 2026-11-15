@@ -69,7 +69,7 @@ fn runtime(home: &Path) -> (tempfile::TempDir, Arc<Runtime>, super::super::Snaps
             workspace,
             guard: None,
             secrets: vec!["test-private-value".into()],
-            logger: Arc::new(crate::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
         },
     )
     .unwrap();

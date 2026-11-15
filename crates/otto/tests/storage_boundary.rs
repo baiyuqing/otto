@@ -598,7 +598,7 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     );
     let legacy_session = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/session/legacy.rs");
     let allowed_constructor = "use super::Store;\nuse \
-        crate::fsops::PosixDriver;\nimpl Store { fn \
+        otto_platform::fsops::PosixDriver;\nimpl Store { fn \
         create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }";
     assert!(domain_violations(&legacy_session, allowed_constructor).is_empty());
     let service_call =

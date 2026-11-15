@@ -194,7 +194,7 @@ fault, not merely the returned error. Before/after faults are not interchangeabl
 | HTTP/SSE | `faults::http`: raw TCP loopback server with controlled chunks, barriers and disconnects |
 | SQL | `faults::sql::FaultySqlDriver`; repository `open_with_driver`; `tests/fault_storage.rs` |
 | Session files | `faults::files::FaultyFileDriver`; Store `*_with_driver`; `tests/fault_session.rs` |
-| Atomic publish | `faults::publish::FaultyPublishOps`; `fsops::publish_file` call-site unit tests |
+| Atomic publish | `faults::publish::FaultyPublishOps`; `otto_platform::fsops::publish_file` call-site unit tests |
 | Sandbox launch | `faults::sandbox::FaultyDriver`; Bash tests and sandbox conformance |
 | MCP | `faults::mcp::FaultyTransport`; client timeout/cancellation tests |
 | Signals/process cleanup | Real subprocesses in `sandbox::conformance`, registered for each driver |

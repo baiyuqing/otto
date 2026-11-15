@@ -10,7 +10,7 @@ pub struct ComposeOptions {
     pub headless: bool,
     pub overrides: Overrides,
     pub explicit_config: bool,
-    pub logger: Arc<crate::log::Logger>,
+    pub logger: Arc<otto_platform::log::Logger>,
 }
 
 pub struct Composed {
@@ -38,7 +38,11 @@ pub fn compose(
     let config_file = &loaded.config;
     let environment = &configured.environment;
     let home = &loaded.home;
-    if options.logger.enable_diagnostics(Path::new(home)).is_err() {
+    if options
+        .logger
+        .enable_diagnostics(Path::new(home), crate::VERSION)
+        .is_err()
+    {
         let _ = writeln!(stderr, "warning: diagnostic file logging unavailable");
     }
 

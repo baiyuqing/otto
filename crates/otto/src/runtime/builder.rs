@@ -36,7 +36,6 @@ use otto_core::session::{
 use otto_core::tool::ToolExecutor;
 use tokio_util::sync::CancellationToken;
 
-use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::provider::openaicompat::Client;
 use crate::runtime::verification;
@@ -48,12 +47,13 @@ use crate::skill::Catalog;
 use crate::tool::registry::Registry;
 use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, write};
 use crate::workspace::confined::Workspace;
+use otto_platform::deadline::{Control, Deadline};
 
 use super::boundary::{self, BoundaryInputs, FixedText};
 use super::prompt::{subagent_model_guidance, system_prompt_for};
 use super::workspace_context::{layered_workspace_context, split_workspace_instructions};
-use crate::fsops::canonical_directory;
 use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
+use otto_platform::fsops::canonical_directory;
 
 mod builder_inputs;
 mod memory_session;
@@ -242,7 +242,7 @@ pub struct Runner {
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
     usage: Option<crate::usage::Collector>,
-    logger: Arc<crate::log::Logger>,
+    logger: Arc<otto_platform::log::Logger>,
     /// The child executor shared with durable workflows.
     pub(crate) subagents: Option<Arc<crate::subagent::runner::Runner>>,
     /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
@@ -341,7 +341,7 @@ pub struct Shared {
     /// The process log, built once at the composition root. Interactive
     /// frontends get `Logger::discard()` because stderr would overwrite the
     /// screen.
-    pub logger: Arc<crate::log::Logger>,
+    pub logger: Arc<otto_platform::log::Logger>,
     /// Frontend-owned parent tools, installed only after the frontend has
     /// assembled any capabilities they need. Every workspace builder for this
     /// process shares this slot.
@@ -535,7 +535,7 @@ pub(crate) fn resume_environment(environment: &HashMap<String, String>) -> HashM
 
 /// A fresh opaque operation identity for durable tool-attempt facts.
 pub(crate) fn new_operation_id() -> Result<otto_core::model::OperationId, String> {
-    let random = crate::random::random_id()
+    let random = otto_platform::random::random_id()
         .map_err(|error| format!("read operation randomness: {error}"))?;
     otto_core::model::OperationId::new(format!("op_{random}")).map_err(|error| error.to_string())
 }

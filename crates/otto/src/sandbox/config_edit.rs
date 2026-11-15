@@ -8,8 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::hex::to_hex;
 use otto_core::config::update_sandbox;
+use otto_platform::hex::to_hex;
 
 /// One `[sandbox]` change a frontend applies to the configuration file while a
 /// session is running, behind `/sandbox allow`, `/sandbox network` and

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -43,6 +44,30 @@ func TestOpenSucceedsAfterClose(t *testing.T) {
 	second, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open after Close: %v", err)
+	}
+	second.Close()
+}
+
+// A child process forked by another goroutine holds a duplicate of the lock
+// descriptor until it calls exec. Close must release the lock even while such
+// a duplicate is open; the duplicate here stands in for that child.
+func TestOpenSucceedsAfterCloseWhileADuplicateDescriptorIsOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := syscall.Dup(int(first.lock.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(duplicate)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after Close with a duplicate descriptor open: %v", err)
 	}
 	second.Close()
 }

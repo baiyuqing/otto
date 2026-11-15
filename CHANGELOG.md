@@ -16,6 +16,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- `otto eval` is no longer in the default `otto` binary. The command moved to
+  the `otto-eval` crate and is linked only with the `eval` feature of
+  `otto-cli`: build it with `cargo build -p otto-cli --features eval`, or run
+  `cargo run -p otto-cli --features eval -- eval memory-retraction --dry-run`.
+  A default build prints
+  `otto: the eval command is not compiled into this binary; build with: cargo build -p otto-cli --features eval`
+  and exits with code 2. See
+  [Memory retraction evaluation](docs/development/testing.md#memory-retraction-evaluation).
 - Opening a lease-managed session that will wait 7/6 of `lease_seconds` for a
   holder that stopped without releasing the lease now writes
   `waiting up to <N> s for the session lease held by host <host> pid <pid>`

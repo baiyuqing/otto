@@ -18,6 +18,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/` | Native runtime library: services, persistence, integrations, tools, sandbox and the terminal UI | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-server/` | `otto serve` HTTP frontend: routes, listeners, TLS, workspaces, tasks, timers, workflows | `src/lib.rs` (`otto_server::Server`) |
 | `crates/otto-acp/` | ACP stdio and attach frontends | `src/lib.rs` |
+| `crates/otto-eval/` | `otto eval` development evaluations (`memory-retraction`); linked into `otto` only with the `eval` feature of `otto-cli` | `src/lib.rs`, `src/eval_command.rs` |
 | `crates/otto-cli/` | The `otto` executable: command parsing, process lifecycle and composition root | `src/main.rs`, then `otto_cli::run` in `src/run.rs` |
 | `chat-connector/` | Independent Go Telegram connector that communicates with Otto through ACP | `chat-connector/cmd/otto-connect/` and `chat-connector/internal/` |
 | `crates/otto/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`), canonical directory and executable-file resolution (`canonical.rs`) | Native session and workspace callers |
@@ -30,7 +31,7 @@ guide rather than being copied into those instruction files.
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-serve-connect.sh` supervises `otto serve` and an `otto-connect` that reaches it through `otto acp --attach` | `Makefile` |
 
 The root Cargo workspace contains `otto-core`, `otto`, `otto-server`,
-`otto-acp` and `otto-cli`.
+`otto-acp`, `otto-eval` and `otto-cli`.
 `chat-connector/` has its own build definition and is not a root workspace crate.
 
 ## Rust layers
@@ -56,6 +57,9 @@ otto-plus (separate repository): browser UI
               │
         React/TypeScript browser client
 ```
+
+`crates/otto-eval` is not in this chain. It depends on `otto` and `otto-core`;
+`crates/otto-cli` depends on it only when built with the `eval` feature.
 
 `otto-core` holds I/O-free contracts (traits and types), formats (Pi v3
 session, provider wire formats, wire DTOs, configuration schema and layered
@@ -164,15 +168,25 @@ attach client mode, `dispatcher.rs` and `command.rs` route requests, and
 `schedule/` handles `_otto/schedule/deliver`. It depends on `otto`,
 `otto-server` and `otto-core`. Its tests are in the crate (`channel_tests.rs`).
 
+### `crates/otto-eval`: development evaluations
+
+`src/eval_command.rs` parses `otto eval <target>` and dispatches it;
+`src/memory_eval_command.rs` and its directory implement the
+`memory-retraction` target (layer 2 and layer 3 evaluations, report, tests).
+It depends on `otto` and `otto-core`. Run its tests with
+`cargo test -p otto-eval`; run the command with
+`cargo run -p otto-cli --features eval -- eval memory-retraction --dry-run`.
+
 ### `crates/otto-cli`: the `otto` executable
 
 `src/main.rs` starts the process and calls `otto_cli::run` (`src/run.rs`),
 the composition root. Command modules: `acp`, `config_command`,
-`eval_command/`, `flags/`, `mcp/`, `memory_command/`, `memory_eval_command/`,
+`flags/`, `mcp/`, `memory_command/`,
 `panic_cleanup`, `plugin`, `run/`, `sandbox_setup`, `serve/`, `setup`, `storage`,
 `terminate`, `trust`, `workflow`, `workspace_command`.
-The crate depends on all four other crates and owns the `[[bin]] name = "otto"`
-target.
+The crate depends on `otto-core`, `otto`, `otto-server` and `otto-acp`, and on
+`otto-eval` only with the `eval` feature (`run/eval_gate.rs` wraps the
+`otto eval` calls). It owns the `[[bin]] name = "otto"` target.
 
 Its integration tests in `crates/otto-cli/tests/` drive the built binary or
 `otto_cli::run`: `acp_attach`, `acp_stdio`, `binary_e2e`,

@@ -18,7 +18,9 @@
   `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <- `otto-cli`. A crate
   never imports one to its right. A one-line change in a frontend crate
   rebuilds and retests only that crate and those to its right, not the `otto`
-  library test binary.
+  library test binary. `otto-eval` (the `otto eval` development evaluations)
+  imports `otto` and `otto-core` only; `otto-cli` links it only with its
+  `eval` feature, which is off by default.
 - The `otto` public API is what the frontend crates need. Widening an item
   from `pub(crate)` to `pub` is how a frontend crate reaches it; new frontend
   code goes into the frontend crates, not into `otto`. `cli::{login, repl,

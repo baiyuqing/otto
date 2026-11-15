@@ -14,12 +14,15 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 | Native services, tools, persistence, sandbox, TUI | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
 | HTTP routes and `otto serve` | [otto-server](crates/otto-server/AGENTS.md), `src/lib.rs` |
 | ACP stdio and attach | [otto-acp](crates/otto-acp/AGENTS.md), `src/lib.rs` |
+| `otto eval` development evaluations | [otto-eval](crates/otto-eval/AGENTS.md), `src/lib.rs` |
 | Binary, commands, composition root | [otto-cli](crates/otto-cli/AGENTS.md), `src/run.rs` |
 | User/contributor docs | [docs](docs/AGENTS.md) |
 
 Dependencies point `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <-
-`otto-cli`. The browser client is in the separate `otto-plus` repository;
-`chat-connector/` is a separate Go ACP client, not a Cargo crate.
+`otto-cli`; `otto-eval` depends on `otto` and `otto-core`, and `otto-cli`
+links it only with its `eval` feature. The browser client is in the separate
+`otto-plus` repository; `chat-connector/` is a separate Go ACP client, not a
+Cargo crate.
 Only `claude`, `openai-compatible` and `chatgpt` providers are supported.
 
 ## Work and release boundaries

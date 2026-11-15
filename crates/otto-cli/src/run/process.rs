@@ -42,21 +42,14 @@ pub async fn run_with_extensions(
     } else {
         None
     };
-    let eval_command = if args.first().is_some_and(|first| first == "eval") {
-        match crate::eval_command::parse_command(&args[1..]) {
-            Ok(command) => Some(command),
-            Err(message) => {
-                let _ = writeln!(stderr, "{message}");
-                return 2;
-            }
-        }
-    } else {
-        None
+    let eval_command = match eval_gate::parse(args, stderr) {
+        Ok(command) => command,
+        Err(code) => return code,
     };
     let flag_args: Vec<String> = if workflow_command.is_some() {
         Vec::new()
     } else if let Some(command) = &eval_command {
-        command.startup_flags()
+        eval_gate::startup_flags(command)
     } else {
         args.to_vec()
     };
@@ -171,15 +164,17 @@ pub async fn run_with_extensions(
             Err(message) => return fail(stderr, &message),
         };
     let session_root = &prepared.session_root;
-    let eval_roots = eval_command.as_ref().map(|_| crate::eval_command::Roots {
-        session_root: session_root.clone(),
-        workspace: workspace_path.clone(),
-        home: loaded.home.clone(),
+    let eval_roots = eval_command.as_ref().map(|_| {
+        eval_gate::roots(
+            session_root.clone(),
+            workspace_path.clone(),
+            loaded.home.clone(),
+        )
     });
     if let Some(command) = &eval_command
-        && command.is_dry_run()
+        && eval_gate::is_dry_run(command)
     {
-        return crate::eval_command::run_dry_command(command, stdout, stderr);
+        return eval_gate::run_dry(command, stdout, stderr);
     }
 
     if let Some(target) = &options.delete_target {
@@ -337,10 +332,7 @@ pub async fn run_with_extensions(
 
     // The evaluation needs the provider and the redactor only: no sandbox and no memory.
     if let (Some(command), Some(roots)) = (&eval_command, &eval_roots) {
-        return crate::eval_command::run_command(
-            command, &builder, &resolved, roots, stdout, stderr, cancel,
-        )
-        .await;
+        return eval_gate::run(command, &builder, &resolved, roots, stdout, stderr, cancel).await;
     }
 
     // `elevate` is REPL/TUI-specific here (an interactive frontend or a

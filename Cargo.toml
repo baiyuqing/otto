@@ -5,6 +5,7 @@ members = [
     "crates/otto",
     "crates/otto-server",
     "crates/otto-acp",
+    "crates/otto-eval",
     "crates/otto-cli",
 ]
 
@@ -88,6 +89,7 @@ otto-core = { path = "crates/otto-core" }
 otto = { path = "crates/otto" }
 otto-server = { path = "crates/otto-server" }
 otto-acp = { path = "crates/otto-acp" }
+otto-eval = { path = "crates/otto-eval" }
 
 # Release binary size. Measured 2026-10-25 on macOS arm64 with Rust 1.99.0:
 # the default release profile produced a 65,633,504-byte `otto` (52,751,472

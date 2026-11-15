@@ -88,14 +88,14 @@ impl Builder {
             && !self.memory.external()
             && self.boundary_allows_dynamic(Some(runtime))
         {
-            crate::approval::memory::attach(
+            crate::memory::approval::attach(
                 &self.approvals,
                 &self.memory.service,
                 vec![self.memory.user_scope.clone(), self.workspace_scope.clone()],
                 &self.workspace_path,
             )
             .map_err(|e| e.to_string())?;
-            crate::approval::memory::reconcile(
+            crate::memory::approval::reconcile(
                 &self.approvals,
                 &self.memory.service,
                 &[self.memory.user_scope.clone(), self.workspace_scope.clone()],

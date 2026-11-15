@@ -355,6 +355,13 @@ impl Service {
         self.create_with_origin(proposal, "")
     }
 
+    /// The request as stored, without the presentation changes of [`Service::get`].
+    /// For tests of a domain adapter outside this module.
+    #[cfg(test)]
+    pub(crate) fn stored_for_test(&self, id: &str) -> Result<Request> {
+        self.store.load(id)
+    }
+
     /// Creates an approval with a trusted passive-presentation origin.
     /// The origin changes delivery only; scope remains the authority boundary.
     pub(crate) fn create_with_origin(&self, proposal: Proposal, origin: &str) -> Result<Request> {

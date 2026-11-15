@@ -254,13 +254,13 @@ impl Controller {
     ) -> Result<otto_core::approval::Snapshot, crate::approval::Error> {
         let scope = self.approval_scope();
         if let Some((memory, user, workspace)) = self.memory_manager() {
-            crate::approval::memory::attach(
+            crate::memory::approval::attach(
                 self.approval_service(),
                 &memory,
                 vec![user.clone(), workspace.clone()],
                 &scope.workspace,
             )?;
-            crate::approval::memory::reconcile(
+            crate::memory::approval::reconcile(
                 self.approval_service(),
                 &memory,
                 &[user, workspace],

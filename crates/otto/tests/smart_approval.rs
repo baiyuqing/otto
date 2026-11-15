@@ -293,7 +293,7 @@ async fn auto_memory_review_applies_exact_content_once_and_retains_the_domain_re
             context("Remember in this workspace: use tabs in fixture files."),
         )
         .unwrap();
-    otto::approval::memory::attach(
+    otto::memory::approval::attach(
         &service,
         &memory,
         vec![memory_scope.clone()],

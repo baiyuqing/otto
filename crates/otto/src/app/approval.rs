@@ -384,9 +384,10 @@ impl Controller {
                     }
                 };
                 // Boxed: unboxed, a debug build copies the step future into the
-                // poll frame of every caller, and the `embed` tests that run a
-                // turn needed up to 2.2 MB of stack (now 1.03 MB), more than the
-                // 2 MiB of a test thread or Tokio worker thread.
+                // poll frame of every caller, and a test turn through
+                // `fixtures::runtime_session` needed up to 2.2 MB of stack (now
+                // 1.03 MB), more than the 2 MiB of a test thread or Tokio worker
+                // thread.
                 self.step_with_shared_approvals(Box::pin(run), received, &mut sink, cancel, decide)
                     .await
             };

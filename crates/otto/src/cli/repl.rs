@@ -158,7 +158,7 @@ impl<'a> Repl<'a> {
     }
 
     /// Enables OSC 7501 for a frontend that established stdin and stdout are
-    /// terminals. Tests and embedded callers keep using [`Self::new`].
+    /// terminals. Tests keep using [`Self::new`].
     pub fn with_program_status(
         controller: &'a Controller,
         mut stdout: Box<dyn Write + Send + 'a>,

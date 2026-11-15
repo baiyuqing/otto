@@ -15,7 +15,7 @@ guide rather than being copied into those instruction files.
 | Path | Owns | Start here |
 | --- | --- | --- |
 | `crates/otto-core/` | WebAssembly-safe shared domain logic and protocol codecs | `src/lib.rs` |
-| `crates/otto/` | Native runtime library: services, persistence, integrations, tools, sandbox, `embed` and the terminal UI | `src/lib.rs`, `src/runtime/`, `src/app/` |
+| `crates/otto/` | Native runtime library: services, persistence, integrations, tools, sandbox and the terminal UI | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-server/` | `otto serve` HTTP frontend: routes, listeners, TLS, workspaces, tasks, timers, workflows | `src/lib.rs` (`otto_server::Server`) |
 | `crates/otto-acp/` | ACP stdio and attach frontends | `src/lib.rs` |
 | `crates/otto-cli/` | The `otto` executable: command parsing, process lifecycle and composition root | `src/main.rs`, then `otto_cli::run` in `src/run.rs` |
@@ -23,7 +23,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`), canonical directory and executable-file resolution (`canonical.rs`) | Native session and workspace callers |
 | `crates/otto/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
 | `crates/otto/src/process_identity.rs` | Process id with start time, and the check that a recorded identity still names a live process | `current_process`, `process_matches` |
-| `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, delivery and `embed` | `initialize`, `read`, `fork`, `admission::admit_workspace` |
+| `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, and delivery | `initialize`, `read`, `fork`, `admission::admit_workspace` |
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories | `runtime/storage.rs` composition |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
@@ -45,7 +45,7 @@ crates/otto-acp: ACP stdio and attach frontends
 crates/otto-server: HTTP serve frontend
               │
               ▼
-crates/otto: app, native services, TUI, embed
+crates/otto: app, native services, TUI
               │
               ▼
  crates/otto-core: I/O-free contracts, formats and agent loop
@@ -119,12 +119,9 @@ replacement: sub-agent registry, inbox, timers, bash output logs, MCP servers
 and workflow delivery worker). A `Runner` borrows these resources and never
 stops them; `SharedSession::close` and `close_resources` do. `runtime/startup.rs` holds the startup composition, from environment
 capture to the memory service, as phase functions; `otto_cli::run`, `otto serve`
-(`load_workspace`) and `embed` all call it. `workspace/admission.rs`
-admits a workspace path for `otto serve`, delivery and `embed`. `src/app/`
-exposes the shared application lifecycle used by frontends. `src/embed.rs` is
-the public in-process API (`otto::embed::Otto`) that builds the `otto acp`
-runtime for another Rust program; see the
-[embedding API contract](development/architecture.md#embedding-api).
+(`load_workspace`) call it. `workspace/admission.rs`
+admits a workspace path for `otto serve` and delivery. `src/app/`
+exposes the shared application lifecycle used by frontends.
 
 `src/cli/` keeps only `login`, `repl` and `repl_commands`, because `tui/`
 uses them; `cli/mod.rs` also re-exports `app` as `controller` and
@@ -180,13 +177,13 @@ target.
 Its integration tests in `crates/otto-cli/tests/` drive the built binary or
 `otto_cli::run`: `acp_attach`, `acp_stdio`, `binary_e2e`,
 `binary_e2e_unconfined`, `serve_listen`, `sigkill`, `sigterm`,
-`tui_attach_pty`, `tui_pty`, `version`, `embed_parity`, `plugin_cli`, with
+`tui_attach_pty`, `tui_pty`, `version`, `plugin_cli`, with
 support code in `binary_harness/`. Run one with
 `cargo test -p otto-cli --test <name>`.
 
 The other modules group native responsibilities:
 
-- **User entry points in `otto`:** `tui/`, `cli/{login,repl,repl_commands}` and `embed`; the binary, HTTP server and ACP frontends are the other three crates.
+- **User entry points in `otto`:** `tui/`, `cli/{login,repl,repl_commands}`; the binary, HTTP server and ACP frontends are the other three crates.
 - **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
@@ -228,9 +225,9 @@ The other modules group native responsibilities:
   `test-support` feature, which implies `fault-injection`): the offline
   two-provider configuration, controllers on temporary directories and
   `fixtures/scripted_provider.rs`, the scripted OpenAI-compatible origin
-  server on `faults/http.rs` that the binary, `embed` and controller tests
+  server on `faults/http.rs` that the binary, `runtime_session` and controller tests
   talk to. Dependent crates enable `test-support` through a dev-dependency.
-  It also holds `embed_harness`, `plugin_package` and `subagent_doubles`, and
+  It also holds `runtime_session` (starts the `runtime::startup` composition for a test), `plugin_package` and `subagent_doubles`, and
   exposes test-only constructors the dependent crates use (`Runner::scripted`,
   `Controller::push_notice`, `tool::testutil`, `memory::advice::testing`,
   `memory::files::testsupport`, in-memory SQLite store constructors,

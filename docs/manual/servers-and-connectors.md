@@ -1524,7 +1524,7 @@ at `<path>`: `<error>`". Both reach the chat as an agent exit. Restart
 
 Native agent runtimes automatically write content-free execution diagnostics to
 `~/.otto/logs/diagnostic-<pid>-<random-id>.jsonl`. TUI, REPL, headless, ACP,
-serve and the embedding startup path share this facility. Attach-mode execution
+and serve share this facility. Attach-mode execution
 is recorded on the server host. `--no-session` disables conversation persistence,
 not these content-free diagnostics. Each runtime owns an independent file family;
 multiple processes and PID reuse cannot share an active log or rotate each

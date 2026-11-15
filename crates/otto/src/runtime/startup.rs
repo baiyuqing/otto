@@ -1,4 +1,4 @@
-//! The startup composition `otto` and an embedding host share: environment
+//! The startup composition of `otto`: environment
 //! capture, layered configuration, the redaction boundary, storage, the
 //! workspace, the sandbox and the memory service.
 //!

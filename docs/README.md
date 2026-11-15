@@ -6,7 +6,7 @@
 | Use and configure Otto | [User manual](user-manual.md) |
 | Inspect session logs | [Session JSONL reference](manual/interactive-use.md#session-jsonl-reference) |
 | Find code and understand crate boundaries | [Code organization](code-organization.md) |
-| Contribute or embed Otto | [Development guide](development.md) |
+| Contribute to Otto | [Development guide](development.md) |
 | Review notable changes and upgrade requirements | [Changelog](../CHANGELOG.md) |
 
 The manual and development guide describe current behavior and contracts.

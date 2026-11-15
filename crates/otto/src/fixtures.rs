@@ -1,14 +1,15 @@
 //! Test support shared by this crate's unit tests and by the tests of the
 //! crates that build on it: a two-provider configuration that resolves
-//! offline, a [`Controller`] built on temporary directories, and
-//! [`scripted_provider`], a loopback OpenAI-compatible origin server.
+//! offline, a [`Controller`] built on temporary directories,
+//! [`runtime_session`], which starts the `runtime::startup` composition for a
+//! test, and [`scripted_provider`], a loopback OpenAI-compatible origin server.
 //!
 //! Compiled under `cfg(test)` or the `test-support` feature; never part of a
 //! shipped build. `test-support` implies `fault-injection`, because the
 //! scripted provider runs on `crate::faults::http`.
 
-pub mod embed_harness;
 pub mod plugin_package;
+pub mod runtime_session;
 pub mod scripted_provider;
 pub mod subagent_doubles;
 

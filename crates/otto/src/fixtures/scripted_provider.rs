@@ -1,5 +1,5 @@
 //! A scripted OpenAI-compatible origin server for tests that drive a whole
-//! agent turn offline: the built binary, [`crate::embed`] or a controller.
+//! agent turn offline: the built binary, [`super::runtime_session`] or a controller.
 //!
 //! It runs on [`crate::faults::http`], a plain HTTP/1.1 listener on 127.0.0.1,
 //! so the tests need no credentials and reach no external network.

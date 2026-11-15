@@ -1,13 +1,11 @@
-//! Embedding-provider conformance checks for the external memory service.
+//! Conformance checks for a `MemoryExtension` that the host supplies to the startup composition.
 
 use super::*;
+use otto::app::approval::ApprovalDecision;
+use otto::fixtures::runtime_session::{Options, Runtime};
+use otto::runtime::startup::Disabled;
 
-fn embed_builder(
-    root: &std::path::Path,
-    url: &str,
-    memory: &str,
-    service: Arc<External>,
-) -> otto::embed::OttoBuilder {
+fn options(root: &std::path::Path, url: &str, memory: &str, service: Arc<External>) -> Options {
     let home = root.join("home");
     let workspace = root.join("workspace");
     std::fs::create_dir_all(home.join(".config/otto")).unwrap();
@@ -24,51 +22,53 @@ fn embed_builder(
         ),
     )
     .unwrap();
-    otto::embed::Otto::builder()
-        .workspace(workspace)
-        .environment([
+    Options {
+        workspace,
+        environment: vec![
             ("HOME".to_string(), home.to_string_lossy().into_owned()),
             ("TEST_KEY".to_string(), "offline-placeholder".to_string()),
-        ])
-        .disable(otto::embed::Component::Bash)
-        .disable(otto::embed::Component::Subagents)
-        .memory_service(otto::runtime::wiring::MemoryExtension::owned(
+        ],
+        memory_extension: Some(otto::runtime::wiring::MemoryExtension::owned(
             service,
             context().scopes[0].clone(),
-        ))
+        )),
+        disabled: Disabled {
+            bash: true,
+            subagents: true,
+            ..Disabled::default()
+        },
+    }
 }
 
 #[test]
-fn embedding_uses_neutral_prompt_context_and_releases_only_session_bindings() {
+fn an_injected_extension_uses_neutral_prompt_context_and_releases_only_session_bindings() {
     // Startup composes a large future; give the integration host its own stack.
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
             tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(embedding_conformance())
+                .block_on(extension_conformance())
         })
         .unwrap()
         .join()
         .unwrap();
 }
 
-async fn embedding_conformance() {
-    use otto::embed::{ApprovalDecision, Input};
+async fn extension_conformance() {
     let (url, requests) = scripted_provider::serve(scripted_provider::Script {
         replies: vec![scripted_provider::text_reply("done")],
         served: Arc::new(AtomicUsize::new(0)),
     });
     let directory = tempfile::tempdir().unwrap();
     let service = Arc::new(External::new(&[]));
-    let otto = embed_builder(directory.path(), &url, "", service.clone())
-        .build()
+    let otto = Runtime::start(options(directory.path(), &url, "", service.clone()))
         .await
         .unwrap();
     let first = otto.new_session(None).await.unwrap();
     first
         .prompt(
-            Input::Text("recall project context"),
+            "recall project context",
             &mut |_| {},
             &CancellationToken::new(),
             |_| async { ApprovalDecision::Deny },
@@ -141,13 +141,12 @@ async fn embedding_conformance() {
     );
 
     let disabled = Arc::new(External::new(&[]));
-    let otto = embed_builder(
+    let otto = Runtime::start(options(
         directory.path(),
         &url,
         "[memory]\nenabled = false",
         disabled.clone(),
-    )
-    .build()
+    ))
     .await
     .unwrap();
     let session = otto.new_session(None).await.unwrap();
@@ -156,31 +155,28 @@ async fn embedding_conformance() {
     assert_eq!(disabled.count(Operation::Recall), 0);
 
     let unknown_encryption = Arc::new(External::new(&[]));
-    let result = embed_builder(
+    let result = Runtime::start(options(
         directory.path(),
         &url,
         "[memory]\nrequire_encryption = true",
         unknown_encryption.clone(),
-    )
-    .build()
+    ))
     .await;
     assert!(result.is_err());
     assert_eq!(unknown_encryption.count(Operation::Recall), 0);
 
     let closed_boundary = Arc::new(External::new(&[]));
-    let builder = embed_builder(directory.path(), &url, "", closed_boundary.clone());
+    let mut closed_options = options(directory.path(), &url, "", closed_boundary.clone());
     let home = directory.path().join("home").to_string_lossy().into_owned();
-    let result = builder
-        .environment([
-            ("HOME".to_string(), home),
-            ("TEST_KEY".to_string(), "offline-placeholder".to_string()),
-            (
-                "LARGE_TOKEN".to_string(),
-                "z".repeat(otto_core::safetext::MAX_SECRET_BYTES + 1),
-            ),
-        ])
-        .build()
-        .await;
+    closed_options.environment = vec![
+        ("HOME".to_string(), home),
+        ("TEST_KEY".to_string(), "offline-placeholder".to_string()),
+        (
+            "LARGE_TOKEN".to_string(),
+            "z".repeat(otto_core::safetext::MAX_SECRET_BYTES + 1),
+        ),
+    ];
+    let result = Runtime::start(closed_options).await;
     if let Ok(otto) = result {
         let session = otto.new_session(None).await.unwrap();
         assert!(
@@ -194,14 +190,13 @@ async fn embedding_conformance() {
     let mut hostile = External::new(&[]);
     hostile.wrong_scope = true;
     let hostile = Arc::new(hostile);
-    let otto = embed_builder(directory.path(), &url, "", hostile.clone())
-        .build()
+    let otto = Runtime::start(options(directory.path(), &url, "", hostile.clone()))
         .await
         .unwrap();
     let session = otto.new_session(None).await.unwrap();
     session
         .prompt(
-            Input::Text("reject unauthorized memories"),
+            "reject unauthorized memories",
             &mut |_| {},
             &CancellationToken::new(),
             |_| async { ApprovalDecision::Deny },
@@ -219,37 +214,36 @@ async fn embedding_conformance() {
     otto.close().await.unwrap();
 
     let borrowed = Arc::new(External::new(&[]));
-    let otto = embed_builder(directory.path(), &url, "", borrowed.clone())
-        .memory_service(otto::runtime::wiring::MemoryExtension::new(
-            borrowed.clone(),
-            context().scopes[0].clone(),
-        ))
-        .build()
-        .await
-        .unwrap();
+    let mut borrowed_options = options(directory.path(), &url, "", borrowed.clone());
+    borrowed_options.memory_extension = Some(otto::runtime::wiring::MemoryExtension::new(
+        borrowed.clone(),
+        context().scopes[0].clone(),
+    ));
+    let otto = Runtime::start(borrowed_options).await.unwrap();
     let session = otto.new_session(None).await.unwrap();
     session.close().await.unwrap();
     otto.close().await.unwrap();
     assert_eq!(
         borrowed.close_calls.load(Ordering::SeqCst),
         0,
-        "borrowed provider belongs to the embedding host"
+        "a borrowed provider belongs to the host that supplied it"
     );
 
     let mut unavailable_close = External::new(&[]);
     unavailable_close.fail_close = true;
     let unavailable_close = Arc::new(unavailable_close);
-    let otto = embed_builder(directory.path(), &url, "", unavailable_close.clone())
-        .build()
-        .await
-        .unwrap();
+    let otto = Runtime::start(options(
+        directory.path(),
+        &url,
+        "",
+        unavailable_close.clone(),
+    ))
+    .await
+    .unwrap();
     let session = otto.new_session(None).await.unwrap();
     session.close().await.unwrap();
     assert_eq!(unavailable_close.close_calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(
-        otto.close().await,
-        Err(otto::embed::Error::Close(_))
-    ));
+    assert!(otto.close().await.unwrap_err().starts_with("close: "));
     assert_eq!(unavailable_close.close_calls.load(Ordering::SeqCst), 1);
     assert_eq!(unavailable_close.count(Operation::Forget), 0);
 }

@@ -39,6 +39,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Removed
 
+- The `otto::embed` in-process API (`Otto`, `OttoBuilder`, `Session`,
+  `Component`) is removed, with the `embed_parity` test. There is no
+  replacement; no program embeds Otto.
 - `otto-core` is no longer built or tested for `wasm32-unknown-unknown`: the
   wasm32 toolchain target, `make rust-wasm-check`, `make rust-wasm-test`, the
   `wasm-bindgen-test` dev-dependency and the wasm32 `cfg` variants (non-`Send`

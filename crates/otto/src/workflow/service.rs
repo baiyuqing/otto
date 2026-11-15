@@ -69,7 +69,7 @@ impl Controller {
         runtime: RuntimeIdentity,
         max_parallel: usize,
     ) -> Arc<Self> {
-        // Tests and embedders that have no process log write no events.
+        // Tests that have no process log write no events.
         Self::new_with_deadlines(
             store,
             catalog,

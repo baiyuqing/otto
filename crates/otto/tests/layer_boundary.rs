@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// The layers, lowest first, with the top-level modules of each.
 const LAYERS: &[(&str, &[&str])] = &[
-    ("persistence", &["usage"]),
+    ("persistence", &["usage", "workspace"]),
     (
         "capability",
         &[

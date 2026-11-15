@@ -31,6 +31,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto-platform/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
 | `crates/otto-platform/src/process_identity.rs` | Process id with start time, and the check that a recorded identity still names a live process | `current_process`, `process_matches` |
 | `crates/otto-session/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, and delivery | `initialize`, `read`, `fork`, `admission::admit_workspace` |
+| `crates/otto/src/workspace/` | The file-access boundary of tools and the sandbox: the confined `Workspace` (`confined.rs`) and the `.git` read-only paths (`git_read_only.rs`) | `Workspace::new`, `git_read_only::GIT_READ_ONLY` |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-serve-connect.sh` supervises `otto serve` and an `otto-connect` that reaches it through `otto acp --attach` | `Makefile` |
@@ -340,7 +341,7 @@ to a feature lives in that feature's module and `runtime` registers it:
 `subagent/tools.rs`, `workflow/tool.rs`, `delivery/tool.rs`,
 `runtime/task_control/tools.rs` (`task_queue`, `task_steer`, `task_reply`) and
 `runtime/verification.rs` (`submit_verification`). Workspace path enforcement
-is `otto-session/src/workspace/confined.rs` (`Workspace`) over the pinned directory handles in
+is `otto/src/workspace/confined.rs` (`Workspace`; the `.git` read-only list is `workspace/git_read_only.rs`) over the pinned directory handles in
 `otto-platform/src/fsops/root.rs` and the Go-style path helpers in
 `otto-platform/src/fsops/gopath.rs`. The
 declared retry safety of every built-in tool is aggregated in

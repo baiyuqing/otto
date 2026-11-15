@@ -43,11 +43,11 @@ use crate::sandbox::CommandExecutor;
 use crate::skill::Catalog;
 use crate::tool::registry::Registry;
 use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, write};
+use crate::workspace::confined::Workspace;
 use otto_platform::deadline::{Control, Deadline};
 pub use otto_session::SessionHandle;
 #[cfg(test)]
 use otto_session::Store;
-use otto_session::workspace::confined::Workspace;
 
 use super::boundary::{self, BoundaryInputs, FixedText};
 use super::prompt::{subagent_model_guidance, system_prompt_for};

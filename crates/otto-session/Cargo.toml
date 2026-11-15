@@ -19,7 +19,6 @@ otto-platform.workspace = true
 async-trait.workspace = true
 chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
-nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

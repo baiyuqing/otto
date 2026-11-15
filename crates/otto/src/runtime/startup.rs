@@ -25,7 +25,7 @@ use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resolve_environment};
 use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 
-use otto_session::workspace::confined::Workspace;
+use crate::workspace::confined::Workspace;
 
 use super::SESSION_OPERATION_UNAVAILABLE;
 use super::boundary::{self, BoundaryInputs};

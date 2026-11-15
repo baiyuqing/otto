@@ -100,7 +100,7 @@ impl Workspace {
     /// identity and the final name, so every spelling of one file shares it.
     /// Entries that no guard or waiter references are dropped here, under the
     /// table lock, so the table holds only files with a live writer.
-    pub async fn lock_path(&self, key: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(crate) async fn lock_path(&self, key: &Path) -> tokio::sync::OwnedMutexGuard<()> {
         let key = self.mutation_key(key);
         let lock = {
             let mut mutations = self
@@ -137,13 +137,13 @@ impl Workspace {
 
     /// The cleaned absolute root as the caller spelled it, before symbolic
     /// links were resolved. `bash` uses it to validate its working directory.
-    pub fn lexical_root(&self) -> &Path {
+    pub(crate) fn lexical_root(&self) -> &Path {
         &self.lexical_root
     }
 
     /// The root directory handle, for tools that walk or write by
     /// root-relative name.
-    pub fn root_fs(&self) -> &Root {
+    pub(crate) fn root_fs(&self) -> &Root {
         &self.root_fs
     }
 
@@ -155,14 +155,14 @@ impl Workspace {
         self.open_relative(&relative)
     }
 
-    pub fn open_relative(&self, path: &Path) -> io::Result<File> {
+    pub(crate) fn open_relative(&self, path: &Path) -> io::Result<File> {
         self.root_fs
             .open_file(path, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty())
     }
 
     /// Resolves an existing path to its canonical absolute location inside the
     /// workspace, following symbolic links.
-    pub fn resolve_existing(&self, path: &Path) -> io::Result<PathBuf> {
+    pub(crate) fn resolve_existing(&self, path: &Path) -> io::Result<PathBuf> {
         self.canonical_existing(path)
     }
 
@@ -170,13 +170,13 @@ impl Workspace {
     /// workspace. The final element need not exist; missing parents are
     /// allowed, and a symbolic link that stays inside the workspace resolves to
     /// its target.
-    pub fn resolve_for_write(&self, path: &Path) -> io::Result<PathBuf> {
+    pub(crate) fn resolve_for_write(&self, path: &Path) -> io::Result<PathBuf> {
         self.canonical_for_write(path)
     }
 
     /// Resolves an existing path to a root-relative name usable with
     /// [`Workspace::root_fs`].
-    pub fn existing_relative(&self, path: &Path) -> io::Result<PathBuf> {
+    pub(crate) fn existing_relative(&self, path: &Path) -> io::Result<PathBuf> {
         let relative = self.direct_relative(path)?;
         match self.open_relative(&relative) {
             Ok(file) => {
@@ -213,9 +213,9 @@ impl Workspace {
     ///
     /// Refuses the paths protected by [`refuse_git_read_only`]. This check
     /// runs before any directory is created;
-    /// `super::write::write_file_atomic` repeats it on the components it
+    /// [`super::write::write_file_atomic`] repeats it on the components it
     /// renames into.
-    pub fn write_relative(&self, path: &Path) -> io::Result<PathBuf> {
+    pub(crate) fn write_relative(&self, path: &Path) -> io::Result<PathBuf> {
         let relative = self.resolve_write_relative(path)?;
         refuse_git_read_only(relative.iter(), path)?;
         // The relative form keeps intermediate symlinks (`g/config` with
@@ -348,7 +348,7 @@ impl Workspace {
     /// Builds the absolute path a relative request refers to. The result is
     /// deliberately not cleaned: `link/../note.txt` must stay unresolved so the
     /// symbolic link is followed before `..` is applied.
-    pub fn candidate_path(&self, path: &Path) -> PathBuf {
+    pub(crate) fn candidate_path(&self, path: &Path) -> PathBuf {
         let raw = bytes(path);
         if raw.is_empty() {
             return self.root.clone();
@@ -363,7 +363,7 @@ impl Workspace {
     }
 
     /// Fails when `candidate` is not the root or below it.
-    pub fn ensure_inside(&self, candidate: &Path) -> io::Result<()> {
+    pub(crate) fn ensure_inside(&self, candidate: &Path) -> io::Result<()> {
         let relative = rel(bytes(&self.root), bytes(candidate))?;
         if relative == b".." || relative.starts_with(b"../") {
             return Err(escapes_workspace(bytes(candidate)));
@@ -673,7 +673,7 @@ mod identity_tests {
     #[test]
     fn workspace_identity_and_parent_are_read_only_including_symlink_aliases() {
         let dir = tempfile::tempdir().unwrap();
-        crate::workspace::initialize(dir.path(), "").unwrap();
+        otto_session::workspace::initialize(dir.path(), "").unwrap();
         std::os::unix::fs::symlink(".otto/workspace.json", dir.path().join("identity-alias"))
             .unwrap();
         let workspace = Workspace::new(dir.path()).unwrap();

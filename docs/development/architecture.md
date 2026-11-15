@@ -26,8 +26,8 @@
 - `otto-session` holds session files and workspace identity: the JSONL session
   `Store`, its writer lease, prepared sessions, listing, fork, archive and
   delete, the `SessionRepository` contract with the POSIX implementation, the
-  `Origin` of a turn, and `workspace` (identity marker, move history, confined
-  `Workspace`, admission). It depends on `otto-core` and `otto-platform`
+  `Origin` of a turn, and `workspace` (identity marker, move history and
+  admission). It depends on `otto-core` and `otto-platform`
   (tests also on `otto-faults`) and never on `otto`; its `test-support`
   feature adds test accessors. `otto` and the crates above it import it as
   `otto_session::...`; `otto` does not re-export it.

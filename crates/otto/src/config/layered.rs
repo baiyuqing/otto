@@ -1,10 +1,10 @@
 //! Native discovery and executable trust. Never writes an effective configuration.
+use crate::workspace::confined::Workspace;
 use otto_core::config::{
     File,
     layered::{Layer, ManagedPolicy, Merged},
 };
 use otto_platform::hex::to_hex;
-use otto_session::workspace::confined::Workspace;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

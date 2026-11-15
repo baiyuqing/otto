@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::sandbox::CommandExecutor;
 use crate::sandbox::git::run_git;
-use otto_session::workspace::confined::Workspace;
+use crate::workspace::confined::Workspace;
 
 /// How much of the workspace instruction file is embedded.
 const MAX_WORKSPACE_CONTEXT_FILE_BYTES: usize = 8 << 10;

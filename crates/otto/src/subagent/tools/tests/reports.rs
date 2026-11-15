@@ -39,8 +39,8 @@ async fn parent_handoffs_are_bounded_but_the_full_child_result_is_retained() {
 #[tokio::test]
 async fn long_final_report_is_readable_after_child_exit_without_another_model_call() {
     use crate::tool::read::ReadTool;
+    use crate::workspace::confined::Workspace;
     use otto_platform::fsops::root::Root;
-    use otto_session::workspace::confined::Workspace;
     let dir = tempfile::tempdir().unwrap();
     let provider = FakeProvider::new();
     let report = format!("# 摘要\n{}\n## 证据\n末尾证据", "中文研究内容".repeat(5000));

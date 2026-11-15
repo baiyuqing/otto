@@ -1,4 +1,4 @@
-//! The fault vocabulary every decorator in [`crate::faults`] shares.
+//! The fault vocabulary every decorator in [`crate`] share.
 //!
 //! A [`FaultPlan`] holds rules for one boundary's operation enum. A decorator
 //! calls [`FaultPlan::check`] before each operation it forwards and applies
@@ -73,7 +73,7 @@ pub enum Fault {
     /// cancellation must end the call.
     Hang,
     /// Terminate the process before performing the operation. Only
-    /// meaningful in a [`crate::faults::crash`] child.
+    /// meaningful in a [`crate::crash`] child.
     Exit,
     /// Perform the operation, then terminate the process before the caller
     /// sees the result.

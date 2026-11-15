@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::faults::publish::FaultyPublishOps;
-use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+use otto_faults::publish::FaultyPublishOps;
+use otto_faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
 
 fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
     let path = dir.join(name);
@@ -99,7 +99,7 @@ fn a_failure_before_the_rename_keeps_the_config_and_leaves_no_temporary_file() {
 
 #[test]
 fn a_crash_before_the_config_rename_keeps_the_previous_config_at_the_target() {
-    use crate::faults::crash::{self, CRASH_EXIT, Role};
+    use otto_faults::crash::{self, CRASH_EXIT, Role};
     crash::run(crash::name_of(&|| {}), |role| match role {
         Role::Child(dir) => {
             let path = write(dir, "config.toml", "default_model = \"old\"\n");

@@ -1,6 +1,4 @@
 use super::*;
-use crate::faults::files::{FaultyFileDriver, FileOp};
-use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
 use crate::fixtures::subagent_doubles::{
     FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, last_user_text,
     match_any, match_prompt, raw, redaction, redactor, stub, test_config, test_prompt_for,
@@ -9,6 +7,8 @@ use crate::fixtures::subagent_doubles::{
 use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role, Usage};
 use otto_core::provider::Response;
+use otto_faults::files::{FaultyFileDriver, FileOp};
+use otto_faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
 use otto_platform::fsops::PosixDriver;
 use otto_platform::fsops::files::FileDriver;
 use std::sync::Mutex;

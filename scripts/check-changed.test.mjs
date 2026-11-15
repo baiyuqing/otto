@@ -91,6 +91,11 @@ test('modules of otto-storage map to --lib filters by module name', () => {
   assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- drivers:: worker::']);
 });
 
+test('modules of otto-faults map to --lib filters by module name', () => {
+  const { steps } = plan(['crates/otto-faults/src/plan.rs', 'crates/otto-faults/src/publish.rs']);
+  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- plan:: publish::']);
+});
+
 test('module and integration test steps run in that order', () => {
   const { steps } = plan(['crates/otto/tests/a.rs', 'crates/otto/src/skill/mod.rs']);
   assert.deepEqual(steps.slice(2), ['cargo test --workspace --lib -- skill::', 'cargo test --workspace --test a']);
@@ -156,7 +161,7 @@ test('mixed change keeps the documented order', () => {
 test('every tests/*.rs file of the lib crates maps to --test <name>', () => {
   const crates = new URL('../crates/', import.meta.url);
   let seen = 0;
-  for (const crate of ['otto', 'otto-platform', 'otto-storage', 'otto-terminal', 'otto-server', 'otto-acp', 'otto-eval', 'otto-cli']) {
+  for (const crate of ['otto', 'otto-platform', 'otto-storage', 'otto-faults', 'otto-terminal', 'otto-server', 'otto-acp', 'otto-eval', 'otto-cli']) {
     const dir = join(fileURLToPath(crates), crate, 'tests');
     let names;
     try {

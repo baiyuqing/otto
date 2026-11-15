@@ -17,8 +17,8 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::{Fault, FaultPlan};
 use crate::mcp::{CallError, Outbound, Transport, jsonrpc};
+use otto_faults::{Fault, FaultPlan};
 
 /// The transport operations a rule can select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

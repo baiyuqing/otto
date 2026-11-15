@@ -17,6 +17,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto-core/` | I/O-free shared domain logic and protocol codecs | `src/lib.rs` |
 | `crates/otto-platform/` | Process-wide primitives with no domain knowledge: `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | `src/lib.rs` |
 | `crates/otto-storage/` | The SQL layer over SQLite: connection, statement and transaction types, the `SqlDriver` trait and the SQLite driver (`drivers/sqlite`); no domain schema | `src/lib.rs` |
+| `crates/otto-faults/` | Test support: the fault vocabulary, file, publish, SQL and crash doubles and the scripted loopback HTTP server; never linked by a shipped build | `src/lib.rs` |
 | `crates/otto/` | Native runtime library: services, persistence, integrations, tools and sandbox | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-client/` | HTTP client of a running `otto serve`, used by the TUI `--attach` mode and by `otto-acp` | `src/lib.rs` (`otto_client::Client`) |
 | `crates/otto-terminal/` | Terminal frontend: the TUI (`tui/`) and the REPL, login and slash commands (`cli/`) | `src/lib.rs`, `src/tui/mod.rs`, `src/cli/repl.rs` |
@@ -33,7 +34,7 @@ guide rather than being copied into those instruction files.
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-serve-connect.sh` supervises `otto serve` and an `otto-connect` that reaches it through `otto acp --attach` | `Makefile` |
 
-The root Cargo workspace contains `otto-core`, `otto-platform`, `otto-storage`, `otto`, `otto-client`,
+The root Cargo workspace contains `otto-core`, `otto-platform`, `otto-storage`, `otto-faults`, `otto`, `otto-client`,
 `otto-terminal`, `otto-server`, `otto-acp`, `otto-eval` and `otto-cli`.
 `chat-connector/` has its own build definition and is not a root workspace crate.
 
@@ -159,7 +160,7 @@ see [layers inside `otto`](development/architecture.md#layers-inside-otto).
 layer order. `crates/otto/tests/storage_boundary.rs` checks storage
 ownership, dependency direction, and that no `otto` source re-exports an
 `otto-core` item. `crates/otto/tests/faults_boundary.rs` keeps `faults` out
-of production code. See [package boundaries](development/architecture.md#package-boundaries).
+of production code, and scans the `src` of every crate for `otto_faults`. See [package boundaries](development/architecture.md#package-boundaries).
 
 Integration tests that need no frontend stay in `crates/otto/tests/`:
 `definition_parity`, `fault_*`, `faults_boundary`, `herdr_report`,
@@ -269,13 +270,16 @@ The other modules group native responsibilities:
 - **Runtime assembly:** `runtime/`, and `metrics.rs` (the HTTP and turn
   metrics `otto-server` exposes and the schedule worker records).
 - **Test-only fault injection:** `faults/` (compiled under `cfg(test)` or the
-  `fault-injection` feature; `faults/http.rs` is the scripted loopback HTTP
-  server; see [Fault injection](development/testing.md#fault-injection)).
+  `fault-injection` feature) holds the decorators over `otto` traits
+  (`faults/mcp.rs`, `faults/sandbox.rs`); the fault vocabulary, the file,
+  publish, SQL and crash doubles and the scripted loopback HTTP server
+  (`http.rs`) are in `crates/otto-faults/src/`; see
+  [Fault injection](development/testing.md#fault-injection).
 - **Test support:** `fixtures.rs` (compiled under `cfg(test)` or the
   `test-support` feature, which implies `fault-injection`): the offline
   two-provider configuration, controllers on temporary directories and
   `fixtures/scripted_provider.rs`, the scripted OpenAI-compatible origin
-  server on `faults/http.rs` that the binary, `runtime_session` and controller tests
+  server on `otto-faults/src/http.rs` that the binary, `runtime_session` and controller tests
   talk to. Dependent crates enable `test-support` through a dev-dependency.
   It also holds `runtime_session` (starts the `runtime::startup` composition for a test), `plugin_package` and `subagent_doubles`, and
   exposes test-only constructors the dependent crates use (`Runner::scripted`,

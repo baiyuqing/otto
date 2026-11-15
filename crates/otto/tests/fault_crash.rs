@@ -7,13 +7,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use otto::faults::crash::{self, CRASH_EXIT, Role};
-use otto::faults::files::{FaultyFileDriver, FileOp};
-use otto::faults::{Fault, FaultPlan, Filter, Rule, Trigger};
 use otto::session::Store;
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role as MessageRole};
 use otto_core::session::Header;
 use otto_core::session::context::MAY_HAVE_RUN_TOOL_RESULT_TEXT;
+use otto_faults::crash::{self, CRASH_EXIT, Role};
+use otto_faults::files::{FaultyFileDriver, FileOp};
+use otto_faults::{Fault, FaultPlan, Filter, Rule, Trigger};
 
 fn header(workspace: &Path) -> Header {
     Header {
@@ -240,8 +240,8 @@ fn workflow_store(
 
 #[test]
 fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_interrupted_step() {
-    use otto::faults::sql::{FaultySqlDriver, SqlOp};
     use otto::workflow::{RunStatus, StepStatus};
+    use otto_faults::sql::{FaultySqlDriver, SqlOp};
     use otto_storage::drivers::sqlite::SqliteDriver;
 
     crash::run(crash::name_of(&|| {}), |role| {

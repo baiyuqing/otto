@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
-use crate::faults::http;
 use crate::skill::check_repository::StoreError;
 use crate::skill::sqlite::{SCHEMA, Store};
+use otto_faults::http;
 use otto_storage::Connection;
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,13 @@
   depends on no workspace crate. Domain schemas and repositories stay in the
   domain modules of `otto`. `otto` and the crates above it import it as
   `otto_storage::...`; `otto` does not re-export it.
+- `otto-faults` is test support: the fault vocabulary (`FaultPlan`, `Fault`,
+  `Rule`), the file, publish, SQL and crash doubles over `otto-platform` and
+  `otto-storage`, and the scripted HTTP origin server. It depends on
+  `otto-platform` and `otto-storage` and never on `otto`. `otto` links it only
+  through its `fault-injection` feature and as a dev-dependency, the frontend
+  crates as dev-dependencies, so no shipped build contains it. `otto` does not
+  re-export it.
 - `otto` is a library. It owns native I/O, tools, sandboxing, domain
   repositories and authentication. `app` owns shared use cases; frontends adapt presentation and transport rather than
   reimplementing domain behavior.
@@ -30,7 +37,8 @@
   and the REPL), `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio
   and attach frontends) and `otto-cli` (the `otto` binary and composition
   root) are separate packages. Dependencies are one-way:
-  `otto-core` <- `otto-platform` <- `otto`, `otto-storage` <- `otto`, and
+  `otto-core` <- `otto-platform` <- `otto`, `otto-storage` <- `otto`,
+  `otto-platform` and `otto-storage` <- `otto-faults` <- `otto` (feature and tests only), and
   `otto` <- {`otto-client`, `otto-server`, `otto-eval`};
   `otto-server` and `otto-client` <- `otto-acp`; `otto` and `otto-client` <-
   `otto-terminal`; every crate <- `otto-cli`. A crate never imports one that
@@ -56,8 +64,8 @@
 
 Each top-level module of `crates/otto/src` belongs to one layer. A module
 imports only modules in its own layer or in a lower layer, and the imports
-between modules of one layer contain no cycle. `otto-core`, `otto-platform`
-and `otto-storage` are below every layer and are not part of this table; `otto`
+between modules of one layer contain no cycle. `otto-core`, `otto-platform`,
+`otto-storage` and `otto-faults` are below every layer and are not part of this table; `otto`
 modules import them as `otto_platform::...` and `otto_storage::...`. The frontend crates (`otto-client`,
 `otto-terminal`, `otto-server`, `otto-acp`, `otto-cli`) are above it and are
 not part of this table.
@@ -69,7 +77,7 @@ not part of this table.
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
 | assembly | `runtime` | Building one runnable agent from resolved configuration |
 | application | `app` | Session lifecycle shared by every frontend |
-| test support | `fixtures`, `faults` | Compiled only for tests or the `fault-injection` feature; production code never imports them |
+| test support | `fixtures`, `faults` | Compiled only for tests or the `fault-injection` feature; production code never imports them. `faults` holds the doubles that need `otto` modules (`mcp`, `sandbox`); the rest is the `otto-faults` crate |
 
 `crates/otto/tests/layer_boundary.rs` holds this table and checks the
 non-test source of every module. Rules:

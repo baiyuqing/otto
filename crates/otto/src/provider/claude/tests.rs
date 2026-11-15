@@ -3,8 +3,8 @@ mod recovery_tests;
 mod stream_tests;
 
 use super::*;
-use crate::faults::http;
 use otto_core::model::{Block, Message, Role};
+use otto_faults::http;
 
 fn request() -> Request {
     Request {

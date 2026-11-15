@@ -221,7 +221,7 @@ pub(super) mod testserver {
 
     use std::sync::Arc;
 
-    pub(crate) use crate::faults::http::Server;
+    pub(crate) use otto_faults::http::Server;
 
     /// One canned response: raw bytes written after the request is read.
     pub(crate) type Handler = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
@@ -238,7 +238,7 @@ pub(super) mod testserver {
 
     /// Answers each request with `handler(request head)`.
     pub(crate) async fn serve(handler: Handler) -> Server {
-        crate::faults::http::spawn(move |request| handler(&request.head)).await
+        otto_faults::http::spawn(move |request| handler(&request.head)).await
     }
 }
 
@@ -419,10 +419,9 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_stops_a_stalled_request() {
-        let server = crate::faults::http::spawn_scripted(vec![
-            crate::faults::http::Script::stall_before_head(),
-        ])
-        .await;
+        let server =
+            otto_faults::http::spawn_scripted(vec![otto_faults::http::Script::stall_before_head()])
+                .await;
         let port = server.port();
         let cancel = CancellationToken::new();
         let stop = cancel.clone();

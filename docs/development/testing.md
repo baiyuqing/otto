@@ -162,14 +162,19 @@ threshold; see the spec's interpretation limits.
 
 ## Fault injection
 
-`otto::faults` provides deterministic seams, compiled only for tests or the
-`fault-injection` feature. The crate's self dev-dependency enables it, together
+The `otto-faults` crate provides deterministic seams (fault vocabulary, file,
+publish, SQL and crash doubles, scripted HTTP server); `otto::faults` adds the
+doubles that need `otto` modules (`mcp`, `sandbox`). Both are test support:
+`otto::faults` is compiled only for tests or the `fault-injection` feature,
+which also links `otto-faults`; `otto` and the frontend crates also list
+`otto-faults` as a dev-dependency where their tests use it. The crate's self dev-dependency enables it, together
 with `test-support` (`otto::fixtures`: offline configuration, controllers on
 temporary directories and the scripted provider server), for the integration
 tests. `otto-client`, `otto-terminal`, `otto-server`, `otto-acp` and `otto-cli` enable both features through
 a dev-dependency on `otto`. `crates/otto/tests/faults_boundary.rs` guards
-production references and forbids faults from depending on
-frontend/runtime/provider/tool modules.
+production references in every crate (`otto::faults` and `otto_faults`) and
+forbids `otto::faults` from depending on frontend/runtime/provider/tool
+modules; Cargo enforces the same for `otto-faults`, which cannot import `otto`.
 
 A `FaultPlan<Op>` holds rules with operation, subject filter (`Any`, `NameSuffix`,
 `NameContains`, `SqlPrefix`), trigger (`Always`, `Nth`, `FromNth`, counted from 1)
@@ -191,10 +196,10 @@ fault, not merely the returned error. Before/after faults are not interchangeabl
 
 | Seam | Implementation / focused coverage |
 | --- | --- |
-| HTTP/SSE | `faults::http`: raw TCP loopback server with controlled chunks, barriers and disconnects |
-| SQL | `faults::sql::FaultySqlDriver` (implements `otto_storage::SqlDriver`); repository `open_with_driver`; `tests/fault_storage.rs`; SQL layer and SQLite driver unit tests: `cargo test -p otto-storage` |
-| Session files | `faults::files::FaultyFileDriver`; Store `*_with_driver`; `tests/fault_session.rs` |
-| Atomic publish | `faults::publish::FaultyPublishOps`; `otto_platform::fsops::publish_file` call-site unit tests |
+| HTTP/SSE | `otto_faults::http`: raw TCP loopback server with controlled chunks, barriers and disconnects |
+| SQL | `otto_faults::sql::FaultySqlDriver` (implements `otto_storage::SqlDriver`); repository `open_with_driver`; `tests/fault_storage.rs`; SQL layer and SQLite driver unit tests: `cargo test -p otto-storage` |
+| Session files | `otto_faults::files::FaultyFileDriver`; Store `*_with_driver`; `tests/fault_session.rs` |
+| Atomic publish | `otto_faults::publish::FaultyPublishOps`; `otto_platform::fsops::publish_file` call-site unit tests |
 | Sandbox launch | `faults::sandbox::FaultyDriver`; Bash tests and sandbox conformance |
 | MCP | `faults::mcp::FaultyTransport`; client timeout/cancellation tests |
 | Signals/process cleanup | Real subprocesses in `sandbox::conformance`, registered for each driver |

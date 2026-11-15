@@ -512,7 +512,7 @@ async fn grace_client(
 /// `tools/call` that it accepts and never answers, then a second one.
 #[tokio::test]
 async fn a_stalled_http_request_times_out_and_the_next_request_succeeds() {
-    use crate::faults::http::{Script, spawn_scripted};
+    use otto_faults::http::{Script, spawn_scripted};
 
     let discover =
         format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{MODERN_VERSION}"}}}}"#);

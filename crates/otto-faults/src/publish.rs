@@ -85,7 +85,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::faults::{FaultError, Rule, Trigger};
+    use crate::{FaultError, Rule, Trigger};
     use otto_platform::fsops::{PublishError, PublishMode, open_dir_no_follow, publish_file};
 
     const EIO: Fault = Fault::Before(FaultError::Os(libc::EIO));

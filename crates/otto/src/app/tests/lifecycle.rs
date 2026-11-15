@@ -17,10 +17,10 @@ async fn controller_with_failing_journal_sync(
 ) -> (
     Controller,
     SharedSession,
-    Arc<crate::faults::FaultPlan<crate::faults::files::FileOp>>,
+    Arc<otto_faults::FaultPlan<otto_faults::files::FileOp>>,
 ) {
-    use crate::faults::files::{FaultyFileDriver, FileOp};
-    use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
+    use otto_faults::files::{FaultyFileDriver, FileOp};
+    use otto_faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
     use otto_platform::fsops::PosixDriver;
 
     let builder = builder(workspace, sessions);

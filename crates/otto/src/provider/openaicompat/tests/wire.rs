@@ -63,8 +63,8 @@ async fn sends_the_expected_request_line_headers_and_body() {
 
 #[tokio::test]
 async fn catalog_preserves_compat_metadata_and_auth_without_required_metadata() {
-    let server = crate::faults::http::spawn(|_| {
-        crate::faults::http::json_response(concat!(
+    let server = otto_faults::http::spawn(|_| {
+        otto_faults::http::json_response(concat!(
             r#"{"data":[{"id":"fixture-a","display_name":"Provider name","#,
             r#""description":"catalog-compat-secret"},{"id":"fixture-b"}]}"#
         ))

@@ -28,8 +28,8 @@ use super::fsops;
 use super::list::{self, MAX_LIST_SESSIONS};
 use super::prepared::Prepared;
 use super::store::Store;
-use crate::faults::files::{FaultyFileDriver, FileOp};
-use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
+use otto_faults::files::{FaultyFileDriver, FileOp};
+use otto_faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
 use otto_platform::fsops::PosixDriver;
 
 mod cache_usage;

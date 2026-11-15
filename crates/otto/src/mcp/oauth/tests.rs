@@ -1,5 +1,5 @@
 use super::*;
-use crate::faults::http::{
+use otto_faults::http::{
     self as testserver, json_response, status_response, unauthorized_response,
 };
 use serde_json::json;

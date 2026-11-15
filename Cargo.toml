@@ -4,6 +4,7 @@ members = [
     "crates/otto-core",
     "crates/otto-platform",
     "crates/otto-storage",
+    "crates/otto-faults",
     "crates/otto",
     "crates/otto-client",
     "crates/otto-terminal",
@@ -92,6 +93,7 @@ rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled
 otto-core = { path = "crates/otto-core" }
 otto-platform = { path = "crates/otto-platform" }
 otto-storage = { path = "crates/otto-storage" }
+otto-faults = { path = "crates/otto-faults" }
 otto = { path = "crates/otto" }
 otto-client = { path = "crates/otto-client" }
 otto-terminal = { path = "crates/otto-terminal" }

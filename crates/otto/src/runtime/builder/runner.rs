@@ -461,7 +461,7 @@ impl Runner {
     /// Runs during a SIGTERM migration, after this session's turn was
     /// already cancelled: cancels every non-final sub-agent task, waits for
     /// each to reach a final status, and leaves one notification describing
-    /// what moved (see [`crate::subagent::session_recovery::notify_moved`]).
+    /// what moved (see `crate::subagent::session_recovery::notify_moved`).
     /// Returns no warnings and does nothing when sub-agents are off
     /// (`self.tasks()` is `None`) or the session has no persisted path
     /// (`--no-session`, so there is no children directory to scan).

@@ -3,7 +3,7 @@
 //! Everything the REPL path builds is already in place when [`run`] is called;
 //! this module only picks the listener and wires one [`Factory`] over the
 //! shared [`Builder`]. The process sandbox arrives already behind the
-//! [`SandboxSwitch`](otto::runtime::sandbox_switch::SandboxSwitch) that `POST
+//! [`SandboxSwitch`] that `POST
 //! /v1/sandbox/reload` replaces.
 
 use std::collections::{BTreeMap, HashMap};

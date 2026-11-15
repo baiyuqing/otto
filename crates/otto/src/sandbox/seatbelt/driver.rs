@@ -4,8 +4,8 @@
 //! profile generated from the session's workspace, its private state tree and
 //! the read denylist.
 //!
-//! Ownership: [`SeatbeltDriver`] owns the private state tree and the process
-//! manager, and releases both exactly once in [`SeatbeltDriver::close`]. The
+//! Ownership: `SeatbeltDriver` owns the private state tree and the process
+//! manager, and releases both exactly once in `SeatbeltDriver::close`. The
 //! writers in [`Streams`] are borrowed for one execution only.
 //!
 //! Concurrency and cancellation: `execute` takes `&self` and may run

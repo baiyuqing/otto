@@ -26,7 +26,7 @@ use crate::fsops::{
 };
 use crate::session::fsops;
 
-/// A session created by [`fork`].
+/// A session created by `fork`.
 #[derive(Debug, Clone)]
 pub struct Forked {
     pub path: PathBuf,

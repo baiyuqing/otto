@@ -169,7 +169,7 @@ pub fn is_simple_command(command: &str) -> bool {
 /// (a path such as `./build.sh` or `/abs/dir/tool` can name a file in the
 /// workspace or in the sandbox's private home and temporary directories, which
 /// the model can write); or the program is one of [`COMMAND_RUNNERS`] or
-/// [`WORKSPACE_EXECUTORS`].
+/// `WORKSPACE_EXECUTORS`.
 pub fn excluded_command_entry(command: &str) -> Result<String, &'static str> {
     let command = command.trim();
     if !is_simple_command(command) {

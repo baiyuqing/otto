@@ -6,7 +6,7 @@
 //!
 //! Input: one blocking reader task feeds a bounded channel, so a parent
 //! cancellation is observed while the loop is idle waiting for a line. A line
-//! longer than [`MAX_INPUT_BYTES`] ends the loop with an error.
+//! longer than `MAX_INPUT_BYTES` ends the loop with an error.
 //!
 //! Sub-agent wake turns: the loop also selects on the task registry's update
 //! signal and runs an empty-text turn whenever a notification is pending, and

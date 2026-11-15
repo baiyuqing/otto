@@ -125,7 +125,7 @@ impl Controller {
         self.wake_replies.push(text.to_owned());
     }
 
-    /// A signal that changes whenever [`Controller::take_notices`] has
+    /// A signal that changes whenever `Controller::take_notices` has
     /// something new, for frontends that wait on events.
     pub fn notices_changed(&self) -> watch::Receiver<u64> {
         self.notices.signal.subscribe()

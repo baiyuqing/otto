@@ -184,7 +184,7 @@ impl WarningCollector {
 ///
 /// A tool call the history left unanswered with more history after it is
 /// repaired here, in memory, and warned about; see
-/// [`repair_interrupted_tool_calls`] for why the file cannot hold that
+/// `repair_interrupted_tool_calls` for why the file cannot hold that
 /// repair and why a trailing one is left alone.
 ///
 /// Warnings describe entries that were skipped, re-rooted or repaired; they

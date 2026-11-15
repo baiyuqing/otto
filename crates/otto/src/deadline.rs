@@ -1,5 +1,5 @@
 //! Monotonic deadlines for native asynchronous operations, and the Go-style
-//! spelling of elapsed durations ([`round_to_seconds`]).
+//! spelling of elapsed durations (`round_to_seconds`).
 
 use std::future::pending;
 use std::sync::Mutex;

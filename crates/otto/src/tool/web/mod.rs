@@ -1,14 +1,14 @@
 //! The `web_fetch` and `web_search` tools.
 //!
 //! They run inside the Otto process, so the `bash` sandbox does not confine
-//! them; [`policy`] is their boundary.
+//! them; `policy` is their boundary.
 //!
 //! Ownership: [`Runtime`] holds the HTTP client for one workspace's runners
 //! and is shared by every tool built from it. Calls are independent, and
 //! cancellation stops the request and body read. Errors are in-band results.
 //!
 //! Public web access needs no approval. Argument, credential and network
-//! checks run before execution; [`policy`] validates destinations at connect
+//! checks run before execution; `policy` validates destinations at connect
 //! time. The original per-host approval design is superseded.
 
 mod client;
@@ -72,7 +72,7 @@ impl Runtime {
 /// The web tools for one runner: `web_fetch` and `web_search`.
 ///
 /// `web_search` uses the first backend `env` configures (Google, then Brave,
-/// then Bing's keyless page; see [`search`]). `network_denied` is
+/// then Bing's keyless page; see `search`). `network_denied` is
 /// `[sandbox].network = "deny"` as of this build; a runner is rebuilt when the
 /// sandbox reloads, so a changed mode applies from the next runner. `secrets`
 /// are exact values a URL or query may not contain; the search keys are added.

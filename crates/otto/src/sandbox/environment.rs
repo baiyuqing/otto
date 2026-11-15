@@ -4,8 +4,8 @@
 //! may see it, whether its value must be redacted from transcripts, and whether
 //! the classification can be proven complete.
 //!
-//! Ownership: [`resolve_environment`] copies everything it needs out of its
-//! options, so an [`EnvironmentSnapshot`] shares no storage with the caller and
+//! Ownership: `resolve_environment` copies everything it needs out of its
+//! options, so an `EnvironmentSnapshot` shares no storage with the caller and
 //! later mutation of the inputs cannot change it.
 //!
 //! Concurrency and cancellation: every function here is synchronous, does a

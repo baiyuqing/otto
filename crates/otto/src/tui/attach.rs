@@ -2,8 +2,8 @@
 //!
 //! The process opens no session, runs no model or tool and reads no provider
 //! credentials. Every session operation is an HTTP request on serve's Unix
-//! socket (see [`crate::client`]); the screen is the shared [`App`] with
-//! [`Backend::Attach`].
+//! socket (see [`crate::client`]); the screen is the shared `App` with
+//! `Backend::Attach`.
 //!
 //! Turns: a prompt posts a queued turn and the loop follows that turn's
 //! events (`turn_events` from frame 0) until `turn_end`. The `user_message`

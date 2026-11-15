@@ -111,7 +111,7 @@ impl Controller {
     /// [`PROMPT_ACTIVE`] every 20ms (the in-flight operation is the
     /// just-cancelled turn winding down) and gives up with no warnings on
     /// [`CLOSED`] (nothing left to migrate). Requests a close while the
-    /// admission is still held, so dropping it runs [`Self::finish_close`]
+    /// admission is still held, so dropping it runs `Self::finish_close`
     /// (closes the runner and the session, which writes the lease's
     /// `released: true`); the caller's own `close_resources`/`close` pair still
     /// runs afterward and finds the controller already closed.

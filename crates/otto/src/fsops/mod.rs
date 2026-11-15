@@ -140,7 +140,7 @@ pub struct PublishError {
 }
 
 /// The system calls [`publish_file`] makes, one method per [`PublishStep`].
-/// [`PosixPublish`] is the only production implementation; tests wrap it to
+/// `PosixPublish` is the only production implementation; tests wrap it to
 /// inject faults.
 pub trait PublishOps: Send + Sync {
     /// Creates `target.temp` in `dir` exclusively, without following a

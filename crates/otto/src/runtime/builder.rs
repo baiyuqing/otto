@@ -131,7 +131,7 @@ struct MemoryState {
 }
 
 /// A session shared by the agent and the frontend: a cloneable handle to one
-/// [`SessionState`].
+/// `SessionState`.
 ///
 /// Both need `&self` access to the same transcript for the whole run, which
 /// is what `Arc` buys; every [`SessionHandle`] method already takes `&self`.
@@ -272,7 +272,7 @@ pub(crate) type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 ///
 /// The split exists because a server process that later loads
 /// more than one workspace builds this once and calls
-/// [`Builder::for_workspace`] once per workspace.
+/// `Builder::for_workspace` once per workspace.
 #[derive(Clone)]
 pub struct Shared {
     pub storage: Arc<super::storage::Storage>,

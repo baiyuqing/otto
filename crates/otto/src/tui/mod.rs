@@ -3,7 +3,7 @@
 //! [`run`] is the entry point `otto_cli::run` dispatches to for `--ui tui` (or `--ui
 //! auto` on a terminal). It owns the alternate screen / raw mode lifecycle,
 //! reads keys on a background task the way `cli::repl`'s `spawn_reader` reads
-//! lines, and drives [`app::App`] against the same [`Controller`] the REPL
+//! lines, and drives `app::App` against the same [`Controller`] the REPL
 //! uses.
 //!
 //! Sub-agent wake turns: the idle loop also selects on the task registry's

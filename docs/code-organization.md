@@ -14,7 +14,7 @@ guide rather than being copied into those instruction files.
 
 | Path | Owns | Start here |
 | --- | --- | --- |
-| `crates/otto-core/` | WebAssembly-safe shared domain logic and protocol codecs | `src/lib.rs` |
+| `crates/otto-core/` | I/O-free shared domain logic and protocol codecs | `src/lib.rs` |
 | `crates/otto/` | Native runtime library: services, persistence, integrations, tools, sandbox and the terminal UI | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-server/` | `otto serve` HTTP frontend: routes, listeners, TLS, workspaces, tasks, timers, workflows | `src/lib.rs` (`otto_server::Server`) |
 | `crates/otto-acp/` | ACP stdio and attach frontends | `src/lib.rs` |

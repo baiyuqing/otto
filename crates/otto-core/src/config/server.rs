@@ -81,7 +81,7 @@ pub struct ServerRuntime {
 
 /// Picks the listener: `listen_override` (`--listen`) > `socket_override`
 /// (`--socket`) > `file.server.listen` > `file.server.socket` >
-/// [`DEFAULT_SERVER_SOCKET`]. A relative socket path is only cleaned, not
+/// `DEFAULT_SERVER_SOCKET`. A relative socket path is only cleaned, not
 /// resolved against a directory; the native caller resolves it against the
 /// process working directory.
 pub fn resolve_server(

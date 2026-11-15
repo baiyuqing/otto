@@ -119,7 +119,7 @@ fn is_compaction_control(character: char) -> bool {
 /// and the turn-prefix mode otherwise.
 ///
 /// The caller wraps every one of them in
-/// [`AgentError::InvalidCompactionSummary`], including the `nothing to compact`
+/// [`crate::agent::AgentError::InvalidCompactionSummary`], including the `nothing to compact`
 /// case, which is also reported as an invalid summary here.
 pub fn build_summary_request(
     options: &Options,

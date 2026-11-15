@@ -1,6 +1,6 @@
 //! The `Tool` adapter for one MCP tool.
 //!
-//! One [`McpTool`] wraps one tool advertised by one server's
+//! One `McpTool` wraps one tool advertised by one server's
 //! `tools/list` and forwards `execute` to [`crate::mcp::ToolServer::call`].
 //!
 //! Ownership: an `McpTool` holds an `Arc<dyn ToolServer>` shared with every

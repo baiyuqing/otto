@@ -84,7 +84,7 @@ pub fn resolve_home_for(lookup: &EnvironmentLookup) -> Result<String, String> {
 }
 
 /// The `otto memory` flag grammar names its own config path, so it cannot
-/// build a [`CliOptions`].
+/// build a `CliOptions`.
 pub fn load_config_for(
     config_path: &str,
     explicit: bool,

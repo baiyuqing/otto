@@ -121,7 +121,7 @@ impl Client {
         self
     }
 
-    /// Sends `payload` (see [`request_body`]) and decodes the answer set.
+    /// Sends `payload` (see `request_body`) and decodes the answer set.
     /// Retries a 429 or 529 after each backoff delay; every other non-200
     /// status is returned as is.
     pub async fn post(&self, payload: &str) -> Result<Reply, Error> {

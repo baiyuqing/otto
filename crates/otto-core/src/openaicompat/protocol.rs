@@ -7,7 +7,7 @@
 //!
 //! - A tool's `parameters` is raw JSON passed through verbatim, so its keys
 //!   keep the order the caller supplied rather than being sorted.
-//! - [`serialize_messages`] writes `"messages":null` for an empty vector
+//! - `serialize_messages` writes `"messages":null` for an empty vector
 //!   rather than `[]`.
 //!
 //! Ownership: [`build_request`] borrows the request and returns an owned wire

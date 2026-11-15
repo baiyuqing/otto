@@ -265,7 +265,7 @@ fn is_level_two_or_three_heading(line: &str) -> bool {
 /// Joins a validated historical summary and a validated turn summary with the
 /// split-turn separator, rejecting a combination that is over the bound. The
 /// historical half may be a stored summary with the headings of
-/// [`PRE_OBSERVATIONS_SUMMARY_HEADINGS`].
+/// `PRE_OBSERVATIONS_SUMMARY_HEADINGS`.
 pub fn combine_summary(historical: &str, turn: &str) -> Result<String, String> {
     let validated_historical =
         validate_summary_message(&text_message(historical), SUMMARY_MAXIMUM_BYTES)?;

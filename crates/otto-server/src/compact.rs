@@ -1,7 +1,7 @@
 //! `POST /v1/sessions/{id}/compact`.
 //!
 //! Refused with 409 `turn_active` while a turn or another compaction runs on
-//! the same session; [`super::Server::start_turn`] refuses turns for the same
+//! the same session; `super::Server::start_turn` refuses turns for the same
 //! window.
 
 use std::sync::Arc;

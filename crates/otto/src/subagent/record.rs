@@ -218,7 +218,7 @@ fn os_process_start_time(_pid: u32) -> Option<DateTime<Utc>> {
     None
 }
 
-pub use crate::storage::backends::sqlite::tasks::Store;
+pub use crate::subagent::sqlite::Store;
 
 #[cfg(test)]
 mod tests {

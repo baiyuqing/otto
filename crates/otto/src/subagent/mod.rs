@@ -24,6 +24,7 @@ pub(crate) mod recovery;
 mod reports;
 pub mod runner;
 mod scratch;
+pub mod sqlite;
 pub mod tasks;
 pub mod tools;
 

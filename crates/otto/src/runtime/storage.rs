@@ -44,16 +44,14 @@ impl SqlRepositories {
         let connection = self
             .connection(path)
             .map_err(|_| crate::approval::Error::Unavailable)?;
-        Ok(Arc::new(
-            crate::storage::backends::sqlite::approval::Store::from_connection(connection)?,
-        ))
+        Ok(Arc::new(crate::approval::sqlite::Store::from_connection(
+            connection,
+        )?))
     }
     pub fn schedule(&self, path: &Path) -> crate::schedule::Result<Arc<dyn ScheduleStore>> {
         let connection = self.connection(path).map_err(|_| crate::schedule::Error)?;
         Ok(Arc::new(
-            crate::storage::backends::sqlite::schedule::SqliteScheduleStore::from_connection(
-                connection,
-            )?,
+            crate::schedule::sqlite::SqliteScheduleStore::from_connection(connection)?,
         ))
     }
     pub fn workflow(&self, path: &Path) -> Result<Arc<dyn WorkflowStore>, String> {
@@ -61,9 +59,7 @@ impl SqlRepositories {
             .connection(path)
             .map_err(|_| "workflow storage is unavailable".to_owned())?;
         Ok(Arc::new(
-            crate::storage::backends::sqlite::workflow::SqliteWorkflowStore::from_connection(
-                connection,
-            )?,
+            crate::workflow::sqlite::SqliteWorkflowStore::from_connection(connection)?,
         ))
     }
     pub fn usage(&self, path: &Path) -> crate::usage::Result<Arc<dyn UsageRepository>> {
@@ -74,9 +70,9 @@ impl SqlRepositories {
         let connection = self
             .connection(path)
             .map_err(|_| crate::subagent::record::Error)?;
-        Ok(Arc::new(
-            crate::storage::backends::sqlite::tasks::Store::from_connection(connection)?,
-        ))
+        Ok(Arc::new(crate::subagent::sqlite::Store::from_connection(
+            connection,
+        )?))
     }
     pub fn skill_checks(
         &self,
@@ -85,9 +81,9 @@ impl SqlRepositories {
         let connection = self
             .connection(path)
             .map_err(|_| crate::skill::check_repository::StoreError::Io)?;
-        Ok(Arc::new(
-            crate::storage::backends::sqlite::skill_checks::Store::from_connection(connection)?,
-        ))
+        Ok(Arc::new(crate::skill::sqlite::Store::from_connection(
+            connection,
+        )?))
     }
     pub fn memory_advice(
         &self,
@@ -97,7 +93,7 @@ impl SqlRepositories {
             .connection(path)
             .map_err(|_| crate::memory::advice::audit::Error::Io)?;
         Ok(Arc::new(
-            crate::storage::backends::sqlite::memory_advice::Store::from_connection(connection)?,
+            crate::memory::advice::sqlite::Store::from_connection(connection)?,
         ))
     }
 }

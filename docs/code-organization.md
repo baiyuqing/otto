@@ -245,22 +245,23 @@ The other modules group native responsibilities:
 ### Persistent state and storage ownership
 
 Domain directories own typed repository ports and state semantics. Concrete
-schema, physical row mappings, SQL and file operations live under
-`crates/otto/src/storage/backends/`, except the session store and the usage
-store, which live in `session/` and `usage/`; the small capability contracts
-and the SQLite driver live beside them in `storage/`. The POSIX file driver
-and the `FileDriver` contract are in `fsops/`. `runtime/storage.rs`
+schema, physical row mappings and SQL live in the domain module as `sqlite.rs`
+or `sqlite/` files; the session store lives in `session/`. `storage/` holds the
+SQLite driver, the SQL layer (`sql.rs`, `worker.rs`), the small capability
+contracts and the generic schema validation helper `schema_objects.rs`, and
+imports no domain module. The POSIX file driver and the `FileDriver` contract
+are in `fsops/`. `runtime/storage.rs`
 opens concrete repositories at their local paths and injects domain ports into
 consumers. Backend packages retain their physical mappings and I/O.
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
-| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `storage/backends/sqlite/approval.rs` |
-| Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `storage/backends/sqlite/memory_advice.rs` (advice audit) |
+| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `approval/sqlite.rs` |
+| Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `memory/advice/sqlite.rs` (advice audit) |
 | Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `session/{store,prepared,list,fork,lease}.rs` |
-| Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/sqlite/{schedule,workflow}.rs` |
-| Tasks, skill checks | Their domain repository modules | `storage/backends/sqlite/{tasks,skill_checks}.rs` |
-| Usage | `usage/{mod,repository}.rs` | `usage/store.rs` |
+| Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `schedule/sqlite.rs`, `workflow/sqlite.rs` |
+| Tasks, skill checks | Their domain repository modules | `subagent/sqlite.rs`, `skill/sqlite.rs` |
+| Usage | `usage/{mod,repository}.rs` | `usage/sqlite.rs` |
 
 `runtime::storage::Storage` uses the local SQLite driver for SQL-backed
 state and the confined POSIX file driver for sessions. `storage/worker.rs` owns

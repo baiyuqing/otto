@@ -980,7 +980,16 @@ lease in `<session-id>.lease/` beside the session file.
   the holder exited
   cleanly, the open succeeds at once. When the holder stopped without
   releasing the lease, the open waits 7/6 of `lease_seconds` (35 s with the
-  default) without output, then takes the session over.
+  default), then takes the session over. Before it waits, Otto writes one
+  notice, `waiting up to <N> s for the session lease held by host <host> pid
+  <pid>`, with the wait in whole seconds and the holder from its heartbeat
+  (`unknown` and `0` when the heartbeat cannot be read). At startup
+  (`--continue`, `--resume`) the line goes to standard error. A session opened
+  later by `otto acp` or `otto serve` logs it as `WARN session_lease_wait`
+  with the fields `seconds`, `host` and `pid` on the process's standard error.
+  A session opened later inside the TUI or the REPL waits without a notice.
+  The notice is written before the open and the lease can change in between,
+  so it can name a holder that has released or been replaced.
 - The wait is skipped when the heartbeat shows a process of the same host
   that no longer exists: same hostname, same machine id (`/etc/machine-id`
   on Linux, the hardware UUID on macOS), and a recorded pid and process start

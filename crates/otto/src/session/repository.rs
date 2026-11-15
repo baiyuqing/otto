@@ -9,6 +9,7 @@ use otto_core::session::{
     Snapshot, Warning,
 };
 
+use super::lease::LeaseWait;
 use super::{ArchiveResult, Forked, Recovery};
 
 /// The current session writer authority, independent of its storage protocol.
@@ -153,6 +154,14 @@ pub trait SessionRepository: Send + Sync {
         header: Header,
         parent_writer: Option<Arc<dyn WriterOwnership>>,
     ) -> Result<(Arc<dyn SessionHandle>, String), String>;
+    /// The wait a `prepare` or `prepare_listed` of `reference` would start
+    /// now before taking over a lease whose holder stopped without releasing
+    /// it, or `None` when it would not wait. Read-only. The state can change
+    /// before the open, so the result is advisory: it can make a notice
+    /// inaccurate, never the open. Repositories without leases return `None`.
+    fn lease_wait(&self, _reference: &str) -> Option<LeaseWait> {
+        None
+    }
     fn prepare(
         &self,
         reference: &str,

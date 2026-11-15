@@ -62,7 +62,14 @@ pub(super) fn prepare_session_backend(
     reference: &str,
     create_lease: Option<u64>,
     listed: bool,
+    stderr: &mut dyn Write,
 ) -> Result<Box<dyn session::PreparedSession>, String> {
+    // The query runs before the open, so the lease can change in between
+    // (the holder releases, or another process takes over). That makes the
+    // notice inaccurate; it does not change what the open does.
+    if let Some(wait) = repository.lease_wait(reference) {
+        let _ = writeln!(stderr, "{}", lease_wait_notice(&wait));
+    }
     let prepared = if listed {
         repository.prepare_listed(root, workspace, reference, create_lease)
     } else {
@@ -75,6 +82,14 @@ pub(super) fn prepare_session_backend(
         return Err(error);
     }
     Ok(prepared)
+}
+
+/// The line printed before an open that waits for a lease holder.
+pub(super) fn lease_wait_notice(wait: &session::lease::LeaseWait) -> String {
+    format!(
+        "waiting up to {} s for the session lease held by host {} pid {}",
+        wait.seconds, wait.host, wait.pid
+    )
 }
 
 pub(super) async fn activate_initial_session(

@@ -16,6 +16,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- Opening a lease-managed session that will wait 7/6 of `lease_seconds` for a
+  holder that stopped without releasing the lease now writes
+  `waiting up to <N> s for the session lease held by host <host> pid <pid>`
+  first: to standard error at startup, and to the process log of `otto acp`
+  and `otto serve` for a session opened later. A session opened later in the
+  TUI or REPL still waits without a notice. See
+  [Continuing a session on another host](docs/manual/interactive-use.md#continuing-a-session-on-another-host).
 - A process that holds a session lease and was stopped for longer than 5/6 of
   `lease_seconds` (`SIGSTOP`, a terminal suspend, a debugger) no longer exits
   on resume when no other host took the session over. It checks for a

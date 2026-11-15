@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::attach::Remote;
 use crate::app::{Controller, Info, ModelSummary};
 use crate::memory::{Candidate, ReviewDecision};
-use crate::runtime::sandbox_config::SandboxChange;
+use crate::sandbox::config_edit::SandboxChange;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 mod local;

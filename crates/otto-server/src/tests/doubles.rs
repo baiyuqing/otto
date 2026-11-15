@@ -354,7 +354,7 @@ pub(super) struct TestFactory {
     /// Canned `Factory::reload_other_sandboxes` answer, one entry per
     /// non-startup workspace with its own reloader.
     pub(super) sandbox_reload_others: Vec<(String, Result<SandboxInfo, String>)>,
-    pub(super) sandbox_control: Option<Arc<dyn otto::app::SandboxControl>>,
+    pub(super) sandbox_control: Option<Arc<dyn otto::sandbox::control::SandboxControl>>,
     /// Canned `Factory::diff_runner` answer for the startup workspace.
     /// `None` matches a workspace with no usable sandbox (`GET
     /// /v1/workspaces/diff` answers 501).

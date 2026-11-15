@@ -14,14 +14,14 @@ use otto_core::config::File;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::SandboxControl;
+use crate::sandbox::control::SandboxControl;
 use crate::sandbox::{CommandExecutor, Error as SandboxError, ExitStatus, Request, Streams};
 
-use crate::runtime::info::SandboxInfo;
 use crate::runtime::sandbox_runtime::{
     CloseError, OpenOptions, ReconfigureError, SandboxRuntime, normalize_sandbox_runtime,
     open_sandbox_runtime, settings_from_config,
 };
+use crate::sandbox::info::SandboxInfo;
 use crate::sandbox::read_denylist::ReadDenylist;
 
 const RELOAD_UNAVAILABLE: &str = "sandbox reload requires a usable sandbox; restart otto";
@@ -193,7 +193,7 @@ fn usable(runtime: &SandboxRuntime) -> bool {
 /// as a runtime failure.
 fn reload_reason(info: &SandboxInfo) -> &'static str {
     match info.reason_code() {
-        "" => crate::runtime::info::SandboxReason::RuntimeFailure.as_str(),
+        "" => crate::sandbox::info::SandboxReason::RuntimeFailure.as_str(),
         code => code,
     }
 }
@@ -690,7 +690,7 @@ mod tests {
         let info = SandboxControl::reload(&reloader).await.expect("reload");
         assert_eq!(
             info.network,
-            crate::runtime::info::SandboxNetwork::Allowed,
+            crate::sandbox::info::SandboxNetwork::Allowed,
             "{info:?}"
         );
         assert_eq!(control.info(), info);

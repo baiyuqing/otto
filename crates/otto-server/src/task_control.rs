@@ -155,13 +155,13 @@ pub async fn steer(
 /// saved, `409 duplicate_input` for a retry of a delivered input, otherwise
 /// `409` with `code`.
 fn input_error(message: &str, code: &str) -> Response {
-    if message == otto::app::task_control::INPUT_NOT_PERSISTED {
+    if message == otto::runtime::task_control::INPUT_NOT_PERSISTED {
         error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "input_not_persisted",
             message,
         )
-    } else if message == otto::app::task_control::DUPLICATE_INPUT {
+    } else if message == otto::runtime::task_control::DUPLICATE_INPUT {
         error_response(StatusCode::CONFLICT, "duplicate_input", message)
     } else {
         error_response(StatusCode::CONFLICT, code, message)
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn an_unsaved_input_answers_503_and_other_failures_409() {
         let unsaved = input_error(
-            otto::app::task_control::INPUT_NOT_PERSISTED,
+            otto::runtime::task_control::INPUT_NOT_PERSISTED,
             "input_admission_failed",
         );
         assert_eq!(unsaved.status(), StatusCode::SERVICE_UNAVAILABLE);

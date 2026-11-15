@@ -10,9 +10,9 @@ use std::io;
 use std::path::Path;
 
 use super::gitignore::GitignoreStack;
-use super::gopath::{base, bytes, clean, is_abs, path_from, rel};
-use super::root::Root;
-use super::workspace::Workspace;
+use crate::fsops::gopath::{base, bytes, clean, is_abs, path_from, rel};
+use crate::fsops::root::Root;
+use crate::workspace::confined::Workspace;
 
 /// The text Go's `path.ErrBadPattern` carries.
 const BAD_PATTERN: &str = "syntax error in pattern";
@@ -341,7 +341,7 @@ fn requested_git_alias_inside_workspace(
         if segment.is_empty() {
             continue;
         }
-        prefix = super::gopath::join(&[&prefix, segment]);
+        prefix = crate::fsops::gopath::join(&[&prefix, segment]);
         if segment != b".git" {
             continue;
         }
@@ -404,9 +404,9 @@ pub(crate) fn walk_dir_ignoring(
     let entry = WalkEntry {
         path: root.to_owned(),
         name: String::from_utf8_lossy(&base(root.as_bytes())).into_owned(),
-        is_dir: super::root::is_dir(&stat),
+        is_dir: crate::fsops::root::is_dir(&stat),
         is_symlink: false,
-        is_regular: super::root::is_regular(&stat),
+        is_regular: crate::fsops::root::is_regular(&stat),
     };
     let is_dir = entry.is_dir;
     match visit(&entry)? {
@@ -650,7 +650,7 @@ mod git_alias_tests {
     fn pathdiff(base: &Path, target: &Path) -> String {
         use std::os::unix::ffi::OsStrExt;
         let relative =
-            crate::tool::gopath::rel(base.as_os_str().as_bytes(), target.as_os_str().as_bytes())
+            crate::fsops::gopath::rel(base.as_os_str().as_bytes(), target.as_os_str().as_bytes())
                 .expect("the paths share a root");
         String::from_utf8(relative).expect("the temporary paths are UTF-8")
     }

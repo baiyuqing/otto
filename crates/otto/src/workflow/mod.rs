@@ -5,6 +5,7 @@ pub(crate) mod provenance;
 pub mod repository;
 pub mod service;
 pub mod sqlite;
+pub(crate) mod tool;
 pub use crate::workflow::sqlite::SqliteWorkflowStore as Store;
 pub use contracts::*;
 pub use error::Error;

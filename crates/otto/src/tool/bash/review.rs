@@ -229,7 +229,7 @@ impl BashTool {
         for name in ["HEAD", "main", "master"] {
             let reference = format!("refs/remotes/{remote}/{name}");
             let commit_ref = format!("{reference}^{{commit}}");
-            let Some(base) = crate::runtime::workspace_context::run_git(
+            let Some(base) = crate::sandbox::git::run_git(
                 &self.executor,
                 &target.to_string_lossy(),
                 &self.environment,
@@ -246,7 +246,7 @@ impl BashTool {
             {
                 continue;
             }
-            let Some(ancestor) = crate::runtime::workspace_context::run_git(
+            let Some(ancestor) = crate::sandbox::git::run_git(
                 &self.executor,
                 &target.to_string_lossy(),
                 &self.environment,
@@ -264,7 +264,7 @@ impl BashTool {
             {
                 continue;
             }
-            let Some(diff) = crate::runtime::workspace_context::run_git(
+            let Some(diff) = crate::sandbox::git::run_git(
                 &self.executor,
                 &target.to_string_lossy(),
                 &self.environment,

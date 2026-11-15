@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use otto_core::agent::inbox::{Entry, Inbox};
 
 use crate::fsops::{PosixPublish, PublishOps};
-use crate::tool::remind;
+use crate::schedule::remind;
 
 /// IDs backed by a recoverable intent in this exact session/workspace.
 pub(crate) fn recoverable_local_ids(

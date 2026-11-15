@@ -20,7 +20,7 @@ fault-injection = []
 test-support = ["fault-injection"]
 
 [dependencies]
-# Static shell analysis for approval rules and review facts (`tool::shell`).
+# Static shell analysis for approval rules and review facts (`approval::shell`).
 # C grammar, compiled by the build script.
 tree-sitter = "=0.27.1"
 tree-sitter-bash = "=0.25.1"

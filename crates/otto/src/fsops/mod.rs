@@ -4,7 +4,9 @@
 //! descriptor primitives and the local [`PosixDriver`]; `files` holds the
 //! [`files::FileDriver`] contract it implements.
 pub mod files;
+pub(crate) mod gopath;
 pub mod posix;
+pub(crate) mod root;
 use otto_core::session::PiError;
 pub use posix::*;
 use std::io::Write;

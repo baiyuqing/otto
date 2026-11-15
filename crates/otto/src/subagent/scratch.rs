@@ -1,6 +1,6 @@
 //! A child's private workspace-local research directory. Its pinned handles
 //! survive path swaps; drop removes only this generated tree, never siblings.
-use crate::tool::root::Root;
+use crate::fsops::root::Root;
 use crate::tool::session_directory::{create_session_directory, session_directory_name};
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;

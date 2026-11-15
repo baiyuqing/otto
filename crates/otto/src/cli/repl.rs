@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::subagent::tasks::TaskError;
 
 use super::controller::{Controller, MODEL_SWITCH_UNAVAILABLE};
-use crate::runtime::sandbox_config::{SandboxChange, parse_exclude_entry};
+use crate::sandbox::config_edit::{SandboxChange, parse_exclude_entry};
 
 mod command;
 mod compaction;

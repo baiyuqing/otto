@@ -43,7 +43,7 @@ pub(super) struct HarnessOptions {
     pub(super) sandbox_reload_others: Vec<(String, Result<SandboxInfo, String>)>,
     /// The process sandbox every controller is wired to, which
     /// `amend_sandbox` reloads.
-    pub(super) sandbox_control: Option<Arc<dyn otto::app::SandboxControl>>,
+    pub(super) sandbox_control: Option<Arc<dyn otto::sandbox::control::SandboxControl>>,
     /// Canned `Factory::diff_runner` answer for the startup workspace.
     pub(super) diff_runner: Option<(Arc<dyn otto::sandbox::CommandExecutor>, Vec<String>)>,
     /// The startup workspace directory. Defaults to a fresh, empty temp

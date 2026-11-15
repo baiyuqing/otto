@@ -8,8 +8,8 @@ use std::sync::Mutex;
 
 use nix::sys::stat::Mode;
 
+use crate::fsops::root::Root;
 use crate::fsops::{PosixPublish, Publish, PublishMode, publish_file};
-use crate::tool::root::Root;
 use crate::tool::session_directory::{create_session_directory, session_directory_name};
 
 #[derive(Default)]

@@ -25,10 +25,10 @@ use crate::mcp::{Era, ServerState};
 #[cfg(test)]
 use crate::memory::{RememberRequest, Scope};
 use crate::memory::{ReviewDecision, SearchResult};
+use crate::schedule::remind::{NO_TIMERS, timer_line};
 use crate::skill;
 use crate::subagent::format::{first_runes, one_line, task_line, task_steps};
 use crate::subagent::record::{self, TaskRow};
-use crate::tool::remind::{NO_TIMERS, timer_line};
 
 use super::controller::Controller;
 use super::login::{SharedWriter, browser_opener};

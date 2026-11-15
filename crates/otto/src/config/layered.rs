@@ -1,6 +1,6 @@
 //! Native discovery and executable trust. Never writes an effective configuration.
 use crate::hex::to_hex;
-use crate::tool::workspace::Workspace;
+use crate::workspace::confined::Workspace;
 use otto_core::config::{
     File,
     layered::{Layer, ManagedPolicy, Merged},

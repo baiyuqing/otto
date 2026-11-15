@@ -25,8 +25,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+pub mod config_edit;
+pub mod control;
 pub mod direct;
 pub mod environment;
+pub mod git;
+pub mod info;
 pub mod process;
 pub mod read_denylist;
 /// macOS only: the driver shells out to `/usr/bin/sandbox-exec`, and its
@@ -38,18 +42,6 @@ pub mod worktrees;
 
 #[cfg(test)]
 pub(crate) mod conformance_tests;
-
-/// Workspace paths that stay read-only because git runs hooks and the
-/// configuration's program settings outside the sandbox: `(suffix, subpath)`,
-/// where `subpath` also covers everything below the path. The Seatbelt profile
-/// and the `write`/`edit` tools both enforce this one list.
-pub(crate) const GIT_READ_ONLY: [(&str, bool); 5] = [
-    (".git", false),
-    (".git/config", false),
-    (".git/config.worktree", false),
-    (".git/commondir", false),
-    (".git/hooks", true),
-];
 
 /// Default grace afforded after `SIGTERM` before process cleanup escalates to
 /// `SIGKILL`.

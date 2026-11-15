@@ -1,6 +1,6 @@
 //! The session timer routes.
 //!
-//! The wire record is [`otto::tool::remind::StoredReminder`], the same shape
+//! The wire record is [`otto::schedule::remind::StoredReminder`], the same shape
 //! the session's `.reminders.json` sidecar stores. A runner without a timer
 //! registry (`--no-session` child runners, and any runner built without the
 //! timer tools) lists nothing and answers 404 on cancel, the way the task
@@ -14,7 +14,7 @@ use axum::response::Response;
 use serde::Serialize;
 
 use super::{Server, json_response, not_found};
-use otto::tool::remind::StoredReminder;
+use otto::schedule::remind::StoredReminder;
 
 #[derive(Debug, Serialize)]
 struct TimerListResponse {

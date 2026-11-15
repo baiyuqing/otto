@@ -463,7 +463,7 @@ fn interrupted_nonidempotent_call_is_settled_once_and_never_replayed() {
     let (_temp, store, path) = take_over_with(
         &[("call-write", "write")],
         &[("call-write", "write", 1)],
-        crate::tool::safety::is_replayable,
+        crate::runtime::retry_safety::is_replayable,
     );
     let recovery = store.take_recovery().expect("recovery recorded");
     assert!(recovery.replayable.is_empty());

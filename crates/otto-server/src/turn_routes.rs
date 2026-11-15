@@ -79,10 +79,14 @@ pub(super) async fn start_turn(
     {
         return bad_request("image is invalid");
     }
-    let origin = match parsed.origin.as_deref().map(otto::schedule::Origin::parse) {
+    let origin = match parsed
+        .origin
+        .as_deref()
+        .map(otto::session::origin::Origin::parse)
+    {
         Some(Ok(origin)) => origin,
         Some(Err(message)) => return bad_request(&message),
-        None => otto::schedule::Origin::web(),
+        None => otto::session::origin::Origin::web(),
     };
     if let (Some(channel), Some(platform)) = (parsed.channel, origin.chat_platform()) {
         let expected = match channel {

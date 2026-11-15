@@ -40,6 +40,7 @@ use crate::memory::scope::new_workspace_scope;
 use crate::memory::{
     BindOptions, Binding, ErrorKind, MAX_EXACT_GUARD_VALUE_BYTES, Scope, Service, new_id,
 };
+use crate::schedule::remind;
 use crate::skill;
 use crate::subagent;
 use crate::subagent::runner::{
@@ -49,7 +50,6 @@ use crate::subagent::runner::{
 use crate::tool::Tool;
 use crate::tool::mcp::{McpCatalogEntry, McpTool, router_tools, tools_for};
 use crate::tool::memory::{ForgetTool, MemorySearchTool, RememberTool};
-use crate::tool::remind;
 use crate::tool::result::redact_exact_text;
 use crate::tool::skill::SkillTool;
 

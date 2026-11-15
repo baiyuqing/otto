@@ -8,7 +8,7 @@ async fn workflow_tools_and_durable_mailbox_exist_with_conversational_agents_dis
     let source = crate::workflow::conversation_tests::session("source");
     let runner = builder.build_runner(&source, &runtime()).await.unwrap();
     assert!(runner.tasks().is_none());
-    for name in crate::tool::workflow::NAMES {
+    for name in crate::workflow::tool::NAMES {
         assert!(tool_names(&runner).contains(&name.to_string()));
     }
     let controller = builder.workflows.get().unwrap();
@@ -106,7 +106,7 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
     tokio::time::timeout(Duration::from_secs(2), old_binding.join())
         .await
         .unwrap();
-    let parent = crate::tool::workflow::Parent::new(Ok(owner.clone()), source_id.clone(), true);
+    let parent = crate::workflow::tool::Parent::new(Ok(owner.clone()), source_id.clone(), true);
     let runner = Runner::scripted_with_tools(source.clone(), provider, tasks, parent.tools());
     runner
         .run("Review scope", &mut |_| {}, &CancellationToken::new())

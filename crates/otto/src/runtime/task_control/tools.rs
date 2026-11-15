@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use super::{Tool, definition, error_result, text_result};
-use crate::app::task_control::{ControlRoute, TaskControl, checked_text};
+use super::{ControlRoute, TaskControl, checked_text};
+use crate::tool::{Tool, definition, error_result, text_result};
 use otto_core::agent::redactor::Redactor;
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -86,7 +86,7 @@ impl Tool for TaskQueue {
 
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
         if cancel.is_cancelled() {
-            return error_result(super::CONTEXT_CANCELED);
+            return error_result(crate::tool::CONTEXT_CANCELED);
         }
         if let Some(route) = &self.route {
             if serde_json::from_str::<EmptyArgs>(arguments.get()).is_err() {
@@ -167,7 +167,7 @@ impl Tool for TaskReply {
 
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
         if cancel.is_cancelled() {
-            return error_result(super::CONTEXT_CANCELED);
+            return error_result(crate::tool::CONTEXT_CANCELED);
         }
         if serde_json::from_str::<EmptyArgs>(arguments.get()).is_err() {
             return error_result("task_reply accepts no arguments in control dialogue mode");
@@ -223,7 +223,7 @@ impl Tool for TaskSteer {
 
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
         if cancel.is_cancelled() {
-            return error_result(super::CONTEXT_CANCELED);
+            return error_result(crate::tool::CONTEXT_CANCELED);
         }
         if serde_json::from_str::<EmptyArgs>(arguments.get()).is_err() {
             return error_result("task_steer accepts no arguments in control dialogue mode");
@@ -247,7 +247,7 @@ impl Tool for TaskSteer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::task_control::Route;
+    use crate::runtime::task_control::Route;
     use crate::tool::testutil::raw;
 
     #[tokio::test]

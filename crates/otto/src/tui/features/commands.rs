@@ -482,7 +482,7 @@ fn sandbox(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
         ("network", "") => push(Choice::new(
             ChoiceKind::Network,
             match info.sandbox.network {
-                crate::runtime::info::SandboxNetwork::Allowed => "allow",
+                crate::sandbox::info::SandboxNetwork::Allowed => "allow",
                 _ => "deny",
             },
         )),
@@ -490,7 +490,7 @@ fn sandbox(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
             command("Sandbox network", Command::SandboxNetwork(mode.into()))
         }
         ("exclude", entry) if !entry.is_empty() => Ok(Transition::Request(Request::Command(
-            Command::SandboxExclude(crate::runtime::sandbox_config::parse_exclude_entry(entry)?),
+            Command::SandboxExclude(crate::sandbox::config_edit::parse_exclude_entry(entry)?),
         ))),
         _ => {
             Err("usage: /sandbox [reload|allow <path>|network [allow|deny]|exclude <entry>]".into())

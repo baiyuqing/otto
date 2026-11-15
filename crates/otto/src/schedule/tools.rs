@@ -6,7 +6,7 @@
 //! call returns an error naming the cause. Items and listings are limited to
 //! the current origin.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::{Local, TimeDelta, Utc};
 use otto_core::model::ToolDefinition;
@@ -18,7 +18,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::store::{CreateError, Item, NewItem};
 use super::time::{format_duration, format_local, next_occurrence, resolve_at};
-use super::{Kind, Origin, Repeat, ScheduleStore, State};
+use super::{Kind, Repeat, ScheduleStore, State};
+use crate::session::origin::Origin;
+use crate::session::origin::TurnOrigin;
 use crate::tool::result::decode_strict_json;
 use crate::tool::{
     ApprovalSpec, CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result,
@@ -51,21 +53,6 @@ const SCHEDULE_DESCRIPTION: &str = "Schedule a fixed text message (`text`) or a 
     run unattended.";
 const LIST_DESCRIPTION: &str = "List the scheduled items of this chat or surface: active ones, then those that finished, failed or were cancelled in the last 7 days. Use the id with schedule_cancel.";
 const CANCEL_DESCRIPTION: &str = "Cancel an active scheduled item by id, as schedule_list shows it (for example s7). A recurring item stops for good.";
-
-/// The origin of the current user turn of one runner. Set by the app layer at
-/// the start of each user turn; a wake turn keeps the last value.
-#[derive(Default)]
-pub struct TurnOrigin(Mutex<Option<Origin>>);
-
-impl TurnOrigin {
-    pub fn set(&self, origin: Option<Origin>) {
-        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = origin;
-    }
-
-    pub fn get(&self) -> Option<Origin> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
-    }
-}
 
 #[derive(Clone)]
 pub struct Context {

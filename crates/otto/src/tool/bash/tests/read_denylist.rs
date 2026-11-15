@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::fixtures::FakeSandbox;
-use crate::runtime::info::SandboxInfo;
+use crate::sandbox::info::SandboxInfo;
 use crate::sandbox::read_denylist::ReadDenylist;
 
 const ALREADY_READABLE: &str =

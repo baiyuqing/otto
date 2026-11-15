@@ -20,9 +20,9 @@ use otto_core::agent::inbox::Inbox;
 
 use super::builder::SharedSession;
 use super::workflow_notifications::Binding;
+use crate::schedule::remind::Reminders;
 use crate::subagent::tasks::Tasks;
 use crate::tool::bash_output::Logs;
-use crate::tool::remind::Reminders;
 
 mod construction;
 mod session_mcp;

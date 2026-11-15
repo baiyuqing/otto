@@ -3,14 +3,14 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::AtomicU32;
 
-struct FakeClock {
+pub(super) struct FakeClock {
     now: Mutex<Duration>,
     sleeps: Mutex<u32>,
     on_sleep: Box<dyn Fn() + Send + Sync>,
 }
 
 impl FakeClock {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         FakeClock::with_on_sleep(|| {})
     }
 
@@ -22,7 +22,7 @@ impl FakeClock {
         }
     }
 
-    fn sleep_count(&self) -> u32 {
+    pub(super) fn sleep_count(&self) -> u32 {
         *self.sleeps.lock().unwrap()
     }
 }
@@ -44,7 +44,7 @@ impl Clock for FakeClock {
 /// or fencing happen, so watchdog tests finish well under 2s.
 const TEST_TICK: Duration = Duration::from_millis(50);
 
-fn no_op_keeper() -> Arc<Keeper> {
+pub(super) fn no_op_keeper() -> Arc<Keeper> {
     Keeper::new_for_test(Box::new(|| {}), Arc::new(Children::new()), TEST_TICK)
 }
 
@@ -101,6 +101,7 @@ fn acquire_with_reports_a_running_holder() {
             pid: 4242,
             released: false,
             seq: seq.fetch_add(1, Ordering::Relaxed) as u64,
+            ..Default::default()
         };
         write_heartbeat_record(&renew_dir, &record).unwrap();
     });
@@ -275,6 +276,7 @@ fn heartbeat_reads_are_never_torn_under_concurrent_renewal() {
         pid: 1,
         released: false,
         seq: 0,
+        ..Default::default()
     };
     write_heartbeat_record(&writer_dir, &record).unwrap();
 
@@ -289,6 +291,7 @@ fn heartbeat_reads_are_never_torn_under_concurrent_renewal() {
                 pid: 1,
                 released: false,
                 seq,
+                ..Default::default()
             };
             write_heartbeat_record(&writer_dir, &record).unwrap();
             seq += 1;

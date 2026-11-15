@@ -16,6 +16,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- Opening a lease-managed session whose holder stopped without releasing the
+  lease no longer waits 7/6 of `lease_seconds` (35 s by default) when the
+  holder was a process of the same host that no longer exists. Heartbeats and
+  epoch markers now record the machine id, and heartbeats the process start
+  time; a holder with no machine id (written by an earlier build), on another
+  host, or whose process state cannot be determined keeps the wait. See
+  [Continuing a session on another host](docs/manual/interactive-use.md#continuing-a-session-on-another-host).
+
 - `scripts/otto-tcp.sh` is now `scripts/otto-serve-connect.sh` and supervises
   `otto serve` on its Unix socket with `otto-connect` configured as
   `[agent] command = ["otto", "acp", "--attach"]`; it no longer starts serve

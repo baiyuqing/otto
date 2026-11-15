@@ -169,8 +169,8 @@ impl Tool for ListModelsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::faults::http;
     use crate::tool::testutil::{MAX_OUTPUT_BYTES, run, run_cancelled};
+    use otto_faults::http;
 
     /// Serves one fixed HTTP response to every connection and returns the base
     /// URL. The accept loop ends with the test's runtime.

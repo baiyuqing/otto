@@ -6,7 +6,7 @@
 //!
 //! Compiled under `cfg(test)` or the `test-support` feature; never part of a
 //! shipped build. `test-support` implies `fault-injection`, because the
-//! scripted provider runs on `crate::faults::http`.
+//! scripted provider runs on `otto_faults::http`.
 
 pub mod plugin_package;
 pub mod runtime_session;

@@ -1,6 +1,6 @@
 //! Provider contract matrix: one test per injected transport fault, driven
 //! through the real `reqwest` transport and each provider's retry loop against
-//! `otto::faults::http` scripts. Each test name states its row; the expected
+//! `otto_faults::http` scripts. Each test name states its row; the expected
 //! values come from the resilience spec (2026-09-28) and its 2026-10-07
 //! amendment, and from the module documentation of each provider.
 //!
@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use otto::auth::Credentials;
 use otto::auth::token::TokenSource;
-use otto::faults::http::{self, Script, Server, Step};
 use otto::provider::{chatgpt, openaicompat};
 use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{Provider, ProviderError, ProviderSettlement, Request, StreamEvent};
+use otto_faults::http::{self, Script, Server, Step};
 use otto_platform::deadline::{Control, Deadline};
 use tokio_util::sync::CancellationToken;
 

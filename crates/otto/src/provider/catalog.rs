@@ -220,7 +220,7 @@ mod tests {
     }
     #[tokio::test]
     async fn catalog_transport_rejects_redirects_errors_and_oversize_without_body_leaks() {
-        use crate::faults::http as fixture;
+        use otto_faults::http as fixture;
         let target = fixture::spawn(|_| fixture::json_response(r#"{"data":[]}"#)).await;
         let location = target.url.clone();
         let redirect = fixture::spawn(move |_| fixture::redirect_response(307, &location)).await;
@@ -249,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_body_read_observes_cancellation() {
-        use crate::faults::http as fixture;
+        use otto_faults::http as fixture;
         let origin = fixture::spawn_repeating(fixture::Script::stall_after_head()).await;
         let cancel = CancellationToken::new();
         let stop = cancel.clone();

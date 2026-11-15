@@ -188,8 +188,8 @@ mod tests {
     use otto_core::agent::inbox::Notification;
 
     use super::*;
-    use crate::faults::publish::FaultyPublishOps;
-    use crate::faults::{Fault, FaultPlan, Rule, Trigger};
+    use otto_faults::publish::FaultyPublishOps;
+    use otto_faults::{Fault, FaultPlan, Rule, Trigger};
     use otto_platform::fsops::PublishStep;
 
     fn session_dir() -> (tempfile::TempDir, PathBuf) {
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn a_crash_before_the_sidecar_rename_reloads_the_previous_queue() {
-        use crate::faults::crash::{self, CRASH_EXIT, Role};
+        use otto_faults::crash::{self, CRASH_EXIT, Role};
         crash::run(crash::name_of(&|| {}), |role| match role {
             Role::Child(dir) => crash_on_second_save(dir, PublishStep::Rename),
             Role::Parent(dir, status) => {
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_crash_before_the_sidecar_directory_sync_reloads_the_previous_queue_and_the_prompt() {
-        use crate::faults::crash::{self, CRASH_EXIT, Role};
+        use otto_faults::crash::{self, CRASH_EXIT, Role};
         crash::run(crash::name_of(&|| {}), |role| match role {
             Role::Child(dir) => crash_on_second_save(dir, PublishStep::DirSync),
             Role::Parent(dir, status) => {

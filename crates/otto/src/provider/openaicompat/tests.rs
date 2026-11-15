@@ -5,7 +5,7 @@ use otto_core::model::{Block, Message, OperationDisposition, Role};
 use otto_core::provider::StreamEvent;
 
 use super::*;
-use crate::faults::http;
+use otto_faults::http;
 
 mod cache_key;
 mod errors;
@@ -68,7 +68,7 @@ impl OperationControl for BudgetControl {
     }
 }
 
-/// Starts a loopback origin server on `faults::http`.
+/// Starts a loopback origin server on `otto_faults::http`.
 ///
 /// `handler` receives the request head as text and the request body, and
 /// returns the raw response bytes. An empty return closes the connection

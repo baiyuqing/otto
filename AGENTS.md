@@ -13,6 +13,7 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 | I/O-free contracts, formats, agent loop | [otto-core](crates/otto-core/AGENTS.md) |
 | Process-wide primitives: file driver, log, retry, URL parsing | [otto-platform](crates/otto-platform/AGENTS.md), `src/lib.rs` |
 | SQL layer and SQLite driver | [otto-storage](crates/otto-storage/AGENTS.md), `src/lib.rs` |
+| Fault-injection doubles for tests (test support) | [otto-faults](crates/otto-faults/AGENTS.md), `src/lib.rs` |
 | Native services, tools, persistence, sandbox | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
 | Terminal UI, REPL, login commands | [otto-terminal](crates/otto-terminal/AGENTS.md), `src/tui/mod.rs` |
 | HTTP client of `otto serve` | [otto-client](crates/otto-client/AGENTS.md), `src/lib.rs` |
@@ -22,12 +23,24 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 | Binary, commands, composition root | [otto-cli](crates/otto-cli/AGENTS.md), `src/run.rs` |
 | User/contributor docs | [docs](docs/AGENTS.md) |
 
-Dependencies point `otto-core` <- `otto-platform` and {`otto-platform`,
-`otto-storage`} <- `otto` <- {`otto-client`, `otto-server`, `otto-eval`};
-`otto-storage` depends on no workspace crate; every crate above `otto-platform`
-or `otto-storage` may import it directly; `otto-acp` imports `otto-server` and `otto-client`;
-`otto-terminal` imports `otto` and `otto-client`; `otto-cli` imports all of
-them, and `otto-eval` only with its `eval` feature. The browser client is in the separate
+Dependencies between the crates, lowest first; a crate imports only crates
+listed above it:
+
+- `otto-core`, `otto-storage`: no workspace dependency.
+- `otto-platform`: `otto-core`.
+- `otto-faults` (test support): `otto-platform`, `otto-storage`. Linked only
+  by tests and by the `fault-injection` feature of `otto`, never by a
+  shipped build.
+- `otto`: `otto-core`, `otto-platform`, `otto-storage`.
+- `otto-client`, `otto-server`, `otto-eval`: `otto` and the crates below it.
+- `otto-acp`: `otto-server`, `otto-client`. `otto-terminal`: `otto`,
+  `otto-client`.
+- `otto-cli`: all of them; `otto-eval` only with its `eval` feature.
+
+A crate that uses a module of a lower crate imports that crate directly;
+no crate re-exports another.
+
+The browser client is in the separate
 `otto-plus` repository; `chat-connector/` is a separate Go ACP client, not a
 Cargo crate.
 Only `claude`, `openai-compatible` and `chatgpt` providers are supported.

@@ -21,13 +21,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use otto::faults::mcp::{FaultyTransport, McpOp};
-use otto::faults::{Fault, FaultPlan, Filter, Rule, Trigger};
 use otto::mcp::client::Client;
 use otto::mcp::jsonrpc::modern_meta;
 use otto::mcp::stdio::StdioTransport;
 use otto::mcp::{
     CallError, ContentBlock, Era, LEGACY_VERSION, MODERN_VERSION, Outbound, ToolServer, Transport,
 };
+use otto_faults::{Fault, FaultPlan, Filter, Rule, Trigger};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 

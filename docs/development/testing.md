@@ -111,11 +111,18 @@ it reads no session, changes no session and registers no product tool or
 binding. Every provider call goes through the agent's secret redaction and PII
 egress guard, and every file it writes holds redacted text.
 
+The command lives in the `otto-eval` crate, which `otto-cli` links only with
+its `eval` feature. A default build (`cargo build -p otto-cli`) does not
+contain it: `otto eval ...` prints
+`otto: the eval command is not compiled into this binary; build with: cargo build -p otto-cli --features eval`
+to standard error and exits with code 2. Build or run it with
+`--features eval`; the unit tests run with `cargo test -p otto-eval`.
+
 ```sh
-otto eval memory-retraction --dry-run                 # counts and call estimate, no requests
-otto eval memory-retraction                           # layers 2 and 3, all conditions and variants
-otto eval memory-retraction --layer 3 --conditions A,C --variants assistant_paraphrase --repeat 3
-otto eval memory-retraction --out ~/.otto/eval/memory-retraction/<run-id>   # rerun: reuse rows
+cargo run -p otto-cli --features eval -- eval memory-retraction --dry-run                 # counts and call estimate, no requests
+cargo run -p otto-cli --features eval -- eval memory-retraction                           # layers 2 and 3, all conditions and variants
+cargo run -p otto-cli --features eval -- eval memory-retraction --layer 3 --conditions A,C --variants assistant_paraphrase --repeat 3
+cargo run -p otto-cli --features eval -- eval memory-retraction --out ~/.otto/eval/memory-retraction/<run-id>   # rerun: reuse rows
 ```
 
 | Flag | Meaning |

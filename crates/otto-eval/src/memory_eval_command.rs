@@ -60,7 +60,7 @@ pub fn run_dry(
 ) -> i32 {
     match argument_parsing::dry_run(&invocation.options, stdout) {
         Ok(()) => 0,
-        Err(message) => crate::run::fail(stderr, &format!("eval memory-retraction: {message}")),
+        Err(message) => crate::fail(stderr, &format!("eval memory-retraction: {message}")),
     }
 }
 
@@ -77,7 +77,7 @@ pub async fn run(
     let (provider, redactor) = match builder.eval_provider_access(runtime) {
         Ok(access) => access,
         Err(message) => {
-            return crate::run::fail(stderr, &builder.redact_error(&message, Some(runtime)));
+            return crate::fail(stderr, &builder.redact_error(&message, Some(runtime)));
         }
     };
     let (provider, log) = BudgetedProvider::new(provider, invocation.options.max_calls);
@@ -98,7 +98,7 @@ pub async fn run(
                 let _ = writeln!(stderr, "otto: eval memory-retraction: {message}");
                 return 130;
             }
-            crate::run::fail(stderr, &format!("eval memory-retraction: {message}"))
+            crate::fail(stderr, &format!("eval memory-retraction: {message}"))
         }
     }
 }

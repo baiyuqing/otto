@@ -8,11 +8,9 @@
 
 pub mod acp;
 pub mod config_command;
-pub mod eval_command;
 pub mod flags;
 pub mod mcp;
 pub mod memory_command;
-pub mod memory_eval_command;
 pub mod panic_cleanup;
 pub mod plugin;
 pub mod run;

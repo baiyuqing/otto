@@ -185,7 +185,7 @@ Git and release tags are the archive. No parallel historical index is required.
 ## Releases
 
 `[workspace.package] version` in `Cargo.toml` is shared by `otto`, `otto-core`,
-`otto-server`, `otto-acp` and `otto-cli`; their `Cargo.lock` entries must match
+`otto-server`, `otto-acp`, `otto-eval` and `otto-cli`; their `Cargo.lock` entries must match
 (covered by `crates/otto-cli/tests/version.rs`).
 Version changes belong **only in release PRs** via `make bump VERSION=X.Y.Z`,
 never feature/fix PRs. Versioning is patch-only in 0.x, even for incompatible

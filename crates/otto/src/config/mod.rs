@@ -167,8 +167,7 @@ fn write_bytes_with(
     if let Some(current) = current {
         back_up(directory, &current)?;
     }
-    let suffix = crate::runtime::builder::random_id()
-        .map_err(|_| "cannot create temporary configuration")?;
+    let suffix = crate::random::random_id().map_err(|_| "cannot create temporary configuration")?;
     let temp_name = format!(".otto-config-{suffix}");
     let (parent, name) =
         fsops::open_parent(path).map_err(|_| "cannot create temporary configuration")?;
@@ -431,8 +430,7 @@ fn create_bytes_if_absent(path: &Path, contents: &[u8]) -> Result<(), &'static s
         return Err("configuration already exists; no changes made");
     }
     let directory = parent_directory(path);
-    let suffix = crate::runtime::builder::random_id()
-        .map_err(|_| "cannot create temporary configuration")?;
+    let suffix = crate::random::random_id().map_err(|_| "cannot create temporary configuration")?;
     let temp_path = directory.join(format!(".otto-config-{suffix}"));
     let result = fs::OpenOptions::new()
         .write(true)

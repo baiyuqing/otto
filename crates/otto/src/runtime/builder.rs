@@ -51,8 +51,8 @@ use crate::workspace::confined::Workspace;
 
 use super::boundary::{self, BoundaryInputs, FixedText};
 use super::prompt::{subagent_model_guidance, system_prompt_for};
-use super::sandbox_runtime::canonical_directory;
 use super::workspace_context::{layered_workspace_context, split_workspace_instructions};
+use crate::fsops::canonical_directory;
 use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 mod builder_inputs;
@@ -539,17 +539,10 @@ pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<Stri
         .collect()
 }
 
-/// 16 random bytes from `/dev/urandom`, hex encoded.
-pub fn random_id() -> std::io::Result<String> {
-    use std::io::Read;
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
 /// A fresh opaque operation identity for durable tool-attempt facts.
 pub(crate) fn new_operation_id() -> Result<otto_core::model::OperationId, String> {
-    let random = random_id().map_err(|error| format!("read operation randomness: {error}"))?;
+    let random = crate::random::random_id()
+        .map_err(|error| format!("read operation randomness: {error}"))?;
     otto_core::model::OperationId::new(format!("op_{random}")).map_err(|error| error.to_string())
 }
 

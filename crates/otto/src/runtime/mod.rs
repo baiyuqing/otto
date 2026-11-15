@@ -26,5 +26,4 @@ pub mod verification;
 pub mod wiring;
 pub mod workflow;
 pub mod workflow_notifications;
-pub mod workspace_admission;
 pub mod workspace_context;

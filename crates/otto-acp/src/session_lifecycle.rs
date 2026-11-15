@@ -86,7 +86,7 @@ impl Connection {
         if matches!(&self.backend, Backend::Attach(_)) {
             return Ok(PathBuf::from(cwd));
         }
-        match otto::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) {
+        match otto::fsops::canonical_directory(Path::new(cwd)) {
             Ok(canonical) if canonical == self.workspace => Ok(canonical),
             _ => Err(invalid_params(format!(
                 "cwd must be the workspace {}",

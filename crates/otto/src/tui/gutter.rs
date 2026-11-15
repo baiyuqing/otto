@@ -20,18 +20,11 @@
 //! [`strip_gutters`] is the inverse for clipboard copy: a drag selects
 //! rendered rows, and pasting the markers back is never what the reader meant.
 
+use crate::cli::repl::USER_MARK;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// The user prompt marker, shared with the REPL's input prompt
-/// (`cli::repl`) so the two frontends cannot drift apart.
-///
-/// Deliberately not `>`: a reply's markdown blockquotes carry a `> ` prefix
-/// of their own, so an ASCII chevron in the gutter reads as just another
-/// quoted line. East Asian width Neutral, like the others here, so it stays
-/// one column even where ambiguous-width characters render double.
-pub(crate) const USER_MARK: &str = "\u{276f} ";
 /// Assistant text, and the header line of a tool call.
 pub(crate) const BULLET_MARK: &str = "⏺ ";
 /// Compaction checkpoints, notifications, and other system entries.

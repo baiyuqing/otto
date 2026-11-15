@@ -3,8 +3,13 @@
 use std::fs::File;
 use std::io::Read;
 
-/// `N` bytes from `/dev/urandom`, hex encoded. Same source as `randomID` in
-/// `runtime::builder` and the workspace write tool.
+/// 16 random bytes from `/dev/urandom`, hex encoded.
+pub fn random_id() -> std::io::Result<String> {
+    random_hex::<16>()
+}
+
+/// `N` bytes from `/dev/urandom`, hex encoded. Same source as the workspace
+/// write tool.
 pub(crate) fn random_hex<const N: usize>() -> std::io::Result<String> {
     Ok(crate::hex::to_hex(&random_bytes::<N>()?))
 }

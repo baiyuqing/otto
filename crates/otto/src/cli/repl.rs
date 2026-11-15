@@ -37,6 +37,15 @@ use settings::*;
 /// The longest line the REPL accepts.
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
+/// The user prompt marker, shared with the terminal UI transcript (`tui::gutter`)
+/// so the two frontends cannot drift apart.
+///
+/// Deliberately not `>`: a reply's markdown blockquotes carry a `> ` prefix
+/// of their own, so an ASCII chevron in the gutter reads as just another
+/// quoted line. East Asian width Neutral, like the others here, so it stays
+/// one column even where ambiguous-width characters render double.
+pub(crate) const USER_MARK: &str = "\u{276f} ";
+
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
 const HELP: &str = concat!(
@@ -218,7 +227,7 @@ impl<'a> Repl<'a> {
             for line in self.controller.take_notices() {
                 let _ = writeln!(self.stdout, "{line}");
             }
-            let _ = write!(self.stdout, "{}", crate::tui::gutter::USER_MARK);
+            let _ = write!(self.stdout, "{}", USER_MARK);
             let _ = self.stdout.flush();
             // The receiver is kept across iterations rather than re-subscribed:
             // subscribing now would mark a signal raised during the last turn

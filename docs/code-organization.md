@@ -20,9 +20,10 @@ guide rather than being copied into those instruction files.
 | `crates/otto-acp/` | ACP stdio and attach frontends | `src/lib.rs` |
 | `crates/otto-cli/` | The `otto` executable: command parsing, process lifecycle and composition root | `src/main.rs`, then `otto_cli::run` in `src/run.rs` |
 | `chat-connector/` | Independent Go Telegram connector that communicates with Otto through ACP | `chat-connector/cmd/otto-connect/` and `chat-connector/internal/` |
-| `crates/otto/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`) | Native session and workspace callers |
+| `crates/otto/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`), canonical directory and executable-file resolution (`canonical.rs`) | Native session and workspace callers |
 | `crates/otto/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
-| `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
+| `crates/otto/src/process_identity.rs` | Process id with start time, and the check that a recorded identity still names a live process | `current_process`, `process_matches` |
+| `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, delivery and `embed` | `initialize`, `read`, `fork`, `admission::admit_workspace` |
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories | `runtime/storage.rs` composition |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
@@ -119,7 +120,7 @@ replacement: sub-agent registry, inbox, timers, bash output logs, MCP servers
 and workflow delivery worker). A `Runner` borrows these resources and never
 stops them; `SharedSession::close` and `close_resources` do. `runtime/startup.rs` holds the startup composition, from environment
 capture to the memory service, as phase functions; `otto_cli::run`, `otto serve`
-(`load_workspace`) and `embed` all call it. `runtime/workspace_admission.rs`
+(`load_workspace`) and `embed` all call it. `workspace/admission.rs`
 admits a workspace path for `otto serve`, delivery and `embed`. `src/app/`
 exposes the shared application lifecycle used by frontends. `src/embed.rs` is
 the public in-process API (`otto::embed::Otto`) that builds the `otto acp`
@@ -191,7 +192,7 @@ The other modules group native responsibilities:
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
   `typesafe/`, `storage/` (drivers and backend repositories),
-  `usage/`, `failover/`, `workflow/`, and `schedule/` (typed store port, tools, worker).
+  `usage/`, `failover/` (lease and commit guard), `workflow/` (including `workflow/approval.rs`, its approval adapter), and `schedule/` (typed store port, tools, worker).
 - **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
   package validation and Skills/MCP adaptation with content-bound trust.
   `plugin/hooks.rs` adapts authorized `dev.otto` hooks/tools through the native
@@ -260,7 +261,7 @@ consumers. Backend packages retain their physical mappings and I/O.
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
-| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `approval/sqlite.rs` |
+| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `approval/sqlite.rs`; `workflow/approval.rs` (workflow steps), `approval/model_change.rs` (model and provider changes) |
 | Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `memory/advice/sqlite.rs` (advice audit) |
 | Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `session/{store,prepared,list,fork,lease}.rs` |
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `schedule/sqlite.rs`, `workflow/sqlite.rs` |

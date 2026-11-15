@@ -129,7 +129,7 @@ async fn a_wake_turn_resuming_an_interrupted_turn_reports_trigger_recovery() {
     assert!(!session.ctrl.resumes_interrupted_turn());
 }
 
-/// R13: `failover::recovery::notify` pushes through the same
+/// R13: `subagent::session_recovery::notify` pushes through the same
 /// `tasks.notifications()` inbox `Builder::session_resources` wires the recovery
 /// push into, so it starts a wake turn the same way any other pending
 /// notification does; no separate signaling code exists for it.
@@ -151,7 +151,7 @@ async fn a_recovery_notification_starts_a_wake_turn_while_idle() {
         replayable: Vec::new(),
         interrupted_turn: None,
     };
-    otto::failover::recovery::notify(
+    otto::subagent::session_recovery::notify(
         tasks.notifications().as_ref(),
         Some(takeover),
         &tempfile::tempdir().expect("dir").path().join("children"),

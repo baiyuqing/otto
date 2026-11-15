@@ -259,9 +259,7 @@ pub fn run_with_storage(
             stderr,
         ),
         "forget" => {
-            let Ok(workspace) =
-                otto::runtime::sandbox_runtime::canonical_directory(Path::new(&flags.cwd))
-            else {
+            let Ok(workspace) = otto::fsops::canonical_directory(Path::new(&flags.cwd)) else {
                 return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
             };
             forget(
@@ -366,7 +364,7 @@ fn status(
     if usable {
         // The scopes `/memory review` lists: the user and the current workspace.
         let standing = service.standing_usage(&user_scope);
-        let pending = otto::runtime::sandbox_runtime::canonical_directory(Path::new(cwd))
+        let pending = otto::fsops::canonical_directory(Path::new(cwd))
             .ok()
             .and_then(|workspace| {
                 otto::runtime::wiring::workspace_memory_scope(config, &workspace.to_string_lossy())
@@ -440,7 +438,7 @@ fn list(input: ListInput<'_>) -> i32 {
         stdout,
         stderr,
     } = input;
-    let Ok(workspace) = otto::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
+    let Ok(workspace) = otto::fsops::canonical_directory(Path::new(cwd)) else {
         return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
     };
     let mut warning = Vec::new();
@@ -515,7 +513,7 @@ fn show(
     if scope == "all" {
         return fail(stderr, "show requires --scope current, user, or workspace");
     }
-    let Ok(workspace) = otto::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
+    let Ok(workspace) = otto::fsops::canonical_directory(Path::new(cwd)) else {
         return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
     };
     let mut warning = Vec::new();

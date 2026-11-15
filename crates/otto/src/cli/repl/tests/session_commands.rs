@@ -23,7 +23,7 @@ async fn the_banner_reports_the_session_and_the_sandbox() {
         )),
         "{stdout}"
     );
-    assert!(stdout.contains(crate::tui::gutter::USER_MARK), "{stdout}");
+    assert!(stdout.contains(crate::cli::repl::USER_MARK), "{stdout}");
     assert_eq!(stderr, "");
 }
 
@@ -37,7 +37,7 @@ async fn blank_lines_are_skipped_and_unknown_commands_are_reported() {
 
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(stderr, "unknown command: /unknown\n");
-    assert_eq!(stdout.matches(crate::tui::gutter::USER_MARK).count(), 4);
+    assert_eq!(stdout.matches(crate::cli::repl::USER_MARK).count(), 4);
 }
 
 #[tokio::test]

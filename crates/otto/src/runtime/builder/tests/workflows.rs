@@ -119,7 +119,7 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
         "replaced adapter must not write to retained mailbox"
     );
     let domain = owner.requests(&run).unwrap().pop().unwrap();
-    let request = crate::approval::workflow::publish(&approvals, "/w", &domain).unwrap();
+    let request = crate::workflow::approval::publish(&approvals, "/w", &domain).unwrap();
     assert_eq!(request.state, otto_core::approval::State::Pending);
     assert!(request.decision.is_none(), "no human decision exists yet");
     assert!(

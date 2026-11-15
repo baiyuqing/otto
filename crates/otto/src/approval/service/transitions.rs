@@ -101,7 +101,7 @@ impl Service {
             if update(&mut request)? {
                 let claim = if request.application != expected.application {
                     if request.application == ApplicationState::Applying {
-                        let (pid, started) = crate::subagent::record::current_process();
+                        let (pid, started) = crate::process_identity::current_process();
                         ClaimChange::Start(Claim {
                             owner: self.owner.clone(),
                             pid,

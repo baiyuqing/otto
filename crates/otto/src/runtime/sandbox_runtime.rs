@@ -13,7 +13,7 @@
 //! exercise the same paths with the real `direct` driver (offline, no child
 //! process at open time) and the end-to-end test covers Seatbelt for real.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use otto_core::config::sandbox::{
@@ -21,6 +21,7 @@ use otto_core::config::sandbox::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::fsops::{canonical_directory, canonical_executable_file};
 use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::read_denylist::ReadDenylist;
 #[cfg(target_os = "macos")]
@@ -700,39 +701,6 @@ fn safe_sandbox_reason(reason: SandboxReason) -> SandboxReason {
         SandboxReason::None => SandboxReason::RuntimeFailure,
         reason => reason,
     }
-}
-
-/// Resolves `path` to an existing directory with every symlink followed.
-pub fn canonical_directory(path: &Path) -> Result<PathBuf, std::io::Error> {
-    let canonical = std::fs::canonicalize(path)?;
-    if !std::fs::metadata(&canonical)?.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotADirectory,
-            format!("not a directory: {}", canonical.display()),
-        ));
-    }
-    Ok(canonical)
-}
-
-/// Resolves `path` to an existing, regular, executable file.
-///
-/// The final component is re-checked with `lstat` after canonicalization so a
-/// symlink swapped in between the two calls cannot pass as the shell.
-pub fn canonical_executable_file(path: &Path) -> Result<PathBuf, Error> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let Some(text) = path.to_str() else {
-        return Err(Error::InvalidRequest);
-    };
-    if text.is_empty() || text.contains('\0') {
-        return Err(Error::InvalidRequest);
-    }
-    let canonical = std::fs::canonicalize(path).map_err(|_| Error::InvalidRequest)?;
-    let metadata = std::fs::symlink_metadata(&canonical).map_err(|_| Error::InvalidRequest)?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-        return Err(Error::InvalidRequest);
-    }
-    Ok(canonical)
 }
 
 #[cfg(test)]

@@ -449,11 +449,10 @@ fn managed_command_allowlist_uses_resolved_administrator_executable() {
     let path = f.package("example");
     f.mcp(&path, json!({"tools":{"type":"stdio","command":"sh"}}));
     f.install(&path);
-    let executable =
-        crate::runtime::sandbox_runtime::canonical_executable_file(Path::new("/bin/sh"))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+    let executable = crate::fsops::canonical_executable_file(Path::new("/bin/sh"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let file = File {
         policy: Some(otto_core::config::layered::ManagedPolicy {
             allowed_mcp_commands: Some(vec![executable.clone()]),

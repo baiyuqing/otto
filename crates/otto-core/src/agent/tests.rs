@@ -69,8 +69,7 @@ impl ScriptedProvider {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Provider for ScriptedProvider {
     async fn complete(
         &self,
@@ -100,8 +99,7 @@ impl Provider for ScriptedProvider {
 /// Waits for cancellation and then reports it.
 struct CancellingProvider;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Provider for CancellingProvider {
     async fn complete(
         &self,
@@ -117,8 +115,7 @@ impl Provider for CancellingProvider {
 /// Returns the call arguments as the result text.
 struct EchoExecutor;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for EchoExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
@@ -195,8 +192,7 @@ struct ReplayExecutor {
     calls: AtomicUsize,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for ReplayExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor.definitions()
@@ -241,8 +237,7 @@ async fn session_with_pending_echo(attempted: bool) -> MemorySession {
     session
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_replays_a_replayable_call_a_takeover_left_unanswered() {
     let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
     let executor = ReplayExecutor {
@@ -301,8 +296,7 @@ async fn run_replays_a_replayable_call_a_takeover_left_unanswered() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn recovered_nonidempotent_outcome_reaches_model_and_new_call_is_distinct() {
     use crate::model::{EffectCertainty, OperationDisposition, ToolResultMetadata};
     for new_call in [false, true] {
@@ -405,8 +399,7 @@ async fn recovered_nonidempotent_outcome_reaches_model_and_new_call_is_distinct(
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_does_not_replay_a_call_whose_tool_is_not_replayable() {
     let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
     let executor = ReplayExecutor {
@@ -429,8 +422,7 @@ async fn run_does_not_replay_a_call_whose_tool_is_not_replayable() {
     assert_eq!(agent.tools.calls.load(Ordering::SeqCst), 0);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_executes_a_tool_turn_then_a_text_turn() {
     // op_1 is the turn id of the `otto.turn` records.
     let provider = ScriptedProvider::new(vec![
@@ -551,13 +543,11 @@ async fn run_executes_a_tool_turn_then_a_text_turn() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_persists_the_override_text_and_reports_the_live_text() {
     struct OverridingExecutor;
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[async_trait::async_trait]
     impl ToolExecutor for OverridingExecutor {
         fn definitions(&self) -> Vec<ToolDefinition> {
             Vec::new()
@@ -603,8 +593,7 @@ async fn run_persists_the_override_text_and_reports_the_live_text() {
     assert_eq!(agent.session().messages()[2].blocks[0].text, "stored");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn run_rejects_empty_user_text() {
     let agent = Agent::new(
         ScriptedProvider::new(Vec::new()),

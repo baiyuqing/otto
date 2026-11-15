@@ -59,7 +59,6 @@ mod tests {
         parse,
     };
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn defaults_and_validation() {
         assert_eq!(
@@ -80,7 +79,6 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn project_layers_cannot_change_security_even_when_trusted() {
         for trusted in [false, true] {

@@ -6,7 +6,8 @@
 //! credential, so a change to what parses changes which proxy settings are
 //! refused. Only the parts Otto reaches are ported: [`parse`],
 //! [`path_unescape`], and [`Userinfo`]. `gourl/tests.rs` checks them against
-//! vectors produced by Go 1.27.3.
+//! vectors produced by Go 1.27.3. The module is private to this crate;
+//! `urlprivacy` is its only caller.
 //!
 //! Everything works on bytes rather than `str` because Go strings may hold
 //! arbitrary bytes and percent escapes routinely decode to invalid UTF-8.
@@ -23,7 +24,7 @@ use std::net::IpAddr;
 /// escaping rules per component; the discriminants mirror Go's `encoding`
 /// constants in name only, never by value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Encoding {
+pub(crate) enum Encoding {
     Path,
     PathSegment,
     Host,
@@ -83,8 +84,7 @@ fn unhex(c: u8) -> u8 {
 
 /// Go's `url.unescape`. Returns `Err(())` where Go returns `EscapeError` or
 /// `InvalidHostError`.
-#[allow(clippy::result_unit_err)]
-pub fn unescape(s: &[u8], mode: Encoding) -> Result<Vec<u8>, ()> {
+pub(crate) fn unescape(s: &[u8], mode: Encoding) -> Result<Vec<u8>, ()> {
     let mut escapes = 0usize;
     let mut has_plus = false;
     let mut index = 0usize;
@@ -177,15 +177,14 @@ pub(crate) fn escape(s: &[u8], mode: Encoding) -> Vec<u8> {
 }
 
 /// Go's `url.PathUnescape`: percent decoding that leaves `+` alone.
-#[allow(clippy::result_unit_err)]
-pub fn path_unescape(s: &[u8]) -> Result<Vec<u8>, ()> {
+pub(crate) fn path_unescape(s: &[u8]) -> Result<Vec<u8>, ()> {
     unescape(s, Encoding::PathSegment)
 }
 
 /// Go's `url.Userinfo`: an immutable username with an optionally set password.
 /// A set but empty password is distinct from an absent one, exactly as in Go.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Userinfo {
+pub(crate) struct Userinfo {
     username: Vec<u8>,
     password: Vec<u8>,
     password_set: bool,
@@ -211,12 +210,12 @@ impl Userinfo {
     }
 
     /// The decoded username.
-    pub fn username(&self) -> &[u8] {
+    pub(crate) fn username(&self) -> &[u8] {
         &self.username
     }
 
     /// The decoded password, or `None` when the URL carried no `:` separator.
-    pub fn password(&self) -> Option<&[u8]> {
+    pub(crate) fn password(&self) -> Option<&[u8]> {
         if self.password_set {
             Some(&self.password)
         } else {
@@ -225,7 +224,7 @@ impl Userinfo {
     }
 
     /// Go's `(*Userinfo).String`: the re-encoded `username[:password]` form.
-    pub fn encoded(&self) -> Vec<u8> {
+    pub(crate) fn encoded(&self) -> Vec<u8> {
         let mut out = escape(&self.username, Encoding::UserPassword);
         if self.password_set {
             out.push(b':');
@@ -239,11 +238,11 @@ impl Userinfo {
 /// (`RawPath`, `RawFragment`, `ForceQuery`, `OmitHost`) are not stored, because
 /// they only affect `URL.String`, which Otto does not call.
 #[derive(Clone, Debug, Default)]
-pub struct Url {
+pub(crate) struct Url {
     pub(crate) scheme: Vec<u8>,
     pub(crate) opaque: Vec<u8>,
-    pub user: Option<Userinfo>,
-    pub host: Vec<u8>,
+    pub(crate) user: Option<Userinfo>,
+    pub(crate) host: Vec<u8>,
     pub(crate) path: Vec<u8>,
     pub(crate) raw_query: Vec<u8>,
     pub(crate) fragment: Vec<u8>,
@@ -464,8 +463,7 @@ fn parse_relative(raw: &[u8]) -> Result<Url, ()> {
 /// Go's `url.Parse`: cuts the fragment first, then parses the remainder as a
 /// possibly relative reference. `Err(())` means Go would have returned an
 /// error; the message is never inspected.
-#[allow(clippy::result_unit_err)]
-pub fn parse(raw: &[u8]) -> Result<Url, ()> {
+pub(crate) fn parse(raw: &[u8]) -> Result<Url, ()> {
     let (head, fragment) = match raw.iter().position(|&b| b == b'#') {
         Some(hash) => (&raw[..hash], &raw[hash + 1..]),
         None => (raw, &raw[raw.len()..]),

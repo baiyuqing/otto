@@ -81,6 +81,7 @@ fn release_version_is_consistent_across_files() {
         "otto",
         "otto-core",
         "otto-platform",
+        "otto-storage",
         "otto-client",
         "otto-terminal",
         "otto-server",

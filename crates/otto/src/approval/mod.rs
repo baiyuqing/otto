@@ -31,10 +31,10 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::Connection;
     use otto_core::approval::{
         ApplicationState, ApprovalMode, Authority, Kind, Request, Scope, State, Subject,
     };
+    use otto_storage::Connection;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 

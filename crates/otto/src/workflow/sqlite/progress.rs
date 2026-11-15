@@ -66,7 +66,7 @@ pub(super) fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Resu
                 Ok((row.get::<String>(0)?, row.get::<String>(1)?))
             })
             .map_err(|_| op_error())?;
-        rows.collect::<crate::storage::Result<Vec<_>>>()
+        rows.collect::<otto_storage::Result<Vec<_>>>()
             .map_err(|_| op_error())?
     };
     for (step_id, encoded) in pending {
@@ -126,7 +126,7 @@ pub(super) fn copied_steps_at(
             ))
         })
         .map_err(|_| op_error())?;
-    rows.collect::<crate::storage::Result<HashMap<_, _>>>()
+    rows.collect::<otto_storage::Result<HashMap<_, _>>>()
         .map_err(|_| op_error())
 }
 

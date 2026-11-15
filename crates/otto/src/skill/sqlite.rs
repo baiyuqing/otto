@@ -2,9 +2,9 @@
 use crate::skill::check_repository::{
     CheckStore, NewRow, ResultJson, Row, StoreError, StoreResult,
 };
-use crate::storage::{Connection, params};
+use otto_storage::{Connection, params};
 #[cfg(any(test, feature = "test-support"))]
-use crate::storage::{OpenOptions, drivers::sqlite::SqliteDriver};
+use otto_storage::{OpenOptions, drivers::sqlite::SqliteDriver};
 use std::sync::Mutex;
 use std::time::Duration;
 

@@ -16,15 +16,22 @@
   its start time (`process_identity`). It imports `otto-core` only. `otto` and the
   frontend crates import it as `otto_platform::...`; `otto` does not re-export
   its modules.
-- `otto` is a library. It owns native I/O, tools, sandboxing, storage and
-  authentication. `app` owns shared use cases; frontends adapt presentation and transport rather than
+- `otto-storage` holds the SQL layer over SQLite: `Connection`, `Statement`,
+  `Rows` and `Transaction`, value conversion (`IntoValue`, `Params`), the
+  `SqlDriver`, `SqlConnection`, `SqlStatement` and `SqlRows` traits, the
+  bounded `worker::Worker` and the SQLite driver (`drivers::sqlite`). It
+  depends on no workspace crate. Domain schemas and repositories stay in the
+  domain modules of `otto`. `otto` and the crates above it import it as
+  `otto_storage::...`; `otto` does not re-export it.
+- `otto` is a library. It owns native I/O, tools, sandboxing, domain
+  repositories and authentication. `app` owns shared use cases; frontends adapt presentation and transport rather than
   reimplementing domain behavior.
 - `otto-client` (the HTTP client of `otto serve`), `otto-terminal` (the TUI
   and the REPL), `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio
   and attach frontends) and `otto-cli` (the `otto` binary and composition
   root) are separate packages. Dependencies are one-way:
-  `otto-core` <- `otto-platform` <- `otto` <- {`otto-client`, `otto-server`,
-  `otto-eval`};
+  `otto-core` <- `otto-platform` <- `otto`, `otto-storage` <- `otto`, and
+  `otto` <- {`otto-client`, `otto-server`, `otto-eval`};
   `otto-server` and `otto-client` <- `otto-acp`; `otto` and `otto-client` <-
   `otto-terminal`; every crate <- `otto-cli`. A crate never imports one that
   depends on it. `otto-server` does not import `otto-terminal`. A one-line
@@ -49,15 +56,15 @@
 
 Each top-level module of `crates/otto/src` belongs to one layer. A module
 imports only modules in its own layer or in a lower layer, and the imports
-between modules of one layer contain no cycle. `otto-core` and `otto-platform`
-are below every layer and are not part of this table; `otto` modules import
-`otto-platform` as `otto_platform::...`. The frontend crates (`otto-client`,
+between modules of one layer contain no cycle. `otto-core`, `otto-platform`
+and `otto-storage` are below every layer and are not part of this table; `otto`
+modules import them as `otto_platform::...` and `otto_storage::...`. The frontend crates (`otto-client`,
 `otto-terminal`, `otto-server`, `otto-acp`, `otto-cli`) are above it and are
 not part of this table.
 
 | Layer | Modules | Owns |
 | --- | --- | --- |
-| persistence | `storage`, `workspace`, `session`, `usage` | Storage drivers and the SQL layer, workspace identity, the session store with its writer lease and the `Origin` of a turn, the usage store |
+| persistence | `workspace`, `session`, `usage` | Workspace identity, the session store with its writer lease and the `Origin` of a turn, the usage store |
 | capability | `auth`, `provider`, `typesafe`, `sandbox`, `config`, `tool`, `mcp`, `skill`, `memory`, `approval`, `decision` | What one agent turn uses: model access, the `Tool` trait and `Registry` with the file, Bash and web tools, sandboxed execution, memory, approval |
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
 | assembly | `runtime` | Building one runnable agent from resolved configuration |
@@ -82,8 +89,7 @@ non-test source of every module. Rules:
   lives in `tool` or in a lower module (`otto_platform::fsops`, `workspace`, `approval::shell`,
   `session::origin`, `sandbox::info`).
 - A domain's repository implementation (SQLite or file) lives in the domain
-  module. `storage` provides the drivers, the SQL layer and the capability
-  contracts.
+  module. `otto-storage` provides the SQL layer and the SQLite driver.
 - Extracting a layer into its own crate happens only after its imports satisfy
   these rules; then the extraction moves files and changes no imports.
 
@@ -125,12 +131,12 @@ Forking leaves old state untouched and requires stopped workspace processes.
 
 ## Native storage contracts
 
-`storage/{contracts,sql}.rs` and `fsops/files.rs` define guarantees; drivers
-implement I/O (the SQLite driver is in `storage/drivers/`, the POSIX driver is
-`fsops/posix.rs`);
+`otto-storage/src/sql.rs` and `otto-platform/src/fsops/files.rs` define
+guarantees; drivers implement I/O (the SQLite driver is in
+`otto-storage/src/drivers/`, the POSIX driver is `otto-platform/src/fsops/posix.rs`);
 each domain's repository implementation (schema, SQL and row mappings) is in
 its domain module as `sqlite.rs` or `sqlite/` (for example
-`approval/sqlite.rs`, `usage/sqlite.rs`); `storage` imports no domain module.
+`approval/sqlite.rs`, `usage/sqlite.rs`); `otto-storage` cannot import any `otto` module because it does not depend on `otto`.
 The session store (`session/`) is the POSIX counterpart.
 `runtime/storage.rs` opens
 repositories at their local paths and injects domain-owned ports. Storage is
@@ -143,7 +149,7 @@ concurrency. An uncertain commit is `CommitUnknown`, not rollback. Never replay
 an uncertain external effect. Async session writes preserve append-only Pi v3.
 
 Preserve synchronous domain ports. Adapters that need async I/O may use the
-bounded `storage::worker::Worker`; async callers await `call`, while
+bounded `otto_storage::worker::Worker`; async callers await `call`, while
 `call_blocking` requires a multi-thread runtime or a separate blocking thread.
 Accepted work is not withdrawn by cancellation; close/drop drain owned work.
 Lost acknowledgements retain existing command/receipt and unknown-effect rules.

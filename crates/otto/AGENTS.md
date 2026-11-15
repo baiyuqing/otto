@@ -8,7 +8,10 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   process-wide primitives (`fsops`, `log`, `retry`, `deadline`, `gourl`,
   `urlprivacy` and the other platform modules) live in
   [otto-platform](../otto-platform/AGENTS.md), which `otto` imports as
-  `otto_platform::...` and does not re-export. The
+  `otto_platform::...` and does not re-export. The SQL layer and its SQLite
+  driver live in [otto-storage](../otto-storage/AGENTS.md), imported as
+  `otto_storage::...` and not re-exported; domain schemas and repositories stay
+  in each domain's `sqlite.rs`. The
   `otto serve` client, the terminal UI, the HTTP server, the ACP frontends
   and the `otto` binary live in [otto-client](../otto-client/AGENTS.md),
   [otto-terminal](../otto-terminal/AGENTS.md),

@@ -6,7 +6,7 @@ use super::*;
 use crate::faults::http;
 use crate::skill::check_repository::StoreError;
 use crate::skill::sqlite::{SCHEMA, Store};
-use crate::storage::Connection;
+use otto_storage::Connection;
 
 // ---------------------------------------------------------------------------
 // HTTP stub on the shared loopback server.

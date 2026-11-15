@@ -108,7 +108,7 @@ impl FaultError {
     }
 }
 
-/// The [`crate::storage::Error`] variants a fault can inject. The storage
+/// The [`otto_storage::Error`] variants a fault can inject. The storage
 /// error is not `Clone`, so a rule carries this and the SQL decorator builds
 /// the error each time the rule fires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +123,7 @@ pub enum SqlFault {
     CommitUnknown,
 }
 
-impl From<SqlFault> for crate::storage::Error {
+impl From<SqlFault> for otto_storage::Error {
     fn from(fault: SqlFault) -> Self {
         const MESSAGE: &str = "injected fault";
         match fault {

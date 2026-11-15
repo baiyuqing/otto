@@ -130,9 +130,9 @@ pub use crate::subagent::sqlite::Store;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::Connection;
     use crate::subagent::tasks::TaskStatus;
     use otto_platform::process_identity::current_process;
+    use otto_storage::Connection;
 
     fn context() -> TaskContext {
         TaskContext {

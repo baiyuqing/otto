@@ -1,5 +1,5 @@
 //! Comparison of SQLite schema objects ignoring formatting differences.
-use crate::storage::{Error, Result};
+use crate::{Error, Result};
 use std::collections::BTreeMap;
 
 /// Normalizes one statement: trim, drop one trailing semicolon, remove
@@ -29,7 +29,7 @@ pub(crate) fn normalize_schema_sql(statement: &str) -> String {
 }
 
 /// Succeeds only when both lists hold the same objects after normalization.
-pub(crate) fn validate_objects(source: &[String], canonical: &[String]) -> Result<()> {
+pub fn validate_objects(source: &[String], canonical: &[String]) -> Result<()> {
     fn objects(objects: &[String]) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         for object in objects {

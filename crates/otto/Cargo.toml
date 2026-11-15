@@ -26,6 +26,7 @@ tree-sitter = "=0.27.1"
 tree-sitter-bash = "=0.25.1"
 otto-core.workspace = true
 otto-platform.workspace = true
+otto-storage.workspace = true
 mlua.workspace = true
 async-trait.workspace = true
 base64.workspace = true
@@ -40,7 +41,6 @@ chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
 nix.workspace = true
 regex.workspace = true
-rusqlite.workspace = true
 tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true

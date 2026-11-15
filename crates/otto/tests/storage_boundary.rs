@@ -1,8 +1,9 @@
 //! Source guard for native storage ownership and dependency direction.
 //!
 //! Domain services own state semantics and import typed repository ports.
-//! Concrete drivers and the SQL layer live under `storage/`, which imports no
-//! domain module. Each domain's repository implementation is a file named
+//! Concrete drivers and the SQL layer live in the `otto-storage` crate, which
+//! does not depend on `otto`, so Cargo enforces that it imports no domain
+//! module. Each domain's repository implementation is a file named
 //! `sqlite.rs` or a file under a `sqlite/` directory inside the domain module
 //! (see `is_domain_repository`); only those files may hold SQL and import the
 //! SQL layer and the SQLite driver. Only domain `mod.rs` files may retain
@@ -17,9 +18,6 @@ const DOMAIN_MODULES: &[&str] = &[
     "approval", "memory", "session", "schedule", "workflow", "skill", "usage", "subagent",
 ];
 const FRONTENDS: &[&str] = &["cli", "tui", "acp", "server", "client"];
-const DOMAINS: &[&str] = &[
-    "approval", "memory", "session", "schedule", "workflow", "skill", "usage", "subagent",
-];
 
 fn sources(path: &Path) -> Vec<PathBuf> {
     if path.is_file() {
@@ -232,8 +230,8 @@ fn is_pure_legacy_facade(path: &Path, source: &str) -> bool {
             .iter()
             .all(|line| line.starts_with("pub use ") || line.starts_with("pub(crate) use "))
         && !code.contains("Store::")
-        && !code.contains("crate::storage::Connection")
-        && !code.contains("crate::storage::params")
+        && !code.contains("otto_storage::Connection")
+        && !code.contains("otto_storage::params")
         && !has_sql(&code)
 }
 
@@ -313,14 +311,14 @@ fn session_legacy_violations(source: &str) -> Vec<String> {
     if source.contains("::sqlite::") {
         problems.push("session compatibility facade imports a SQLite repository".into());
     }
-    if source.contains("crate::storage::drivers::") {
+    if source.contains("otto_storage::drivers::") {
         problems.push("session compatibility facade imports a storage driver".into());
     }
     for forbidden in [
-        "crate::storage::Connection",
-        "crate::storage::Transaction",
-        "crate::storage::params",
-        "crate::storage::drivers::sqlite::",
+        "otto_storage::Connection",
+        "otto_storage::Transaction",
+        "otto_storage::params",
+        "otto_storage::drivers::sqlite::",
         "crate::app::",
         "crate::runtime::",
         "crate::cli::",
@@ -388,7 +386,7 @@ fn domain_violations(path: &Path, source: &str) -> Vec<String> {
     let source = without_line_comments(&source);
     let mut problems = Vec::new();
     if !is_domain_mod(path) && !legacy_facade {
-        for forbidden in ["::sqlite::", "crate::storage::drivers"] {
+        for forbidden in ["::sqlite::", "otto_storage::drivers"] {
             if source.contains(forbidden) {
                 problems.push(format!("concrete storage import `{forbidden}`"));
             }
@@ -445,17 +443,6 @@ fn backend_violations(source: &str) -> Vec<String> {
     problems
 }
 
-fn driver_violations(source: &str) -> Vec<String> {
-    let source = without_line_comments(&non_test(source));
-    let mut problems = frontend_or_runtime_imports(&source);
-    for domain in DOMAINS {
-        if source.contains(&format!("crate::{domain}::")) {
-            problems.push(format!("domain `{domain}`"));
-        }
-    }
-    problems
-}
-
 #[test]
 fn domain_services_and_repositories_use_typed_ports() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -477,15 +464,8 @@ fn domain_services_and_repositories_use_typed_ports() {
 }
 
 #[test]
-fn drivers_and_adapters_point_downward() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage");
+fn repositories_point_downward() {
     let mut offenders = Vec::new();
-    for path in sources(&src) {
-        let body = std::fs::read_to_string(&path).expect("read storage source");
-        for problem in driver_violations(&body) {
-            offenders.push(format!("{}: {problem}", path.display()));
-        }
-    }
     for path in repository_sources() {
         let body = std::fs::read_to_string(&path).expect("read repository source");
         for problem in backend_violations(&body) {
@@ -495,7 +475,7 @@ fn drivers_and_adapters_point_downward() {
     offenders.sort();
     assert!(
         offenders.is_empty(),
-        "drivers and repositories may not depend on application services or frontends:\n{}",
+        "repositories may not depend on application services or frontends:\n{}",
         offenders.join("\n")
     );
 }
@@ -578,7 +558,6 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     assert!(!domain_violations(service, "use crate::workflow::sqlite::Store;").is_empty());
     assert!(!domain_violations(service, "const SQL: &str = \"SELECT * FROM runs\";").is_empty());
     assert!(domain_violations(service, "fn f() { invalid(\"update identity\"); }").is_empty());
-    assert!(!driver_violations("use crate::memory::Service;").is_empty());
     assert!(!backend_violations("use crate::runtime::Builder;").is_empty());
     assert!(
         domain_violations(
@@ -613,7 +592,7 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     assert!(!domain_violations(&legacy_session, session_backend_import).is_empty());
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let usage_store = src.join("usage/sqlite.rs");
-    let usage_sql = "use crate::storage::drivers::sqlite::SqliteDriver;\nconst SQL: &str = \"SELECT * FROM usage_events\";";
+    let usage_sql = "use otto_storage::drivers::sqlite::SqliteDriver;\nconst SQL: &str = \"SELECT * FROM usage_events\";";
     assert!(domain_violations(&usage_store, usage_sql).is_empty());
     assert!(!domain_violations(&usage_store, "use rusqlite::Connection;").is_empty());
     // A repository is `<domain>/sqlite.rs` or a file below `<domain>/**/sqlite/`.
@@ -635,7 +614,6 @@ fn fixtures_prove_forbidden_edges_are_detected() {
         "subagent/tasks.rs",
         "memory/files/sqlite_like.rs",
         "skill/check.rs",
-        "storage/sqlite.rs",
         "tool/sqlite.rs",
     ] {
         assert!(!is_domain_repository(&src.join(other)), "{other}");
@@ -652,7 +630,6 @@ fn fixtures_prove_forbidden_edges_are_detected() {
         )
         .is_empty()
     );
-    assert!(!driver_violations("use crate::workflow::sqlite::Store;").is_empty());
     let usage_other = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/usage/mod.rs");
     assert!(
         domain_violations(

@@ -29,7 +29,7 @@ fn legacy_delivery_backfill_is_once_and_idle_plan_uses_pending_index() {
     let plan = query
         .query_map((), |row| row.get::<String>(3))
         .unwrap()
-        .collect::<crate::storage::Result<Vec<_>>>()
+        .collect::<otto_storage::Result<Vec<_>>>()
         .unwrap()
         .join(";");
     assert!(plan.contains("SEARCH p USING"), "{plan}");
@@ -75,7 +75,7 @@ fn attempt_journal_keeps_each_transcript_path() {
     let paths: Vec<String> = statement
         .query_map((), |row| row.get(0))
         .unwrap()
-        .collect::<crate::storage::Result<_>>()
+        .collect::<otto_storage::Result<_>>()
         .unwrap();
     assert_eq!(paths, ["/tmp/attempt-1.jsonl", "/tmp/attempt-2.jsonl"]);
 }

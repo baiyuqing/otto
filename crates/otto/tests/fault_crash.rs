@@ -230,7 +230,7 @@ fn workflow_definition() -> otto::workflow::Definition {
 
 fn workflow_store(
     address: &str,
-    driver: Arc<dyn otto::storage::SqlDriver>,
+    driver: Arc<dyn otto_storage::SqlDriver>,
 ) -> Arc<dyn otto::workflow::WorkflowStore> {
     use otto::runtime::storage::SqlRepositories;
     SqlRepositories::new(driver)
@@ -241,8 +241,8 @@ fn workflow_store(
 #[test]
 fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_interrupted_step() {
     use otto::faults::sql::{FaultySqlDriver, SqlOp};
-    use otto::storage::drivers::sqlite::SqliteDriver;
     use otto::workflow::{RunStatus, StepStatus};
+    use otto_storage::drivers::sqlite::SqliteDriver;
 
     crash::run(crash::name_of(&|| {}), |role| {
         let address = |dir: &Path| dir.join("workflow.db").to_string_lossy().into_owned();

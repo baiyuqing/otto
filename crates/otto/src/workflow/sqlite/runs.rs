@@ -250,7 +250,7 @@ impl SqliteWorkflowStore {
                 })
             })
             .map_err(|_| op_error())?;
-        rows.collect::<crate::storage::Result<Vec<_>>>()
+        rows.collect::<otto_storage::Result<Vec<_>>>()
             .map_err(|_| op_error())
     }
 
@@ -310,7 +310,7 @@ impl SqliteWorkflowStore {
                 })
             })
             .map_err(|_| op_error())?;
-        rows.collect::<crate::storage::Result<Vec<_>>>()
+        rows.collect::<otto_storage::Result<Vec<_>>>()
             .map_err(|_| op_error())
     }
 }

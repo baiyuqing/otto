@@ -74,7 +74,7 @@ fn backup_and_migration_share_the_same_source_writer_fence() {
             "INSERT INTO approval_modes VALUES ('/backup','late','manual')",
             ()
         ),
-        Err(crate::storage::Error::Busy(_))
+        Err(otto_storage::Error::Busy(_))
     ));
     initialize_tx(&tx).unwrap();
     assert!(matches!(
@@ -82,7 +82,7 @@ fn backup_and_migration_share_the_same_source_writer_fence() {
             "INSERT INTO approval_modes VALUES ('/backup','late','manual')",
             ()
         ),
-        Err(crate::storage::Error::Busy(_))
+        Err(otto_storage::Error::Busy(_))
     ));
     tx.commit().unwrap();
     let backup = std::fs::read_dir(dir.path())

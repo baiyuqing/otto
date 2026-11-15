@@ -16,6 +16,7 @@ guide rather than being copied into those instruction files.
 | --- | --- | --- |
 | `crates/otto-core/` | I/O-free shared domain logic and protocol codecs | `src/lib.rs` |
 | `crates/otto-platform/` | Process-wide primitives with no domain knowledge: `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | `src/lib.rs` |
+| `crates/otto-storage/` | The SQL layer over SQLite: connection, statement and transaction types, the `SqlDriver` trait and the SQLite driver (`drivers/sqlite`); no domain schema | `src/lib.rs` |
 | `crates/otto/` | Native runtime library: services, persistence, integrations, tools and sandbox | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-client/` | HTTP client of a running `otto serve`, used by the TUI `--attach` mode and by `otto-acp` | `src/lib.rs` (`otto_client::Client`) |
 | `crates/otto-terminal/` | Terminal frontend: the TUI (`tui/`) and the REPL, login and slash commands (`cli/`) | `src/lib.rs`, `src/tui/mod.rs`, `src/cli/repl.rs` |
@@ -28,12 +29,11 @@ guide rather than being copied into those instruction files.
 | `crates/otto-platform/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
 | `crates/otto-platform/src/process_identity.rs` | Process id with start time, and the check that a recorded identity still names a live process | `current_process`, `process_matches` |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, and delivery | `initialize`, `read`, `fork`, `admission::admit_workspace` |
-| `crates/otto/src/storage/` | The SQL layer over SQLite: connection, statement and transaction types, the `SqlDriver` trait and the SQLite driver | `runtime/storage.rs` composition |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-serve-connect.sh` supervises `otto serve` and an `otto-connect` that reaches it through `otto acp --attach` | `Makefile` |
 
-The root Cargo workspace contains `otto-core`, `otto-platform`, `otto`, `otto-client`,
+The root Cargo workspace contains `otto-core`, `otto-platform`, `otto-storage`, `otto`, `otto-client`,
 `otto-terminal`, `otto-server`, `otto-acp`, `otto-eval` and `otto-cli`.
 `chat-connector/` has its own build definition and is not a root workspace crate.
 
@@ -51,9 +51,11 @@ HTTP serve          client of `otto serve`
      │              │
      ▼              ▼
 crates/otto: app, native services
-              │
-              ▼
- crates/otto-platform: file driver, log, retry, URL parsing
+        │                │
+        ▼                ▼
+ crates/otto-platform:   crates/otto-storage:
+ file driver, log,       SQL layer, SQLite driver
+ retry, URL parsing
               │
               ▼
  crates/otto-core: I/O-free contracts, formats and agent loop
@@ -67,6 +69,8 @@ otto-plus (separate repository): browser UI
 
 The diagram is a partial order, not one chain. `otto-platform` depends on
 `otto-core` only, and every crate above it may import it directly.
+`otto-storage` depends on no workspace crate; `otto` and the crates above it
+import it directly.
 `otto-client`, `otto-server` and `otto-eval` each depend on `otto` and
 `otto-core`; `otto-acp` depends on
 `otto-server` and `otto-client`; `otto-terminal` depends on `otto`,
@@ -118,7 +122,7 @@ contract or format and `otto` holds the implementation:
 | `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store`, `PosixSessionRepository` and the writer lease in `crates/otto/src/session/` (`store.rs`, `posix_repository.rs`, `lease.rs`) |
 | `config` | configuration schema, layered merge, provenance, managed constraints, resolution, `config::edit` | source discovery, executable trust, the compare-and-swap writer |
 | `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; file store in `memory/files/` |
-| `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; SQLite store under `storage/` |
+| `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; SQLite store in `approval/sqlite.rs` |
 | `provider` | `Provider` trait; wire codecs in `openaicompat` and `openairesponses` | HTTP transports in `provider/openaicompat.rs` and `provider/chatgpt.rs` |
 | `tool` | tool definitions, schema assembly, `ToolExecutor` trait | `Tool` trait, `Registry` (implements `ToolExecutor`), native tool execution, MCP tool adapter |
 
@@ -233,7 +237,7 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   the `otto-client` crate (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
-  `typesafe/`, `storage/` (drivers and backend repositories),
+  `typesafe/`,
   `usage/`, `failover/` (lease and commit guard), `workflow/` (including `workflow/approval.rs`, its approval adapter), and `schedule/` (typed store port, tools, worker).
 - **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
   package validation and Skills/MCP adaptation with content-bound trust.
@@ -293,10 +297,10 @@ The other modules group native responsibilities:
 
 Domain directories own typed repository ports and state semantics. Concrete
 schema, physical row mappings and SQL live in the domain module as `sqlite.rs`
-or `sqlite/` files; the session store lives in `session/`. `storage/` holds the
-SQLite driver, the SQL layer (`sql.rs`, `worker.rs`), the small capability
-contracts and the generic schema validation helper `schema_objects.rs`, and
-imports no domain module. The POSIX file driver and the `FileDriver` contract
+or `sqlite/` files; the session store lives in `session/`. The `otto-storage`
+crate holds the SQLite driver, the SQL layer (`sql.rs`, `worker.rs`) and the
+generic schema validation helper `schema_objects.rs`, and depends on no
+workspace crate. The POSIX file driver and the `FileDriver` contract
 are in `otto-platform/src/fsops/`. `runtime/storage.rs`
 opens concrete repositories at their local paths and injects domain ports into
 consumers. Backend packages retain their physical mappings and I/O.
@@ -311,7 +315,7 @@ consumers. Backend packages retain their physical mappings and I/O.
 | Usage | `usage/{mod,repository}.rs` | `usage/sqlite.rs` |
 
 `runtime::storage::Storage` uses the local SQLite driver for SQL-backed
-state and the confined POSIX file driver for sessions. `storage/worker.rs` owns
+state and the confined POSIX file driver for sessions. `otto-storage/src/worker.rs` owns
 optional async adapter I/O. See the
 [storage contract](development/architecture.md#native-storage-contracts) for
 capability and compatibility boundaries.

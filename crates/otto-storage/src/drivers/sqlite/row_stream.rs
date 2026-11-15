@@ -17,7 +17,7 @@
 #![allow(unsafe_code)]
 
 use super::{SharedState, check, lock, map_error};
-use crate::storage::{Error, Params, Result, Row, SqlRows, Value};
+use crate::{Error, Params, Result, Row, SqlRows, Value};
 use rusqlite::ffi;
 use std::ffi::{CStr, c_int, c_void};
 use std::sync::MutexGuard;

@@ -486,3 +486,47 @@ fn auto_mode_never_publishes_a_decision_for_a_request_it_cannot_decide() {
     assert_eq!(store.load(&pending.id).unwrap(), pending);
     assert_eq!(store.events("/w", Some("s"), 0).unwrap().len(), 1);
 }
+
+#[test]
+fn a_stored_managed_policy_row_with_fields_the_config_no_longer_has_still_reads() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("approvals.db")).unwrap();
+    let connection = store.connection.lock().unwrap();
+    // The row shape written while the row was a serialized ApprovalConfig.
+    connection
+        .execute(
+            "INSERT INTO approval_managed_policy VALUES (?1,?2)",
+            params![
+                "/w",
+                r#"{"policy":"never","reviewer":null,"reviewer_model":null,"reviewer_profile":null,"rules":[]}"#
+            ],
+        )
+        .unwrap();
+    let forced = read_managed(&connection, "/w").unwrap().unwrap();
+    assert_eq!(forced.policy, Some(ApprovalPolicy::Never));
+    assert_eq!(forced.reviewer, None);
+}
+
+#[test]
+fn a_written_managed_policy_row_holds_only_policy_and_reviewer() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("approvals.db")).unwrap();
+    let forced = otto_core::config::ApprovalConfig {
+        policy: Some(ApprovalPolicy::Never),
+        reviewer: Some(ApprovalReviewer::User),
+        reviewer_model: Some("claude/review".into()),
+        ..Default::default()
+    };
+    store.managed_policy("/w", &forced).unwrap();
+    let body: String = store
+        .connection
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT body FROM approval_managed_policy WHERE workspace=?1",
+            ["/w"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(body, r#"{"policy":"never","reviewer":"user"}"#);
+}

@@ -62,12 +62,15 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// Close releases the lock taken by Open.
+// Close releases the lock taken by Open. The flock belongs to the open file
+// description, which a child process shares between fork and exec, so Close
+// unlocks it explicitly instead of relying on the descriptor being closed.
 func (s *Store) Close() error {
 	if s.lock == nil {
 		return nil
 	}
-	err := s.lock.Close()
+	unlockErr := syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
+	err := errors.Join(unlockErr, s.lock.Close())
 	s.lock = nil
 	return err
 }

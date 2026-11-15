@@ -21,7 +21,7 @@ use crate::app::approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
 use crate::memory::client::Client;
 use crate::runtime::builder::{Builder, resolve_initial_runtime};
 use crate::runtime::sandbox_switch::SandboxReloader;
-use crate::runtime::startup::{self, Disabled, StartOptions, WorkspaceSandbox};
+use crate::runtime::startup::{self, StartOptions, WorkspaceSandbox};
 use crate::runtime::wiring::MemoryExtension;
 use crate::sandbox::control::SandboxControl;
 
@@ -33,8 +33,6 @@ pub struct Options {
     pub environment: Vec<(String, String)>,
     /// A memory service the test supplies instead of the configured one.
     pub memory_extension: Option<MemoryExtension>,
-    /// Components switched off for every workspace.
-    pub disabled: Disabled,
 }
 
 /// A workspace opened after startup, with the reloader of its sandbox.
@@ -47,7 +45,6 @@ pub struct Runtime {
     resolved: ResolvedRuntime,
     workspace: PathBuf,
     sandbox: WorkspaceSandbox,
-    disabled: Disabled,
     loaded: tokio::sync::Mutex<BTreeMap<PathBuf, Loaded>>,
     sessions: Mutex<Vec<Weak<Controller>>>,
     cancel: CancellationToken,
@@ -85,7 +82,6 @@ impl Runtime {
                 cwd: options.workspace.to_string_lossy().into_owned(),
                 overrides: Default::default(),
                 logger: Arc::new(crate::log::Logger::stderr()),
-                disabled: options.disabled,
             },
             &cancel,
             &mut std::io::stderr(),
@@ -102,7 +98,6 @@ impl Runtime {
             resolved: runtime,
             workspace: PathBuf::from(workspace_path),
             sandbox,
-            disabled: options.disabled,
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
             sessions: Mutex::new(Vec::new()),
             cancel,
@@ -168,7 +163,6 @@ impl Runtime {
         let (builder, sandbox) = startup::load_workspace(
             Arc::clone(&self.builder.shared),
             &canonical,
-            &self.disabled,
             &self.cancel,
             &mut std::io::stderr(),
         )

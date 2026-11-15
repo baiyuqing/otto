@@ -23,7 +23,6 @@ use super::*;
 pub async fn load_workspace(
     shared: Arc<Shared>,
     canonical_path: &Path,
-    disabled: &Disabled,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
 ) -> Result<(Builder, WorkspaceSandbox), String> {
@@ -43,7 +42,6 @@ pub async fn load_workspace(
             );
         }
         scoped.config = loaded.file;
-        disabled.apply(&mut scoped.config);
     }
     let workspace_path = canonical_path.to_string_lossy().into_owned();
     let memory_config =
@@ -81,7 +79,6 @@ pub async fn load_workspace(
         driver_override.as_deref(),
         &resolved.api_key_env,
         true,
-        disabled,
         cancel,
         stderr,
     )
@@ -90,47 +87,6 @@ pub async fn load_workspace(
     builder.workspace_scope = workspace_scope;
 
     Ok((builder, composed))
-}
-
-// ---- components ----
-
-/// Component switches the tests of the startup composition set. Each disabled
-/// state is one the CLI already reaches through a config key, a flag or a
-/// failed store open.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Disabled {
-    pub bash: bool,
-    pub mcp: bool,
-    pub memory: bool,
-    pub skills: bool,
-    pub plugins: bool,
-    pub subagents: bool,
-    pub schedule: bool,
-    pub session_persistence: bool,
-    pub usage: bool,
-    pub task_history: bool,
-}
-
-impl Disabled {
-    /// Sets `[mcp]`, `[memory]`, `[skills]`, `[plugins]`, `[agents]` and
-    /// `enabled = false` in memory for each disabled one.
-    pub fn apply(&self, file: &mut File) {
-        if self.mcp {
-            file.mcp.enabled = Some(false);
-        }
-        if self.memory {
-            file.memory.enabled = Some(false);
-        }
-        if self.skills {
-            file.skills.enabled = Some(false);
-        }
-        if self.plugins {
-            file.plugins.enabled = Some(false);
-        }
-        if self.subagents {
-            file.agents.enabled = Some(false);
-        }
-    }
 }
 
 // ---- startup phases ----

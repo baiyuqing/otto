@@ -272,7 +272,6 @@ pub async fn run_with_extensions(
             overrides: overrides_from(&options),
             explicit_config: options.explicit_config,
             logger,
-            disabled: Disabled::default(),
         },
         &loaded,
         &configured,
@@ -356,7 +355,6 @@ pub async fn run_with_extensions(
         sandbox_driver_override.as_deref(),
         &resolved.api_key_env,
         elevate,
-        &Disabled::default(),
         cancel,
         stderr,
     )

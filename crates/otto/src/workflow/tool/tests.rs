@@ -133,14 +133,14 @@ async fn non_parent_service_guard_cannot_be_bypassed_by_direct_controller_call()
     let store = Arc::new(Store::open_in_memory());
     let owner = controller(store.clone(), catalog, "/w", dir.path());
     let result =
-        crate::workflow::provenance::non_parent(owner.start("documentation-review", "scope")).await;
+        crate::subagent::provenance::non_parent(owner.start("documentation-review", "scope")).await;
     assert!(
         result
             .unwrap_err()
             .to_string()
             .contains("children and workflow steps")
     );
-    let result = crate::workflow::provenance::non_parent(owner.start_parent(
+    let result = crate::subagent::provenance::non_parent(owner.start_parent(
         "documentation-review",
         "scope",
         "forged",

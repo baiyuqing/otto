@@ -1,6 +1,7 @@
 //! Builder session resolution, creation and forking.
 
 use super::*;
+use crate::random::random_id;
 
 impl Builder {
     /// The text a caller may print for `message`.

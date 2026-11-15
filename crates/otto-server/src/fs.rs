@@ -93,7 +93,7 @@ pub fn list(requested: Option<&str>, roots: &[PathBuf]) -> Result<Listing, ListE
     if !requested.is_absolute() {
         return Err(ListError::Invalid(format!("{shown}: not an absolute path")));
     }
-    let dir = otto::runtime::sandbox_runtime::canonical_directory(&requested)
+    let dir = otto::fsops::canonical_directory(&requested)
         .map_err(|_| ListError::Invalid(format!("{shown}: not an existing directory")))?;
     let within = |path: &Path| roots.iter().any(|root| path.starts_with(root));
     if !within(&dir) {

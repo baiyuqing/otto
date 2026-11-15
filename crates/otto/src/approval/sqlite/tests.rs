@@ -123,7 +123,7 @@ fn expired_review_tokens_cannot_commit_or_release_a_replacement_lease() {
     let scope = fixture_proposal().scope;
     service.set_mode(&scope, ApprovalMode::Manual).unwrap();
     let expected = service.create(fixture_proposal()).unwrap();
-    let (pid, started) = crate::subagent::record::current_process();
+    let (pid, started) = crate::process_identity::current_process();
     let old = ReviewLease {
         owner: "process:old-review".into(),
         pid,

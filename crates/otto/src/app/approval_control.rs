@@ -75,7 +75,7 @@ impl Controller {
         let input_id = match input_id {
             Some(id) if !otto_core::model::is_input_id(id) => return Err("invalid input_id".into()),
             Some(id) => id.to_owned(),
-            None => crate::runtime::builder::random_id().map_err(|error| error.to_string())?,
+            None => crate::random::random_id().map_err(|error| error.to_string())?,
         };
         let scope = self.approval_scope();
         let pending = self

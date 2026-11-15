@@ -267,7 +267,7 @@ pub(super) fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::
     std::fs::create_dir_all(&directory)?;
     let json = serde_json::to_vec(&WorkspaceListFile { workspaces })
         .expect("a list of strings always serializes");
-    let suffix = otto::runtime::builder::random_id()?;
+    let suffix = otto::random::random_id()?;
     let temp_path = directory.join(format!(".serve-workspaces-{suffix}.json"));
     std::fs::write(&temp_path, &json)?;
     std::fs::rename(&temp_path, workspace_list_path(home))

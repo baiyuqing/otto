@@ -30,6 +30,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             "tls_provider",
             "gourl",
             "urlprivacy",
+            "process_identity",
             "program_status",
             "herdr",
             "random",
@@ -66,23 +67,9 @@ const ROOT_FILES: &[&str] = &["lib.rs"];
 /// The `(from, to)` module pairs that violate the layer order today.
 const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
     ("approval", "runtime"),
-    ("approval", "subagent"),
-    ("approval", "workflow"),
-    ("cli", "tui"),
-    ("config", "runtime"),
-    ("delivery", "runtime"),
-    ("failover", "subagent"),
     ("metrics", "app"),
-    ("plugin", "failover"),
-    ("plugin", "runtime"),
     ("runtime", "app"),
     ("subagent", "app"),
-    ("subagent", "failover"),
-    ("subagent", "plugin"),
-    ("subagent", "runtime"),
-    ("subagent", "workflow"),
-    ("tui", "cli"),
-    ("workflow", "subagent"),
 ];
 
 fn sources(path: &Path) -> Vec<PathBuf> {

@@ -39,7 +39,7 @@ impl Controller {
         text: &str,
         delivery: InputDelivery,
     ) -> Result<Submission, String> {
-        let id = crate::runtime::builder::random_id().map_err(|error| error.to_string())?;
+        let id = crate::random::random_id().map_err(|error| error.to_string())?;
         let mut provenance = InputProvenance::local(InputSource::Tui);
         provenance.delivery = delivery;
         let info = self.info();

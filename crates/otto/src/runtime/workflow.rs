@@ -11,7 +11,8 @@ use otto_core::config::resolve::Runtime;
 use otto_core::session::{CURRENT_VERSION, Header, Session};
 
 use crate::deadline::Control;
-use crate::runtime::builder::{Builder, MemoryHandle, Runner, SharedSession, random_id};
+use crate::random::random_id;
+use crate::runtime::builder::{Builder, MemoryHandle, Runner, SharedSession};
 use crate::subagent::runner::{Runner as SubagentRunner, StartRequest};
 use crate::subagent::tasks::TaskStatus;
 use crate::workflow::{Attempt, Catalog, Controller, DeadlinePolicy, Executor, RuntimeIdentity};

@@ -1,9 +1,10 @@
 //! Workflow owns the transactional request/step/result receipt and DAG resume.
-use super::{Domain, Error, Proposal, Result, Service};
+use super::{ApprovalRequest, Controller};
+use crate::approval::{Domain, Error, Proposal, Result, Service, digest};
 use otto_core::approval::{Authority, Kind, Request, State, Subject};
 use std::sync::{Arc, Weak};
 pub struct Adapter {
-    pub controller: Weak<crate::workflow::Controller>,
+    pub controller: Weak<Controller>,
 }
 impl Domain for Adapter {
     fn details(&self, request: &Request) -> Result<String> {
@@ -22,7 +23,7 @@ impl Domain for Adapter {
             .approval_request(&request.subject.id)
             .map_err(|_| Error::Unavailable)?;
         if pending.run_id != request.scope.run_id
-            || super::digest(&pending.prompt) != request.subject.version
+            || digest(&pending.prompt) != request.subject.version
         {
             return Err(Error::Conflict);
         }
@@ -31,11 +32,7 @@ impl Domain for Adapter {
             .map_err(|_| Error::Conflict)
     }
 }
-pub fn publish(
-    service: &Service,
-    workspace: &str,
-    request: &crate::workflow::ApprovalRequest,
-) -> Result<Request> {
+pub fn publish(service: &Service, workspace: &str, request: &ApprovalRequest) -> Result<Request> {
     service.create(Proposal {
         kind: Kind::Authorization,
         authority: Authority::Consent,
@@ -49,7 +46,7 @@ pub fn publish(
             tool_call_id: String::new(),
             source: "workflow".into(),
             id: request.id.clone(),
-            version: super::digest(&request.prompt),
+            version: digest(&request.prompt),
             details: request.prompt.clone(),
         },
         title: format!("Approve workflow step {}?", request.step_id),
@@ -59,7 +56,7 @@ pub fn publish(
         expires_at: None,
     })
 }
-impl crate::workflow::Controller {
+impl Controller {
     pub fn attach_approvals(
         self: &Arc<Self>,
         service: &Arc<Service>,
@@ -96,14 +93,11 @@ impl crate::workflow::Controller {
             .apply_available(&self.workspace)
             .map_err(|e| e.to_string())
     }
-    pub fn approval_request(
-        &self,
-        id: &str,
-    ) -> std::result::Result<crate::workflow::ApprovalRequest, crate::workflow::Error> {
+    pub fn approval_request(&self, id: &str) -> std::result::Result<ApprovalRequest, super::Error> {
         let request = self
             .store
             .request(id)?
-            .ok_or_else(|| crate::workflow::Error::not_found("approval request not found"))?;
+            .ok_or_else(|| super::Error::not_found("approval request not found"))?;
         self.get(&request.run_id)?;
         Ok(request)
     }

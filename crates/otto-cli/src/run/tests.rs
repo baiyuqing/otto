@@ -1,5 +1,5 @@
 use super::*;
-use otto::runtime::sandbox_runtime::canonical_directory;
+use otto::fsops::canonical_directory;
 use otto::runtime::startup::{
     MAX_CAPTURED_ENVIRONMENT_BYTES, MAX_CAPTURED_ENVIRONMENT_ENTRIES, config_environment,
     load_workspace, skill_checker,

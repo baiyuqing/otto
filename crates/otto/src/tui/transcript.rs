@@ -11,9 +11,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::entries::{Entry, EntryKind};
-use super::gutter::{self, BULLET_MARK, RESULT_MARK, SYSTEM_MARK, USER_MARK};
+use super::gutter::{self, BULLET_MARK, RESULT_MARK, SYSTEM_MARK};
 use super::layout::{escape_plain_text, escape_single_line_text};
 use super::markdown;
+use crate::cli::repl::USER_MARK;
 
 pub(crate) mod render_cache;
 

@@ -10,7 +10,6 @@ pub mod reviewer;
 mod service;
 pub mod shell;
 pub mod sqlite;
-pub mod workflow;
 pub use contracts::*;
 pub use service::{Service, digest};
 #[cfg(test)]

@@ -307,7 +307,7 @@ impl ApprovalStore for Store {
             .map_err(storage_error)?;
         if old.as_ref().is_some_and(|old| {
             old.expires_at > chrono::Utc::now().timestamp()
-                && crate::subagent::record::process_matches(old.pid, &old.started) != Some(false)
+                && crate::process_identity::process_matches(old.pid, &old.started) != Some(false)
         }) {
             return Ok(false);
         }

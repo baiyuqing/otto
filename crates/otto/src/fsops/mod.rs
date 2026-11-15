@@ -3,10 +3,12 @@
 //! publishing ([`publish_file`]) stay here. `posix` holds the pinned
 //! descriptor primitives and the local [`PosixDriver`]; `files` holds the
 //! [`files::FileDriver`] contract it implements.
+pub mod canonical;
 pub mod files;
 pub(crate) mod gopath;
 pub mod posix;
 pub(crate) mod root;
+pub use canonical::{canonical_directory, canonical_executable_file};
 use otto_core::session::PiError;
 pub use posix::*;
 use std::io::Write;

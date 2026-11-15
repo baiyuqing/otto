@@ -42,8 +42,8 @@ layer; the frontend crates are above it.
 
 | Layer | Modules | Owns |
 | --- | --- | --- |
-| platform | `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence` | Process-wide primitives with no domain knowledge; `fsops` holds the pinned POSIX file driver and its `FileDriver` contract, `child_fence` the registry of child processes to kill when a session lease is lost |
-| persistence | `storage`, `workspace`, `session`, `usage` | Storage drivers and the SQL layer, workspace identity, the session store with its writer lease, the usage store |
+| platform | `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | Process-wide primitives with no domain knowledge; `fsops` holds the pinned POSIX file driver and its `FileDriver` contract, `child_fence` the registry of child processes to kill when a session lease is lost, `process_identity` the process id with its start time |
+| persistence | `storage`, `workspace`, `session`, `usage` | Storage drivers and the SQL layer, workspace identity, the session store with its writer lease and the `Origin` of a turn, the usage store |
 | capability | `auth`, `provider`, `typesafe`, `sandbox`, `config`, `tool`, `mcp`, `skill`, `memory`, `approval`, `decision` | What one agent turn uses: model access, the `Tool` trait and `Registry` with the file, Bash and web tools, sandboxed execution, memory, approval |
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
 | assembly | `runtime` | Building one runnable agent from resolved configuration |

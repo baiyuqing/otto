@@ -21,8 +21,9 @@ use tokio_util::sync::CancellationToken;
 use otto::sandbox::{CommandExecutor, Request, Streams};
 
 use super::run::{fail, sandbox_provider_environment_names};
+use otto::fsops::canonical_directory;
 use otto::runtime::sandbox_runtime::{
-    OpenOptions, SandboxRuntime, canonical_directory, open_sandbox_runtime, settings_from_config,
+    OpenOptions, SandboxRuntime, open_sandbox_runtime, settings_from_config,
 };
 use otto::sandbox::config_edit::quote;
 

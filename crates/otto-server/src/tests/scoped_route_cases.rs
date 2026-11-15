@@ -509,7 +509,7 @@ async fn the_v1_tasks_route_marks_cancelable_only_for_an_owned_non_final_task() 
     // The current process's own pid and start time, so a `queued`/
     // `running` row reads back as verifiably alive instead of
     // `interrupted` (see `record::interrupted`).
-    let (pid, process_started_at) = otto::subagent::record::current_process();
+    let (pid, process_started_at) = otto::process_identity::current_process();
     let live_context = |parent_session: &str| TaskContext {
         parent_session: parent_session.to_string(),
         parent_session_path: format!("/home/me/.otto/sessions/{parent_session}.jsonl"),

@@ -31,10 +31,11 @@ use crate::workspace::confined::Workspace;
 use super::boundary::{self, BoundaryInputs};
 use super::builder::{Builder, Shared, resolve_initial_runtime};
 use super::sandbox_runtime::{
-    OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
-    open_sandbox_runtime, sandbox_runtime_warning, settings_from_config,
+    OpenOptions, normalize_sandbox_runtime, open_sandbox_runtime, sandbox_runtime_warning,
+    settings_from_config,
 };
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
+use crate::fsops::{canonical_directory, canonical_executable_file};
 
 /// Darwin's process argument/environment budget is about 1 MiB. These
 /// ceilings are deliberately larger while still bounding injected snapshots.

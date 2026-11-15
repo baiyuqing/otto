@@ -37,7 +37,7 @@
 
 use super::{Encoding, escape, path_unescape, unescape};
 
-#[path = "gourl_parse_tests.rs"]
+#[path = "parse_tests.rs"]
 mod parse_tests;
 
 fn show(bytes: &[u8]) -> String {

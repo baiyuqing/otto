@@ -147,14 +147,14 @@ impl<T: IntoValue> IntoParams for Vec<T> {
             .map(Params)
     }
 }
-pub fn params_from_iter<T: IntoValue>(iter: impl IntoIterator<Item = T>) -> impl IntoParams {
+pub(crate) fn params_from_iter<T: IntoValue>(iter: impl IntoIterator<Item = T>) -> impl IntoParams {
     iter.into_iter().collect::<Vec<_>>()
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row(pub Vec<Value>);
 impl Row {
-    pub fn column_count(&self) -> usize {
+    pub(crate) fn column_count(&self) -> usize {
         self.0.len()
     }
     pub fn get_value(&self, index: usize) -> Result<Value> {

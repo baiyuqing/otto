@@ -3,7 +3,7 @@
 use super::*;
 
 impl Builder {
-    pub fn connecting_mcp_servers(&self) -> Arc<mcp::Servers> {
+    pub(crate) fn connecting_mcp_servers(&self) -> Arc<mcp::Servers> {
         let servers = Arc::new(mcp::Servers::default());
         if !self.mcp.enabled {
             return servers;
@@ -46,7 +46,8 @@ impl Builder {
     /// Returns the parent's tools, the connected servers (for
     /// [`mcp_adapter_tools`], since [`mcp::client::Client`] tools cannot be
     /// cloned into a second registry), and the status handle.
-    pub async fn connect_mcp(
+    #[cfg(test)]
+    pub(crate) async fn connect_mcp(
         &self,
         max_output: usize,
         warnings: &mut (dyn Write + Send),
@@ -60,7 +61,8 @@ impl Builder {
     }
 
     /// Connects MCP servers using the runtime cooperative cancellation grace.
-    pub async fn connect_mcp_with_grace(
+    #[cfg(test)]
+    pub(crate) async fn connect_mcp_with_grace(
         &self,
         max_output: usize,
         cancellation_grace: Duration,
@@ -438,7 +440,6 @@ impl Builder {
             } => {
                 let bearer: Option<Arc<dyn mcp::BearerSource>> = match auth {
                     McpAuth::OAuth => Some(Arc::new(mcp::oauth::TokenStore::new(
-                        server.name.clone(),
                         mcp::oauth::token_path(Path::new(&self.home), &server.name),
                     ))),
                     McpAuth::None => None,

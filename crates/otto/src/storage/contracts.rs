@@ -32,11 +32,11 @@ pub struct SqlRequirements {
 }
 
 impl SqlRequirements {
-    pub const EPHEMERAL: Self = Self {
+    pub(crate) const EPHEMERAL: Self = Self {
         durable_commits: false,
         multiprocess_writers: false,
     };
-    pub const DURABLE: Self = Self {
+    pub(crate) const DURABLE: Self = Self {
         durable_commits: true,
         multiprocess_writers: true,
     };

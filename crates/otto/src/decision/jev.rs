@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use super::{Answer, Backend, Exchange, Failure, Kind, NO, Question, YES};
 use crate::typesafe::{self, Client, Error, WireQuestion};
 
-pub struct Jev {
+pub(crate) struct Jev {
     client: Client,
 }
 

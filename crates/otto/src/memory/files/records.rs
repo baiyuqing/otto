@@ -147,7 +147,7 @@ impl FileStore {
 
     /// The forgotten counterpart of [`FileStore::get`]. A tombstone keeps no
     /// content, so the guard only checks its identifiers.
-    pub fn get_tombstone(&self, reference: &RecordRef) -> Result<Tombstone> {
+    pub(crate) fn get_tombstone(&self, reference: &RecordRef) -> Result<Tombstone> {
         validate_record_ref(reference)?;
         let tombstone = self
             .snapshot()?
@@ -252,7 +252,7 @@ impl FileStore {
 
     /// [`FileStore::upsert`] that also rejects a record that would push the
     /// standing set over its token budget, checked under the store lock.
-    pub fn upsert_within_standing_budget(&self, request: &UpsertRequest) -> Result<Record> {
+    pub(crate) fn upsert_within_standing_budget(&self, request: &UpsertRequest) -> Result<Record> {
         self.upsert_inner(request, true)
     }
 
@@ -468,7 +468,7 @@ impl FileStore {
 
     /// The standing set of `user`, oldest first: every record recall injects
     /// when the budget allows.
-    pub fn standing_records(&self, user: &Scope, now: DateTime<Utc>) -> Result<Vec<Record>> {
+    pub(crate) fn standing_records(&self, user: &Scope, now: DateTime<Utc>) -> Result<Vec<Record>> {
         Ok(standing_set(&self.snapshot()?, user, &[], false, now))
     }
 

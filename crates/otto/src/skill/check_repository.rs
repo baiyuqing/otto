@@ -19,7 +19,7 @@ impl fmt::Display for StoreError {
     }
 }
 impl std::error::Error for StoreError {}
-pub type StoreResult<T> = std::result::Result<T, StoreError>;
+pub(crate) type StoreResult<T> = std::result::Result<T, StoreError>;
 
 /// Exact result fields retained in the append-only history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

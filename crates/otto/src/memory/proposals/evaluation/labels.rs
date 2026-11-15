@@ -11,7 +11,8 @@ use crate::memory::{NAMESPACE_WORKSPACE, Record, Scope};
 use super::super::{EvidenceItem, MAX_EXPLANATION_BYTES, ProposalAction, ProposalInput};
 
 /// Repository path of the labeled dataset.
-pub const LABELED_DATASET_PATH: &str = "testdata/memory-eval/proposals/labeled.jsonl";
+#[cfg(test)]
+pub(crate) const LABELED_DATASET_PATH: &str = "testdata/memory-eval/proposals/labeled.jsonl";
 /// The version of the label format and the scoring rubric.
 pub const DATASET_VERSION: &str = "memory-proposal-labels/1";
 
@@ -173,12 +174,12 @@ pub fn retires(action: ProposalAction) -> bool {
 }
 
 /// Whether the action needs supporting evidence (everything but abstention).
-pub fn requires_evidence(action: ProposalAction) -> bool {
+pub(crate) fn requires_evidence(action: ProposalAction) -> bool {
     retires(action)
 }
 
 /// Whether the action carries replacement text.
-pub fn requires_replacement(action: ProposalAction) -> bool {
+pub(crate) fn requires_replacement(action: ProposalAction) -> bool {
     matches!(action, ProposalAction::Supersede | ProposalAction::Correct)
 }
 

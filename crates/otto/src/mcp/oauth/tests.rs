@@ -476,7 +476,7 @@ async fn scope_selection_prefers_configured_then_advertised_then_challenge() {
 #[tokio::test]
 async fn token_store_bearer_without_a_file_needs_login() {
     let directory = tempfile::tempdir().unwrap();
-    let store = TokenStore::new("server".to_owned(), directory.path().join("absent.json"));
+    let store = TokenStore::new(directory.path().join("absent.json"));
     let error = store.bearer(&CancellationToken::new()).await.unwrap_err();
     assert_eq!(error, CallError::NeedsLogin);
     assert!(store.secrets().is_empty());
@@ -508,7 +508,7 @@ async fn refresh_on_expiry_persists_the_new_file() {
     };
     save_token(&path, &stale).unwrap();
 
-    let store = TokenStore::new("server".to_owned(), path.clone());
+    let store = TokenStore::new(path.clone());
     let token = store.bearer(&CancellationToken::new()).await.unwrap();
     assert_eq!(token, "new-access");
 
@@ -538,7 +538,7 @@ async fn a_failed_refresh_needs_login() {
     };
     save_token(&path, &stale).unwrap();
 
-    let store = TokenStore::new("server".to_owned(), path.clone());
+    let store = TokenStore::new(path.clone());
     let error = store.bearer(&CancellationToken::new()).await.unwrap_err();
     assert_eq!(error, CallError::NeedsLogin);
     // The stale file on disk is left untouched by a failed refresh.
@@ -577,7 +577,7 @@ async fn concurrent_refresh_posts_only_once() {
     };
     save_token(&path, &stale).unwrap();
 
-    let store = TokenStore::new("server".to_owned(), path.clone());
+    let store = TokenStore::new(path.clone());
     let cancel = CancellationToken::new();
     let (first, second) = tokio::join!(store.bearer(&cancel), store.bearer(&cancel));
     assert_eq!(first.unwrap(), "new-access");
@@ -615,7 +615,7 @@ async fn refresh_after_401_posts_even_when_token_is_not_expiring() {
     };
     save_token(&path, &current).unwrap();
 
-    let store = TokenStore::new("server".to_owned(), path.clone());
+    let store = TokenStore::new(path.clone());
     let cancel = CancellationToken::new();
     let refreshed = store.refresh("old-access", &cancel).await.unwrap();
     assert_eq!(refreshed, "new-access");
@@ -650,7 +650,7 @@ async fn refresh_skips_post_when_stored_token_already_differs() {
     };
     save_token(&path, &current).unwrap();
 
-    let store = TokenStore::new("server".to_owned(), path.clone());
+    let store = TokenStore::new(path.clone());
     let cancel = CancellationToken::new();
     let result = store.refresh("some-other-token", &cancel).await.unwrap();
     assert_eq!(result, "current-access");
@@ -686,8 +686,8 @@ async fn refresh_adopts_a_token_rotated_by_another_store_on_the_same_file() {
     };
     save_token(&path, &current).unwrap();
 
-    let store_a = TokenStore::new("server".to_owned(), path.clone());
-    let store_b = TokenStore::new("server".to_owned(), path.clone());
+    let store_a = TokenStore::new(path.clone());
+    let store_b = TokenStore::new(path.clone());
     let cancel = CancellationToken::new();
     // Loads the old token into store B's cache.
     assert!(store_b.secrets().contains(&"old-access".to_owned()));

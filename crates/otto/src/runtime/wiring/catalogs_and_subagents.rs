@@ -5,6 +5,7 @@ use super::*;
 impl Builder {
     /// Discovers skills and agent definitions, prints their warnings, and
     /// appends the skill tool to `tools`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn build_catalogs(
         &self,
         tools: &mut Vec<Box<dyn Tool + Send + Sync>>,
@@ -102,7 +103,7 @@ impl Builder {
     /// nothing, when the provider is unavailable, sub-agents are off, or the
     /// session has no task registry ([`Builder::session_resources`] creates it).
     #[allow(clippy::too_many_arguments)]
-    pub fn build_subagents(
+    pub(crate) fn build_subagents(
         &self,
         tools: &mut Vec<Box<dyn Tool + Send + Sync>>,
         catalogs: &CatalogWiring,
@@ -289,7 +290,8 @@ impl Builder {
 
     /// A second set of the parent's non-memory tools, for the children. Boxed
     /// tools cannot be cloned, so the children get their own.
-    pub fn child_tools(
+    #[cfg(test)]
+    pub(crate) fn child_tools(
         &self,
         runtime: &Runtime,
         max_output: usize,
@@ -357,7 +359,7 @@ impl Builder {
     /// Renders a child's static system prompt: the parent's prompt for the
     /// child's tool set, plus the shared redacted tail. The Agents section is
     /// parent-only, because children never have the agent tool.
-    pub fn child_prompt_for(
+    pub(crate) fn child_prompt_for(
         &self,
         runtime: &Runtime,
         endpoint_host: &str,

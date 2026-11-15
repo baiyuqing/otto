@@ -9,7 +9,7 @@ use std::path::Path;
 
 /// Four random bytes, hex encoded, avoiding any id in `seen`. A fresh Pi entry
 /// id, including the 1024-attempt ceiling.
-pub fn new_pi_entry_id(seen: &std::collections::HashSet<String>) -> Result<String, PiError> {
+pub(crate) fn new_pi_entry_id(seen: &std::collections::HashSet<String>) -> Result<String, PiError> {
     for _ in 0..1024 {
         let mut buffer = [0u8; 4];
         // SAFETY: buffer is 4 writable bytes and 4 is well under the 256-byte

@@ -13,7 +13,7 @@ use chrono::{
 use super::Repeat;
 
 /// The furthest a one-shot item may be scheduled ahead.
-pub const MAX_AHEAD_DAYS: i64 = 30;
+pub(crate) const MAX_AHEAD_DAYS: i64 = 30;
 
 /// How many calendar days a search for the next or previous matching day
 /// scans; a weekend needs 2.
@@ -42,7 +42,7 @@ fn runs_on(repeat: Repeat, date: NaiveDate) -> bool {
 }
 
 /// The first occurrence of `time` on a day `repeat` runs, strictly after `after`.
-pub fn next_occurrence<Tz: TimeZone>(
+pub(crate) fn next_occurrence<Tz: TimeZone>(
     repeat: Repeat,
     time: NaiveTime,
     after: DateTime<Utc>,
@@ -64,7 +64,7 @@ pub fn next_occurrence<Tz: TimeZone>(
 
 /// The latest occurrence of `time` on a day `repeat` runs, at or before
 /// `at_or_before`.
-pub fn latest_occurrence<Tz: TimeZone>(
+pub(crate) fn latest_occurrence<Tz: TimeZone>(
     repeat: Repeat,
     time: NaiveTime,
     at_or_before: DateTime<Utc>,
@@ -87,7 +87,7 @@ pub fn latest_occurrence<Tz: TimeZone>(
 /// Resolves the `at` argument. `HH:MM` is the next occurrence after `now` and
 /// also returns the time of day, for `repeat`. `YYYY-MM-DD HH:MM` must be after
 /// `now` and at most [`MAX_AHEAD_DAYS`] ahead.
-pub fn resolve_at<Tz: TimeZone>(
+pub(crate) fn resolve_at<Tz: TimeZone>(
     at: &str,
     now: DateTime<Utc>,
     tz: &Tz,
@@ -114,14 +114,14 @@ pub fn resolve_at<Tz: TimeZone>(
 }
 
 /// `2026-10-05 08:00 +08:00`, in the host's local time zone.
-pub fn format_local(at: DateTime<Utc>) -> String {
+pub(crate) fn format_local(at: DateTime<Utc>) -> String {
     at.with_timezone(&Local)
         .format("%Y-%m-%d %H:%M %:z")
         .to_string()
 }
 
 /// `14h40m`, `2h3m`, `5m10s`, `45s`; negative values print as `0s`.
-pub fn format_duration(delta: TimeDelta) -> String {
+pub(crate) fn format_duration(delta: TimeDelta) -> String {
     let total = (delta.num_milliseconds().max(0) + 500) / 1000;
     let (hours, minutes, seconds) = (total / 3600, (total / 60) % 60, total % 60);
     if hours > 0 {

@@ -38,7 +38,7 @@ struct ReadArgs {
 }
 
 /// Reads a workspace file.
-pub struct ReadTool {
+pub(crate) struct ReadTool {
     workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }

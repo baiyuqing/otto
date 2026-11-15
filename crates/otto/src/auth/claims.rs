@@ -16,7 +16,7 @@ const OPENAI_AUTH_CLAIM: &str = "https://api.openai.com/auth";
 /// the namespaced object; a top-level key is accepted as a fallback.
 ///
 /// The error strings describe the shape of the token, never its contents.
-pub fn account_id_from_id_token(id_token: &str) -> Result<String, String> {
+pub(crate) fn account_id_from_id_token(id_token: &str) -> Result<String, String> {
     let segments: Vec<&str> = id_token.split('.').collect();
     if segments.len() < 2 {
         return Err(format!(

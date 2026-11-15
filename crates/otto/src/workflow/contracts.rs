@@ -50,7 +50,7 @@ impl SnapshotWritePolicy {
         }
     }
 
-    pub fn as_subagent(self) -> WritePolicy {
+    pub(crate) fn as_subagent(self) -> WritePolicy {
         match self {
             Self::ReadOnly => WritePolicy::ReadOnly,
             Self::ProposeOnly => WritePolicy::ProposeOnly,
@@ -252,7 +252,7 @@ pub struct Attempt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DeadlinePolicy {
+pub(crate) struct DeadlinePolicy {
     pub step_timeout: Option<Duration>,
     pub cancellation_grace: Duration,
 }

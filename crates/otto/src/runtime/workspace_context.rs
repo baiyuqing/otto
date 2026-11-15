@@ -29,7 +29,7 @@ const INSTRUCTION_FENCE_PREFIX: &str = "<workspace_instructions";
 
 /// Layered instruction loading for production runtimes. The legacy single-file
 /// helper below remains useful for its pinned filesystem/context tests.
-pub async fn layered_workspace_context(
+pub(crate) async fn layered_workspace_context(
     home: &Path,
     workspace_path: &str,
     now: DateTime<Utc>,
@@ -56,7 +56,8 @@ pub async fn layered_workspace_context(
 ///
 /// `executor` is `None` when bash is unavailable or the redaction boundary
 /// refuses dynamic content; the git line is then omitted rather than guessed.
-pub async fn workspace_context_for(
+#[cfg(test)]
+pub(crate) async fn workspace_context_for(
     workspace_path: &str,
     now: DateTime<Utc>,
     executor: Option<&Arc<dyn CommandExecutor>>,
@@ -114,7 +115,7 @@ async fn context_for(
 /// workspace instructions, which is empty when no instruction file exists.
 /// The file's own fence prefix is neutralized, so the first fence in the text
 /// is the one this module wrote.
-pub fn split_workspace_instructions(context: &str) -> (&str, &str) {
+pub(crate) fn split_workspace_instructions(context: &str) -> (&str, &str) {
     let marker = INSTRUCTION_FENCE_PREFIX.to_string();
     match context.find(&marker) {
         Some(at) => context.split_at(at),

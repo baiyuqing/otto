@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 pub const TIMEOUT: Duration = Duration::from_secs(30);
-pub const MAX_BODY: usize = 8 << 20;
+pub(crate) const MAX_BODY: usize = 8 << 20;
 const MAX_ID: usize = 512;
 const MAX_METADATA: usize = 2048;
 

@@ -10,12 +10,12 @@ pub type Transcript = Arc<dyn Session + Send + Sync>;
 /// its file path. The second argument is the fresh session ID to use in its
 /// header. `Ok(None)` keeps the child in memory; an error fails the
 /// task before it starts.
-pub type ChildSession =
+pub(crate) type ChildSession =
     Arc<dyn Fn(&str, &str) -> Result<Option<(Transcript, String)>, String> + Send + Sync>;
 
 /// Builds the durable mailbox for the child whose transcript is at the given
 /// path, restoring the parent messages it had not read when it stopped.
-pub type ChildMailbox = Arc<dyn Fn(&str) -> Arc<dyn Mailbox> + Send + Sync>;
+pub(crate) type ChildMailbox = Arc<dyn Fn(&str) -> Arc<dyn Mailbox> + Send + Sync>;
 
 pub(super) struct SharedTranscript(pub(super) Transcript);
 
@@ -117,7 +117,7 @@ impl Session for SharedTranscript {
 
 /// One child's view of the shared child registry: the tools whose names are in
 /// `allowed`, in the registry's own order. `None` allows every child tool.
-pub struct ChildTools {
+pub(crate) struct ChildTools {
     pub(super) registry: Arc<Registry>,
     pub(super) allowed: Option<BTreeSet<String>>,
     pub(super) write_policy: WritePolicy,

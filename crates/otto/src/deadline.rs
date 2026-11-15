@@ -66,14 +66,14 @@ impl Deadline {
     }
 
     /// Returns whether this deadline has elapsed.
-    pub fn is_expired(&self) -> bool {
+    pub(crate) fn is_expired(&self) -> bool {
         self.0.is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     /// Waits until this deadline expires.
     ///
     /// Waiting on an unlimited deadline never completes.
-    pub async fn sleep_until(&self) {
+    pub(crate) async fn sleep_until(&self) {
         match self.0 {
             Some(deadline) => tokio::time::sleep_until(deadline).await,
             None => pending::<()>().await,
@@ -143,7 +143,7 @@ impl OperationControl for Control {
 /// The Go `time.Duration` spelling, rounded to the second, for the whole-second
 /// durations this module produces: `"0s"`, `"42s"`, `"2m0s"`, `"1h0m0s"`.
 /// Rounding is half away from zero.
-pub fn round_to_seconds(delta: TimeDelta) -> String {
+pub(crate) fn round_to_seconds(delta: TimeDelta) -> String {
     let milliseconds = delta.num_milliseconds();
     let negative = milliseconds < 0;
     let total = (milliseconds.abs() + 500) / 1000;

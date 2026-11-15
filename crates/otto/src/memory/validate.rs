@@ -60,7 +60,7 @@ pub fn valid_name(value: &str, max: usize) -> bool {
 }
 
 /// Valid UTF-8 within `max` bytes and free of C0/C1 control characters.
-pub fn valid_text(value: &str, max: usize) -> bool {
+pub(crate) fn valid_text(value: &str, max: usize) -> bool {
     if value.len() > max {
         return false;
     }
@@ -80,7 +80,7 @@ fn valid_cursor(value: &str) -> bool {
     valid_text(value, MAX_CURSOR_BYTES)
 }
 
-pub fn valid_timestamp(value: DateTime<Utc>) -> bool {
+pub(crate) fn valid_timestamp(value: DateTime<Utc>) -> bool {
     value != zero_time() && value.year() >= 1 && value.year() <= 9999
 }
 
@@ -88,7 +88,7 @@ fn valid_optional_timestamp(value: Option<DateTime<Utc>>) -> bool {
     value.is_none_or(valid_timestamp)
 }
 
-pub fn valid_revision(value: u64) -> bool {
+pub(crate) fn valid_revision(value: u64) -> bool {
     value >= 1 && value <= i64::MAX as u64
 }
 
@@ -103,7 +103,7 @@ fn decision_origin(origin: Option<Origin>) -> bool {
     matches!(origin, Some(Origin::Human) | Some(Origin::Migration))
 }
 
-pub fn provenance_zero(value: &Provenance) -> bool {
+pub(crate) fn provenance_zero(value: &Provenance) -> bool {
     value.origin.is_none()
         && value.session_id.is_empty()
         && value.message_ids.is_empty()
@@ -177,7 +177,7 @@ fn valid_confidence(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
-pub fn validate_record(record: &Record) -> Result<()> {
+pub(crate) fn validate_record(record: &Record) -> Result<()> {
     if !valid_opaque_id(&record.id, MAX_ID_BYTES) {
         return Err(invalid_record_limit("record ID", MAX_ID_BYTES));
     }
@@ -255,7 +255,7 @@ fn validate_record_lifecycle(record: &Record) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_labels(labels: &[String], record_base: bool) -> Result<()> {
+pub(crate) fn validate_labels(labels: &[String], record_base: bool) -> Result<()> {
     let bad = |field: &str, limit: Option<usize>| -> Error {
         let kind = if record_base {
             ErrorKind::InvalidRecord
@@ -293,7 +293,10 @@ fn presentation_route_only(metadata: &BTreeMap<String, String>) -> bool {
                 .is_some_and(|origin| crate::session::origin::Origin::parse(origin).is_ok()))
 }
 
-pub fn validate_metadata(metadata: &BTreeMap<String, String>, record_base: bool) -> Result<()> {
+pub(crate) fn validate_metadata(
+    metadata: &BTreeMap<String, String>,
+    record_base: bool,
+) -> Result<()> {
     let bad = |field: &str, limit: Option<usize>| -> Error {
         let kind = if record_base {
             ErrorKind::InvalidRecord
@@ -359,14 +362,14 @@ fn record_zero(record: &Record) -> bool {
 
 /// Whether an accepted candidate of `action` writes a new record, so the
 /// review names its ID: create, supersede and correct.
-pub fn action_writes_new_record(action: CandidateAction) -> bool {
+pub(crate) fn action_writes_new_record(action: CandidateAction) -> bool {
     matches!(
         action,
         CandidateAction::Create | CandidateAction::Supersede | CandidateAction::Correct
     )
 }
 
-pub fn validate_proposed_record(record: &Record, action: CandidateAction) -> Result<()> {
+pub(crate) fn validate_proposed_record(record: &Record, action: CandidateAction) -> Result<()> {
     validate_scope(&record.scope).map_err(|_| invalid_record("proposed scope"))?;
     if !record.id.is_empty()
         || record.revision != 0
@@ -434,7 +437,7 @@ fn decided_proposed_empty(record: &Record) -> bool {
     record_zero(&copy)
 }
 
-pub fn validate_candidate(candidate: &Candidate) -> Result<()> {
+pub(crate) fn validate_candidate(candidate: &Candidate) -> Result<()> {
     if !valid_opaque_id(&candidate.id, MAX_ID_BYTES) {
         return Err(invalid_record("candidate ID"));
     }
@@ -507,7 +510,7 @@ pub fn validate_candidate(candidate: &Candidate) -> Result<()> {
 
 mod requests;
 
-pub use requests::*;
+pub(crate) use requests::*;
 
 #[cfg(test)]
 mod tests;

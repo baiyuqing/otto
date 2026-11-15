@@ -45,7 +45,7 @@ pub fn list_models_definition() -> ToolDefinition {
 }
 
 /// Lists the endpoint's model ids.
-pub struct ListModelsTool {
+pub(crate) struct ListModelsTool {
     client: CatalogClient,
     max_output: usize,
 }

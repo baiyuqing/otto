@@ -110,7 +110,7 @@ impl Store {
         Self::from_connection(connection)
     }
 
-    pub fn from_connection(connection: Connection) -> Result<Self> {
+    pub(crate) fn from_connection(connection: Connection) -> Result<Self> {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| Error)?;

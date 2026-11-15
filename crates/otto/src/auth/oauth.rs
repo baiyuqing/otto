@@ -15,11 +15,12 @@ use crate::random::random_bytes;
 /// OAuth "Sign in with ChatGPT" constants. These mirror the OpenAI Codex CLI
 /// public client. Verify against openai/codex (codex-rs/login) if the flow
 /// changes.
-pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub const ISSUER: &str = "https://auth.openai.com";
-pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
-pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-pub const SCOPES: &str = "openid profile email offline_access";
+pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+#[cfg(test)]
+pub(crate) const ISSUER: &str = "https://auth.openai.com";
+pub(crate) const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+pub(crate) const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub(crate) const SCOPES: &str = "openid profile email offline_access";
 
 /// The redirect ports tried in order; matches the Codex CLI default and its
 /// fallback.
@@ -43,25 +44,25 @@ impl Endpoint {
 }
 
 /// 32 random bytes, base64url without padding.
-pub fn random_state() -> Result<String, String> {
+pub(crate) fn random_state() -> Result<String, String> {
     let bytes = random_bytes::<32>().map_err(|_| "generate state".to_owned())?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// 32 random bytes, base64url without padding, which lands inside RFC 7636's
 /// 43..128 character range.
-pub fn generate_verifier() -> Result<String, String> {
+pub(crate) fn generate_verifier() -> Result<String, String> {
     let bytes = random_bytes::<32>().map_err(|_| "generate code verifier".to_owned())?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-pub fn s256_challenge(verifier: &str) -> String {
+pub(crate) fn s256_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 /// The authorization URL, with offline access and an S256 PKCE challenge. The
 /// parameters are appended in sorted key order.
-pub fn authorize_url(
+pub(crate) fn authorize_url(
     endpoint: &Endpoint,
     redirect_uri: &str,
     state: &str,
@@ -165,7 +166,7 @@ async fn post_token(
 /// The code exchange, with the PKCE verifier.
 #[allow(clippy::result_unit_err)] // The unit error is the point: no
 // endpoint body, status or transport detail may reach a caller.
-pub async fn exchange_code(
+pub(crate) async fn exchange_code(
     client: &reqwest::Client,
     endpoint: &Endpoint,
     redirect_uri: &str,
@@ -188,7 +189,7 @@ pub async fn exchange_code(
 
 #[allow(clippy::result_unit_err)] // The unit error is the point: no
 // endpoint body, status or transport detail may reach a caller.
-pub async fn refresh_token(
+pub(crate) async fn refresh_token(
     client: &reqwest::Client,
     endpoint: &Endpoint,
     refresh: &str,
@@ -208,7 +209,9 @@ pub async fn refresh_token(
 /// Binds the first available port from `ports` on loopback. Port 0 asks the
 /// kernel for an ephemeral port, which is what the tests use so they never
 /// depend on 1455 being free.
-pub async fn listen_loopback(ports: &[u16]) -> Result<(tokio::net::TcpListener, u16), String> {
+pub(crate) async fn listen_loopback(
+    ports: &[u16],
+) -> Result<(tokio::net::TcpListener, u16), String> {
     for port in ports {
         if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", *port)).await {
             let bound = listener

@@ -213,7 +213,7 @@ pub struct Settings {
 /// the cache roots. All are created at mode 0700 and owned by the driver that
 /// created them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PrivateDirectories {
+pub(crate) struct PrivateDirectories {
     pub root: PathBuf,
     pub temp: PathBuf,
     pub cache: PathBuf,

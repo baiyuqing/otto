@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
         Self::from_connection(connection)
     }
 
-    pub fn from_connection(connection: Connection) -> Result<Self, String> {
+    pub(crate) fn from_connection(connection: Connection) -> Result<Self, String> {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| "delivery receipt storage is unavailable")?;

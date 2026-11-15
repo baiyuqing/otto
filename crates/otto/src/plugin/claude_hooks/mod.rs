@@ -41,7 +41,7 @@ pub struct ClaudeHook {
     pub timeout_seconds: u64,
 }
 
-pub fn default_shell() -> String {
+pub(crate) fn default_shell() -> String {
     "sh".into()
 }
 fn is_default_shell(shell: &String) -> bool {
@@ -49,17 +49,17 @@ fn is_default_shell(shell: &String) -> bool {
 }
 
 /// Otto's cap on hook command timeouts; declared Claude timeouts above it are clamped.
-pub const MAX_TIMEOUT_SECONDS: u64 = 300;
+pub(crate) const MAX_TIMEOUT_SECONDS: u64 = 300;
 /// Cap on `additionalContext`, `systemMessage` and reasons taken from a hook (characters),
 /// as in Claude Code.
-pub const TEXT_LIMIT: usize = 10_000;
+pub(crate) const TEXT_LIMIT: usize = 10_000;
 /// Cap on the large payload strings `tool_response.stdout`, `error` and
 /// `last_assistant_message` (bytes) before the runtime's 1 MiB input limit applies.
-pub const FIELD_LIMIT: usize = 256 << 10;
+pub(crate) const FIELD_LIMIT: usize = 256 << 10;
 
 /// Claude events Otto fires, each with the Otto hook event that drives it. Every other
 /// Claude event (`Notification`, `PermissionRequest`, ...) never fires; discovery reports it.
-pub const EVENTS: [(&str, &str); 11] = [
+pub(crate) const EVENTS: [(&str, &str); 11] = [
     ("SessionStart", "session_start"),
     ("SubagentStart", "session_start"),
     ("UserPromptSubmit", "before_prompt"),
@@ -74,7 +74,7 @@ pub const EVENTS: [(&str, &str); 11] = [
 ];
 
 /// The Otto hook event that drives `claude_event`, or `None` for an event Otto never fires.
-pub fn otto_event(claude_event: &str) -> Option<&'static str> {
+pub(crate) fn otto_event(claude_event: &str) -> Option<&'static str> {
     EVENTS
         .iter()
         .find(|(claude, _)| *claude == claude_event)
@@ -83,7 +83,7 @@ pub fn otto_event(claude_event: &str) -> Option<&'static str> {
 
 /// Default timeout when the handler declares none: 30 s on `UserPromptSubmit`, 10 s on
 /// `SessionEnd`, 60 s otherwise.
-pub fn default_timeout_seconds(claude_event: &str) -> u64 {
+pub(crate) fn default_timeout_seconds(claude_event: &str) -> u64 {
     match claude_event {
         "UserPromptSubmit" => 30,
         "SessionEnd" => 10,
@@ -92,7 +92,7 @@ pub fn default_timeout_seconds(claude_event: &str) -> u64 {
 }
 
 /// Truncates `text` to at most `limit` characters on a char boundary.
-pub fn truncate_chars(text: &str, limit: usize) -> &str {
+pub(crate) fn truncate_chars(text: &str, limit: usize) -> &str {
     match text.char_indices().nth(limit) {
         Some((end, _)) => &text[..end],
         None => text,
@@ -100,7 +100,7 @@ pub fn truncate_chars(text: &str, limit: usize) -> &str {
 }
 
 /// Truncates `text` to at most `limit` bytes on a char boundary.
-pub fn truncate_bytes(text: &str, limit: usize) -> &str {
+pub(crate) fn truncate_bytes(text: &str, limit: usize) -> &str {
     if text.len() <= limit {
         return text;
     }

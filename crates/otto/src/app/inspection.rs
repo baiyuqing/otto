@@ -64,7 +64,7 @@ impl Controller {
         self.dynamic_content
     }
 
-    pub fn dynamic_content_available(&self) -> bool {
+    pub(crate) fn dynamic_content_available(&self) -> bool {
         !self.lock().is_closed() && self.dynamic_content
     }
 
@@ -242,6 +242,7 @@ impl Controller {
 
     /// The session currently in force. Panics only if called after a close,
     /// which no frontend does; `current_session_opt` is the checked form.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn current_session(&self) -> SharedSession {
         self.current_session_opt()
             .expect("controller has no current session")

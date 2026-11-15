@@ -12,8 +12,9 @@ use crate::{
 };
 use nix::{fcntl::OFlag, sys::stat::Mode};
 use package::Package;
+pub(crate) use runtime::GuardedServer;
+pub use runtime::Snapshot;
 pub use runtime::internal_name as runtime_name;
-pub use runtime::{GuardedServer, Snapshot};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -57,7 +58,7 @@ impl Service {
             root: home.join(".otto/plugins"),
         }
     }
-    pub fn package_path(&self, digest: &str) -> PathBuf {
+    pub(crate) fn package_path(&self, digest: &str) -> PathBuf {
         self.root.join("packages").join(digest)
     }
     pub fn data_path(&self, name: &str) -> PathBuf {
@@ -515,7 +516,7 @@ fn permissions_tree(path: &Path, writable: bool) -> Result<(), String> {
 fn freeze(path: &Path) -> Result<(), String> {
     permissions_tree(path, false)
 }
-pub fn thaw(path: &Path) -> Result<(), String> {
+pub(crate) fn thaw(path: &Path) -> Result<(), String> {
     permissions_tree(path, true)
 }
 

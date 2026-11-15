@@ -334,7 +334,7 @@ impl Store {
     /// `Store::create`/`create_lazy` builds directly, such as a freshly
     /// started REPL session; a child transcript never calls this and never
     /// gets its own lease directory.
-    pub fn enable_failover(&self, lease_seconds: u64) -> Result<(), PiError> {
+    pub(crate) fn enable_failover(&self, lease_seconds: u64) -> Result<(), PiError> {
         let mut state = self.lock()?;
         state.enable_failover = Some(lease_seconds);
         Ok(())
@@ -345,7 +345,7 @@ impl Store {
         self.writer_ownership()
     }
 
-    pub fn writer_ownership(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+    pub(crate) fn writer_ownership(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
         let state = self.lock().expect("session mutex");
         state.writer_ownership.clone().or_else(|| {
             state
@@ -363,7 +363,7 @@ impl Store {
         self.lock().ok()?.forked_from.clone()
     }
 
-    pub fn take_recovery(&self) -> Option<Recovery> {
+    pub(crate) fn take_recovery(&self) -> Option<Recovery> {
         self.lock().expect("session mutex").recovery.take()
     }
 
@@ -371,7 +371,7 @@ impl Store {
     /// against it (see [`StoreState::check_lease`]), but [`Store::close`]
     /// does not release it. For a child transcript whose lease is the
     /// parent session's.
-    pub fn set_lease_check(&self, ownership: Arc<dyn crate::session::WriterOwnership>) {
+    pub(crate) fn set_lease_check(&self, ownership: Arc<dyn crate::session::WriterOwnership>) {
         let mut state = self.lock().expect("session mutex");
         state.writer_ownership = Some(ownership);
         state.owns_lease = false;
@@ -496,7 +496,7 @@ impl Store {
     /// Records the thinking effort for this session. A no-op when unchanged;
     /// the file is created on the first real change so the level survives
     /// resuming the session without requiring a profile-level default.
-    pub fn update_thinking_level(&self, thinking: &str) -> Result<(), PiError> {
+    pub(crate) fn update_thinking_level(&self, thinking: &str) -> Result<(), PiError> {
         let mut state = self.lock()?;
         state.writable()?;
         let thinking = normalize_session_thinking(thinking)?;
@@ -523,7 +523,7 @@ impl Store {
 
     /// Records a provider, model or profile change. A no-op when nothing
     /// changed; the file is created on the first real change.
-    pub fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), PiError> {
+    pub(crate) fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), PiError> {
         let mut state = self.lock()?;
         state.writable()?;
         if runtime.provider.trim().is_empty() || runtime.model.trim().is_empty() {

@@ -19,7 +19,7 @@ impl Client {
 
     /// `GET /v1/sessions/{id}/tasks`: the open session's sub-agent tasks.
     /// `prompt` and `context` are empty; the wire omits them.
-    pub async fn session_tasks(
+    pub(crate) async fn session_tasks(
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::subagent::tasks::Task>, Error> {
@@ -33,7 +33,7 @@ impl Client {
 
     /// `GET /v1/sessions/{id}/tasks` as the wire records, which is what
     /// the management reply `Tasks` carries.
-    pub async fn session_task_records(
+    pub(crate) async fn session_task_records(
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::app::tasks::Task>, Error> {
@@ -52,7 +52,7 @@ impl Client {
 
     /// `GET /v1/sessions/{id}/tasks/{task_id}`: one task record; the
     /// `history` field of the reply is ignored. `None` on 404.
-    pub async fn session_task_record(
+    pub(crate) async fn session_task_record(
         &self,
         session_id: &str,
         task_id: &str,
@@ -73,7 +73,7 @@ impl Client {
     /// `POST /v1/sessions/{id}/tasks/{task_id}/cancel`: the task after the
     /// cancel. Serve answers 409 `task_done` for a finished task and 404 for
     /// an unknown one.
-    pub async fn cancel_task(
+    pub(crate) async fn cancel_task(
         &self,
         session_id: &str,
         task_id: &str,
@@ -136,7 +136,7 @@ impl Client {
 
     /// `GET /v1/tasks/{parent_session}/{task_id}`, including its server-read
     /// child transcript. `None` means the task row is not found.
-    pub async fn task_detail(
+    pub(crate) async fn task_detail(
         &self,
         parent_session: &str,
         task_id: &str,

@@ -82,7 +82,7 @@ pub(super) fn validate_now(now: DateTime<Utc>, include_expired: bool) -> Result<
     Ok(())
 }
 
-pub fn validate_list_request(request: &ListRequest) -> Result<()> {
+pub(crate) fn validate_list_request(request: &ListRequest) -> Result<()> {
     if request.all_scopes && !request.scopes.is_empty() {
         return Err(invalid_request("all scopes with explicit scopes"));
     }
@@ -114,7 +114,7 @@ fn validate_list_states(states: &[RecordState]) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_candidate_list_request(request: &CandidateListRequest) -> Result<()> {
+pub(crate) fn validate_candidate_list_request(request: &CandidateListRequest) -> Result<()> {
     validate_scopes(&request.scopes, true, false)?;
     if request.states.len() > MAX_REQUEST_KINDS {
         return Err(invalid_request("candidate state count"));
@@ -151,7 +151,7 @@ pub(super) fn validate_budget(limit: usize, budget: usize, max_limit: usize) -> 
     Ok(())
 }
 
-pub fn validate_retrieval_request(request: &RetrievalRequest) -> Result<()> {
+pub(crate) fn validate_retrieval_request(request: &RetrievalRequest) -> Result<()> {
     validate_query(&request.query, true)?;
     validate_scopes(&request.scopes, false, true)?;
     validate_filters(&request.kinds, &request.labels)?;
@@ -159,7 +159,7 @@ pub fn validate_retrieval_request(request: &RetrievalRequest) -> Result<()> {
     validate_now(request.now, request.include_expired)
 }
 
-pub fn validate_search_request(request: &SearchRequest) -> Result<()> {
+pub(crate) fn validate_search_request(request: &SearchRequest) -> Result<()> {
     validate_query(&request.query, true)?;
     validate_scopes(&request.scopes, false, true)?;
     validate_filters(&request.kinds, &request.labels)?;
@@ -227,7 +227,7 @@ pub(super) fn validate_transient_content(
     validate_provenance(source, false, false)
 }
 
-pub fn validate_remember_request(request: &RememberRequest) -> Result<()> {
+pub(crate) fn validate_remember_request(request: &RememberRequest) -> Result<()> {
     let mut source = request.source.clone();
     if provenance_zero(&source) {
         source.origin = Some(Origin::Human);
@@ -265,7 +265,7 @@ pub fn validate_remember_request(request: &RememberRequest) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
+pub(crate) fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
     if !valid_semantic(&request.reason, MAX_REASON_BYTES, false) {
         return Err(invalid_request_limit("proposal reason", MAX_REASON_BYTES));
     }
@@ -331,7 +331,7 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_forget_request(request: &ForgetRequest) -> Result<()> {
+pub(crate) fn validate_forget_request(request: &ForgetRequest) -> Result<()> {
     validate_record_ref(&request.reference)?;
     if !valid_revision(request.expected_revision) {
         return Err(invalid_request("expected revision"));
@@ -342,7 +342,7 @@ pub fn validate_forget_request(request: &ForgetRequest) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_record_ref(reference: &RecordRef) -> Result<()> {
+pub(crate) fn validate_record_ref(reference: &RecordRef) -> Result<()> {
     validate_scope(&reference.scope)?;
     if !valid_opaque_id(&reference.id, MAX_ID_BYTES) {
         return Err(invalid_request("record ID"));
@@ -352,7 +352,7 @@ pub fn validate_record_ref(reference: &RecordRef) -> Result<()> {
 
 /// A state change names the current revision; `Superseded` needs a
 /// replacement id other than the record itself, every other state none.
-pub fn validate_set_state_request(request: &SetStateRequest) -> Result<()> {
+pub(crate) fn validate_set_state_request(request: &SetStateRequest) -> Result<()> {
     validate_record_ref(&request.reference)?;
     if !valid_revision(request.expected_revision) {
         return Err(invalid_request("expected revision"));
@@ -382,7 +382,7 @@ pub fn validate_set_state_request(request: &SetStateRequest) -> Result<()> {
 
 /// A verification names the current revision and an optional next review
 /// deadline.
-pub fn validate_verify_request(request: &VerifyRequest) -> Result<()> {
+pub(crate) fn validate_verify_request(request: &VerifyRequest) -> Result<()> {
     validate_record_ref(&request.reference)?;
     if !valid_revision(request.expected_revision) {
         return Err(invalid_request("expected revision"));
@@ -395,7 +395,7 @@ pub fn validate_verify_request(request: &VerifyRequest) -> Result<()> {
 
 /// A restore names an earlier revision and the current one the caller read;
 /// both are positive, and the restored revision precedes the current one.
-pub fn validate_restore_request(request: &RestoreRequest) -> Result<()> {
+pub(crate) fn validate_restore_request(request: &RestoreRequest) -> Result<()> {
     validate_record_ref(&request.reference)?;
     if !valid_revision(request.revision) || !valid_revision(request.expected_revision) {
         return Err(invalid_request("restore revision"));
@@ -408,7 +408,7 @@ pub fn validate_restore_request(request: &RestoreRequest) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_candidate_ref(reference: &CandidateRef) -> Result<()> {
+pub(crate) fn validate_candidate_ref(reference: &CandidateRef) -> Result<()> {
     validate_scope(&reference.scope)?;
     if !valid_opaque_id(&reference.id, MAX_ID_BYTES) {
         return Err(invalid_request("candidate ID"));
@@ -416,7 +416,7 @@ pub fn validate_candidate_ref(reference: &CandidateRef) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_record_key(key: &RecordKey) -> Result<()> {
+pub(crate) fn validate_record_key(key: &RecordKey) -> Result<()> {
     validate_scope(&key.scope)?;
     if !valid_name(&key.kind, MAX_KIND_BYTES)
         || !valid_semantic(&key.key, MAX_SEMANTIC_KEY_BYTES, true)
@@ -426,7 +426,7 @@ pub fn validate_record_key(key: &RecordKey) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_upsert_request(request: &UpsertRequest) -> Result<()> {
+pub(crate) fn validate_upsert_request(request: &UpsertRequest) -> Result<()> {
     match request.expected_revision {
         None => {
             if request.record.revision != 0 {
@@ -445,7 +445,7 @@ pub fn validate_upsert_request(request: &UpsertRequest) -> Result<()> {
     }
 }
 
-pub fn validate_store_forget_request(request: &StoreForgetRequest) -> Result<()> {
+pub(crate) fn validate_store_forget_request(request: &StoreForgetRequest) -> Result<()> {
     validate_record_ref(&request.reference)?;
     if !valid_revision(request.expected_revision) || !valid_timestamp(request.forgotten_at) {
         return Err(invalid_request("forget revision or time"));
@@ -453,7 +453,7 @@ pub fn validate_store_forget_request(request: &StoreForgetRequest) -> Result<()>
     Ok(())
 }
 
-pub fn validate_proposal_batch(candidates: &[Candidate]) -> Result<()> {
+pub(crate) fn validate_proposal_batch(candidates: &[Candidate]) -> Result<()> {
     if candidates.is_empty() {
         return Err(invalid_request("candidate batch count"));
     }
@@ -473,7 +473,7 @@ pub fn validate_proposal_batch(candidates: &[Candidate]) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_store_review_request(
+pub(crate) fn validate_store_review_request(
     request: &StoreReviewRequest,
     candidate: &Candidate,
 ) -> Result<()> {
@@ -548,7 +548,7 @@ pub fn validate_store_review_request(
     Ok(())
 }
 
-pub fn validate_tombstone(tombstone: &Tombstone) -> Result<()> {
+pub(crate) fn validate_tombstone(tombstone: &Tombstone) -> Result<()> {
     if !valid_opaque_id(&tombstone.id, MAX_ID_BYTES) {
         return Err(invalid_record("tombstone ID"));
     }
@@ -569,13 +569,13 @@ pub fn validate_tombstone(tombstone: &Tombstone) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_recall_request(request: &RecallRequest) -> Result<()> {
+pub(crate) fn validate_recall_request(request: &RecallRequest) -> Result<()> {
     validate_query(&request.query, false)?;
     validate_filters(&request.kinds, &[])?;
     validate_budget(request.limit, request.token_budget, MAX_RECALL_RECORDS)
 }
 
-pub fn validate_bind_scopes(scopes: &[Scope], default_write_scope: &Scope) -> Result<()> {
+pub(crate) fn validate_bind_scopes(scopes: &[Scope], default_write_scope: &Scope) -> Result<()> {
     validate_scopes(scopes, false, true)?;
     validate_scope(default_write_scope)?;
     if scopes.contains(default_write_scope) {

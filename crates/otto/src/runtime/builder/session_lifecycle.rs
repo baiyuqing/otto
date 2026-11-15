@@ -17,7 +17,10 @@ impl Builder {
     }
 
     /// Resolves a replacement runtime from the provenance a session carries.
-    pub fn resolve_session(&self, metadata: &RuntimeMetadata) -> Result<Runtime, BuildError> {
+    pub(crate) fn resolve_session(
+        &self,
+        metadata: &RuntimeMetadata,
+    ) -> Result<Runtime, BuildError> {
         // The stored `profile` field holds a selector for sessions written
         // since provider/model configuration; older sessions hold a profile
         // name, and otto-core resolves those from the recorded type and model.
@@ -38,7 +41,7 @@ impl Builder {
 
     /// The selector is an explicit override, so its provider, model and
     /// endpoint win over command-line overrides.
-    pub fn resolve_model(&self, selector: &str) -> Result<Runtime, BuildError> {
+    pub(crate) fn resolve_model(&self, selector: &str) -> Result<Runtime, BuildError> {
         let overrides = Overrides {
             model: selector.to_string(),
             provider: String::new(),
@@ -87,7 +90,7 @@ impl Builder {
         self.create_session_with_id(runtime, id)
     }
 
-    pub fn create_session_with_id(
+    pub(crate) fn create_session_with_id(
         &self,
         runtime: &Runtime,
         id: String,
@@ -120,7 +123,7 @@ impl Builder {
 impl Builder {
     /// Writes a new session forked from the session file `reference`; see
     /// [`crate::session::SessionRepository::fork`].
-    pub fn fork_session_file(
+    pub(crate) fn fork_session_file(
         &self,
         reference: &str,
         before: Option<&str>,
@@ -132,7 +135,7 @@ impl Builder {
         self.fork_session_file_with_id(reference, before, &id, None)
     }
 
-    pub fn fork_session_file_with_id(
+    pub(crate) fn fork_session_file_with_id(
         &self,
         reference: &str,
         before: Option<&str>,
@@ -145,7 +148,7 @@ impl Builder {
     }
 
     /// The places the session file `reference` can be forked, oldest first.
-    pub fn session_fork_points(
+    pub(crate) fn session_fork_points(
         &self,
         reference: &str,
     ) -> Result<Vec<otto_core::session::ForkPoint>, String> {

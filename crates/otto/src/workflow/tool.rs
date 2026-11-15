@@ -8,7 +8,7 @@ use serde_json::{json, value::RawValue};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub const NAMES: [&str; 4] = [
+pub(crate) const NAMES: [&str; 4] = [
     "workflow_list",
     "workflow_inspect",
     "workflow_start",

@@ -27,7 +27,7 @@ pub mod verification;
 pub mod wiring;
 pub mod workflow;
 pub mod workflow_notifications;
-pub mod workspace_context;
+pub(crate) mod workspace_context;
 
 /// Returned when a session operation cannot run in the current boundary or
 /// process; callers compare against it to tell this cause apart.

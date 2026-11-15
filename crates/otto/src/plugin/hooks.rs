@@ -321,7 +321,7 @@ impl Runtime {
             })
             && package.is_none_or(|p| p.service.authorized(&p.installed.name, &p.installed.digest))
     }
-    pub fn has_hooks(&self) -> bool {
+    pub(crate) fn has_hooks(&self) -> bool {
         !self.hooks.is_empty()
     }
     fn redact_json(&self, text: &str) -> String {
@@ -749,7 +749,8 @@ fn schema(spec: &Value, value: Option<&Value>) -> Result<(), String> {
 mod lua_engine;
 pub(crate) mod lua_handler;
 mod memory_source;
-pub use memory_source::PluginMemoryService;
+#[cfg(test)]
+pub(crate) use memory_source::PluginMemoryService;
 
 mod binding;
 mod claude_binding;
@@ -757,7 +758,7 @@ mod claude_binding;
 mod claude_binding_tests;
 #[cfg(test)]
 mod memory_source_tests;
-pub use binding::SessionBinding;
+pub(crate) use binding::SessionBinding;
 
 #[cfg(test)]
 mod lua_handler_tests;

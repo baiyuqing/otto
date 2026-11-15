@@ -17,7 +17,8 @@ pub(crate) mod selftest;
 pub(crate) mod state;
 pub(crate) mod violations;
 
-pub use driver::{Options, SeatbeltDriver};
+pub use driver::Options;
+pub(crate) use driver::SeatbeltDriver;
 
 /// The identifier this driver reports.
 pub const ID: &str = "seatbelt";

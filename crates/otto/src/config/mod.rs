@@ -53,7 +53,7 @@ impl NativeConfigError {
 /// The default config file path: `$HOME/.config/otto/config.toml`, or the
 /// literal path `~/.config/otto/config.toml`, left unexpanded, if `HOME` is
 /// unset or empty.
-pub fn default_path() -> PathBuf {
+pub(crate) fn default_path() -> PathBuf {
     default_path_for_home(std::env::var("HOME").ok().as_deref())
 }
 
@@ -494,7 +494,7 @@ pub fn set_skill_disabled_file(
 
 /// Sets `path`'s `default_model` to the selector `model`, after checking its
 /// provider exists in the file, changing only that value.
-pub fn set_default_model_file(path: &Path, model: &str) -> Result<(), NativeConfigError> {
+pub(crate) fn set_default_model_file(path: &Path, model: &str) -> Result<(), NativeConfigError> {
     set_default_model_file_impl(path, &default_path(), model)
 }
 
@@ -512,7 +512,7 @@ fn set_default_model_file_impl(
 
 /// Sets the `thinking` key of the model table `model` (a selector), creating
 /// the table when absent, or removes the key when `thinking` is empty.
-pub fn set_model_thinking_file(
+pub(crate) fn set_model_thinking_file(
     path: &Path,
     model: &str,
     thinking: &str,

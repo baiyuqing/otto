@@ -256,7 +256,7 @@ impl Collector {
         Self::from_sink(sink, context)
     }
 
-    pub fn from_sink(sink: Arc<dyn Sink>, context: Context) -> Self {
+    pub(crate) fn from_sink(sink: Arc<dyn Sink>, context: Context) -> Self {
         Self { sink, context }
     }
 

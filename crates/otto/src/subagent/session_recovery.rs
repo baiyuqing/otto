@@ -123,7 +123,7 @@ pub fn notify(
 /// not recorded as interrupted (the task finished on its own right before
 /// the migration cancelled it, or its transcript write failed) is reported
 /// as one warning instead of being included in the notification.
-pub fn notify_moved(
+pub(crate) fn notify_moved(
     inbox: &dyn Mailbox,
     children_dir: &Path,
     task_ids: &[String],

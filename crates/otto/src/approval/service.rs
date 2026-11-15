@@ -33,7 +33,7 @@ enum Recovery {
 }
 
 impl Service {
-    pub fn from_store(store: Arc<dyn ApprovalStore>) -> Result<Self> {
+    pub(crate) fn from_store(store: Arc<dyn ApprovalStore>) -> Result<Self> {
         let mut random = [0; 16];
         std::fs::File::open("/dev/urandom")
             .and_then(|mut file| file.read_exact(&mut random))
@@ -355,7 +355,7 @@ impl Service {
 
     /// Creates an approval with a trusted passive-presentation origin.
     /// The origin changes delivery only; scope remains the authority boundary.
-    pub fn create_with_origin(&self, proposal: Proposal, origin: &str) -> Result<Request> {
+    pub(crate) fn create_with_origin(&self, proposal: Proposal, origin: &str) -> Result<Request> {
         if !origin.is_empty() {
             crate::session::origin::Origin::parse(origin)
                 .map_err(|_| Error::Invalid("invalid approval presentation origin"))?;

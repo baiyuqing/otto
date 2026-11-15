@@ -530,7 +530,10 @@ async fn jev_advice_carries_percentages_and_the_audit_row_never_holds_the_key() 
     let server = serve(Some(jev_reply())).await;
     let (_directory, service) = service();
     standing(&service, "plan-first", "Plan before editing.");
-    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
+    let (advisor, audit) = audited(Box::new(crate::decision::jev::Jev::new(
+        &server.url,
+        API_KEY,
+    )));
     assert!(advisor.is_auxiliary());
 
     let candidates = propose_one(
@@ -578,7 +581,10 @@ async fn a_low_noul_answers_no_with_the_complement_probability() {
     .to_string();
     let server = serve(Some(reply)).await;
     let (_directory, service) = service();
-    let (advisor, _) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
+    let (advisor, _) = audited(Box::new(crate::decision::jev::Jev::new(
+        &server.url,
+        API_KEY,
+    )));
 
     let candidates = propose_one(
         &advisor,
@@ -598,7 +604,10 @@ async fn a_low_noul_answers_no_with_the_complement_probability() {
 async fn a_jev_server_that_does_not_answer_in_time_times_out_without_advice() {
     let server = serve(None).await;
     let (_directory, service) = service();
-    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
+    let (advisor, audit) = audited(Box::new(crate::decision::jev::Jev::new(
+        &server.url,
+        API_KEY,
+    )));
     let advisor = advisor.with_limit(Duration::from_millis(150));
 
     let candidates = propose_one(
@@ -628,7 +637,10 @@ async fn a_jev_answer_of_the_wrong_type_is_invalid() {
     .to_string();
     let server = serve(Some(reply)).await;
     let (_directory, service) = service();
-    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
+    let (advisor, audit) = audited(Box::new(crate::decision::jev::Jev::new(
+        &server.url,
+        API_KEY,
+    )));
 
     let candidates = propose_one(
         &advisor,
@@ -656,7 +668,7 @@ fn session_questions() -> Vec<Question> {
 
 #[test]
 fn session_parse_accepts_exactly_the_requested_json() {
-    let parsed = session::parse(
+    let parsed = crate::decision::session::parse(
         r#"{"scope":"all_workspaces","relation":"duplicate:plan-first","durable":false}"#,
         &session_questions(),
     )
@@ -680,7 +692,10 @@ fn session_parse_rejects_anything_else() {
         "```json\n{\"scope\":\"all_workspaces\",\"relation\":\"new\",\"durable\":true}\n```",
     ] {
         assert!(
-            matches!(session::parse(text, &questions), Err(Failure::Invalid(_))),
+            matches!(
+                crate::decision::session::parse(text, &questions),
+                Err(Failure::Invalid(_))
+            ),
             "{text}"
         );
     }

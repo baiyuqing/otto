@@ -7,7 +7,7 @@ use otto_core::model::{Message, Role};
 /// pending `agent` tool calls. Tool results appended after it for sibling calls
 /// are cut too. `None` when there is no assistant message at all; an empty
 /// `Vec` means "an assistant message was found and nothing precedes it".
-pub fn inherit_snapshot(messages: &[Message]) -> Option<Vec<Message>> {
+pub(crate) fn inherit_snapshot(messages: &[Message]) -> Option<Vec<Message>> {
     let last_assistant = messages
         .iter()
         .rposition(|message| message.role == Role::Assistant)?;

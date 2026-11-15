@@ -40,7 +40,7 @@ pub trait ContentGuard: Send + Sync {
 
 /// Shape-based guard: redaction markers, URI userinfo, private key
 /// delimiters, credential headers and `key = value` credential assignments.
-pub struct DefaultGuard;
+pub(crate) struct DefaultGuard;
 
 impl ContentGuard for DefaultGuard {
     fn check(&self, input: &GuardInput) -> Result<()> {
@@ -157,7 +157,7 @@ struct ExactFingerprint {
 /// Rejects any field, whitespace token, `key: value` tail or URI span that
 /// equals a configured secret. Only length-plus-digest fingerprints are kept,
 /// so the guard never holds the plaintext itself.
-pub struct ExactGuard {
+pub(crate) struct ExactGuard {
     fingerprints: Vec<ExactFingerprint>,
 }
 
@@ -265,7 +265,7 @@ impl ContentGuard for ExactGuard {
 
 /// Runs each member in order and collapses any failure to a sentinel, so a
 /// guard implementation cannot leak the rejected text through its message.
-pub struct CompositeGuard {
+pub(crate) struct CompositeGuard {
     members: Vec<Box<dyn ContentGuard>>,
 }
 
@@ -369,13 +369,13 @@ fn candidate_fields(fields: &mut Vec<GuardField>, candidate: &Candidate) {
     ));
 }
 
-pub fn guard_record(guard: &dyn ContentGuard, record: &Record) -> Result<()> {
+pub(crate) fn guard_record(guard: &dyn ContentGuard, record: &Record) -> Result<()> {
     let mut fields = Vec::new();
     record_fields(&mut fields, record, "record ");
     run_guard(guard, fields)
 }
 
-pub fn guard_candidate(guard: &dyn ContentGuard, candidate: &Candidate) -> Result<()> {
+pub(crate) fn guard_candidate(guard: &dyn ContentGuard, candidate: &Candidate) -> Result<()> {
     let mut fields = Vec::new();
     candidate_fields(&mut fields, candidate);
     run_guard(guard, fields)

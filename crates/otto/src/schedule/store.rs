@@ -178,7 +178,7 @@ pub fn delivery_text(item: &Item, now: DateTime<Utc>) -> String {
         item.result.clone()
     }
 }
-pub fn run_text(item: &Item, now: DateTime<Utc>) -> String {
+pub(crate) fn run_text(item: &Item, now: DateTime<Utc>) -> String {
     format!(
         "[scheduled run {}: created {} from {}; due {}; now {}. No user is present; approval requests are denied.]\n\n{}",
         item.label(),

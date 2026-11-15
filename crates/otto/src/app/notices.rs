@@ -93,35 +93,20 @@ impl Notices {
 
 impl Controller {
     /// Takes the lines background operations has queued since the last call.
-    pub fn take_notices(&self) -> Vec<String> {
+    pub(crate) fn take_notices(&self) -> Vec<String> {
         self.notices.take()
     }
 
     /// Queues the text of a scheduled delivery as a notice and marks the
     /// terminal bell pending.
-    pub fn push_scheduled(&self, text: &str) {
+    pub(crate) fn push_scheduled(&self, text: &str) {
         self.notices.push(text.to_owned());
         self.bell.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Whether a scheduled delivery arrived since the last call.
-    pub fn take_bell(&self) -> bool {
+    pub(crate) fn take_bell(&self) -> bool {
         self.bell.swap(false, std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// The notices queued after `after` (0 for all still kept) with their ids,
-    /// and the newest id so far. Does not remove them: for readers that share
-    /// a controller, such as the HTTP server's clients. The REPL and the TUI
-    /// use [`Controller::take_notices`] instead, which drains.
-    pub fn notices_since(&self, after: u64) -> (Vec<(u64, String)>, u64) {
-        let (notices, last) = self.notices.since(after);
-        (
-            notices
-                .into_iter()
-                .map(|notice| (notice.id, notice.text))
-                .collect(),
-            last,
-        )
     }
 
     pub fn routed_notices_since(&self, after: u64) -> (Vec<Notice>, u64) {

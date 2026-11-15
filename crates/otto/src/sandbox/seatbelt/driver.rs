@@ -108,7 +108,7 @@ struct Active {
 }
 
 /// Runs commands under `/usr/bin/sandbox-exec`.
-pub struct SeatbeltDriver {
+pub(crate) struct SeatbeltDriver {
     workspace: String,
     /// The profile options and text now in the profile file.
     profile: Mutex<Active>,
@@ -360,7 +360,7 @@ impl SeatbeltDriver {
     /// and the resulting `sandbox-exec:` diagnostic poisons the driver.
     /// `SandboxSwitch` guarantees this by holding its write lock for the whole
     /// call.
-    pub async fn reconfigure(
+    pub(crate) async fn reconfigure(
         &self,
         read_paths: Vec<String>,
         deny_read_paths: Vec<String>,
@@ -429,7 +429,7 @@ impl SeatbeltDriver {
 
     /// The private directories the child sees as `TMPDIR` and the cache
     /// roots. `HOME` is the user's home directory.
-    pub fn private_directories(&self) -> PrivateDirectories {
+    pub(crate) fn private_directories(&self) -> PrivateDirectories {
         self.state.directories.clone()
     }
 

@@ -47,7 +47,7 @@ fn slots() -> &'static Arc<tokio::sync::Semaphore> {
 impl Service {
     /// Reopen only an unstarted automatic authorization whose authority has
     /// changed. The original immutable operation and old journal event survive.
-    pub fn revalidate_authorization(&self, request: &Request) -> Result<Request> {
+    pub(crate) fn revalidate_authorization(&self, request: &Request) -> Result<Request> {
         let mut current = self.store.load(&request.id)?;
         loop {
             if current.scope != request.scope || current.subject != request.subject {
@@ -204,7 +204,7 @@ impl Service {
     /// Removes the reviewer and review context of a closed runner. A newer
     /// runner of the same session may already have replaced the provider, so
     /// nothing is removed unless `provider` is still the registered one.
-    pub fn unregister_reviewer(
+    pub(crate) fn unregister_reviewer(
         &self,
         workspace: &str,
         root_session: &str,
@@ -258,7 +258,7 @@ impl Service {
         drop(state);
         self.refresh_pending(workspace, root_session)
     }
-    pub fn set_policy_config(
+    pub(crate) fn set_policy_config(
         &self,
         workspace: &str,
         config: otto_core::config::ApprovalConfig,
@@ -304,7 +304,7 @@ impl Service {
         drop(state);
         self.refresh_pending(workspace, "")
     }
-    pub fn set_managed_policy(
+    pub(crate) fn set_managed_policy(
         &self,
         workspace: &str,
         forced: otto_core::config::ApprovalConfig,

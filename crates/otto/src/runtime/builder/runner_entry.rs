@@ -115,7 +115,7 @@ impl Builder {
 
     /// Composes one runnable agent, writing non-fatal build diagnostics to
     /// `warnings`.
-    pub async fn build_runner_with_warnings(
+    pub(crate) async fn build_runner_with_warnings(
         &self,
         session: &SharedSession,
         runtime: &Runtime,
@@ -153,7 +153,7 @@ impl Builder {
     /// Composes the internal owner runner for durable workflows. Frontend
     /// parent-only tools (such as cross-workspace delivery) are intentionally
     /// absent: a workflow runtime is not a user parent session.
-    pub async fn build_workflow_runner(
+    pub(crate) async fn build_workflow_runner(
         &self,
         session: &SharedSession,
         runtime: &Runtime,

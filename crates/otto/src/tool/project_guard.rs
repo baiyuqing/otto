@@ -19,7 +19,11 @@ pub struct Guard {
 }
 
 impl Guard {
-    pub fn for_config(file: &otto_core::config::File, home: &str, workspace: &str) -> Option<Self> {
+    pub(crate) fn for_config(
+        file: &otto_core::config::File,
+        home: &str,
+        workspace: &str,
+    ) -> Option<Self> {
         let check_trust = file.project_executables == Some(true);
         let require_sandbox = file
             .policy
@@ -80,7 +84,7 @@ impl Guard {
             })
             .collect()
     }
-    pub fn watch_mcp(&self, servers: &Arc<crate::mcp::Servers>) {
+    pub(crate) fn watch_mcp(&self, servers: &Arc<crate::mcp::Servers>) {
         let weak = Arc::downgrade(servers);
         let guard = self.clone();
         tokio::spawn(async move {

@@ -86,7 +86,7 @@ impl SandboxSwitch {
     /// current runtime is not usable, or [`SandboxRuntime::reconfigure`] does
     /// not apply. The caller then opens a replacement runtime and calls
     /// [`SandboxSwitch::reload`].
-    pub async fn reconfigure(
+    pub(crate) async fn reconfigure(
         &self,
         options: &OpenOptions,
         cancel: &CancellationToken,

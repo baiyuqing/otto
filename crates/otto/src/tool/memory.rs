@@ -34,7 +34,7 @@ const MEMORY_SEARCH_LIMIT: usize = 20;
 const MEMORY_SEARCH_TOKEN_BUDGET: usize = 4000;
 
 /// Reads the records this session is bound to.
-pub struct MemorySearchTool {
+pub(crate) struct MemorySearchTool {
     service: Arc<Service>,
     scopes: Vec<Scope>,
     max_output_bytes: usize,
@@ -178,7 +178,7 @@ impl Tool for MemorySearchTool {
 }
 
 /// Proposes a record for human review.
-pub struct RememberTool {
+pub(crate) struct RememberTool {
     service: Arc<Service>,
     user_scope: Scope,
     workspace_scope: Scope,
@@ -199,7 +199,7 @@ impl RememberTool {
         }
     }
 
-    pub fn with_turn_context(
+    pub(crate) fn with_turn_context(
         mut self,
         session_id: impl Into<String>,
         origin: Arc<crate::session::origin::TurnOrigin>,
@@ -210,7 +210,7 @@ impl RememberTool {
     }
 
     /// Adds advisory review hints to the candidates this tool queues.
-    pub fn with_advisor(mut self, advisor: Option<Arc<Advisor>>) -> Self {
+    pub(crate) fn with_advisor(mut self, advisor: Option<Arc<Advisor>>) -> Self {
         self.advisor = advisor;
         self
     }
@@ -346,7 +346,7 @@ impl Tool for RememberTool {
 }
 
 /// Proposes forgetting a record for human review.
-pub struct ForgetTool {
+pub(crate) struct ForgetTool {
     service: Arc<Service>,
     scopes: Vec<Scope>,
     session_id: String,
@@ -363,7 +363,7 @@ impl ForgetTool {
         }
     }
 
-    pub fn with_turn_context(
+    pub(crate) fn with_turn_context(
         mut self,
         session_id: impl Into<String>,
         origin: Arc<crate::session::origin::TurnOrigin>,

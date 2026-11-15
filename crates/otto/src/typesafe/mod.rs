@@ -22,15 +22,15 @@ const DEFAULT_BACKOFF: [Duration; 3] = [
     Duration::from_secs(4),
 ];
 /// The model name sent in every request.
-pub const MODEL: &str = "jev-latest";
+pub(crate) const MODEL: &str = "jev-latest";
 const URL_SUFFIX: &str = "/v1/systemone";
 /// The production endpoint's base URL, passed to [`Client::new`] at the
 /// composition root; never read from here.
-pub const BASE_URL: &str = "https://api.typesafe.ai";
+pub(crate) const BASE_URL: &str = "https://api.typesafe.ai";
 
 /// One question on the wire: `type` is `choice`, `noul` or `score`.
 #[derive(Debug, Serialize)]
-pub struct WireQuestion<'a> {
+pub(crate) struct WireQuestion<'a> {
     pub r#type: &'a str,
     pub instructions: &'a str,
     pub criteria: serde_json::Value,
@@ -46,7 +46,7 @@ struct RequestBody<'a> {
 /// The response `answers` object, kept exactly as returned: a map keyed by
 /// question id whose values carry `type` plus type-specific fields (`noul`,
 /// `choice` or `score`, and `confidence` for choice and score).
-pub type AnswerMap = serde_json::Map<String, serde_json::Value>;
+pub(crate) type AnswerMap = serde_json::Map<String, serde_json::Value>;
 
 #[derive(Debug, Deserialize)]
 struct ResponseBody {
@@ -85,7 +85,10 @@ impl Error {
 
 /// The request body for `state` and `questions` (a map from question id to a
 /// serialized [`WireQuestion`]), exactly as [`Client::post`] sends it.
-pub fn request_body(state: &str, questions: &serde_json::Map<String, serde_json::Value>) -> String {
+pub(crate) fn request_body(
+    state: &str,
+    questions: &serde_json::Map<String, serde_json::Value>,
+) -> String {
     serde_json::to_string(&RequestBody {
         state,
         model: MODEL,
@@ -113,7 +116,7 @@ impl Client {
 
     /// Replaces the retry backoff so tests do not wait seconds for a 429.
     #[cfg(test)]
-    pub fn with_backoff(mut self, backoff: Vec<Duration>) -> Self {
+    pub(crate) fn with_backoff(mut self, backoff: Vec<Duration>) -> Self {
         self.backoff = backoff;
         self
     }

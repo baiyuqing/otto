@@ -107,7 +107,7 @@ impl Remote {
         self.state().info.clone()
     }
 
-    pub(crate) fn history(&self) -> Vec<Message> {
+    pub fn history(&self) -> Vec<Message> {
         self.state().history.clone()
     }
 

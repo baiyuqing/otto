@@ -161,7 +161,7 @@ pub fn secret_redactor(inputs: &BoundaryInputs<'_>, runtime: Option<&Runtime>) -
 /// `fixed` is the text that must survive redaction unchanged: the workspace
 /// path, the resolved runtime's identifying fields, the tool definitions, and
 /// the system prompt built from them.
-pub fn boundary_redactor(
+pub(crate) fn boundary_redactor(
     inputs: &BoundaryInputs<'_>,
     runtime: Option<&Runtime>,
     fixed: &FixedText<'_>,
@@ -175,7 +175,7 @@ pub fn boundary_redactor(
 
 /// The fixed text a usable boundary must leave untouched.
 #[derive(Default)]
-pub struct FixedText<'a> {
+pub(crate) struct FixedText<'a> {
     pub workspace_path: &'a str,
     /// `None` until the workspace exists; the definition and prompt checks are
     /// skipped in that case, because neither can be built yet.
@@ -184,7 +184,7 @@ pub struct FixedText<'a> {
 }
 
 /// Whether redaction leaves every piece of fixed text byte-identical.
-pub fn fields_unchanged(
+pub(crate) fn fields_unchanged(
     redactor: &Redactor,
     runtime: Option<&Runtime>,
     fixed: &FixedText<'_>,
@@ -227,7 +227,7 @@ pub fn fields_unchanged(
 
 /// The `host[:port]` of `base_url`, never its userinfo, path, or query, which
 /// may carry credentials. Empty when the URL is absent or unparsable.
-pub fn endpoint_host_for(base_url: &str) -> String {
+pub(crate) fn endpoint_host_for(base_url: &str) -> String {
     if base_url.is_empty() {
         return String::new();
     }

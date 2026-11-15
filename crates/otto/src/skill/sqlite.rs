@@ -78,7 +78,7 @@ impl Store {
         })
     }
 
-    pub(crate) fn append(&self, row: &NewRow) -> StoreResult<()> {
+    pub fn append(&self, row: &NewRow) -> StoreResult<()> {
         let result = serde_json::to_string(row.result).map_err(|_| StoreError::Io)?;
         self.connection
             .lock()

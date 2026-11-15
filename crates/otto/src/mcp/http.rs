@@ -40,7 +40,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const BODY_TOO_LARGE: &str = "response body exceeds 16 MiB";
 
 /// One HTTP-based MCP server connection.
-pub struct HttpTransport {
+pub(crate) struct HttpTransport {
     client: Client,
     url: String,
     headers: Vec<(String, String)>,

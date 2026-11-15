@@ -7,10 +7,15 @@ mod metrics;
 mod scoring;
 
 pub use labels::{
-    DATASET_VERSION, LABELED_DATASET_PATH, Label, LabeledEvidence, LabeledItem, LabeledRecord,
-    contains_term, parse_labeled_items, requires_evidence, requires_replacement, retires,
+    DATASET_VERSION, Label, LabeledItem, contains_term, parse_labeled_items, retires,
 };
-pub use metrics::{CategoryMetrics, Metrics};
+#[cfg(test)]
+pub(crate) use labels::{
+    LABELED_DATASET_PATH, LabeledEvidence, LabeledRecord, requires_replacement,
+};
+#[cfg(test)]
+pub(crate) use metrics::CategoryMetrics;
+pub use metrics::Metrics;
 pub use scoring::{Abstention, Generated, LayerOne, Score, score};
 
 #[cfg(test)]

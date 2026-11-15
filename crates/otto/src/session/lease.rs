@@ -49,11 +49,12 @@ pub(crate) use keeper::*;
 
 /// Default lease duration `L`, in seconds, for a newly created lease
 /// directory.
+#[cfg(any(test, feature = "test-support"))]
 pub const DEFAULT_LEASE_SECONDS: u64 = 30;
 
 /// Exit status a fenced process uses when it stops itself: `libc::_exit`
 /// with this code, and no further writes.
-pub const FENCED_EXIT_STATUS: i32 = 75;
+pub(crate) const FENCED_EXIT_STATUS: i32 = 75;
 
 /// Fixed size, in bytes, of the heartbeat record: JSON content, then space
 /// padding, then a trailing `\n` at the final byte.
@@ -67,7 +68,7 @@ pub fn lease_dir(session_path: &Path) -> PathBuf {
 /// True when `session_path` has a lease directory. `Err` when the path
 /// exists but is not a plain directory (a symlink or a regular file),
 /// since neither is a lease directory Otto created.
-pub fn is_lease_managed(session_path: &Path) -> std::io::Result<bool> {
+pub(crate) fn is_lease_managed(session_path: &Path) -> std::io::Result<bool> {
     let dir_path = lease_dir(session_path);
     match std::fs::symlink_metadata(&dir_path) {
         Ok(meta) if meta.file_type().is_dir() => Ok(true),
@@ -178,7 +179,7 @@ pub enum AcquireError {
     Invalid(String),
 }
 
-pub fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     let mut buf = vec![0u8; 256];
     // SAFETY: buf has 256 bytes of writable storage; gethostname writes at
     // most that many bytes, including the NUL terminator, into it.

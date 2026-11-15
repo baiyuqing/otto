@@ -236,7 +236,7 @@ struct Inner {
 /// The canonical cache base must lie outside the canonical workspace, so a
 /// workspace-relative symlink cannot pull the private tree into reviewed
 /// territory.
-pub(crate) fn create(workspace: &str, cache_base: &str) -> Result<State, Error> {
+pub fn create(workspace: &str, cache_base: &str) -> Result<State, Error> {
     create_with_operations(workspace, cache_base, &Operations::default())
 }
 

@@ -18,7 +18,7 @@ pub fn canonical_directory(path: &Path) -> Result<PathBuf, std::io::Error> {
 ///
 /// The final component is re-checked with `lstat` after canonicalization so a
 /// symlink swapped in between the two calls cannot pass as the shell.
-pub fn canonical_executable_file(path: &Path) -> Result<PathBuf, std::io::Error> {
+pub(crate) fn canonical_executable_file(path: &Path) -> Result<PathBuf, std::io::Error> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::fs::PermissionsExt;
 

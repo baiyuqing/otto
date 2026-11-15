@@ -18,7 +18,7 @@ const MAX_OUTPUT_BYTES: usize = 2048;
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Owns an independent provider snapshot and no live runner or session locks.
-pub struct SessionReviewer<T> {
+pub(crate) struct SessionReviewer<T> {
     agent: Agent<ProviderClient, T, SharedSession>,
     usage: Option<crate::usage::Collector>,
 }

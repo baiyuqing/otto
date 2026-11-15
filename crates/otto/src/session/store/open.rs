@@ -12,6 +12,7 @@ impl Store {
     }
 
     /// Reads a session header without opening a store.
+    #[cfg(test)]
     pub fn read_header(path: impl AsRef<Path>) -> Result<Header, PiError> {
         let mut file = open_path_journal(
             &crate::fsops::PosixDriver,
@@ -34,7 +35,9 @@ impl Store {
     /// Reads a session file's raw entries in file order and its resolved
     /// message transcript, with the same read-only behavior as
     /// [`Store::read_transcript`]. For callers that need custom entries.
-    pub fn read_entries(path: impl AsRef<Path>) -> Result<(Vec<PiEntry>, Vec<Message>), PiError> {
+    pub(crate) fn read_entries(
+        path: impl AsRef<Path>,
+    ) -> Result<(Vec<PiEntry>, Vec<Message>), PiError> {
         let mut file = open_path_journal(
             &crate::fsops::PosixDriver,
             path.as_ref(),

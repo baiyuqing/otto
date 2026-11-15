@@ -9,55 +9,55 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-pub const MAX_RECORD_TEXT_BYTES: usize = 8 * 1024;
-pub const MAX_NAMESPACE_BYTES: usize = 32;
-pub const MAX_KIND_BYTES: usize = 32;
+pub(crate) const MAX_RECORD_TEXT_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_NAMESPACE_BYTES: usize = 32;
+pub(crate) const MAX_KIND_BYTES: usize = 32;
 pub const MAX_ID_BYTES: usize = 64;
-pub const MAX_SESSION_ID_BYTES: usize = 128;
-pub const MAX_MESSAGE_ID_BYTES: usize = 128;
-pub const MAX_SEMANTIC_KEY_BYTES: usize = 256;
-pub const MAX_LABELS: usize = 32;
-pub const MAX_LABEL_BYTES: usize = 64;
+pub(crate) const MAX_SESSION_ID_BYTES: usize = 128;
+pub(crate) const MAX_MESSAGE_ID_BYTES: usize = 128;
+pub(crate) const MAX_SEMANTIC_KEY_BYTES: usize = 256;
+pub(crate) const MAX_LABELS: usize = 32;
+pub(crate) const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_METADATA_ENTRIES: usize = 32;
-pub const MAX_METADATA_KEY_BYTES: usize = 64;
-pub const MAX_METADATA_VALUE_BYTES: usize = 512;
+pub(crate) const MAX_METADATA_KEY_BYTES: usize = 64;
+pub(crate) const MAX_METADATA_VALUE_BYTES: usize = 512;
 /// Bounds the canonical JSON object wire bytes for record metadata.
 pub const MAX_METADATA_BYTES: usize = 4 * 1024;
-pub const MAX_REASON_BYTES: usize = 2 * 1024;
-pub const MAX_PROVENANCE_MESSAGE_IDS: usize = 32;
+pub(crate) const MAX_REASON_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_PROVENANCE_MESSAGE_IDS: usize = 32;
 pub const MAX_QUERY_BYTES: usize = 8 * 1024;
 /// Bounds the whitespace-separated terms of a retrieval query.
-pub const MAX_QUERY_TERMS: usize = 64;
+pub(crate) const MAX_QUERY_TERMS: usize = 64;
 /// Bounds the bytes of one query term.
-pub const MAX_QUERY_TERM_BYTES: usize = 256;
+pub(crate) const MAX_QUERY_TERM_BYTES: usize = 256;
 /// The token budget of the standing set: active, unexpired, user-scope
 /// `preference` and `instruction` records with a key. Recall injects the whole
 /// set outside the per-turn limit and budget, and a write that would push the
 /// set over this budget is rejected. Not configurable.
-pub const MAX_STANDING_TOKENS: usize = 2000;
+pub(crate) const MAX_STANDING_TOKENS: usize = 2000;
 /// A row cap on the recall query for the standing set. Every record costs at
 /// least one token, so only legacy data written past [`MAX_STANDING_TOKENS`]
 /// can reach it, and [`StandingUsage::omitted`] counts what it cuts.
-pub const STANDING_ROW_GUARD: usize = 128;
-pub const MAX_RETRIEVAL_CANDIDATES: usize = 256;
-pub const MAX_REQUEST_SCOPES: usize = 16;
-pub const MAX_REQUEST_KINDS: usize = 16;
-pub const MAX_REQUEST_LABELS: usize = 16;
+pub(crate) const STANDING_ROW_GUARD: usize = 128;
+pub(crate) const MAX_RETRIEVAL_CANDIDATES: usize = 256;
+pub(crate) const MAX_REQUEST_SCOPES: usize = 16;
+pub(crate) const MAX_REQUEST_KINDS: usize = 16;
+pub(crate) const MAX_REQUEST_LABELS: usize = 16;
 pub const MAX_PAGE_SIZE: usize = 100;
 pub const MAX_RECALL_RECORDS: usize = 64;
 pub const MAX_TOKEN_BUDGET: usize = 8192;
-pub const MAX_CANDIDATE_BATCH: usize = 8;
-pub const MAX_CANDIDATE_BATCH_BYTES: usize = 256 * 1024;
-pub const MAX_GUARD_FIELDS: usize = 512;
-pub const MAX_GUARD_BYTES: usize = 64 * 1024;
-pub const MAX_EXACT_GUARD_SPANS: usize = 8192;
-pub const MAX_EXACT_GUARD_VALUES: usize = 64;
-pub const MAX_EXACT_GUARD_VALUE_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_CANDIDATE_BATCH: usize = 8;
+pub(crate) const MAX_CANDIDATE_BATCH_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_GUARD_FIELDS: usize = 512;
+pub(crate) const MAX_GUARD_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_EXACT_GUARD_SPANS: usize = 8192;
+pub(crate) const MAX_EXACT_GUARD_VALUES: usize = 64;
+pub(crate) const MAX_EXACT_GUARD_VALUE_BYTES: usize = 8 * 1024;
 pub const MAX_CURSOR_BYTES: usize = 4 * 1024;
-pub const MAX_DUPLICATE_ID_RETRIES: usize = 8;
+pub(crate) const MAX_DUPLICATE_ID_RETRIES: usize = 8;
 
 pub const NAMESPACE_USER: &str = "user";
-pub const NAMESPACE_WORKSPACE: &str = "workspace";
+pub(crate) const NAMESPACE_WORKSPACE: &str = "workspace";
 
 /// Sentinel category. Errors are compared by `kind`, never by message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,7 +172,7 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub fn invalid_request(detail: &str) -> Error {
+pub(crate) fn invalid_request(detail: &str) -> Error {
     Error::detailed(ErrorKind::InvalidRequest, detail)
 }
 
@@ -270,7 +270,7 @@ impl RecordState {
 }
 
 /// Longest `state_reason`, in bytes.
-pub const MAX_STATE_REASON_BYTES: usize = 1024;
+pub(crate) const MAX_STATE_REASON_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateAction {
@@ -318,14 +318,9 @@ impl CandidateAction {
         }
     }
 
-    /// Whether the action names an existing target record.
-    pub fn targets_record(self) -> bool {
-        !matches!(self, CandidateAction::Create)
-    }
-
     /// Whether an accepted candidate of this action writes a record from the
     /// proposed content (a new record or a new revision).
-    pub fn carries_content(self) -> bool {
+    pub(crate) fn carries_content(self) -> bool {
         matches!(
             self,
             CandidateAction::Create
@@ -338,7 +333,7 @@ impl CandidateAction {
 
 /// The metadata name a correction replacement carries; its value is the id of
 /// the record it corrects.
-pub const CORRECTS_METADATA: &str = "otto.corrects";
+pub(crate) const CORRECTS_METADATA: &str = "otto.corrects";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CandidateState {
@@ -432,7 +427,7 @@ impl Scope {
     }
 }
 
-pub const PRESENTATION_ORIGIN_METADATA: &str = "otto.presentation_origin";
+pub(crate) const PRESENTATION_ORIGIN_METADATA: &str = "otto.presentation_origin";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Provenance {
@@ -618,7 +613,7 @@ fn getrandom(buffer: &mut [u8]) -> Result<()> {
 }
 
 /// Calls `generate` until it has `count` distinct IDs.
-pub fn generate_distinct_ids(
+pub(crate) fn generate_distinct_ids(
     count: usize,
     generate: &dyn Fn() -> Result<String>,
 ) -> Result<Vec<String>> {

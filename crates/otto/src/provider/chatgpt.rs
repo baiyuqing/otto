@@ -267,7 +267,7 @@ impl Client {
 
     /// Whether requests also advertise the backend-hosted `web_search` tool.
     /// The backend runs the search itself; Otto sees no tool call for it.
-    pub fn with_hosted_web_search(mut self, enabled: bool) -> Self {
+    pub(crate) fn with_hosted_web_search(mut self, enabled: bool) -> Self {
         self.hosted_web_search = enabled;
         self
     }
@@ -283,20 +283,21 @@ impl Client {
     }
 
     /// Overrides the model-output idle bound; tests use a short one.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
         self.model_idle_timeout = timeout;
         self
     }
 
     /// Persist successful model catalogs under the caller's private Otto home.
-    pub fn with_catalog_cache(mut self, path: PathBuf) -> Self {
+    pub(crate) fn with_catalog_cache(mut self, path: PathBuf) -> Self {
         self.catalog_cache_path = Some(path);
         self
     }
 
     /// A client for `base_url`. One trailing `/` is trimmed so the path is
     /// never doubled.
-    pub fn with_base_url(base_url: &str, tokens: TokenSource, account_id: &str) -> Self {
+    pub(crate) fn with_base_url(base_url: &str, tokens: TokenSource, account_id: &str) -> Self {
         Self::with_client_result(
             base_url,
             tokens,

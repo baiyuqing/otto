@@ -62,7 +62,7 @@ impl SandboxChange {
 
     /// The sentence a frontend appends after saving an `excluded_commands`
     /// entry; `config_path` is the file that now holds it.
-    pub fn exclude_saved_note(&self, config_path: &str) -> String {
+    pub(crate) fn exclude_saved_note(&self, config_path: &str) -> String {
         format!(
             "Saved {} in {config_path} and reloaded immediately (existing \
                     entries are not duplicated). Matching simple commands run outside the \
@@ -75,7 +75,7 @@ impl SandboxChange {
 /// What one amendment replaced, so a caller whose reload failed can put the
 /// previous configuration back.
 #[derive(Debug, Clone)]
-pub struct Amendment {
+pub(crate) struct Amendment {
     original: Vec<u8>,
     updated: Vec<u8>,
 }
@@ -88,7 +88,7 @@ pub struct Amendment {
 /// sandbox-build time so the frontend can show what the grant will actually
 /// cover, and so a path the profile would reject (one that does not exist, or
 /// is neither a directory nor a regular file) is refused before it is written.
-pub fn resolve_read_path(input: &str, home: &str) -> Result<String, String> {
+pub(crate) fn resolve_read_path(input: &str, home: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("a path is required".to_string());
@@ -113,7 +113,7 @@ pub fn resolve_read_path(input: &str, home: &str) -> Result<String, String> {
 
 /// The entry of `/sandbox exclude <entry>`: the rest of the line, trimmed,
 /// with one pair of matching single or double quotes removed.
-pub fn parse_exclude_entry(rest: &str) -> Result<String, String> {
+pub(crate) fn parse_exclude_entry(rest: &str) -> Result<String, String> {
     let trimmed = rest.trim();
     let entry = ['\'', '"']
         .iter()
@@ -139,11 +139,14 @@ pub fn parse_exclude_entry(rest: &str) -> Result<String, String> {
 /// both refused and the replaced contents are backed up. A change that
 /// would not resolve is rejected before anything is written, and a read path
 /// already present is left alone rather than repeated.
-pub fn amend_sandbox_config(path: &Path, change: &SandboxChange) -> Result<Amendment, String> {
+pub(crate) fn amend_sandbox_config(
+    path: &Path,
+    change: &SandboxChange,
+) -> Result<Amendment, String> {
     amend_sandbox_config_checked(path, change, None)
 }
 
-pub fn amend_sandbox_config_checked(
+pub(crate) fn amend_sandbox_config_checked(
     path: &Path,
     change: &SandboxChange,
     expected: Option<&str>,
@@ -200,7 +203,7 @@ pub fn amend_sandbox_config_checked(
 ///
 /// A configuration file the amendment created is emptied rather than removed,
 /// which resolves to the same defaults.
-pub fn revert_sandbox_config(path: &Path, amendment: &Amendment) -> Result<(), String> {
+pub(crate) fn revert_sandbox_config(path: &Path, amendment: &Amendment) -> Result<(), String> {
     crate::config::write_bytes(path, &amendment.updated, &amendment.original)
         .map_err(str::to_string)
 }

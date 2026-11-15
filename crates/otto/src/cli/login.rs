@@ -37,7 +37,7 @@ const NOT_SIGNED_IN: &str = "Not signed in to ChatGPT.";
 const REPL_SIGNED_IN: &str = "Signed in to ChatGPT. Restart Otto to use the new credentials.";
 const LOGIN_USAGE: &str = "usage: /login [status]";
 
-pub use crate::auth::{CapturedAuth, capture_auth_credentials};
+pub use crate::auth::capture_auth_credentials;
 
 /// Records what the browser launcher was asked to open. A compile-time seam is
 /// used so no test can reach `/usr/bin/open`.
@@ -191,7 +191,7 @@ fn repl_service(
     (controller.dynamic_content() && !path.is_empty()).then(|| build(PathBuf::from(path)))
 }
 
-pub async fn repl_login(
+pub(crate) async fn repl_login(
     controller: &Controller,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
@@ -255,7 +255,7 @@ async fn repl_login_with(
     }
 }
 
-pub async fn repl_logout(
+pub(crate) async fn repl_logout(
     controller: &Controller,
     stdout: &mut (dyn Write + Send),
     cancel: &CancellationToken,

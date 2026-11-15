@@ -119,7 +119,7 @@ impl Store {
 
     /// Drops the table so every later [`Self::append`] fails.
     #[cfg(test)]
-    pub fn break_for_test(&self) {
+    pub(crate) fn break_for_test(&self) {
         self.connection
             .lock()
             .expect("audit lock")
@@ -130,7 +130,7 @@ impl Store {
     /// Every row, oldest first, as `(candidate_id, outcome, request,
     /// response, error)`.
     #[cfg(test)]
-    pub fn rows(&self) -> Vec<AuditRow> {
+    pub(crate) fn rows(&self) -> Vec<AuditRow> {
         let connection = self.connection.lock().expect("audit lock");
         let mut statement = connection
             .prepare(
@@ -164,7 +164,7 @@ impl AuditStore for Store {
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
-pub struct AuditRow {
+pub(crate) struct AuditRow {
     pub candidate_id: Option<String>,
     pub outcome: String,
     pub request: String,

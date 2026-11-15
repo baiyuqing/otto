@@ -19,18 +19,19 @@ pub(crate) mod store;
 #[cfg(test)]
 mod tests;
 
-pub use crate::fsops::clean_go_path;
+pub(crate) use crate::fsops::clean_go_path;
 pub use fork::Forked;
 pub use fsops::workspace_key;
 pub use legacy::archive;
 pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
 pub use posix_repository::PosixSessionRepository;
-pub use prepared::{ArchiveResult, Prepared};
-pub use repository::{
-    DeleteCandidate, PreparedSession, SessionHandle, SessionRepository, WriterOwnership,
-};
+pub(crate) use prepared::ArchiveResult;
+pub use prepared::Prepared;
+pub(crate) use repository::WriterOwnership;
+pub use repository::{DeleteCandidate, PreparedSession, SessionHandle, SessionRepository};
+pub(crate) use store::UnansweredCall;
 pub(crate) use store::unanswered_calls_from;
-pub use store::{Recovery, RecoveryCause, Store, UnansweredCall};
+pub use store::{Recovery, RecoveryCause, Store};
 
 /// A session id is 32 lowercase hexadecimal characters. Checked before an id
 /// from a client becomes `<session directory>/<id>.jsonl`, so it cannot name

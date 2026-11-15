@@ -157,7 +157,7 @@ pub trait ToolServer: Send + Sync {
 /// Where an HTTP transport gets its bearer token. Implemented by the OAuth
 /// token store in [`oauth`]; a server with `auth = "none"` has no source.
 #[async_trait::async_trait]
-pub trait BearerSource: Send + Sync {
+pub(crate) trait BearerSource: Send + Sync {
     /// The current access token, refreshed first when it is expired or
     /// expiring within 60 s. `Err(NeedsLogin)` when there is no usable token.
     async fn bearer(&self, cancel: &CancellationToken) -> Result<String, CallError>;

@@ -70,7 +70,7 @@ pub fn render_comparison(from: &Record, to: &Record) -> String {
 
 /// A scalar field that differs between two revisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FieldChange {
+pub(crate) struct FieldChange {
     pub field: &'static str,
     pub from: String,
     pub to: String,
@@ -78,7 +78,7 @@ pub struct FieldChange {
 
 /// The scalar fields that differ, in a fixed order. The text is compared by
 /// [`line_changes`].
-pub fn field_changes(from: &Record, to: &Record) -> Vec<FieldChange> {
+pub(crate) fn field_changes(from: &Record, to: &Record) -> Vec<FieldChange> {
     let mut changes = Vec::new();
     let mut compare = |field: &'static str, left: String, right: String| {
         if left != right {
@@ -154,7 +154,7 @@ pub fn field_changes(from: &Record, to: &Record) -> Vec<FieldChange> {
 
 /// One line of a line diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LineChange {
+pub(crate) enum LineChange {
     Kept(String),
     Removed(String),
     Added(String),
@@ -163,7 +163,7 @@ pub enum LineChange {
 /// A line diff by longest common subsequence: kept lines in order, removed
 /// lines before the added lines that replace them. Record text is at most
 /// 8 KiB, so the quadratic table is small.
-pub fn line_changes(from: &str, to: &str) -> Vec<LineChange> {
+pub(crate) fn line_changes(from: &str, to: &str) -> Vec<LineChange> {
     let from_lines: Vec<&str> = from.lines().collect();
     let to_lines: Vec<&str> = to.lines().collect();
     let rows = from_lines.len();

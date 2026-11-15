@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::result::{capped_text_result, decode_strict_json};
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
-use otto_session::workspace::confined::Workspace;
+use crate::workspace::confined::Workspace;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

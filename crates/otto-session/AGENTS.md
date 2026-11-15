@@ -4,12 +4,13 @@ The [repository rules](../../AGENTS.md) apply. Use the
 [ownership map](../../docs/code-organization.md#repository-map) and
 [package contracts](../../docs/development/architecture.md#package-boundaries).
 
-- Scope: session files and workspace identity. The crate root (`src/lib.rs`)
+- Scope: session files and workspace identity (not the confined `Workspace`,
+  which is `otto::workspace`). The crate root (`src/lib.rs`)
   holds the JSONL session `Store`, prepared sessions (`prepared.rs`), listing,
   fork, archive and delete, the `SessionRepository` contract and its POSIX
   implementation (`posix_repository.rs`), the writer lease (`lease/`) and the
   `origin` of a turn. `workspace.rs` and `workspace/` hold the workspace
-  identity marker, its move history, the confined `Workspace` and admission.
+  identity marker, its move history and admission.
 - Session history stays append-only and compatible (see the repository
   rules); the on-disk layout and the lease files are read by other Otto
   processes. File access goes through `otto_platform::fsops`.

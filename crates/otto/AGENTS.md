@@ -42,7 +42,8 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   compare-and-swap writer. `tool/project_guard.rs` rechecks authorization at
   effects. Provider identity/credentials and security grants never come from
   project preference sources; each workspace resolves its own overlay.
-- Use `otto_platform::fsops` and workspace directory handles for confined/atomic operations.
+- Use `otto_platform::fsops` and workspace directory handles for confined/atomic operations;
+  the confined `Workspace` and the `.git` read-only list are `src/workspace/`.
   Keep native session storage append-only and Pi-compatible.
 - Memory callers use `memory::Service` for the built-in domain or
   `memory::client::Client` for the neutral service, not a store directly.

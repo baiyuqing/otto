@@ -117,7 +117,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
     let mut builder = Builder::for_workspace(
         shared,
         std::sync::Arc::new(
-            otto_session::workspace::confined::Workspace::new(workspace_root).expect("workspace"),
+            crate::workspace::confined::Workspace::new(workspace_root).expect("workspace"),
         ),
         workspace_root.to_string_lossy().into_owned(),
         otto_core::config::McpRuntime {

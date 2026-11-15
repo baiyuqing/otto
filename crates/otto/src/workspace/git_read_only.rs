@@ -8,11 +8,11 @@
 //! Refused, after case folding and removal of `.` components:
 //!
 //! - the root paths in `GIT_READ_ONLY` and
-//!   `crate::workspace::READ_ONLY_PATHS`;
+//!   `otto_session::workspace::READ_ONLY_PATHS`;
 //! - at any depth, a path whose last component is `.git`, which is the git
 //!   directory or the gitfile of a nested repository or submodule checkout;
 //! - at any depth, a path below a `.git` component whose last component is in
-//!   `GIT_DIR_READ_ONLY_FILES`, or that has a `GIT_DIR_HOOKS` component.
+//!   [`GIT_DIR_READ_ONLY_FILES`], or that has a [`GIT_DIR_HOOKS`] component.
 //!   This covers `.git/modules/<name>/config`, `.git/modules/<name>/hooks/*`,
 //!   `.git/worktrees/<id>/commondir`, `.git/worktrees/<id>/gitdir` and
 //!   `<dir>/.git/config`.
@@ -46,7 +46,7 @@ const GIT_DIR_NAME: &str = ".git";
 /// case-insensitive by default and also treats the Kelvin sign (U+212A) as `k`
 /// and long s (U+017F) as `s`, so each component is folded with
 /// `to_uppercase().to_lowercase()`, which maps both.
-pub fn refuse_git_read_only<'a>(
+pub(crate) fn refuse_git_read_only<'a>(
     components: impl IntoIterator<Item = &'a std::ffi::OsStr>,
     path: &Path,
 ) -> io::Result<()> {
@@ -55,7 +55,7 @@ pub fn refuse_git_read_only<'a>(
         .filter(|part| *part != ".")
         .map(|part| part.to_string_lossy().to_uppercase().to_lowercase())
         .collect();
-    if crate::workspace::READ_ONLY_PATHS
+    if otto_session::workspace::READ_ONLY_PATHS
         .iter()
         .any(|(name, _)| parts.iter().map(String::as_str).eq(name.split('/')))
     {
@@ -84,7 +84,7 @@ pub fn refuse_git_read_only<'a>(
 /// where `subpath` also covers everything below the path. The Seatbelt profile
 /// (through `crate::workspace::git_read_only::GIT_READ_ONLY`) and the `write`/`edit` tools both
 /// enforce this one list.
-pub const GIT_READ_ONLY: [(&str, bool); 5] = [
+pub(crate) const GIT_READ_ONLY: [(&str, bool); 5] = [
     (".git", false),
     (".git/config", false),
     (".git/config.worktree", false),

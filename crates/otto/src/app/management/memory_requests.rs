@@ -285,7 +285,7 @@ impl Controller {
                 let pending = self.approval_snapshot().map_err(|error| {
                     ManagementError::new(ManagementErrorKind::Internal, error.to_string())
                 })?;
-                let candidates = crate::approval::memory::human_pending_candidates(
+                let candidates = crate::memory::approval::human_pending_candidates(
                     &service,
                     &[user, workspace],
                     &pending.requests,
@@ -301,7 +301,7 @@ impl Controller {
                 let pending = self.approval_snapshot().map_err(|error| {
                     ManagementError::new(ManagementErrorKind::Internal, error.to_string())
                 })?;
-                crate::approval::memory::human_pending_candidate_page(
+                crate::memory::approval::human_pending_candidate_page(
                     &service,
                     &[user, workspace],
                     &pending.requests,

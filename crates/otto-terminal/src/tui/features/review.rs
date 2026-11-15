@@ -14,7 +14,7 @@ impl Presenter for Reviews {
     fn covers_approval(&self, request: &otto_core::approval::Request) -> bool {
         (!self.loaded && request.subject.source == "memory" && request.is_human_pending())
             || self.rows.iter().any(|candidate| {
-                otto::approval::memory::is_human_pending(candidate, std::slice::from_ref(request))
+                otto::memory::approval::is_human_pending(candidate, std::slice::from_ref(request))
             })
     }
     fn key(&self) -> String {

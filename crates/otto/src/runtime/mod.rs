@@ -4,7 +4,7 @@
 //!
 //! This is the runtime layer that `app`, `tool` and the
 //! frontends build on. It must not depend on a frontend (`cli`, `tui`, `acp`,
-//! `server`, `client`); `tests/runtime_boundary.rs` enforces that. Flag
+//! `server`, `client`); `tests/layer_boundary.rs` enforces that. Flag
 //! parsing, the REPL and process lifecycle stay in [`crate::cli`], which
 //! composes this layer with the frontends.
 

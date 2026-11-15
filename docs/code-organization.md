@@ -133,17 +133,20 @@ Items that `otto-server`, `otto-acp` and `otto-cli` call are `pub` in `otto`
 turn_queue, scheduled, notices}`, `fsops`, `hex`); widening visibility is the
 mechanism, and new frontend code goes into the frontend crates, not into `otto`.
 
-`otto` does not depend on the frontend crates, and within `otto` the runtime
-modules do not import the frontend modules `cli/`, `tui/` and `client/`:
-`crates/otto/tests/runtime_boundary.rs` fails when one does.
-`crates/otto/tests/storage_boundary.rs` checks storage ownership, dependency
-direction, and that no `otto` source re-exports an `otto-core` item. `crates/otto/tests/faults_boundary.rs` keeps `faults` out of
-production code. See [package boundaries](development/architecture.md#package-boundaries).
+`otto` does not depend on the frontend crates. Within `otto`, every top-level
+module belongs to a layer (platform, persistence, capability, orchestration,
+assembly, application, frontend) and imports only its own or a lower layer;
+see [layers inside `otto`](development/architecture.md#layers-inside-otto).
+`crates/otto/tests/layer_boundary.rs` fails on an import that breaks the
+layer order. `crates/otto/tests/storage_boundary.rs` checks storage
+ownership, dependency direction, and that no `otto` source re-exports an
+`otto-core` item. `crates/otto/tests/faults_boundary.rs` keeps `faults` out
+of production code. See [package boundaries](development/architecture.md#package-boundaries).
 
 Integration tests that need no frontend stay in `crates/otto/tests/`:
 `definition_parity`, `fault_*`, `faults_boundary`, `herdr_report`,
-`mcp_stdio`, `memory_plugin_source`, `memory_review_boundary`,
-`memory_service_conformance`, `runtime_boundary`, `session_conformance`,
+`layer_boundary`, `mcp_stdio`, `memory_plugin_source`,
+`memory_review_boundary`, `memory_service_conformance`, `session_conformance`,
 `smart_approval`, `sqlite_storage`, `storage_boundary`,
 `tool_argument_contract`, `tui_boundary`, and `testdata/`.
 

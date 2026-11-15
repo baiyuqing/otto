@@ -15,7 +15,7 @@ guide rather than being copied into those instruction files.
 | Path | Owns | Start here |
 | --- | --- | --- |
 | `crates/otto-core/` | I/O-free shared domain logic and protocol codecs | `src/lib.rs` |
-| `crates/otto-platform/` | Process-wide primitives with no domain knowledge: `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | `src/lib.rs` |
+| `crates/otto-platform/` | Process-wide primitives with no domain knowledge: `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `sse`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | `src/lib.rs` |
 | `crates/otto-storage/` | The SQL layer over SQLite: connection, statement and transaction types, the `SqlDriver` trait and the SQLite driver (`drivers/sqlite`); no domain schema | `src/lib.rs` |
 | `crates/otto/` | Native runtime library: services, persistence, integrations, tools and sandbox | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-client/` | HTTP client of a running `otto serve`, used by the TUI `--attach` mode and by `otto-acp` | `src/lib.rs` (`otto_client::Client`) |
@@ -283,7 +283,7 @@ The other modules group native responsibilities:
   `memory::files::testsupport`, in-memory SQLite store constructors,
   `workflow::Catalog::from_definitions`). Such items are public and gated
   `#[cfg(any(test, feature = "test-support"))]`, not `#[cfg(test)]`.
-- **Cross-cutting native helpers** (all in `crates/otto-platform/src/`): `deadline.rs`, `retry.rs`, `gourl.rs`,
+- **Cross-cutting native helpers** (all in `crates/otto-platform/src/`): `deadline.rs`, `retry.rs`, `sse.rs`, `gourl.rs`,
   `urlprivacy.rs`, `tls_provider.rs` (installs `ring` as the process-wide
   rustls crypto provider; every reqwest client is built through its
   `http_client_builder()` or `http_client()`, and `otto-server/src/tls.rs` takes its

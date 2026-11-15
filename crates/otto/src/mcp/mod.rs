@@ -31,7 +31,6 @@ pub mod client;
 pub mod http;
 pub mod jsonrpc;
 pub mod oauth;
-pub mod sse;
 pub mod stdio;
 mod wire_status;
 

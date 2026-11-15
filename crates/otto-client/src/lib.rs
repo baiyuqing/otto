@@ -39,10 +39,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use otto::app::{ActiveInputAdmission, Channel};
-use otto::mcp::sse::SseParser;
 use otto::sandbox::info::{SandboxMode, SandboxNetwork};
 use otto::session::origin::Origin;
 use otto::subagent::record::{ListQuery, ListResult, TaskRow};
+use otto_platform::sse::SseParser;
 
 mod approvals;
 mod mcp;

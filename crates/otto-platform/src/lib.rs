@@ -14,5 +14,6 @@ pub mod process_identity;
 pub mod program_status;
 pub mod random;
 pub mod retry;
+pub mod sse;
 pub mod tls_provider;
 pub mod urlprivacy;

@@ -506,7 +506,7 @@ impl Controller {
 
     /// `/remember` against a selected memory service. The caller is a
     /// synchronous management thread, so the async client call is driven with
-    /// `block_in_place` as `storage::worker::blocking` does.
+    /// `block_in_place` as `otto_storage::worker::blocking` does.
     pub(super) fn remember_with_service(
         &self,
         scope: &str,

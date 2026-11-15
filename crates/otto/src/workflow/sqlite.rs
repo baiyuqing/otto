@@ -1,11 +1,11 @@
 //! SQLite repository for durable workflow runs.
-use crate::storage::drivers::sqlite::SqliteDriver;
-use crate::storage::{Connection, OptionalExtension, Transaction, params};
-use crate::storage::{OpenOptions, SqlDriver};
 use crate::workflow::contracts::*;
 use crate::workflow::error::Error;
 use crate::workflow::repository::WorkflowStore;
 use chrono::{SecondsFormat, Utc};
+use otto_storage::drivers::sqlite::SqliteDriver;
+use otto_storage::{Connection, OptionalExtension, Transaction, params};
+use otto_storage::{OpenOptions, SqlDriver};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -100,7 +100,7 @@ impl RawStep {
     }
 }
 
-fn raw_run(row: &crate::storage::Row, offset: usize) -> crate::storage::Result<RawRun> {
+fn raw_run(row: &otto_storage::Row, offset: usize) -> otto_storage::Result<RawRun> {
     Ok(RawRun {
         id: row.get(offset)?,
         workflow: row.get(offset + 1)?,
@@ -118,7 +118,7 @@ fn raw_run(row: &crate::storage::Row, offset: usize) -> crate::storage::Result<R
     })
 }
 
-fn raw_step(row: &crate::storage::Row, offset: usize) -> crate::storage::Result<RawStep> {
+fn raw_step(row: &otto_storage::Row, offset: usize) -> otto_storage::Result<RawStep> {
     Ok(RawStep {
         id: row.get(offset)?,
         kind: row.get(offset + 1)?,
@@ -299,7 +299,7 @@ impl WorkflowStore for SqliteWorkflowStore {
                 },
             )
             .map_err(|_| op_error())?;
-        rows.collect::<crate::storage::Result<Vec<_>>>()
+        rows.collect::<otto_storage::Result<Vec<_>>>()
             .map_err(|_| op_error())
     }
     fn acknowledge_event(&self, workspace: &str, session: &str, seq: i64) -> Result<(), Error> {

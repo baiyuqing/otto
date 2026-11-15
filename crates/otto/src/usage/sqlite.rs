@@ -10,10 +10,10 @@ use super::repository::UsageRepository;
 use super::{
     Analysis, ApiOperationRecord, DailyPoint, Error, Result, Sink, Summary, UsageRecord, date_range,
 };
-use crate::storage::drivers::sqlite::SqliteDriver;
-use crate::storage::{Connection, params};
-use crate::storage::{OpenOptions, SqlDriver};
 use otto_core::model::Usage;
+use otto_storage::drivers::sqlite::SqliteDriver;
+use otto_storage::{Connection, params};
+use otto_storage::{OpenOptions, SqlDriver};
 
 pub(super) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS usage_events (

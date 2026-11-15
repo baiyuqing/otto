@@ -183,7 +183,7 @@ impl SqliteWorkflowStore {
                     ))
                 })
                 .map_err(|_| op_error())?;
-            rows.collect::<crate::storage::Result<Vec<_>>>()
+            rows.collect::<otto_storage::Result<Vec<_>>>()
                 .map_err(|_| op_error())?
         };
         for (run_id, step_id, attempt) in &running {
@@ -223,7 +223,7 @@ impl SqliteWorkflowStore {
             let rows = statement
                 .query_map([workspace], |row| row.get::<String>(0))
                 .map_err(|_| op_error())?;
-            rows.collect::<crate::storage::Result<Vec<_>>>()
+            rows.collect::<otto_storage::Result<Vec<_>>>()
                 .map_err(|_| op_error())?
         };
         for run_id in &unfinished {

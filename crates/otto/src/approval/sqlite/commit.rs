@@ -106,7 +106,7 @@ impl Store {
                     ],
                 )
                 .map_err(|error| match error {
-                    crate::storage::Error::Constraint(_) => Error::Conflict,
+                    otto_storage::Error::Constraint(_) => Error::Conflict,
                     other => storage_error(other),
                 })?;
             }

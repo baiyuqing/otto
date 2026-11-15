@@ -5,10 +5,10 @@ use crate::schedule::{
     Scope, State, WorkspaceAdmit,
 };
 use crate::session::origin::Origin;
-use crate::storage::drivers::sqlite::SqliteDriver;
-use crate::storage::{Connection, params};
-use crate::storage::{OpenOptions, SqlDriver};
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, Utc};
+use otto_storage::drivers::sqlite::SqliteDriver;
+use otto_storage::{Connection, params};
+use otto_storage::{OpenOptions, SqlDriver};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -73,7 +73,7 @@ const BACKOFF_CAP_SECONDS: i64 = 30 * 60;
 const MAX_ERROR_CHARS: usize = 300;
 const EXPIRED: &str = "not delivered within 24 h of the due time";
 
-type Db<T> = crate::storage::Result<T>;
+type Db<T> = otto_storage::Result<T>;
 fn ms(at: DateTime<Utc>) -> i64 {
     at.timestamp_millis()
 }
@@ -96,8 +96,8 @@ fn recurrence(item: &Item) -> Option<(Repeat, NaiveTime)> {
     Some((item.repeat?, item.local_time?))
 }
 impl Item {
-    fn from_sql(row: &crate::storage::Row) -> Db<Self> {
-        let bad = |what: &str| crate::storage::Error::ConversionFailure(format!("bad {what}"));
+    fn from_sql(row: &otto_storage::Row) -> Db<Self> {
+        let bad = |what: &str| otto_storage::Error::ConversionFailure(format!("bad {what}"));
         let origin: String = row.get(1)?;
         let kind: String = row.get(4)?;
         let repeat: String = row.get(6)?;
@@ -280,7 +280,7 @@ pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
 fn query_items(
     connection: &Connection,
     sql: &str,
-    params: impl crate::storage::IntoParams,
+    params: impl otto_storage::IntoParams,
 ) -> Db<Vec<Item>> {
     connection
         .prepare(sql)?
@@ -315,7 +315,7 @@ fn delivery_scope(connection: &Connection, id: &str, now: DateTime<Utc>) -> Db<S
         .query_map(params![id, ms(now)], |row| row.get::<String>(0))?
         .collect::<Db<Vec<_>>>()?
         .pop();
-    let bad = || crate::storage::Error::ConversionFailure("bad delivery client".into());
+    let bad = || otto_storage::Error::ConversionFailure("bad delivery client".into());
     let Some(destinations) = destinations else {
         return Ok(Scope::Origins(Vec::new()));
     };

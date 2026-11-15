@@ -1,6 +1,6 @@
 //! The SQL layer over SQLite: connections, statements, transactions and the driver trait.
 pub mod drivers;
-pub(crate) mod schema_objects;
+pub mod schema_objects;
 pub mod sql;
 pub mod worker;
 pub use sql::*;
@@ -12,7 +12,7 @@ use std::time::Duration;
 #[macro_export]
 macro_rules! storage_params {
     ($($value:expr),* $(,)?) => {{
-        use $crate::storage::IntoValue as _;
+        use $crate::IntoValue as _;
         [$((($value).to_owned()).into_value()),*]
     }};
 }
@@ -72,7 +72,7 @@ impl Connection {
         self.inner.busy_timeout(duration)
     }
 
-    pub(crate) fn pragma_update(&self, name: &str, value: impl std::fmt::Display) -> Result<()> {
+    pub fn pragma_update(&self, name: &str, value: impl std::fmt::Display) -> Result<()> {
         self.inner.pragma_update(name, &value.to_string())
     }
 
@@ -101,7 +101,7 @@ impl Connection {
         self.unchecked_transaction()
     }
 
-    pub(crate) fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
+    pub fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
         self.inner.begin()?;
         Ok(Transaction {
             connection: self,
@@ -213,7 +213,7 @@ impl Drop for Transaction<'_> {
     }
 }
 
-pub(crate) trait OptionalExtension<T> {
+pub trait OptionalExtension<T> {
     fn optional(self) -> Result<Option<T>>;
 }
 

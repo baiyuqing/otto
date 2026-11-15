@@ -6,15 +6,15 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::storage::drivers::sqlite::SqliteDriver;
-use crate::storage::{Connection, params};
-use crate::storage::{OpenOptions, SqlDriver};
 use crate::subagent::record::{
     Error, ListQuery, ListResult, MAX_TEXT_BYTES, Recorder, Result, TaskContext, TaskReader,
     TaskRepository, TaskRow, interrupted,
 };
 use crate::subagent::tasks::{ModelSource, Task};
 use chrono::{DateTime, SecondsFormat, Utc};
+use otto_storage::drivers::sqlite::SqliteDriver;
+use otto_storage::{Connection, params};
+use otto_storage::{OpenOptions, SqlDriver};
 
 /// The schema version this build writes and expects to read.
 pub(super) const SCHEMA_VERSION: i64 = 2;
@@ -102,7 +102,7 @@ struct Row {
 }
 
 impl Row {
-    fn from_sql(row: &crate::storage::Row) -> crate::storage::Result<Self> {
+    fn from_sql(row: &otto_storage::Row) -> otto_storage::Result<Self> {
         Ok(Self {
             parent_session: row.get(0)?,
             task_id: row.get(1)?,
@@ -392,7 +392,7 @@ impl Store {
                 ],
             )
             .map_err(|error| match error {
-                crate::storage::Error::Busy(_) | crate::storage::Error::BusySnapshot(_) => {
+                otto_storage::Error::Busy(_) | otto_storage::Error::BusySnapshot(_) => {
                     UpsertError::Busy
                 }
                 _ => UpsertError::Failed,
@@ -403,7 +403,7 @@ impl Store {
     fn query_rows(
         connection: &Connection,
         sql: &str,
-        params: impl crate::storage::IntoParams,
+        params: impl otto_storage::IntoParams,
     ) -> Result<Vec<Row>> {
         let mut statement = connection.prepare(sql).map_err(|_| Error)?;
         statement

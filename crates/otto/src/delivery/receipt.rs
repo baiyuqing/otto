@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
     /// Creates the tables and adds the owner columns to a database written
     /// before they existed. `BEGIN IMMEDIATE` serializes two processes that
     /// open the same file at once, so only one runs each `ALTER TABLE`.
-    fn initialize_schema(connection: &Connection) -> Result<(), crate::storage::Error> {
+    fn initialize_schema(connection: &Connection) -> Result<(), otto_storage::Error> {
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             connection.execute_batch(Self::SCHEMA)?;
@@ -622,7 +622,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
                         target_session: row.get(2)?,
                         worktree: row.get(3)?,
                         state: TaskState::parse(&row.get::<String>(4)?).map_err(|_| {
-                            crate::storage::Error::Corrupt("delivery task state".into())
+                            otto_storage::Error::Corrupt("delivery task state".into())
                         })?,
                         result: row.get(5)?,
                         error: row.get(6)?,
@@ -655,7 +655,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
                             handoff_digest: row.get(7)?,
                         },
                         state: ReceiptState::parse(&row.get::<String>(8)?).map_err(|_| {
-                            crate::storage::Error::Corrupt("delivery receipt state".into())
+                            otto_storage::Error::Corrupt("delivery receipt state".into())
                         })?,
                     })
                 },

@@ -133,7 +133,7 @@ pub(super) fn backup_before_v4(
     let tables = schemas
         .query_map((), |r| Ok((r.get::<String>(0)?, r.get::<String>(1)?)))
         .map_err(storage_error)?
-        .collect::<crate::storage::Result<Vec<_>>>()
+        .collect::<otto_storage::Result<Vec<_>>>()
         .map_err(storage_error)?;
     drop(schemas);
     // Match source table definitions as data, then reconstruct with trusted SQL.
@@ -156,7 +156,7 @@ pub(super) fn backup_before_v4(
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
-        crate::storage::schema_objects::validate_objects(
+        otto_storage::schema_objects::validate_objects(
             &[source_sql],
             std::slice::from_ref(&expected),
         )
@@ -185,7 +185,7 @@ pub(super) fn backup_before_v4(
         let trusted = variants
             .into_iter()
             .find(|candidate| {
-                crate::storage::schema_objects::validate_objects(
+                otto_storage::schema_objects::validate_objects(
                     std::slice::from_ref(source_sql),
                     std::slice::from_ref(candidate),
                 )
@@ -234,7 +234,7 @@ pub(super) fn backup_before_v4(
             destination
                 .execute(
                     &format!("INSERT INTO {name} VALUES ({placeholders})"),
-                    crate::storage::Params(row.0.clone()),
+                    otto_storage::Params(row.0.clone()),
                 )
                 .map_err(storage_error)?;
         }

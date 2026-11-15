@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 
 use super::map_error;
-use crate::storage::{Error, Result};
+use crate::{Error, Result};
 use rusqlite::ffi;
 use std::ffi::{CString, c_char, c_int, c_void};
 

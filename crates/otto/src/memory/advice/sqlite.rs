@@ -1,9 +1,9 @@
 //! SQLite implementation of the memory-advice audit repository.
 use crate::memory::advice::audit::{AuditStore, Error, NewRow};
-use crate::storage::drivers::sqlite::SqliteDriver;
-use crate::storage::{Connection, params};
-use crate::storage::{OpenOptions, SqlDriver};
 use chrono::{SecondsFormat, Utc};
+use otto_storage::drivers::sqlite::SqliteDriver;
+use otto_storage::{Connection, params};
+use otto_storage::{OpenOptions, SqlDriver};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;

@@ -7,10 +7,10 @@ use crate::memory::advice::audit::AuditStore;
 use crate::schedule::ScheduleStore;
 use crate::session::SessionRepository;
 use crate::skill::check_repository::CheckStore;
-use crate::storage::{Connection, OpenOptions, OpenPolicy, SqlDriver};
 use crate::subagent::record::TaskRepository;
 use crate::usage::repository::UsageRepository;
 use crate::workflow::WorkflowStore;
+use otto_storage::{Connection, OpenOptions, OpenPolicy, SqlDriver};
 
 /// Opens the current repository schemas through one `SqlDriver`.
 pub struct SqlRepositories {
@@ -23,7 +23,7 @@ impl SqlRepositories {
     }
 
     /// Opens the database at `path`, creating it when missing.
-    fn connection(&self, path: &Path) -> crate::storage::Result<Connection> {
+    fn connection(&self, path: &Path) -> otto_storage::Result<Connection> {
         Connection::open_with_driver(
             self.driver.as_ref(),
             path,
@@ -102,7 +102,7 @@ impl Default for Storage {
     fn default() -> Self {
         Self {
             repositories: SqlRepositories::new(Arc::new(
-                crate::storage::drivers::sqlite::SqliteDriver,
+                otto_storage::drivers::sqlite::SqliteDriver,
             )),
             sessions: Arc::new(crate::session::PosixSessionRepository::new(
                 Arc::new(otto_platform::fsops::PosixDriver),

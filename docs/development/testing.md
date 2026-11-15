@@ -192,7 +192,7 @@ fault, not merely the returned error. Before/after faults are not interchangeabl
 | Seam | Implementation / focused coverage |
 | --- | --- |
 | HTTP/SSE | `faults::http`: raw TCP loopback server with controlled chunks, barriers and disconnects |
-| SQL | `faults::sql::FaultySqlDriver`; repository `open_with_driver`; `tests/fault_storage.rs` |
+| SQL | `faults::sql::FaultySqlDriver` (implements `otto_storage::SqlDriver`); repository `open_with_driver`; `tests/fault_storage.rs`; SQL layer and SQLite driver unit tests: `cargo test -p otto-storage` |
 | Session files | `faults::files::FaultyFileDriver`; Store `*_with_driver`; `tests/fault_session.rs` |
 | Atomic publish | `faults::publish::FaultyPublishOps`; `otto_platform::fsops::publish_file` call-site unit tests |
 | Sandbox launch | `faults::sandbox::FaultyDriver`; Bash tests and sandbox conformance |

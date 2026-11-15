@@ -19,7 +19,7 @@ pub const MINIMUM_LEASE_SECONDS: u64 = 12;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Failover {
-    #[serde(default)]
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default = "default_lease_seconds")]
     pub lease_seconds: u64,
@@ -28,10 +28,16 @@ pub struct Failover {
 impl Default for Failover {
     fn default() -> Self {
         Failover {
-            enabled: false,
+            enabled: default_enabled(),
             lease_seconds: default_lease_seconds(),
         }
     }
+}
+
+/// Session failover is on unless the config sets `enabled = false`; that
+/// setting affects only sessions that have no lease directory yet.
+fn default_enabled() -> bool {
+    true
 }
 
 /// Must agree with `otto::session::lease::DEFAULT_LEASE_SECONDS`: otto-core
@@ -69,15 +75,23 @@ mod tests {
     use crate::config::File;
 
     #[test]
-    fn defaults_to_disabled_with_thirty_second_lease() {
+    fn defaults_to_enabled_with_thirty_second_lease() {
         let runtime = resolve_failover(&File::default()).expect("resolve");
         assert_eq!(
             runtime,
             FailoverRuntime {
-                enabled: false,
+                enabled: true,
                 lease_seconds: 30,
             }
         );
+    }
+
+    #[test]
+    fn enabled_false_turns_it_off_and_an_omitted_key_keeps_it_on() {
+        let off = super::super::parse("[failover]\nenabled = false\n").expect("parse");
+        assert!(!resolve_failover(&off).expect("resolve").enabled);
+        let omitted = super::super::parse("[failover]\nlease_seconds = 60\n").expect("parse");
+        assert!(resolve_failover(&omitted).expect("resolve").enabled);
     }
 
     #[test]

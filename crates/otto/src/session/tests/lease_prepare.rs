@@ -7,7 +7,7 @@ use super::*;
 //
 // Test safety: `Lease::acquire` (used by `Prepared::prepare`/`prepare_listed`
 // and `Store::enable_failover`) registers with the process-wide
-// `failover::lease::Keeper`, whose watchdog calls `libc::_exit(75)` on a
+// `session::lease::Keeper`, whose watchdog calls `libc::_exit(75)` on a
 // lease this process holds if it goes more than 5L/6 without renewal or is
 // superseded. Every test below that ends up holding such a lease uses
 // `lease_seconds` (`L`) >= 6 and releases (`close`) it within milliseconds of
@@ -17,7 +17,7 @@ use super::*;
 // heartbeat file every 200ms, never with a second live lease.
 // ---------------------------------------------------------------------------
 
-/// The JSON+padding+newline byte layout `failover::lease` writes to a lease
+/// The JSON+padding+newline byte layout `session::lease` writes to a lease
 /// directory's `heartbeat` file, reproduced here to simulate a holder by
 /// hand.
 pub(super) fn lease_heartbeat_bytes(
@@ -136,7 +136,7 @@ fn prepare_with_create_lease_creates_a_lease_directory_for_an_existing_session()
     let temp = TempDir::new();
     let path = seeded_session(&temp);
     let session_path = Path::new(&path);
-    assert!(!crate::failover::lease::is_lease_managed(session_path).expect("check lease managed"));
+    assert!(!crate::session::lease::is_lease_managed(session_path).expect("check lease managed"));
 
     let prepared = Prepared::prepare(session_path, Some(6)).expect("prepare");
     let (store, _warnings) = prepared.activate().expect("activate");
@@ -158,7 +158,7 @@ fn prepare_honors_lease_seconds_already_recorded_in_an_existing_lease_directory(
     let temp = TempDir::new();
     let path = seeded_session(&temp);
     let session_path = Path::new(&path);
-    crate::failover::lease::create_lease_dir(session_path, 30).expect("create lease dir");
+    crate::session::lease::create_lease_dir(session_path, 30).expect("create lease dir");
 
     let prepared = Prepared::prepare(session_path, Some(40)).expect("prepare");
     let (store, _warnings) = prepared.activate().expect("activate");
@@ -212,7 +212,7 @@ fn a_write_after_the_lease_is_marked_lost_fails_and_poisons_the_store_without_gr
     let path = store.path();
     let dir = Path::new(&path).with_extension("lease");
     fs::create_dir_all(&dir).expect("create lease dir");
-    let lease = crate::failover::lease::Lease::for_test(&dir);
+    let lease = crate::session::lease::Lease::for_test(&dir);
     {
         let mut state = store.lock().expect("lock store");
         state.lease = Some(lease.clone());
@@ -249,7 +249,7 @@ fn close_of_an_owned_lease_writes_a_released_heartbeat() {
     let path = store.path();
     let dir = Path::new(&path).with_extension("lease");
     fs::create_dir_all(&dir).expect("create lease dir");
-    let lease = crate::failover::lease::Lease::for_test(&dir);
+    let lease = crate::session::lease::Lease::for_test(&dir);
     {
         let mut state = store.lock().expect("lock store");
         state.lease = Some(lease);
@@ -269,7 +269,7 @@ fn close_without_a_session_file_still_releases_the_owned_lease() {
     let path = store.path();
     let dir = Path::new(&path).with_extension("lease");
     fs::create_dir_all(&dir).expect("create lease dir");
-    let lease = crate::failover::lease::Lease::for_test(&dir);
+    let lease = crate::session::lease::Lease::for_test(&dir);
     {
         let mut state = store.lock().expect("lock store");
         state.lease = Some(lease);
@@ -290,7 +290,7 @@ fn close_of_a_check_only_lease_does_not_release_it() {
     let path = store.path();
     let dir = Path::new(&path).with_extension("lease");
     fs::create_dir_all(&dir).expect("create lease dir");
-    let lease = crate::failover::lease::Lease::for_test(&dir);
+    let lease = crate::session::lease::Lease::for_test(&dir);
     store.set_lease_check(lease);
 
     let before = fs::read(dir.join("heartbeat")).expect("read heartbeat");
@@ -325,7 +325,7 @@ fn takeover_through_prepare_records_the_holder_and_repairs_the_dangling_calls() 
     let dir = write_lease_dir_by_hand(session_path, 6, 1, "stopped-host", 9001, false);
 
     let prepared =
-        crate::failover::lease::without_acquire_wait(|| Prepared::prepare(session_path, None))
+        crate::session::lease::without_acquire_wait(|| Prepared::prepare(session_path, None))
             .expect("prepare takes over");
     let (activated, _warnings) = prepared.activate().expect("activate");
 
@@ -399,7 +399,7 @@ pub(super) fn take_over_with(
         .expect("close before simulating a stopped holder");
     write_lease_dir_by_hand(Path::new(&path), 6, 1, "stopped-host", 9001, false);
     let prepared =
-        crate::failover::lease::without_acquire_wait(|| Prepared::prepare(Path::new(&path), None))
+        crate::session::lease::without_acquire_wait(|| Prepared::prepare(Path::new(&path), None))
             .expect("prepare takes over")
             .with_replayable(replayable);
     let (activated, _warnings) = prepared.activate().expect("activate");

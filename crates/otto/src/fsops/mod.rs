@@ -1,15 +1,19 @@
 //! Compatibility facade for shared pinned POSIX operations.
 //! Domain-specific Pi errors, workspace path normalization and atomic file
-//! publishing ([`publish_file`]) stay here.
-pub use crate::storage::drivers::posix::*;
+//! publishing ([`publish_file`]) stay here. `posix` holds the pinned
+//! descriptor primitives and the local [`PosixDriver`]; `files` holds the
+//! [`files::FileDriver`] contract it implements.
+pub mod files;
+pub mod posix;
 use otto_core::session::PiError;
+pub use posix::*;
 use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{fs::File, io, path::Path};
 
 pub fn lock_directory(dir: &Dir) -> Result<File, PiError> {
-    crate::storage::drivers::posix::lock_directory(dir)
+    posix::lock_directory(dir)
         .map_err(|_| PiError::other("workspace identity is busy or unavailable"))
 }
 

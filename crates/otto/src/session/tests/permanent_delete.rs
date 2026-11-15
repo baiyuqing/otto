@@ -1,6 +1,6 @@
 use super::*;
 use crate::session::SessionRepository;
-use crate::storage::backends::posix::{lease, session::PosixSessionRepository};
+use crate::session::{PosixSessionRepository, lease};
 
 fn repository() -> PosixSessionRepository {
     PosixSessionRepository::new(

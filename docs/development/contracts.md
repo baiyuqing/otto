@@ -155,7 +155,7 @@ Apply to every feature, fix and refactor:
 - Release builds use `panic = "abort"`: a panic runs the panic hooks and ends
   the process without running `Drop`. Cleanup that must happen on a crash
   belongs in `cli::panic_cleanup`, not only in a `Drop` guard; register child
-  processes with `failover::children::Children` so the hook can kill them.
+  processes with `child_fence::Children` so the hook can kill them.
 - Execution diagnostics are out-of-band typed metadata, never request/response/
   tool bodies, raw errors, ordinary stderr or model history. Native private
   rotating files consume the observer; wrappers preserve serialization, stream

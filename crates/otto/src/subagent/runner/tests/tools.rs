@@ -282,7 +282,7 @@ async fn child_registry_refuses_a_tool_call_once_the_parent_lease_is_lost() {
     let calls = write.counter();
 
     let tmp = tempfile::tempdir().expect("tmp");
-    let lease = failover::lease::Lease::for_test(tmp.path());
+    let lease = crate::session::lease::Lease::for_test(tmp.path());
     lease.mark_lost_for_test("test fence");
 
     let tasks = Arc::new(Tasks::new());

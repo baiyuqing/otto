@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use otto_core::session::{PiError, SessionInfo, Warning};
 
-use crate::storage::backends::posix::lease::{self, Keeper};
-use crate::storage::files::{FileDriver, JournalFile, JournalOpen};
+use crate::fsops::files::{FileDriver, JournalFile, JournalOpen};
+use crate::session::lease::{self, Keeper};
 
 use super::list::{
     inspect_opened_session, open_session_root_no_follow, open_workspace_session_directory_no_follow,

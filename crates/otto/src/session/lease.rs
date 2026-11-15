@@ -35,13 +35,15 @@ use std::time::{Duration, Instant};
 use crate::session::fsops;
 
 #[cfg(test)]
-use crate::failover::children::Children;
+use crate::child_fence::Children;
 
 mod acquire;
+mod fence;
 mod heartbeat;
 mod keeper;
 
 pub(crate) use acquire::*;
+pub(crate) use fence::new_keeper;
 use heartbeat::*;
 pub(crate) use keeper::*;
 
@@ -114,7 +116,7 @@ pub fn create_lease_dir(session_path: &Path, lease_seconds: u64) -> std::io::Res
     let tmp_path = parent.join(format!(
         "{}.tmp-{}",
         dir_name.to_string_lossy(),
-        crate::auth::random_hex::<8>()?
+        crate::random::random_hex::<8>()?
     ));
     std::fs::create_dir(&tmp_path)?;
 
@@ -357,6 +359,12 @@ impl std::fmt::Debug for Lease {
 }
 
 impl Lease {
+    /// [`Lease::acquire_with_keeper`] with a keeper from [`new_keeper`]. Runtime
+    /// repositories reuse their composed keeper instead.
+    pub fn acquire(path: &Path) -> Result<(Arc<Lease>, Acquired), AcquireError> {
+        Self::acquire_with_keeper(path, &new_keeper())
+    }
+
     /// Acquires the lease for `session_path`'s lease directory (see
     /// [`create_lease_dir`]), waiting out a running holder's liveness
     /// window if needed. Registers the lease with the process-wide

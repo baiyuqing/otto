@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
+use crate::random::random_hex;
 
 pub const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
 
@@ -287,21 +288,6 @@ fn create_temp(directory: &Path) -> Result<(PathBuf, File), AuthError> {
         }
     }
     Err(AuthError::CredentialsPersistence)
-}
-
-/// `N` bytes from `/dev/urandom`, hex encoded. Same source as `randomID` in
-/// `runtime::builder` and the workspace write tool.
-pub(crate) fn random_hex<const N: usize>() -> std::io::Result<String> {
-    let mut bytes = [0u8; N];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-/// `N` raw bytes from `/dev/urandom`.
-pub(crate) fn random_bytes<const N: usize>() -> std::io::Result<[u8; N]> {
-    let mut bytes = [0u8; N];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes)
 }
 
 pub fn path_for_home(home: &Path) -> PathBuf {

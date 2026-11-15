@@ -15,7 +15,7 @@ fn children_of_an_in_memory_parent_stay_in_memory() {
 async fn a_child_store_refuses_to_append_after_the_parent_lease_is_lost() {
     let root = tempfile::tempdir().expect("root");
     let workspace = tempfile::tempdir().expect("workspace");
-    let lease = crate::failover::lease::Lease::for_test(workspace.path());
+    let lease = crate::session::lease::Lease::for_test(workspace.path());
     let store = crate::session::Store::create(
         root.path(),
         otto_core::session::Header {
@@ -313,7 +313,7 @@ fn the_workspace_scope_is_derived_from_the_path_without_an_override() {
     let canonical = std::fs::canonicalize(directory.path()).expect("canonical");
     assert_eq!(
         scope.id,
-        crate::memory::scope::workspace_id(canonical.to_str().expect("utf-8"))
+        crate::workspace::workspace_id(canonical.to_str().expect("utf-8"))
     );
 }
 
@@ -371,7 +371,7 @@ fn recovery_assistant_text(text: &str) -> otto_core::model::Message {
 }
 
 /// The `lease.json` + `epoch-<epoch>` + `heartbeat` layout
-/// `failover::lease` writes, reproduced by hand so no live `Lease` of
+/// `session::lease` writes, reproduced by hand so no live `Lease` of
 /// this process's own is ever created; see the section header above and
 /// `session::tests`'s helper of the same shape.
 fn recovery_write_lease_dir_by_hand(session_path: &Path, host: &str, pid: u32) {
@@ -534,7 +534,7 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
 
     recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-    let (activated, _warnings) = crate::failover::lease::without_acquire_wait(|| {
+    let (activated, _warnings) = crate::session::lease::without_acquire_wait(|| {
         crate::session::Prepared::prepare(Path::new(&parent_path), None)
     })
     .expect("prepare takes over")
@@ -685,7 +685,7 @@ fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
 
     recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-    let (activated, _warnings) = crate::failover::lease::without_acquire_wait(|| {
+    let (activated, _warnings) = crate::session::lease::without_acquire_wait(|| {
         crate::session::Prepared::prepare(Path::new(&parent_path), None)
     })
     .expect("prepare takes over")
@@ -727,7 +727,7 @@ fn a_second_build_subagents_for_the_same_store_pushes_nothing_more() {
 
     recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-    let (activated, _warnings) = crate::failover::lease::without_acquire_wait(|| {
+    let (activated, _warnings) = crate::session::lease::without_acquire_wait(|| {
         crate::session::Prepared::prepare(Path::new(&parent_path), None)
     })
     .expect("prepare takes over")

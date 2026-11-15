@@ -20,7 +20,8 @@ guide rather than being copied into those instruction files.
 | `crates/otto-acp/` | ACP stdio and attach frontends | `src/lib.rs` |
 | `crates/otto-cli/` | The `otto` executable: command parsing, process lifecycle and composition root | `src/main.rs`, then `otto_cli::run` in `src/run.rs` |
 | `chat-connector/` | Independent Go Telegram connector that communicates with Otto through ACP | `chat-connector/cmd/otto-connect/` and `chat-connector/internal/` |
-| `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
+| `crates/otto/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`) | Native session and workspace callers |
+| `crates/otto/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories | `runtime/storage.rs` composition |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
@@ -97,7 +98,7 @@ contract or format and `otto` holds the implementation:
 
 | Module | `otto-core` | `otto` |
 | --- | --- | --- |
-| `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store` in `storage/backends/posix/session/`, which `session/` re-exports |
+| `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store`, `PosixSessionRepository` and the writer lease in `crates/otto/src/session/` (`store.rs`, `posix_repository.rs`, `lease.rs`) |
 | `config` | configuration schema, layered merge, provenance, managed constraints, resolution, `config::edit` | source discovery, executable trust, the compare-and-swap writer |
 | `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; file store in `memory/files/` |
 | `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; SQLite store under `storage/` |
@@ -245,8 +246,10 @@ The other modules group native responsibilities:
 
 Domain directories own typed repository ports and state semantics. Concrete
 schema, physical row mappings, SQL and file operations live under
-`crates/otto/src/storage/backends/`; the small capability contracts and
-SQLite/POSIX drivers live beside them in `storage/`. `runtime/storage.rs`
+`crates/otto/src/storage/backends/`, except the session store and the usage
+store, which live in `session/` and `usage/`; the small capability contracts
+and the SQLite driver live beside them in `storage/`. The POSIX file driver
+and the `FileDriver` contract are in `fsops/`. `runtime/storage.rs`
 opens concrete repositories at their local paths and injects domain ports into
 consumers. Backend packages retain their physical mappings and I/O.
 
@@ -254,9 +257,10 @@ consumers. Backend packages retain their physical mappings and I/O.
 | --- | --- | --- |
 | Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `storage/backends/sqlite/approval.rs` |
 | Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `storage/backends/sqlite/memory_advice.rs` (advice audit) |
-| Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `storage/backends/posix/session/` |
+| Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `session/{store,prepared,list,fork,lease}.rs` |
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/sqlite/{schedule,workflow}.rs` |
-| Tasks, usage, skill checks | Their domain repository modules | `storage/backends/sqlite/{tasks,usage,skill_checks}.rs` |
+| Tasks, skill checks | Their domain repository modules | `storage/backends/sqlite/{tasks,skill_checks}.rs` |
+| Usage | `usage/{mod,repository}.rs` | `usage/store.rs` |
 
 `runtime::storage::Storage` uses the local SQLite driver for SQL-backed
 state and the confined POSIX file driver for sessions. `storage/worker.rs` owns

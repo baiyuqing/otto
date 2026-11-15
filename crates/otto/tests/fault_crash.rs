@@ -77,10 +77,7 @@ fn store(dir: &Path, rules: Vec<Rule<FileOp>>) -> (Store, Arc<FaultPlan<FileOp>>
     std::fs::create_dir_all(&root).expect("root");
     std::fs::create_dir_all(&workspace).expect("workspace");
     let plan = FaultPlan::new(rules);
-    let driver = FaultyFileDriver::new(
-        Arc::new(otto::storage::drivers::posix::PosixDriver),
-        Arc::clone(&plan),
-    );
+    let driver = FaultyFileDriver::new(Arc::new(otto::fsops::PosixDriver), Arc::clone(&plan));
     let store = Store::create_lazy_with_driver(&root, header(&workspace), Arc::new(driver))
         .expect("lazy store");
     (store, plan)

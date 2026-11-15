@@ -13,17 +13,6 @@ fn error_display_appends_the_detail_after_the_category() {
 }
 
 #[test]
-fn opaque_ids_accept_only_the_id_alphabet() {
-    assert!(valid_opaque_id("abc.DEF_09:-", MAX_ID_BYTES));
-    assert!(!valid_opaque_id("", MAX_ID_BYTES));
-    assert!(!valid_opaque_id("has space", MAX_ID_BYTES));
-    assert!(!valid_opaque_id(
-        &"a".repeat(MAX_ID_BYTES + 1),
-        MAX_ID_BYTES
-    ));
-}
-
-#[test]
 fn the_default_policy_carries_the_documented_rules() {
     let base = PolicyRequest {
         origin: Some(Origin::Human),

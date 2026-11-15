@@ -213,7 +213,7 @@ fn archived_exact_name_can_be_confirmed() {
 
 #[test]
 fn live_lease_is_refused_without_deletion() {
-    use otto::failover::lease::{Lease, create_lease_dir};
+    use otto::session::lease::{Lease, create_lease_dir};
     let fixture = Fixture::new();
     let session = fixture.create("leased-id", "leased");
     let path = session.path();

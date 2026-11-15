@@ -1,7 +1,7 @@
 //! Complete deletion target discovery through the public repository boundary.
 use super::*;
 use crate::session::{DeleteCandidate, SessionRepository};
-use crate::storage::backends::posix::{lease, session::PosixSessionRepository};
+use crate::session::{PosixSessionRepository, lease};
 use std::os::unix::fs::{PermissionsExt, symlink};
 
 fn discover(root: &Path, workspace: &Path) -> Result<Vec<DeleteCandidate>, String> {

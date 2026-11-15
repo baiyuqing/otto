@@ -19,8 +19,6 @@
 //! text, which `crate::tool::registry::Registry::execute` folds into the
 //! tool result.
 
-pub mod children;
-pub mod lease;
 pub mod ownership;
 pub mod recovery;
 
@@ -109,6 +107,7 @@ impl CallGuard for CommitGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::lease;
     use std::sync::atomic::Ordering;
 
     use otto_core::model::{EffectCertainty, OperationDisposition, OperationId, ToolDefinition};

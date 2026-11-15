@@ -26,9 +26,10 @@ use super::advice::audit::{self, NewRow};
 use super::validate::valid_text;
 use super::{
     Candidate, CandidateAction, MAX_ID_BYTES, MAX_RECORD_TEXT_BYTES, Origin, ProposeRequest,
-    Provenance, Record, Result, Service, valid_opaque_id,
+    Provenance, Record, Result, Service,
 };
 use crate::decision::{Backend, Exchange, Failure, Kind, Question, YES};
+use crate::workspace::valid_opaque_id;
 
 /// The version of the question set and the state text. Changing either
 /// changes this value.

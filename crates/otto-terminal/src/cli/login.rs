@@ -286,7 +286,7 @@ mod tests {
     use otto::auth::Credentials;
     use otto::auth::login::{LoginError, Opener};
     use otto::fixtures;
-    use otto::memory::MAX_EXACT_GUARD_VALUE_BYTES;
+    use otto_core::safetext::MAX_DYNAMIC_VALUE_BYTES;
     use std::sync::{Arc, Mutex as StdMutex};
 
     /// Builds a service whose sign-in flow returns `credentials` after calling
@@ -768,7 +768,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let path = auth::path_for_home(home.path());
         Credentials {
-            access_token: "a".repeat(MAX_EXACT_GUARD_VALUE_BYTES + 1),
+            access_token: "a".repeat(MAX_DYNAMIC_VALUE_BYTES + 1),
             ..Credentials::default()
         }
         .save(&path)

@@ -28,7 +28,6 @@ use otto_core::safetext::{self, SecretCollector};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 use otto_platform::random::random_hex;
 
 pub(crate) const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
@@ -392,7 +391,7 @@ pub fn capture_auth_credentials(path: &Path) -> CapturedAuth {
         }
         if !redactions.add(value)
             || !exact.add_form(value)
-            || value.len() > MAX_EXACT_GUARD_VALUE_BYTES
+            || value.len() > safetext::MAX_DYNAMIC_VALUE_BYTES
         {
             capture.complete = false;
             return capture;

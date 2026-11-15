@@ -1,7 +1,7 @@
 //! SQLite repository for durable workflow runs.
 use crate::storage::drivers::sqlite::SqliteDriver;
 use crate::storage::{Connection, OptionalExtension, Transaction, params};
-use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
+use crate::storage::{OpenOptions, SqlDriver};
 use crate::workflow::contracts::*;
 use crate::workflow::error::Error;
 use crate::workflow::repository::WorkflowStore;
@@ -175,13 +175,8 @@ impl SqliteWorkflowStore {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| unavailable())?;
         }
-        let connection = Connection::open_with_driver(
-            driver,
-            path,
-            OpenOptions::default(),
-            SqlRequirements::DURABLE,
-        )
-        .map_err(|_| unavailable())?;
+        let connection = Connection::open_with_driver(driver, path, OpenOptions::default())
+            .map_err(|_| unavailable())?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| unavailable())?;
         Self::from_connection(connection)

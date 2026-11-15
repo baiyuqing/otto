@@ -6,8 +6,8 @@
 //! prepared statement and takes that mutex for one `sqlite3_step` at a time,
 //! so other statements can run on the connection while rows are open.
 use crate::storage::{
-    Error, OpenOptions, OpenPolicy, Params, Result, SqlCapabilities, SqlConnection, SqlDialect,
-    SqlDriver, SqlRows, SqlStatement, Value, WriteIsolation,
+    Error, OpenOptions, OpenPolicy, Params, Result, SqlConnection, SqlDriver, SqlRows,
+    SqlStatement, Value,
 };
 use rusqlite::OpenFlags;
 use std::path::Path;
@@ -32,17 +32,7 @@ const CONSTRAINT_UNIQUE: i32 = 2067;
 #[derive(Debug, Default)]
 pub struct SqliteDriver;
 impl SqlDriver for SqliteDriver {
-    fn capabilities(&self, path: &Path) -> SqlCapabilities {
-        SqlCapabilities {
-            dialect: SqlDialect::Sqlite,
-            write_isolation: WriteIsolation::ImmediateSerializable,
-            atomic_transactions: true,
-            durable_commits: path != Path::new(":memory:"),
-            multiprocess_writers: path != Path::new(":memory:"),
-        }
-    }
     fn open(&self, path: &Path, options: OpenOptions) -> Result<Box<dyn SqlConnection>> {
-        let capabilities = self.capabilities(path);
         let path = path
             .to_str()
             .ok_or_else(|| Error::Misuse("database path is not UTF-8".into()))?;
@@ -114,7 +104,6 @@ impl SqlDriver for SqliteDriver {
                 connection: Mutex::new(inner),
                 poisoned: AtomicBool::new(false),
             }),
-            capabilities,
         }))
     }
 }
@@ -135,7 +124,6 @@ fn lock(state: &ConnectionState) -> Result<MutexGuard<'_, rusqlite::Connection>>
 
 struct SqliteConnection {
     state: SharedState,
-    capabilities: SqlCapabilities,
 }
 impl SqliteConnection {
     fn guard(&self) -> Result<MutexGuard<'_, rusqlite::Connection>> {
@@ -151,9 +139,6 @@ fn check(poisoned: &AtomicBool) -> Result<()> {
     }
 }
 impl SqlConnection for SqliteConnection {
-    fn capabilities(&self) -> SqlCapabilities {
-        self.capabilities
-    }
     fn busy_timeout(&self, duration: Duration) -> Result<()> {
         self.guard()?.busy_timeout(duration).map_err(map_error)
     }

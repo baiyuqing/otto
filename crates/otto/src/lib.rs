@@ -33,3 +33,4 @@ pub mod tool;
 pub mod typesafe;
 pub mod usage;
 pub mod workflow;
+pub mod workspace;

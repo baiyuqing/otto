@@ -1907,7 +1907,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "libc",
- "nix",
  "otto-core",
  "otto-faults",
  "otto-platform",

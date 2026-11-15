@@ -10,9 +10,9 @@ use std::io;
 use std::path::Path;
 
 use super::gitignore::GitignoreStack;
+use crate::workspace::confined::Workspace;
 use otto_platform::fsops::gopath::{base, bytes, clean, is_abs, path_from, rel};
 use otto_platform::fsops::root::Root;
-use otto_session::workspace::confined::Workspace;
 
 /// The text Go's `path.ErrBadPattern` carries.
 const BAD_PATTERN: &str = "syntax error in pattern";

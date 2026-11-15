@@ -8,8 +8,6 @@
 //! Recorded paths identify historical transcripts, never execution authority.
 
 pub mod admission;
-pub mod confined;
-pub mod git_read_only;
 
 use std::io::Read;
 use std::path::Path;

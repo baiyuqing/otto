@@ -4,8 +4,7 @@
 //! decision. The first `SIGTERM` this process ever receives is turned into
 //! [`Action::Migrate`] when the process holds at least one session lease
 //! (see [`otto::failover::ownership::holds_writer_ownership`]), so
-//! `run.rs`/`serve.rs` can run the migration in [the spec's
-//! order](../../../docs/specs/2026-09-28-session-failover.md) after their
+//! `run.rs`/`serve.rs` can run the migration after their
 //! frontend returns, instead of exiting immediately. A process with no
 //! lease keeps today's behavior: `otto serve` cancels its listen loop and
 //! exits cleanly; every other frontend is killed by the signal, since it

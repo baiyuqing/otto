@@ -7,8 +7,6 @@
 //! result is appended to a local SQLite database and never overwritten. Verdicts
 //! ([`hint_for`]) are computed from the stored answers when displayed, not
 //! stored, so a threshold change is visible immediately.
-//!
-//! See `docs/specs/2026-09-25-skill-contract-check.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

@@ -3,7 +3,7 @@
 //! Top-level only: a session's lease directory, once created, fixes its own
 //! `lease_seconds`, so per-profile or per-project failover settings would
 //! only ever apply to a session's first creation and would be misleading
-//! everywhere else. See `docs/specs/2026-09-28-session-failover.md`.
+//! everywhere else.
 
 use serde::{Deserialize, Serialize};
 

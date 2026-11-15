@@ -1,6 +1,5 @@
 //! End-to-end coverage of `SIGTERM` migration through the built `otto`
-//! binary: docs/specs/2026-09-28-session-failover.md, "A planned migration
-//! is `SIGTERM` and cancels running work".
+//! binary: a planned migration is `SIGTERM` and cancels running work.
 //!
 //! `libc::kill` is the only way to send this process's own spawned child a
 //! real `SIGTERM`; no safe wrapper is already a workspace dependency.

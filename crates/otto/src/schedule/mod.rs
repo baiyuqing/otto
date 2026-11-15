@@ -1,7 +1,7 @@
 //! Scheduled deliveries: text or prompt items that are delivered to the
 //! origin that created them, now or repeatedly.
 //!
-//! Design: `docs/specs/2026-10-04-scheduled-deliveries.md`. This module owns
+//! This module owns
 //! the origin scope (the origin value is [`crate::session::origin::Origin`]),
 //! the time rules ([`time`]), the cross-process store ([`store`]), the three
 //! model tools ([`tools`]), the timer tools ([`remind`]) and the worker that

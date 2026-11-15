@@ -18,8 +18,6 @@
 //! blocks reads. Ordinary prompts accept one at a time. `/steer` bypasses the
 //! prompt slot, and explicit `/queue` uses a separate bounded FIFO; cancellation
 //! clears pending queue entries and cancels active work.
-//!
-//! Errors: see the table in `docs/specs/2026-10-02-acp-agent-server.md`.
 
 mod approval;
 pub mod attach;

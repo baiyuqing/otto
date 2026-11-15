@@ -1,5 +1,4 @@
-//! Fault rows for the POSIX session store ("Session store (files)" in
-//! `docs/specs/2026-10-07-fault-injection-testing.md`). The store is built
+//! Fault rows for the POSIX session store. The store is built
 //! over a `FaultyFileDriver`; every reopen uses the real driver.
 //!
 //! A new session file receives its header (write 1) and runtime record

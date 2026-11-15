@@ -1,6 +1,6 @@
 //! The `[mcp]` table and its resolution: parsing, `${VAR}` expansion, and
-//! validation for MCP server declarations. See
-//! `docs/specs/2026-09-19-mcp-design.md` ("Configuration") for the format.
+//! validation for MCP server declarations. The format is documented under
+//! "MCP servers" in `docs/manual/memory-and-extensions.md`.
 //!
 //! This module is pure: no filesystem, no process environment access, no
 //! network. The caller supplies the environment as `env: &HashMap<String,

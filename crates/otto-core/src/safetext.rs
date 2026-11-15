@@ -2,7 +2,7 @@
 //!
 //! Scope: the agent's secret redactor, the sandbox environment classifier, and
 //! the `bash` tool all need this, so it lives in the shared crate. It is pure
-//! string manipulation with no I/O, so it builds for wasm32.
+//! string manipulation with no I/O.
 //!
 //! Ownership: every function returns owned data. [`SecretCollector`] is a plain
 //! owned value with no interior mutability, so callers serialize access through

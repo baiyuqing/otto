@@ -1,8 +1,7 @@
 # Core
 
 The [repository rules](../../AGENTS.md) apply. This crate holds I/O-free
-contracts, formats and the agent loop, and stays buildable for
-`wasm32-unknown-unknown`. `crates/otto` holds their implementations; the
+contracts, formats and the agent loop. `crates/otto` holds their implementations; the
 [layer map](../../docs/code-organization.md#rust-layers) pairs each contract
 with its implementation.
 
@@ -15,8 +14,7 @@ with its implementation.
 - Filesystem, process, environment, network, stdio and clock access,
   credentials, SQLite and sandbox integration stay in `crates/otto`.
   `tests/io_boundary.rs` fails on `std::fs`, `std::process`, `std::net`,
-  `std::env`, stdio and `now()` calls outside `#[cfg(test)]`;
-  `make rust-wasm-check` does not detect them because they compile on wasm32.
+  `std::env`, stdio and `now()` calls outside `#[cfg(test)]`.
 - `crates/otto` imports these items as `otto_core::...` and does not
   re-export them, so each item has one path;
   `crates/otto/tests/storage_boundary.rs` enforces it.
@@ -26,7 +24,7 @@ with its implementation.
 - In-place config edits use `config::edit` and must reject changes beyond the
   intended key/table while preserving supported comments and layout.
 - A contract change updates its `crates/otto` implementations in the same
-  change; `make rust-wasm-check` keeps the crate buildable for wasm32.
+  change.
 
 See [package boundaries](../../docs/development/architecture.md#package-boundaries)
 for module ownership and current compatibility contracts.

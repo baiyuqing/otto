@@ -10,7 +10,7 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 
 | Change | Start here |
 | --- | --- |
-| I/O-free contracts, formats, agent loop (also WASM-safe) | [otto-core](crates/otto-core/AGENTS.md) |
+| I/O-free contracts, formats, agent loop | [otto-core](crates/otto-core/AGENTS.md) |
 | Native services, tools, persistence, sandbox, TUI, `embed` | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
 | HTTP routes and `otto serve` | [otto-server](crates/otto-server/AGENTS.md), `src/lib.rs` |
 | ACP stdio and attach | [otto-acp](crates/otto-acp/AGENTS.md), `src/lib.rs` |
@@ -18,8 +18,8 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 | User/contributor docs | [docs](docs/AGENTS.md) |
 
 Dependencies point `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <-
-`otto-cli`. The browser client/WASM bindings are in the separate `otto-plus`
-repository; `chat-connector/` is a separate Go ACP client, not a Cargo crate.
+`otto-cli`. The browser client is in the separate `otto-plus` repository;
+`chat-connector/` is a separate Go ACP client, not a Cargo crate.
 Only `claude`, `openai-compatible` and `chatgpt` providers are supported.
 
 ## Work and release boundaries
@@ -57,10 +57,9 @@ Only `claude`, `openai-compatible` and `chatgpt` providers are supported.
   installs bundled skills.
 - `make check-fast` selects checks for paths changed since `origin/main` (or
   `main`), including untracked files; `make test-tui` runs both PTY targets.
-  `make connect-check` builds the test binary and runs Go vet/race tests;
-  `make rust-wasm-check` checks the portable core. Run full `make check` or
-  `make check-linux` only when asked. The full gate does not build a release
-  binary or browser frontend. See [local verification](docs/development/workflow.md#local-verification).
+  `make connect-check` builds the test binary and runs Go vet/race tests.
+  Run full `make check` or `make check-linux` only when asked. The full gate
+  does not build a release binary or browser frontend. See [local verification](docs/development/workflow.md#local-verification).
 - Documentation-only edits need no new tests: check links, paths, examples and
   Markdown. Include commands, results and failures in the PR body; after
   verification, open the PR without another blanket confirmation.
@@ -72,5 +71,5 @@ Only `claude`, `openai-compatible` and `chatgpt` providers are supported.
   and requires Rust test-only files under `crates/*/src` to have `tests` or
   `<domain>_tests` in their path (and vice versa).
 - Full sandbox acceptance requires macOS 26+ with standalone Command Line
-  Tools; Linux tests do not validate Seatbelt. The pinned Rust toolchain and
-  wasm target are in `rust-toolchain.toml`.
+  Tools; Linux tests do not validate Seatbelt. The pinned Rust toolchain is in
+  `rust-toolchain.toml`.

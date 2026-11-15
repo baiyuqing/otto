@@ -23,8 +23,7 @@ fn record(id: &str, revision: &str, text: &str) -> Record {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn unreferenced_recall_skips_lifecycle_and_keeps_content() {
     let memory = Arc::new(FakeMemory::failing_lifecycle(
         vec![record("", "", "UNREFERENCED-MARKER")],
@@ -41,8 +40,7 @@ async fn unreferenced_recall_skips_lifecycle_and_keeps_content() {
     assert!(request_text(&agent, 0).contains("UNREFERENCED-MARKER"));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provenance_stays_adjacent_with_memory_retraction_and_changing_recall() {
     use crate::model::{InputProvenance, InputSource};
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
@@ -192,8 +190,7 @@ async fn reloaded(source: &MemorySession) -> MemorySession {
 // Fails at the notice assertion if selection ignores the superseded status,
 // at the text assertions if the retired record is replayed or the new one is
 // not recalled, at the last loop if a notice is persisted.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_record_superseded_between_turns_gets_a_notice_and_its_replacement_is_recalled() {
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let agent = agent_over(
@@ -243,8 +240,7 @@ async fn a_record_superseded_between_turns_gets_a_notice_and_its_replacement_is_
 
 // Fails if a retired record that no turn or checkpoint references produces a
 // notice.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_retired_record_that_was_never_recalled_produces_no_notice() {
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let agent = agent_over(
@@ -260,8 +256,7 @@ async fn a_retired_record_that_was_never_recalled_produces_no_notice() {
 
 // Fails if the persisted `otto.memory_recall` references are not read when a
 // new agent starts over a stored session.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_resumed_session_gets_a_notice_from_its_persisted_references() {
     let first_memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let first = agent_over(
@@ -306,8 +301,7 @@ struct ForgettingExecutor {
     memory: Arc<FakeMemory>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for ForgettingExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()
@@ -326,8 +320,7 @@ impl ToolExecutor for ForgettingExecutor {
 // Fails at the second-request assertions if the recalled set is not
 // re-filtered before every provider step, at the call count if the filter
 // re-runs retrieval.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_record_forgotten_inside_the_tool_loop_leaves_the_next_step() {
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let agent = Agent::new(
@@ -372,8 +365,7 @@ async fn a_record_forgotten_inside_the_tool_loop_leaves_the_next_step() {
 
 // Fails if the latest checkpoint's `details.memory_records` is not part of
 // the referenced set, since no visible user turn references rec-a.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_checkpoint_reference_gets_a_notice_when_no_visible_turn_names_the_record() {
     let session = MemorySession::new();
     for (index, text) in ["question 0", "question 1"].into_iter().enumerate() {
@@ -441,8 +433,7 @@ async fn a_checkpoint_reference_gets_a_notice_when_no_visible_turn_names_the_rec
 
 // Fails if an unchanged revision produces a notice, or if a higher active
 // revision produces none.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_updated_record_gets_a_notice_and_an_unchanged_record_does_not() {
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let agent = agent_over(
@@ -473,8 +464,7 @@ async fn an_updated_record_gets_a_notice_and_an_unchanged_record_does_not() {
 
 // Fails if a lifecycle error is swallowed without a warning, fails the turn,
 // or removes the recalled text from the request.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failing_lifecycle_query_warns_and_keeps_the_recalled_record() {
     let memory = Arc::new(FakeMemory::failing_lifecycle(
         vec![record_a()],
@@ -494,8 +484,7 @@ async fn a_failing_lifecycle_query_warns_and_keeps_the_recalled_record() {
 
 // Fails if the report text of the memory section omits the notice block the
 // last request carried.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_context_report_memory_section_lists_the_notice() {
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let agent = agent_over(

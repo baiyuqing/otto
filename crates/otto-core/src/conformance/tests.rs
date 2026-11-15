@@ -2,8 +2,7 @@ use super::*;
 use crate::agent::inbox::Inbox;
 use crate::session::MemorySession;
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn memory_session_keeps_the_session_contract() {
     session(&MemorySession::new, None).await.unwrap();
 }
@@ -24,8 +23,7 @@ enum Forgotten {
     MemoryReferences,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Session for Forgets {
     fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
         if self.1 == Forgotten::MemoryReferences {
@@ -96,8 +94,7 @@ impl Session for Forgets {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_wrapper_that_drops_a_guarantee_fails_the_named_check() {
     for (forgotten, check) in [
         (Forgotten::Inputs, "session.input_id"),

@@ -2,7 +2,7 @@
 //! compaction-aware view of an active path.
 //!
 //! The store methods that append a checkpoint live with the native store;
-//! everything here is filesystem-free and builds for `wasm32-unknown-unknown`.
+//! everything here is filesystem-free.
 //!
 //! Ownership: input is borrowed, results are owned. Concurrency: no shared
 //! state. Errors: every failure is a [`PiError`].

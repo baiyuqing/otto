@@ -1711,10 +1711,8 @@ name = "otto"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "axum",
  "base64",
  "chrono",
- "crossterm",
  "encoding_rs",
  "futures-util",
  "htmd",
@@ -1724,8 +1722,6 @@ dependencies = [
  "nix",
  "otto",
  "otto-core",
- "pulldown-cmark",
- "ratatui",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1738,10 +1734,8 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "toml",
- "tower",
  "tree-sitter",
  "tree-sitter-bash",
- "unicode-width",
  "url",
 ]
 
@@ -1754,6 +1748,7 @@ dependencies = [
  "axum",
  "chrono",
  "otto",
+ "otto-client",
  "otto-core",
  "otto-server",
  "serde",
@@ -1773,9 +1768,11 @@ dependencies = [
  "nix",
  "otto",
  "otto-acp",
+ "otto-client",
  "otto-core",
  "otto-eval",
  "otto-server",
+ "otto-terminal",
  "rcgen",
  "reqwest",
  "serde",
@@ -1785,6 +1782,22 @@ dependencies = [
  "tokio-util",
  "toml",
  "unicode-width",
+]
+
+[[package]]
+name = "otto-client"
+version = "0.5.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "otto",
+ "otto-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -1842,6 +1855,32 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tower",
+ "url",
+]
+
+[[package]]
+name = "otto-terminal"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "crossterm",
+ "libc",
+ "otto",
+ "otto-client",
+ "otto-core",
+ "pulldown-cmark",
+ "ratatui",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "unicode-width",
  "url",
 ]
 

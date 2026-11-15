@@ -218,7 +218,7 @@ pub enum Reply {
 }
 
 impl Request {
-    pub(crate) fn parse(command: &str, args: &str) -> Result<Self, String> {
+    pub fn parse(command: &str, args: &str) -> Result<Self, String> {
         let fields: Vec<&str> = args.split_whitespace().collect();
         let usage = match command {
             "memory" => {

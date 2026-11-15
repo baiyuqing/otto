@@ -25,7 +25,7 @@ impl Tasks {
 
     /// Records the file the task's transcript is written to. Unknown ids are
     /// ignored.
-    pub(crate) fn set_session_path(&self, id: &str, path: &str) {
+    pub fn set_session_path(&self, id: &str, path: &str) {
         if let Some(entry) = self.lock().entries.get_mut(id) {
             entry.task.session_path = path.to_string();
         }
@@ -37,7 +37,7 @@ impl Tasks {
     /// `cached_input_tokens_present` reports whether this round trip carried
     /// the cached-input-token breakdown. The task keeps the breakdown only
     /// when every report that carried usage carried it too.
-    pub(crate) fn record_provider_step(
+    pub fn record_provider_step(
         &self,
         id: &str,
         usage: Usage,
@@ -81,7 +81,7 @@ impl Tasks {
 
     /// Records the latest tool call while the task is running. Invalid or
     /// unknown updates are no-ops.
-    pub(crate) fn record_tool_call(&self, id: &str, last_tool: &str) {
+    pub fn record_tool_call(&self, id: &str, last_tool: &str) {
         let changed = {
             let mut state = self.lock();
             match state.entries.get_mut(id) {

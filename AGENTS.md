@@ -11,16 +11,19 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 | Change | Start here |
 | --- | --- |
 | I/O-free contracts, formats, agent loop | [otto-core](crates/otto-core/AGENTS.md) |
-| Native services, tools, persistence, sandbox, TUI | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
+| Native services, tools, persistence, sandbox | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
+| Terminal UI, REPL, login commands | [otto-terminal](crates/otto-terminal/AGENTS.md), `src/tui/mod.rs` |
+| HTTP client of `otto serve` | [otto-client](crates/otto-client/AGENTS.md), `src/lib.rs` |
 | HTTP routes and `otto serve` | [otto-server](crates/otto-server/AGENTS.md), `src/lib.rs` |
 | ACP stdio and attach | [otto-acp](crates/otto-acp/AGENTS.md), `src/lib.rs` |
 | `otto eval` development evaluations | [otto-eval](crates/otto-eval/AGENTS.md), `src/lib.rs` |
 | Binary, commands, composition root | [otto-cli](crates/otto-cli/AGENTS.md), `src/run.rs` |
 | User/contributor docs | [docs](docs/AGENTS.md) |
 
-Dependencies point `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <-
-`otto-cli`; `otto-eval` depends on `otto` and `otto-core`, and `otto-cli`
-links it only with its `eval` feature. The browser client is in the separate
+Dependencies point `otto-core` <- `otto` <- {`otto-client`, `otto-server`,
+`otto-eval`}; `otto-acp` imports `otto-server` and `otto-client`;
+`otto-terminal` imports `otto` and `otto-client`; `otto-cli` imports all of
+them, and `otto-eval` only with its `eval` feature. The browser client is in the separate
 `otto-plus` repository; `chat-connector/` is a separate Go ACP client, not a
 Cargo crate.
 Only `claude`, `openai-compatible` and `chatgpt` providers are supported.

@@ -14,12 +14,12 @@ use super::{AuthError, Credentials};
 /// How `login` runs. `Production` is the real PKCE flow; `Stub` is what tests
 /// substitute. The injected sign-in flow. `login` is a boxed closure so the
 /// production path stays a plain function call.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type LoginFlow = Box<dyn Fn(&Opener<'_>) -> Result<Credentials, LoginError> + Send + Sync>;
 
 enum Flow {
     Production,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Stub(LoginFlow),
 }
 
@@ -38,8 +38,8 @@ impl Service {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_flow(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_flow(
         path: PathBuf,
         flow: impl Fn(&Opener<'_>) -> Result<Credentials, LoginError> + Send + Sync + 'static,
     ) -> Self {
@@ -67,7 +67,7 @@ impl Service {
         };
         let credentials: Result<Credentials, LoginError> = match &self.flow {
             Flow::Production => super::login::login(cancel, open).await,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Flow::Stub(stub) => stub(open),
         };
         let credentials = match credentials {

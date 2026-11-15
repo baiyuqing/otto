@@ -3,7 +3,7 @@
 //!
 //! The composition root lives here rather than in `main.rs` so the whole
 //! startup path is reachable from integration tests without spawning a process.
-//! The terminal frontend (`otto::tui`, `otto::cli::repl`, `otto::cli::login`)
+//! The terminal frontend (`otto_terminal::tui`, `otto_terminal::cli::repl`, `otto_terminal::cli::login`)
 //! still lives in the `otto` crate.
 
 pub mod acp;

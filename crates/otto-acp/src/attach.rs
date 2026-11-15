@@ -2,7 +2,7 @@
 //!
 //! The relay opens no session, runs no model or tool and reads no provider
 //! credentials; every session operation is an HTTP request on serve's Unix
-//! socket (see `otto::client`). It shares the transport, dispatcher, request
+//! socket (see `otto_client`). It shares the transport, dispatcher, request
 //! parsing and update mapping with local `otto acp`; only `Relay` differs.
 //!
 //! Prompts: `session/prompt` posts a queued turn and reads that turn's SSE
@@ -41,8 +41,8 @@ use super::{
 };
 use otto::app::ApprovalDecision;
 use otto::app::Channel;
-use otto::client::{Client, Error as ClientError};
 use otto::session::origin::Origin;
+use otto_client::{Client, Error as ClientError};
 use otto_server::authorization::Principal;
 
 const LOST: &str = "connection to otto serve lost";
@@ -355,7 +355,7 @@ impl Relay {
         channel: Option<Channel>,
         origin: Option<&Origin>,
         (request_id, input_id): (Option<&str>, Option<&str>),
-    ) -> Result<otto::client::TurnStream, agent_client_protocol_schema::v1::Error> {
+    ) -> Result<otto_client::TurnStream, agent_client_protocol_schema::v1::Error> {
         if self.lost.is_cancelled() {
             return Err(error(INTERNAL_ERROR, LOST));
         }
@@ -375,7 +375,7 @@ impl Relay {
         &self,
         connection: &Connection,
         session_id: &str,
-        mut stream: otto::client::TurnStream,
+        mut stream: otto_client::TurnStream,
         cancel: &CancellationToken,
     ) -> Reply {
         let mut cancel_sent = false;

@@ -201,7 +201,7 @@ struct ScriptedSizer;
 /// composition without a network and without affecting tests that run
 /// concurrently under other homes.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) static TEST_PROVIDERS: std::sync::Mutex<Vec<(String, Arc<dyn Provider + Send + Sync>)>> =
+pub static TEST_PROVIDERS: std::sync::Mutex<Vec<(String, Arc<dyn Provider + Send + Sync>)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Builder homes whose scripted provider also backs a sub-agent runner.

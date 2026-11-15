@@ -78,11 +78,13 @@ run `cargo fmt --all` and tests covering the changed behavior, for example:
 ```bash
 cargo test -p otto --test storage_boundary
 cargo test -p otto --lib approval
+cargo test -p otto-terminal --lib tui::
 cargo test -p otto-cli --test tui_pty --test tui_attach_pty
 ```
 
 Build the binary with `cargo build -p otto-cli` (or `cargo build`). Tests of
-the moved frontends run per crate: `cargo test -p otto-server`,
+the frontends run per crate: `cargo test -p otto-client`,
+`cargo test -p otto-terminal`, `cargo test -p otto-server`,
 `cargo test -p otto-acp`, and `cargo test -p otto-cli --test <name>` for a file
 in `crates/otto-cli/tests/`. The first `cargo test -p <crate>` after a
 `--workspace` build compiles a second set of dependency artifacts, because
@@ -185,7 +187,7 @@ Git and release tags are the archive. No parallel historical index is required.
 ## Releases
 
 `[workspace.package] version` in `Cargo.toml` is shared by `otto`, `otto-core`,
-`otto-server`, `otto-acp`, `otto-eval` and `otto-cli`; their `Cargo.lock` entries must match
+`otto-client`, `otto-terminal`, `otto-server`, `otto-acp`, `otto-eval` and `otto-cli`; their `Cargo.lock` entries must match
 (covered by `crates/otto-cli/tests/version.rs`).
 Version changes belong **only in release PRs** via `make bump VERSION=X.Y.Z`,
 never feature/fix PRs. Versioning is patch-only in 0.x, even for incompatible

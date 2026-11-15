@@ -46,13 +46,13 @@ pub(super) async fn run_attach(
         return fail(stderr, "--attach requires terminal stdin and stdout");
     }
     let start = if options.continue_last {
-        otto::tui::attach::Start::Continue
+        otto_terminal::tui::attach::Start::Continue
     } else if !options.resume_path.is_empty() {
-        otto::tui::attach::Start::Resume(options.resume_path.clone())
+        otto_terminal::tui::attach::Start::Resume(options.resume_path.clone())
     } else {
-        otto::tui::attach::Start::New
+        otto_terminal::tui::attach::Start::New
     };
-    otto::tui::attach::run_with_observer_bindings(
+    otto_terminal::tui::attach::run_with_observer_bindings(
         &socket,
         workspace_path,
         start,

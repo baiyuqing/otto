@@ -13,7 +13,7 @@
 //! unported.
 //!
 //! The TUI (`--ui tui`, or `--ui auto` on a terminal) dispatches to
-//! [`otto::tui::run`].
+//! [`otto_terminal::tui::run`].
 //!
 //! Safety: every diagnostic that could carry a host path, an environment name
 //! or a provider URL goes through the redaction boundary before it is written.
@@ -38,13 +38,13 @@ use super::flags::{CliOptions, ParseFailure, Parsed, parse_flags};
 use super::serve;
 use otto::app::{Controller, PROMPT_ACTIVE};
 
-use otto::cli::repl::{self, Repl};
 use otto::runtime::SESSION_OPERATION_UNAVAILABLE;
 use otto::runtime::boundary;
 use otto::runtime::builder::{Builder, SharedSession};
 use otto::runtime::startup::{
     self, EnvironmentLookup, capture_environment, environment_lookup, redact_with, resolve_home,
 };
+use otto_terminal::cli::repl::{self, Repl};
 // Helpers other `cli` modules and `plugin` call through this path.
 pub(crate) use otto::runtime::startup::{
     config_environment_for, load_config_for, resolve_home_for, sandbox_provider_environment_names,

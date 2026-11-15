@@ -106,9 +106,9 @@ fn unknown_session() -> Error {
     error(RESOURCE_NOT_FOUND, "unknown sessionId")
 }
 
-fn task_control_error(failure: otto::client::Error) -> Error {
+fn task_control_error(failure: otto_client::Error) -> Error {
     match &failure {
-        otto::client::Error::Http {
+        otto_client::Error::Http {
             status: 404, code, ..
         } if code.is_empty() => error(METHOD_NOT_FOUND, TASK_CONTROL_UNSUPPORTED),
         _ => error(INTERNAL_ERROR, failure.to_string()),
@@ -243,7 +243,7 @@ impl Connection {
         origin
     }
 
-    fn input_client(&self, client: &otto::client::Client) -> otto::client::Client {
+    fn input_client(&self, client: &otto_client::Client) -> otto_client::Client {
         client.clone().with_input_source(
             self.input_provenance()
                 .client_source

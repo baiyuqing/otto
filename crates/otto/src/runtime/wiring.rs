@@ -489,8 +489,8 @@ pub fn workspace_memory_scope(
         .get(canonical_path)
         .map(String::as_str)
         .unwrap_or_default();
-    let identity =
-        crate::workspace::read(Path::new(canonical_path)).map_err(|error| error.to_string())?;
+    let identity = otto_session::workspace::read(Path::new(canonical_path))
+        .map_err(|error| error.to_string())?;
     if let Some(identity) = identity {
         if !stable.is_empty() && stable != identity.memory_scope {
             return Err("workspace identity conflicts with memory.workspace_ids".into());

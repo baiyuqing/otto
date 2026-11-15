@@ -1724,6 +1724,7 @@ dependencies = [
  "otto-core",
  "otto-faults",
  "otto-platform",
+ "otto-session",
  "otto-storage",
  "regex",
  "reqwest",
@@ -1753,6 +1754,7 @@ dependencies = [
  "otto-core",
  "otto-platform",
  "otto-server",
+ "otto-session",
  "serde",
  "serde_json",
  "tempfile",
@@ -1776,6 +1778,7 @@ dependencies = [
  "otto-faults",
  "otto-platform",
  "otto-server",
+ "otto-session",
  "otto-storage",
  "otto-terminal",
  "rcgen",
@@ -1798,6 +1801,7 @@ dependencies = [
  "otto",
  "otto-core",
  "otto-platform",
+ "otto-session",
  "reqwest",
  "serde",
  "serde_json",
@@ -1883,6 +1887,7 @@ dependencies = [
  "otto",
  "otto-core",
  "otto-platform",
+ "otto-session",
  "rcgen",
  "serde",
  "serde_json",
@@ -1893,6 +1898,25 @@ dependencies = [
  "tokio-util",
  "tower",
  "url",
+]
+
+[[package]]
+name = "otto-session"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "libc",
+ "nix",
+ "otto-core",
+ "otto-faults",
+ "otto-platform",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -1919,6 +1943,7 @@ dependencies = [
  "otto-client",
  "otto-core",
  "otto-platform",
+ "otto-session",
  "pulldown-cmark",
  "ratatui",
  "regex",

@@ -40,7 +40,7 @@ fn default_enabled() -> bool {
     true
 }
 
-/// Must agree with `otto::session::lease::DEFAULT_LEASE_SECONDS`: otto-core
+/// Must agree with `otto_session::lease::DEFAULT_LEASE_SECONDS`: otto-core
 /// performs no I/O and cannot depend on the native `otto` crate that owns
 /// the lease protocol, so the two constants are independent and pinned by
 /// tests on both sides rather than shared.

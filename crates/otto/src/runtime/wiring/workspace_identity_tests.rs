@@ -17,10 +17,10 @@ fn legacy_memory_remains_reachable_after_a_move_and_is_separate_after_fork() {
             expected_revision: None,
         })
         .unwrap();
-    crate::workspace::initialize(&original, "").unwrap();
+    otto_session::workspace::initialize(&original, "").unwrap();
     let moved = dir.path().join("moved");
     std::fs::rename(&original, &moved).unwrap();
-    crate::workspace::initialize(&moved, "").unwrap();
+    otto_session::workspace::initialize(&moved, "").unwrap();
     let moved_scope = workspace_memory_scope(&config, moved.to_str().unwrap()).unwrap();
     assert_eq!(moved_scope, scope);
     assert_eq!(
@@ -38,7 +38,7 @@ fn legacy_memory_remains_reachable_after_a_move_and_is_separate_after_fork() {
         moved.to_str().unwrap(),
     )
     .unwrap();
-    crate::workspace::fork(&moved).unwrap();
+    otto_session::workspace::fork(&moved).unwrap();
     let fork_scope = workspace_memory_scope(&config, moved.to_str().unwrap()).unwrap();
     assert_ne!(fork_scope, scope);
     assert!(

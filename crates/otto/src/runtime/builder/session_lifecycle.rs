@@ -120,12 +120,12 @@ impl Builder {
 
 impl Builder {
     /// Writes a new session forked from the session file `reference`; see
-    /// [`crate::session::SessionRepository::fork`].
+    /// [`otto_session::SessionRepository::fork`].
     pub(crate) fn fork_session_file(
         &self,
         reference: &str,
         before: Option<&str>,
-    ) -> Result<crate::session::Forked, otto_core::session::ForkError> {
+    ) -> Result<otto_session::Forked, otto_core::session::ForkError> {
         let failed = |message: String| {
             otto_core::session::ForkError::Session(otto_core::session::PiError::other(message))
         };
@@ -139,7 +139,7 @@ impl Builder {
         before: Option<&str>,
         id: &str,
         request_id: Option<&str>,
-    ) -> Result<crate::session::Forked, otto_core::session::ForkError> {
+    ) -> Result<otto_session::Forked, otto_core::session::ForkError> {
         self.storage
             .sessions()
             .fork(reference, before, id, request_id)

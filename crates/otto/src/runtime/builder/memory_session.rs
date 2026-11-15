@@ -21,7 +21,7 @@ impl MemoryHandle {
     #[cfg(test)]
     pub(crate) fn with_writer_ownership(
         header: Header,
-        writer_ownership: Arc<dyn crate::session::WriterOwnership>,
+        writer_ownership: Arc<dyn otto_session::WriterOwnership>,
     ) -> Self {
         let mut handle = Self::new(header);
         handle.writer_ownership = Some(writer_ownership);
@@ -195,7 +195,7 @@ impl SessionHandle for MemoryHandle {
         Ok(())
     }
 
-    fn lease(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+    fn lease(&self) -> Option<Arc<dyn otto_session::WriterOwnership>> {
         self.writer_ownership.clone()
     }
 }

@@ -6,7 +6,7 @@ use super::*;
 fn saved_finished_parent_hydrates_children_without_executor_or_parent_recovery() {
     let root = tempfile::tempdir().unwrap();
     let builder = builder_for(shared_with_no_session(root.path(), false), root.path());
-    let parent = crate::session::Store::create(
+    let parent = otto_session::Store::create(
         root.path().join("sessions"),
         Header {
             id: "parent".into(),
@@ -28,7 +28,7 @@ fn saved_finished_parent_hydrates_children_without_executor_or_parent_recovery()
             ..Message::default()
         })
         .unwrap();
-    let child = crate::session::Store::create_child_lazy(
+    let child = otto_session::Store::create_child_lazy(
         &path,
         "t1-child",
         Header {
@@ -44,7 +44,7 @@ fn saved_finished_parent_hydrates_children_without_executor_or_parent_recovery()
     child.append_custom_entry("otto.task_spec", r#"{"id":"t1","name":"","description":"orphaned child","model":"test","context":"fresh","prompt":"work","definition":null}"#).unwrap();
     drop(child);
     drop(parent);
-    let (parent, _) = crate::session::Store::open(&path).unwrap();
+    let (parent, _) = otto_session::Store::open(&path).unwrap();
     assert!(
         parent.take_recovery().is_none(),
         "parent must not itself look interrupted"

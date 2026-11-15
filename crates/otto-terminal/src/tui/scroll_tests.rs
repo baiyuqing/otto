@@ -11,7 +11,7 @@ async fn idle_draw_and_active_wheel_do_not_wait_for_session_storage() {
     let builder = otto::fixtures::builder(workspace.path(), sessions.path());
     let runtime = otto::fixtures::initial_runtime(&builder);
     let header = builder.create_session(&runtime).unwrap().header();
-    let store = Arc::new(otto::session::Store::create_lazy(sessions.path(), header).unwrap());
+    let store = Arc::new(otto_session::Store::create_lazy(sessions.path(), header).unwrap());
     let session = otto::runtime::builder::SharedSession::new(store.clone());
     let runner = builder.build_runner(&session, &runtime).await.unwrap();
     let info = builder.runtime_info(&runtime);
@@ -36,7 +36,7 @@ async fn idle_draw_and_active_wheel_do_not_wait_for_session_storage() {
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let storage = std::thread::spawn(move || {
-        let _held = store.state.lock().unwrap();
+        let _held = store.hold_state_for_test();
         locked_tx.send(()).unwrap();
         // A regression can block the test thread, so release on a bounded
         // fallback and report that scrolling failed to release us itself.

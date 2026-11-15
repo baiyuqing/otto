@@ -12,7 +12,7 @@ impl Controller {
         self.prompt_with_system_context(
             text,
             "",
-            Some(crate::session::origin::Origin::terminal()),
+            Some(otto_session::origin::Origin::terminal()),
             emit,
             cancel,
         )
@@ -23,7 +23,7 @@ impl Controller {
         &self,
         text: &str,
         system_context: &str,
-        origin: Option<crate::session::origin::Origin>,
+        origin: Option<otto_session::origin::Origin>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -173,7 +173,7 @@ impl Controller {
     pub(crate) async fn begin_user_turn(
         &self,
         runner: &Runner,
-        origin: Option<crate::session::origin::Origin>,
+        origin: Option<otto_session::origin::Origin>,
     ) -> PresentationOriginGuard {
         runner.schedule_origin.set(origin.clone());
         runner.presentation_origin.set(origin.clone());

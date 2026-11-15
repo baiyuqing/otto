@@ -297,7 +297,7 @@ async fn a_session_resumed_from_the_archive_keeps_its_timers_beside_it() {
     // The same open sequence as `--resume PATH` in `otto_cli::run`.
     let builder = builder(workspace.path(), sessions.path());
     let runtime = initial_runtime(&builder);
-    let (store, _) = crate::session::Prepared::prepare(Path::new(&archived.path), None)
+    let (store, _) = otto_session::Prepared::prepare(Path::new(&archived.path), None)
         .expect("prepare archived")
         .activate()
         .expect("activate archived");

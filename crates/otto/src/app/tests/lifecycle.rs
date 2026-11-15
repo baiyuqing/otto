@@ -38,7 +38,7 @@ async fn controller_with_failing_journal_sync(
         .filter(Filter::NameSuffix(".jsonl")),
     ]);
     let driver = Arc::new(FaultyFileDriver::new(Arc::new(PosixDriver), plan.clone()));
-    let (store, _) = crate::session::Prepared::prepare_with_driver(Path::new(&path), None, driver)
+    let (store, _) = otto_session::Prepared::prepare_with_driver(Path::new(&path), None, driver)
         .unwrap()
         .activate()
         .unwrap();

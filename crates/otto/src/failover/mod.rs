@@ -2,7 +2,7 @@
 //! session on another host, and the mechanics used to enforce it.
 //!
 //! `lease` owns the lease protocol: acquire, hold, check, release, built on
-//! `crate::session::fsops`'s `openat` primitives. `children` tracks process
+//! `otto_session::fsops`'s `openat` primitives. `children` tracks process
 //! ids this process started, so a fenced process can kill them before it
 //! stops. This module also defines
 //! `CommitGuard`, a `tool::registry::CallGuard` that keeps a
@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use otto_core::model::RetrySafety;
 
-use crate::session::WriterOwnership;
 use crate::tool::registry::CallGuard;
+use otto_session::WriterOwnership;
 
 /// Produces the lease currently backing a session, or `None` when the
 /// session is not lease-managed. Called once per tool call by
@@ -111,7 +111,7 @@ impl CallGuard for CommitGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::lease;
+    use otto_session::lease;
     use std::sync::atomic::Ordering;
 
     use otto_core::model::{EffectCertainty, OperationDisposition, OperationId, ToolDefinition};

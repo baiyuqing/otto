@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use otto::runtime::builder::{MemoryHandle, SharedSession};
-use otto::session::Store;
 use otto_core::conformance;
 use otto_core::session::Header;
+use otto_session::Store;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 

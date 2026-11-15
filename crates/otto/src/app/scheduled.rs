@@ -13,8 +13,8 @@ use super::approval::{ApprovalDecision, Step, Stop};
 use crate::runtime::builder::Builder;
 use crate::schedule::RunOutcome;
 use crate::schedule::worker::{PromptRunner, Sink};
-use crate::session::origin::Origin;
 use otto_core::config::resolve::Runtime;
+use otto_session::origin::Origin;
 
 const BOUNDARY_CLOSED: &str =
     "scheduled runs are unavailable while the redaction boundary is closed";
@@ -271,7 +271,7 @@ mod tests {
             .await
             .unwrap();
         let store = Arc::new(crate::schedule::Store::open_in_memory().unwrap());
-        let origin = Arc::new(crate::session::origin::TurnOrigin::default());
+        let origin = Arc::new(otto_session::origin::TurnOrigin::default());
         origin.set(Some(Origin::terminal()));
         let context = crate::schedule::tools::Context {
             store: Some(store.clone()),

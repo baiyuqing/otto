@@ -129,7 +129,7 @@ fn production_code_does_not_reference_faults() {
         }
     }
     assert!(
-        scanned >= 9,
+        scanned >= 10,
         "scanned only {scanned} crates under {crates:?}"
     );
     assert!(

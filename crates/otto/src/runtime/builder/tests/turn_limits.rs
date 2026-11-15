@@ -142,7 +142,7 @@ impl Provider for UntilStopped {
 
 /// Runs one turn against a provider that never answers, advancing paused
 /// time past the unattended deadline plus the cancellation grace.
-async fn unattended_turn_ends(origin: crate::session::origin::Origin, headless: bool) -> bool {
+async fn unattended_turn_ends(origin: otto_session::origin::Origin, headless: bool) -> bool {
     let mut runner = Runner::scripted(
         SharedSession::memory(Header::default()),
         Arc::new(UntilStopped),
@@ -172,16 +172,16 @@ async fn unattended_turn_ends(origin: crate::session::origin::Origin, headless: 
 
 #[tokio::test(start_paused = true)]
 async fn chat_turn_ends_at_the_unattended_deadline() {
-    let origin = crate::session::origin::Origin::chat("telegram", "1").unwrap();
+    let origin = otto_session::origin::Origin::chat("telegram", "1").unwrap();
     assert!(unattended_turn_ends(origin, false).await);
 }
 
 #[tokio::test(start_paused = true)]
 async fn terminal_turn_ignores_the_unattended_deadline() {
-    assert!(!unattended_turn_ends(crate::session::origin::Origin::terminal(), false).await);
+    assert!(!unattended_turn_ends(otto_session::origin::Origin::terminal(), false).await);
 }
 
 #[tokio::test(start_paused = true)]
 async fn headless_terminal_turn_ends_at_the_unattended_deadline() {
-    assert!(unattended_turn_ends(crate::session::origin::Origin::terminal(), true).await);
+    assert!(unattended_turn_ends(otto_session::origin::Origin::terminal(), true).await);
 }

@@ -19,12 +19,12 @@ use tokio_util::sync::CancellationToken;
 use super::store::{CreateError, Item, NewItem};
 use super::time::{format_duration, format_local, next_occurrence, resolve_at};
 use super::{Kind, Repeat, ScheduleStore, State};
-use crate::session::origin::Origin;
-use crate::session::origin::TurnOrigin;
 use crate::tool::result::decode_strict_json;
 use crate::tool::{
     ApprovalSpec, CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result,
 };
+use otto_session::origin::Origin;
+use otto_session::origin::TurnOrigin;
 
 #[cfg(test)]
 pub(crate) const NAMES: [&str; 3] = ["schedule", "schedule_list", "schedule_cancel"];
@@ -94,7 +94,7 @@ pub fn tools(context: &Context) -> Vec<Box<dyn Tool + Send + Sync>> {
 
 pub(crate) fn tools_with_session(
     context: &Context,
-    session: Arc<dyn crate::session::SessionHandle>,
+    session: Arc<dyn otto_session::SessionHandle>,
 ) -> Vec<Box<dyn Tool + Send + Sync>> {
     vec![
         Box::new(ScheduleTool(context.clone(), Some(session))),
@@ -182,7 +182,7 @@ fn one_line(body: &str, max: usize) -> String {
     }
 }
 
-struct ScheduleTool(Context, Option<Arc<dyn crate::session::SessionHandle>>);
+struct ScheduleTool(Context, Option<Arc<dyn otto_session::SessionHandle>>);
 
 pub(crate) const SCHEDULE_RETRY: (&str, otto_core::model::RetrySafety) =
     ("schedule", otto_core::model::RetrySafety::NonIdempotent);

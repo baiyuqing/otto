@@ -29,7 +29,7 @@ use super::{
     Provenance, Record, Result, Service,
 };
 use crate::decision::{Backend, Exchange, Failure, Kind, Question, YES};
-use crate::workspace::valid_opaque_id;
+use otto_session::workspace::valid_opaque_id;
 
 /// The version of the question set and the state text. Changing either
 /// changes this value.

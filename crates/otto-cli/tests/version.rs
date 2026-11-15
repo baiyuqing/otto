@@ -83,6 +83,7 @@ fn release_version_is_consistent_across_files() {
         "otto-platform",
         "otto-storage",
         "otto-faults",
+        "otto-session",
         "otto-client",
         "otto-terminal",
         "otto-server",

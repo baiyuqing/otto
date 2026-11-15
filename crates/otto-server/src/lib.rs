@@ -186,7 +186,7 @@ struct QueuedTurn {
     text: String,
     image: Option<Block>,
     channel: Option<Channel>,
-    origin: Option<otto::session::origin::Origin>,
+    origin: Option<otto_session::origin::Origin>,
     input_id: Option<String>,
     input_provenance: Option<otto_core::model::InputProvenance>,
 }

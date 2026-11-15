@@ -190,7 +190,7 @@ impl Local {
         let workspace = self.config.workspace.to_string_lossy().into_owned();
         let listed = if root.exists() {
             tokio::task::spawn_blocking(move || {
-                otto::session::list(&root, &workspace, "", MAX_LIST_SESSIONS)
+                otto_session::list(&root, &workspace, "", MAX_LIST_SESSIONS)
             })
             .await
             .map_err(|join| error(INTERNAL_ERROR, join.to_string()))?

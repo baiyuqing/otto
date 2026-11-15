@@ -28,8 +28,8 @@ use super::read::read_validated_text_file;
 use super::result::decode_strict_json;
 use super::write::write_file_atomic;
 use super::{Tool, definition, empty_as_none, preflight_error, text_result};
-use crate::workspace::confined::Workspace;
 use otto_platform::fsops::{PosixPublish, PublishOps};
+use otto_session::workspace::confined::Workspace;
 
 mod diff;
 mod line_endings;

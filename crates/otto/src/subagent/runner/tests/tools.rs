@@ -282,13 +282,13 @@ async fn child_registry_refuses_a_tool_call_once_the_parent_lease_is_lost() {
     let calls = write.counter();
 
     let tmp = tempfile::tempdir().expect("tmp");
-    let lease = crate::session::lease::Lease::for_test(tmp.path());
+    let lease = otto_session::lease::Lease::for_test(tmp.path());
     lease.mark_lost_for_test("test fence");
 
     let tasks = Arc::new(Tasks::new());
     let mut config = test_config(&provider, &tasks, vec![write.boxed()]);
     config.lease = Some(Arc::new(move || {
-        Some(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>)
+        Some(Arc::clone(&lease) as Arc<dyn otto_session::WriterOwnership>)
     }));
     let (runner, _) = runner(config);
     runner

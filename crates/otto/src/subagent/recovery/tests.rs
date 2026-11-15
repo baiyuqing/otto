@@ -6,10 +6,10 @@ mod recovery_edges;
 mod write_admission;
 
 use super::*;
-use crate::session::Store;
 use otto_core::agent::inbox::Inbox;
 use otto_core::model::{Block, Message, Role};
 use otto_core::session::Header;
+use otto_session::Store;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 

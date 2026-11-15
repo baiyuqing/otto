@@ -43,7 +43,7 @@ pub(super) async fn reopen_evicted_session(
 /// session-scoped, an id that is not a session id -- is left to the route.
 pub(super) fn session_id_in_path(path: &str) -> Option<&str> {
     let id = path.strip_prefix("/v1/sessions/")?.split('/').next()?;
-    otto::session::is_session_id(id).then_some(id)
+    otto_session::is_session_id(id).then_some(id)
 }
 
 /// Request-ID handling, token gating, structured logging and HTTP metrics.

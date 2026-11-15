@@ -237,7 +237,7 @@ async fn process_restart_restores_uncertain_intent_only_not_an_action() {
 
 #[test]
 fn no_session_input_events_live_only_in_the_handle() {
-    use otto::session::SessionHandle;
+    use otto_session::SessionHandle;
     let header = otto_core::session::Header {
         id: "memory-session".into(),
         ..Default::default()

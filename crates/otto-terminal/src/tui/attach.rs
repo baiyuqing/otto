@@ -38,8 +38,8 @@ use crate::cli::repl::Error as ReplError;
 use otto::app::Info;
 use otto::schedule::Scope;
 use otto::schedule::worker::{DeliverRole, Sink, Worker};
-use otto::session::origin::Origin;
 use otto_client::{Client, Error, StatusRow, StatusStream, TurnStream};
+use otto_session::origin::Origin;
 
 mod event_loop;
 mod frames;

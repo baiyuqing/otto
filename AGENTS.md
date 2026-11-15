@@ -14,6 +14,7 @@ instruction file over 16 KiB or combined instructions over 64 KiB.
 | Process-wide primitives: file driver, log, retry, URL parsing | [otto-platform](crates/otto-platform/AGENTS.md), `src/lib.rs` |
 | SQL layer and SQLite driver | [otto-storage](crates/otto-storage/AGENTS.md), `src/lib.rs` |
 | Fault-injection doubles for tests (test support) | [otto-faults](crates/otto-faults/AGENTS.md), `src/lib.rs` |
+| Session files, writer lease, workspace identity | [otto-session](crates/otto-session/AGENTS.md), `src/lib.rs` |
 | Native services, tools, persistence, sandbox | [otto](crates/otto/AGENTS.md), `src/runtime/startup.rs` |
 | Terminal UI, REPL, login commands | [otto-terminal](crates/otto-terminal/AGENTS.md), `src/tui/mod.rs` |
 | HTTP client of `otto serve` | [otto-client](crates/otto-client/AGENTS.md), `src/lib.rs` |
@@ -31,7 +32,8 @@ listed above it:
 - `otto-faults` (test support): `otto-platform`, `otto-storage`. Linked only
   by tests and by the `fault-injection` feature of `otto`, never by a
   shipped build.
-- `otto`: `otto-core`, `otto-platform`, `otto-storage`.
+- `otto-session`: `otto-core`, `otto-platform` (tests also `otto-faults`).
+- `otto`: `otto-core`, `otto-platform`, `otto-storage`, `otto-session`.
 - `otto-client`, `otto-server`, `otto-eval`: `otto` and the crates below it.
 - `otto-acp`: `otto-server`, `otto-client`. `otto-terminal`: `otto`,
   `otto-client`.

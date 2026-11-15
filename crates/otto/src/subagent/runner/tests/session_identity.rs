@@ -73,7 +73,7 @@ async fn session_info_concurrent_children_have_distinct_stable_own_ids() {
         if persisted {
             let parent = dir.path().join("parent.jsonl");
             config.child_session = Some(Arc::new(move |task_id, session_id| {
-                let store = crate::session::Store::create_child_lazy(
+                let store = otto_session::Store::create_child_lazy(
                     &parent,
                     &format!("{task_id}-{session_id}"),
                     otto_core::session::Header {
@@ -87,7 +87,7 @@ async fn session_info_concurrent_children_have_distinct_stable_own_ids() {
                 )
                 .map_err(|error| error.to_string())?;
                 let path =
-                    crate::session::Store::child_path(&parent, &format!("{task_id}-{session_id}"))
+                    otto_session::Store::child_path(&parent, &format!("{task_id}-{session_id}"))
                         .to_string_lossy()
                         .into_owned();
                 Ok(Some((Arc::new(store) as Transcript, path)))
@@ -121,9 +121,9 @@ async fn session_info_concurrent_children_have_distinct_stable_own_ids() {
         assert_ne!(first_ids[0], second_ids[0]);
         for (task, ids) in [(&first, &first_ids), (&second, &second_ids)] {
             assert_ne!(ids[0], parent_id);
-            assert!(crate::session::is_session_id(&ids[0]));
+            assert!(otto_session::is_session_id(&ids[0]));
             if persisted {
-                let header = crate::session::Store::read_header(&task.session_path).unwrap();
+                let header = otto_session::Store::read_header(&task.session_path).unwrap();
                 assert_eq!(header.id, ids[0]);
             } else {
                 assert!(task.session_path.is_empty());
@@ -163,6 +163,6 @@ async fn session_info_resume_binds_existing_child_header_identity() {
     let task = wait_final(&tasks, "t1").await;
     assert_eq!(task.status, TaskStatus::Succeeded, "{task:?}");
     assert_eq!(identity_responses(&tasks, "t1"), vec![actual_id.clone()]);
-    let header = crate::session::Store::read_header(&path).unwrap();
+    let header = otto_session::Store::read_header(&path).unwrap();
     assert_eq!(header.id, actual_id);
 }

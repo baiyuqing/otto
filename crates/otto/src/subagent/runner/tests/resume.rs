@@ -280,7 +280,7 @@ async fn resume_of_a_task_already_resumed_and_running_again_is_rejected() {
     let parent_path = dir.path().join("parent.jsonl");
     let children_dir = parent_path.with_extension("");
 
-    let store = crate::session::Store::create_child_lazy(
+    let store = otto_session::Store::create_child_lazy(
         &parent_path,
         "t1-child",
         otto_core::session::Header {

@@ -11,7 +11,9 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   `otto_platform::...` and does not re-export. The SQL layer and its SQLite
   driver live in [otto-storage](../otto-storage/AGENTS.md), imported as
   `otto_storage::...` and not re-exported; domain schemas and repositories stay
-  in each domain's `sqlite.rs`. The fault vocabulary and the doubles that need
+  in each domain's `sqlite.rs`. Session files, the writer lease and the workspace
+  identity live in [otto-session](../otto-session/AGENTS.md), imported as
+  `otto_session::...` and not re-exported. The fault vocabulary and the doubles that need
   no `otto` module live in [otto-faults](../otto-faults/AGENTS.md), imported as
   `otto_faults::...`; only `faults/mcp.rs` and `faults/sandbox.rs` stay here. The
   `otto serve` client, the terminal UI, the HTTP server, the ACP frontends

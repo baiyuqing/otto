@@ -67,7 +67,7 @@ export const FILES = [
   [
     'Cargo.lock',
     (t, v) => rewriteLock(t, [
-      'otto', 'otto-core', 'otto-platform', 'otto-storage', 'otto-faults', 'otto-client',
+      'otto', 'otto-core', 'otto-platform', 'otto-storage', 'otto-faults', 'otto-session', 'otto-client',
       'otto-terminal', 'otto-server', 'otto-acp', 'otto-eval', 'otto-cli',
     ], v),
   ],

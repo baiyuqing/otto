@@ -44,7 +44,7 @@ impl TraceCache {
         {
             return Some(hit.parsed.clone());
         }
-        let (entries, messages) = crate::session::Store::read_entries(path).ok()?;
+        let (entries, messages) = otto_session::Store::read_entries(path).ok()?;
         let parsed = Parsed {
             entries: Arc::new(entries),
             messages: Arc::new(messages),

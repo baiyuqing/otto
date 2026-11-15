@@ -70,7 +70,7 @@ impl Controller {
                 }
                 let session_id = random_id()
                     .map_err(|_| Error::internal("generate workflow session id failed"))?;
-                let workspace_key = crate::session::workspace_key(Path::new(&run.workspace))
+                let workspace_key = otto_session::workspace_key(Path::new(&run.workspace))
                     .map_err(|_| Error::unavailable("resolve workflow transcript path failed"))?;
                 let transcript_path = attempt_root
                     .join(workspace_key)

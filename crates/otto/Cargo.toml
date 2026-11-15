@@ -17,8 +17,9 @@ fault-injection = ["dep:otto-faults"]
 # on temporary directories and the scripted provider. Off in every shipped
 # build; the tests of dependent crates turn it on through a dev-dependency.
 # It implies `fault-injection` because the scripted provider runs on
-# `otto_faults::http`.
-test-support = ["fault-injection"]
+# `otto_faults::http`. It also turns on the test accessors of `otto-session`
+# (`Lease::for_test`, `Store::hold_state_for_test`).
+test-support = ["fault-injection", "otto-session/test-support"]
 
 [dependencies]
 # Static shell analysis for approval rules and review facts (`approval::shell`).
@@ -27,6 +28,7 @@ tree-sitter = "=0.27.1"
 tree-sitter-bash = "=0.25.1"
 otto-core.workspace = true
 otto-platform.workspace = true
+otto-session.workspace = true
 otto-storage.workspace = true
 # Test support; linked only through the `fault-injection` feature.
 otto-faults = { workspace = true, optional = true }

@@ -71,7 +71,7 @@ impl Fixture {
         }
     }
 
-    fn create(&self, id: &str, name: &str) -> Arc<dyn otto::session::SessionHandle> {
+    fn create(&self, id: &str, name: &str) -> Arc<dyn otto_session::SessionHandle> {
         let session = self
             .storage
             .sessions()
@@ -213,7 +213,7 @@ fn archived_exact_name_can_be_confirmed() {
 
 #[test]
 fn live_lease_is_refused_without_deletion() {
-    use otto::session::lease::{Lease, create_lease_dir};
+    use otto_session::lease::{Lease, create_lease_dir};
     let fixture = Fixture::new();
     let session = fixture.create("leased-id", "leased");
     let path = session.path();

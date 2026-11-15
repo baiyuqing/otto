@@ -16,11 +16,11 @@ use otto::memory::{
 };
 use otto::provider::openaicompat;
 use otto::runtime::builder::{SessionHandle, SharedSession};
-use otto::session::Store;
 use otto_core::agent::{Agent, Options};
 use otto_core::config::endpoint::TrustedEndpoint;
 use otto_core::config::memory::MemoryRuntime;
 use otto_core::session::Header;
+use otto_session::Store;
 use tokio_util::sync::CancellationToken;
 
 /// A word every fixture record contains, so the turn query recalls all of them.

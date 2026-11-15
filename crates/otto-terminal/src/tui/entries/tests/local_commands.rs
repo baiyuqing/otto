@@ -51,8 +51,8 @@ fn local_command_receipts_are_distinct_foldable_rows_with_collapsed_details() {
 
 #[test]
 fn no_session_receipts_remain_in_memory_and_outside_messages() {
-    use otto::session::SessionHandle;
     use otto_core::session::Session;
+    use otto_session::SessionHandle;
     let session = otto::runtime::builder::MemoryHandle::new(otto_core::session::Header::default());
     let receipt = LocalCommandReceipt {
         id: "memory-only".into(),

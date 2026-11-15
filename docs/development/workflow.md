@@ -81,12 +81,13 @@ cargo test -p otto --lib approval
 cargo test -p otto-platform --lib fsops::
 cargo test -p otto-storage --lib
 cargo test -p otto-faults --lib
+cargo test -p otto-session
 cargo test -p otto-terminal --lib tui::
 cargo test -p otto-cli --test tui_pty --test tui_attach_pty
 ```
 
 Build the binary with `cargo build -p otto-cli` (or `cargo build`). Tests of
-the lower and frontend crates run per crate: `cargo test -p otto-platform`, `cargo test -p otto-storage`, `cargo test -p otto-faults`,
+the lower and frontend crates run per crate: `cargo test -p otto-platform`, `cargo test -p otto-storage`, `cargo test -p otto-faults`, `cargo test -p otto-session`,
 `cargo test -p otto-client`,
 `cargo test -p otto-terminal`, `cargo test -p otto-server`,
 `cargo test -p otto-acp`, and `cargo test -p otto-cli --test <name>` for a file
@@ -191,7 +192,7 @@ Git and release tags are the archive. No parallel historical index is required.
 ## Releases
 
 `[workspace.package] version` in `Cargo.toml` is shared by `otto`, `otto-core`,
-`otto-platform`, `otto-storage`, `otto-faults`,
+`otto-platform`, `otto-storage`, `otto-faults`, `otto-session`,
 `otto-client`, `otto-terminal`, `otto-server`, `otto-acp`, `otto-eval` and `otto-cli`; their `Cargo.lock` entries must match
 (covered by `crates/otto-cli/tests/version.rs`).
 Version changes belong **only in release PRs** via `make bump VERSION=X.Y.Z`,

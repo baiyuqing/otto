@@ -1,4 +1,4 @@
-//! Parse vectors from Go's `url.Parse`; see the header of `gourl_tests.rs`.
+//! Parse vectors from Go's `url.Parse`; see the header of `tests.rs`.
 
 use super::show;
 use crate::gourl::{Url, parse};

@@ -39,7 +39,7 @@ impl Controller {
 
     /// Prepares a replacement before irreversible removal. Only idle sessions
     /// are admitted. Cleanup failures are errors, never successful deletion.
-    pub(crate) async fn delete_current_session(&self) -> Result<(), String> {
+    pub async fn delete_current_session(&self) -> Result<(), String> {
         let admission = self.begin_replacement()?;
         if !self.dynamic_content {
             return Err(PERSISTENCE_DISABLED.into());

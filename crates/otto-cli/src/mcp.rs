@@ -14,7 +14,7 @@ use otto_core::config::{McpAuth, McpServer, McpTransport, resolve_mcp};
 use tokio_util::sync::CancellationToken;
 
 use super::run::fail;
-use otto::cli::login::{SharedWriter, browser_opener};
+use otto_terminal::cli::login::{SharedWriter, browser_opener};
 
 const USAGE: &str = "usage: otto mcp login <server> | otto mcp logout <server> | otto mcp \
     list | otto mcp add <server> --transport stdio --command CMD [--arg \

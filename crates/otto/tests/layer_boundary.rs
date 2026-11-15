@@ -51,7 +51,6 @@ const LAYERS: &[(&str, &[&str])] = &[
     ),
     ("assembly", &["runtime"]),
     ("application", &["app"]),
-    ("frontend", &["cli", "client", "tui"]),
     ("test-support", &["fixtures", "faults"]),
 ];
 
@@ -87,14 +86,17 @@ fn sources(path: &Path) -> Vec<PathBuf> {
 
 /// The source without its test-only items (their lines become empty, so line
 /// numbers stay valid): each item after a
-/// `#[cfg(test)]` line, whether a test module of any name or a test helper,
+/// `#[cfg(test)]` or `#[cfg(any(test, feature = "test-support"))]` line, whether a test module of any name or a test helper,
 /// up to its closing brace or semicolon.
 fn non_test(source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let mut kept = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        if lines[index].trim() != "#[cfg(test)]" {
+        let attribute = lines[index].trim();
+        if attribute != "#[cfg(test)]"
+            && attribute != "#[cfg(any(test, feature = \"test-support\"))]"
+        {
             kept.push(lines[index]);
             index += 1;
             continue;
@@ -407,8 +409,8 @@ fn a_same_layer_cycle_is_a_violation_and_a_one_way_edge_is_not() {
         .collect();
     assert_eq!(violations(&cycle).len(), 2);
     let upward: BTreeMap<_, _> = [
-        edge("hex", "tui"),
-        edge("tui", "hex"),
+        edge("hex", "app"),
+        edge("app", "hex"),
         edge("app", "fixtures"),
     ]
     .into_iter()
@@ -418,7 +420,7 @@ fn a_same_layer_cycle_is_a_violation_and_a_one_way_edge_is_not() {
         keys,
         vec![
             ("app".to_string(), "fixtures".to_string()),
-            ("hex".to_string(), "tui".to_string())
+            ("hex".to_string(), "app".to_string())
         ]
     );
 }

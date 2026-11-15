@@ -22,6 +22,8 @@ path = "src/main.rs"
 otto.workspace = true
 otto-core.workspace = true
 otto-server.workspace = true
+otto-client.workspace = true
+otto-terminal.workspace = true
 otto-acp.workspace = true
 # Development evaluations (`otto eval`); linked only with the `eval` feature.
 otto-eval = { workspace = true, optional = true }

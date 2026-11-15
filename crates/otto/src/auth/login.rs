@@ -38,7 +38,7 @@ pub enum LoginError {
 }
 
 /// What the flow calls to put the authorization URL in front of the user.
-pub(crate) type Opener<'a> = dyn Fn(&str) -> Result<(), String> + Send + Sync + 'a;
+pub type Opener<'a> = dyn Fn(&str) -> Result<(), String> + Send + Sync + 'a;
 
 /// The largest request head the callback listener will buffer. A browser's
 /// callback request is a few hundred bytes; anything larger is not the

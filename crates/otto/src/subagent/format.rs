@@ -13,7 +13,7 @@ use crate::deadline::round_to_seconds;
 /// One task in the layout shared with `agent_status`: id, name, status,
 /// elapsed time, tool count, last tool (or the final token total) and a
 /// description or prompt label. Trailing padding is trimmed.
-pub(crate) fn task_line(task: &Task, now: DateTime<Utc>) -> String {
+pub fn task_line(task: &Task, now: DateTime<Utc>) -> String {
     let name = if task.agent.is_empty() {
         "(default)"
     } else {
@@ -94,13 +94,13 @@ pub(crate) fn task_label(task: &Task) -> String {
 
 /// Collapses `value` to a single line, joining fields with one space. Splits on
 /// Unicode whitespace, which `char::is_whitespace` matches.
-pub(crate) fn one_line(value: &str) -> String {
+pub fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 /// The first `count` characters of `value`, unchanged when it is no longer.
 /// Counted in scalar values, not bytes.
-pub(crate) fn first_runes(value: &str, count: usize) -> String {
+pub fn first_runes(value: &str, count: usize) -> String {
     value.chars().take(count).collect()
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn comma_int(value: i64) -> String {
 /// A child's transcript as tool calls and assistant text, in order. Tool
 /// results and the delegated prompt, which is a user message, are not shown,
 /// matching `agent_status`'s step listing.
-pub(crate) fn task_steps(history: &[Message]) -> String {
+pub fn task_steps(history: &[Message]) -> String {
     let mut out = String::new();
     for message in history {
         for block in &message.blocks {

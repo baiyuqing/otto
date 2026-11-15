@@ -142,7 +142,7 @@ impl Recovery {
 
 /// Everything the store mutates, behind one lock.
 #[derive(Debug)]
-pub(crate) struct StoreState {
+pub struct StoreState {
     pub(crate) header: Header,
     pub(crate) root: PathBuf,
     pub(crate) messages: Vec<Message>,
@@ -203,7 +203,7 @@ pub(crate) struct StoreState {
 /// An append-only session file.
 #[derive(Debug)]
 pub struct Store {
-    pub(crate) state: Mutex<StoreState>,
+    pub state: Mutex<StoreState>,
 }
 
 #[derive(Clone)]

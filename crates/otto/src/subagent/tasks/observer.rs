@@ -229,7 +229,7 @@ pub(crate) fn bounded(text: &str) -> String {
 
 impl Tasks {
     /// Only safe, post-redaction child events belong at this boundary.
-    pub(crate) fn observe(&self, id: &str, event: &Event) {
+    pub fn observe(&self, id: &str, event: &Event) {
         if let Some(projection) = self
             .lock()
             .entries

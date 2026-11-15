@@ -44,7 +44,7 @@ pub(crate) fn recoverable_local_ids(
 /// Local TUI guidance surviving process loss is recoverable intent, not replay authority.
 /// Called only while constructing the mailbox, before producers receive it. The
 /// append-only session submission record retains its text and stable ID.
-pub(crate) fn hold_local_input_recovery(
+pub fn hold_local_input_recovery(
     journal: &dyn otto_core::mailbox::Mailbox,
     recoverable_ids: &std::collections::HashSet<String>,
 ) {

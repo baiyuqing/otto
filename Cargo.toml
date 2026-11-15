@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/otto-core",
     "crates/otto",
+    "crates/otto-client",
+    "crates/otto-terminal",
     "crates/otto-server",
     "crates/otto-acp",
     "crates/otto-eval",
@@ -87,6 +89,8 @@ tokio-rustls = { version = "=0.26.6", default-features = false, features = ["rin
 rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }
 otto = { path = "crates/otto" }
+otto-client = { path = "crates/otto-client" }
+otto-terminal = { path = "crates/otto-terminal" }
 otto-server = { path = "crates/otto-server" }
 otto-acp = { path = "crates/otto-acp" }
 otto-eval = { path = "crates/otto-eval" }

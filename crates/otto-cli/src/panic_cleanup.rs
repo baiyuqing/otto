@@ -29,5 +29,5 @@ pub fn install() {
 
 fn cleanup(children: &Children) {
     children.kill_all_without_blocking();
-    otto::tui::reset_terminal_input_modes_after_panic();
+    otto_terminal::tui::reset_terminal_input_modes_after_panic();
 }

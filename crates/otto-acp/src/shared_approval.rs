@@ -335,7 +335,7 @@ impl Connection {
                     .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?;
                 match relay.client.approval_policy(&input.session_id, None).await {
                     Ok(settings) => settings,
-                    Err(otto::client::Error::Http { status: 404, .. }) => {
+                    Err(otto_client::Error::Http { status: 404, .. }) => {
                         otto_core::approval::ApprovalSettings::from_mode(mode)
                     }
                     Err(e) => return Err(error(INTERNAL_ERROR, e.to_string())),

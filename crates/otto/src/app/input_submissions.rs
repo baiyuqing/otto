@@ -5,7 +5,7 @@ use otto_core::model::{InputDelivery, InputProvenance, InputSource};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Submission {
+pub struct Submission {
     pub id: String,
     pub session: String,
     pub workspace: String,
@@ -15,7 +15,7 @@ pub(crate) struct Submission {
 }
 
 impl Controller {
-    pub(crate) fn input_submissions(&self) -> Result<Vec<Submission>, String> {
+    pub fn input_submissions(&self) -> Result<Vec<Submission>, String> {
         let session = self.current_session_opt().ok_or("session is closed")?;
         let info = self.info();
         let mut records: Vec<Submission> = Vec::new();
@@ -34,11 +34,7 @@ impl Controller {
         Ok(records)
     }
 
-    pub(crate) fn prepare_input(
-        &self,
-        text: &str,
-        delivery: InputDelivery,
-    ) -> Result<Submission, String> {
+    pub fn prepare_input(&self, text: &str, delivery: InputDelivery) -> Result<Submission, String> {
         let id = crate::random::random_id().map_err(|error| error.to_string())?;
         let mut provenance = InputProvenance::local(InputSource::Tui);
         provenance.delivery = delivery;
@@ -55,7 +51,7 @@ impl Controller {
         Ok(record)
     }
 
-    pub(crate) fn update_input_submission(
+    pub fn update_input_submission(
         &self,
         id: &str,
         state: &str,

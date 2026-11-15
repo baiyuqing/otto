@@ -671,8 +671,12 @@ pub async fn run_with_extensions(
             console.run(stdin, cancel).await
         }
         Frontend::Tui => {
-            otto::tui::run_with_observer_bindings(&controller, cancel, &loaded.config.ui.observer)
-                .await
+            otto_terminal::tui::run_with_observer_bindings(
+                &controller,
+                cancel,
+                &loaded.config.ui.observer,
+            )
+            .await
         }
     };
 

@@ -52,7 +52,7 @@ pub(crate) const MAX_GUARD_FIELDS: usize = 512;
 pub(crate) const MAX_GUARD_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_EXACT_GUARD_SPANS: usize = 8192;
 pub(crate) const MAX_EXACT_GUARD_VALUES: usize = 64;
-pub(crate) const MAX_EXACT_GUARD_VALUE_BYTES: usize = 8 * 1024;
+pub const MAX_EXACT_GUARD_VALUE_BYTES: usize = 8 * 1024;
 pub const MAX_CURSOR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_DUPLICATE_ID_RETRIES: usize = 8;
 

@@ -4,12 +4,13 @@ The [repository rules](../../AGENTS.md) apply. Start with the
 [ownership map](../../docs/code-organization.md#cratesotto-native-runtime-library)
 and [package contracts](../../docs/development/architecture.md#package-boundaries).
 
-- This crate is a library. It keeps the runtime, tools, `tui`, `client`,
-  `cli::{login, repl, repl_commands}` (used by `tui`) and `fixtures`. The
-  HTTP server, ACP frontends and the `otto` binary live in
+- This crate is a library. It keeps the runtime, tools and `fixtures`. The
+  `otto serve` client, the terminal UI, the HTTP server, the ACP frontends
+  and the `otto` binary live in [otto-client](../otto-client/AGENTS.md),
+  [otto-terminal](../otto-terminal/AGENTS.md),
   [otto-server](../otto-server/AGENTS.md), [otto-acp](../otto-acp/AGENTS.md)
-  and [otto-cli](../otto-cli/AGENTS.md); dependencies run one way,
-  `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <- `otto-cli`.
+  and [otto-cli](../otto-cli/AGENTS.md); dependencies run one way and none of
+  them is imported by `otto`.
 - `runtime/startup.rs` is the startup composition root; `otto_cli::run`
   and `otto serve` call its phases. `runtime` assembles agents;
   `app` owns shared lifecycle.

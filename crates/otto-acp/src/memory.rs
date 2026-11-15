@@ -153,8 +153,8 @@ pub(super) fn review(controller: &Controller, params: &ReviewParams) -> Reply {
 
 /// The ACP error for a failed memory route, by HTTP status. `None` for a
 /// failure to reach serve, which the relay handles itself.
-fn attached_error(failure: &otto::client::Error) -> Option<super::Error> {
-    let otto::client::Error::Http {
+fn attached_error(failure: &otto_client::Error) -> Option<super::Error> {
+    let otto_client::Error::Http {
         status, message, ..
     } = failure
     else {
@@ -201,7 +201,7 @@ fn candidate_id_is_valid(id: &str) -> bool {
 
 /// [`pending`] for a session held by serve.
 pub(super) async fn attached_pending(
-    client: &otto::client::Client,
+    client: &otto_client::Client,
     params: &PendingParams,
 ) -> Result<Value, AttachedFailure> {
     let limit = page_limit(params).map_err(AttachedFailure::Reply)?;
@@ -219,7 +219,7 @@ pub(super) async fn attached_pending(
 /// [`review`] for a session held by serve. Serve records the decision as a
 /// human review.
 pub(super) async fn attached_review(
-    client: &otto::client::Client,
+    client: &otto_client::Client,
     params: &ReviewParams,
 ) -> Result<Value, AttachedFailure> {
     let decision = review_decision(params).map_err(AttachedFailure::Reply)?;
@@ -253,11 +253,11 @@ pub(super) async fn attached_review(
 /// could not be reached.
 pub(super) enum AttachedFailure {
     Reply(super::Error),
-    Unreachable(otto::client::Error),
+    Unreachable(otto_client::Error),
 }
 
-impl From<otto::client::Error> for AttachedFailure {
-    fn from(failure: otto::client::Error) -> Self {
+impl From<otto_client::Error> for AttachedFailure {
+    fn from(failure: otto_client::Error) -> Self {
         match attached_error(&failure) {
             Some(reply) => Self::Reply(reply),
             None => Self::Unreachable(failure),
@@ -299,7 +299,7 @@ mod attached_tests {
 
     #[test]
     fn http_statuses_map_to_the_in_process_error_codes() {
-        let http = |status| otto::client::Error::Http {
+        let http = |status| otto_client::Error::Http {
             status,
             code: "x".into(),
             message: "m".into(),
@@ -312,7 +312,7 @@ mod attached_tests {
         assert_eq!(code(404), want(RESOURCE_NOT_FOUND));
         assert_eq!(code(400), want(super::super::INVALID_PARAMS));
         assert_eq!(code(500), want(INTERNAL_ERROR));
-        assert!(attached_error(&otto::client::Error::Unreachable("down".into())).is_none());
+        assert!(attached_error(&otto_client::Error::Unreachable("down".into())).is_none());
     }
 
     #[test]

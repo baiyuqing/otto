@@ -1,0 +1,47 @@
+[package]
+name = "otto-terminal"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+otto.workspace = true
+otto-core.workspace = true
+otto-client.workspace = true
+async-trait.workspace = true
+chrono = { workspace = true, features = ["clock", "std"] }
+libc.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal", "net"] }
+tokio-util.workspace = true
+toml = { workspace = true, features = ["display"] }
+url.workspace = true
+# The terminal frontend; only this crate uses them, so they are not
+# workspace dependencies.
+pulldown-cmark = { version = "=0.13.6", default-features = false }
+# `all-widgets`/`macros`/`underline-color` are dropped: this TUI uses only the
+# widgets ratatui-widgets ships unconditionally (Paragraph, Block, List,
+# Table, Scrollbar), not the calendar widget or the `layout!` macro.
+# `unstable-rendered-line-info` gives `Paragraph::line_count`, used to
+# auto-scroll the transcript to its last wrapped line;
+# safe to depend on here since the version is pinned exactly, so it cannot
+# change under us.
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
+crossterm = "=0.29.0"
+# The composer wraps and places its caret by display width (see
+# `tui::render::composer_lines`). Already in the tree as ratatui's own
+# width source; depending on it directly keeps the two in agreement.
+unicode-width = "=0.2.3"
+
+[dev-dependencies]
+otto = { workspace = true, features = ["fault-injection", "test-support"] }
+axum.workspace = true
+tower.workspace = true
+tokio = { workspace = true, features = ["test-util", "net"] }

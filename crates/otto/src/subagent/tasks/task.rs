@@ -109,7 +109,7 @@ pub struct Task {
 
 impl Task {
     /// Whether the task has reached a terminal status.
-    pub(crate) fn is_final(&self) -> bool {
+    pub fn is_final(&self) -> bool {
         self.status.is_final()
     }
 }

@@ -1,10 +1,12 @@
 //! The slice of Go's `net/url` that Otto's credential detection depends on.
 //!
-//! [`crate::urlprivacy`] must agree with Go byte for byte about which proxy
-//! URLs parse and which do not, because a URL that Go accepts but Rust rejects
-//! would be reported as an ambiguous credential and would make
-//! `ResolveEnvironment` refuse an ordinary proxy setting. Only the parts Otto
-//! reaches are ported: [`parse`], [`path_unescape`], and [`Userinfo`].
+//! This is a port of Go's `net/url` (Otto was written in Go until #92); the
+//! functions here define which proxy URLs [`crate::urlprivacy`] accepts.
+//! `urlprivacy` treats a value that [`parse`] rejects as an ambiguous
+//! credential, so a change to what parses changes which proxy settings are
+//! refused. Only the parts Otto reaches are ported: [`parse`],
+//! [`path_unescape`], and [`Userinfo`]. `gourl_tests.rs` checks them against
+//! vectors produced by Go 1.27.3.
 //!
 //! Everything works on bytes rather than `str` because Go strings may hold
 //! arbitrary bytes and percent escapes routinely decode to invalid UTF-8.
@@ -12,8 +14,8 @@
 //!
 //! These items are pure functions with no shared state, so they are `Send`,
 //! `Sync`, and free of cancellation concerns. Errors carry no detail: every
-//! caller only distinguishes "Go would have returned an error" from "Go would
-//! have succeeded", so the error type is the unit type.
+//! caller only distinguishes a rejected URL from an accepted one, so the error
+//! type is the unit type.
 
 use std::net::IpAddr;
 
@@ -472,3 +474,7 @@ pub(crate) fn parse(raw: &[u8]) -> Result<Url, ()> {
     url.fragment = unescape(fragment, Encoding::Fragment)?;
     Ok(url)
 }
+
+#[cfg(test)]
+#[path = "gourl_tests.rs"]
+mod gourl_tests;

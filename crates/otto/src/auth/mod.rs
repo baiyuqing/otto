@@ -1,8 +1,8 @@
 //! ChatGPT credential storage and the "Sign in with ChatGPT" OAuth flow.
 //!
-//! The credential file at `~/.otto/auth/chatgpt.json` keeps the byte layout the
-//! previously released binary wrote, so an existing file still loads:
-//! `encoding/json`'s `MarshalIndent(c, "", " ")` field order and two-space
+//! The credential file at `~/.otto/auth/chatgpt.json` has the byte layout
+//! written by Go (Otto was written in Go until #92), and existing files hold
+//! it: `encoding/json`'s `MarshalIndent(c, "", "  ")` field order and two-space
 //! indent, and `time.RFC3339Nano` for the expiry (see `go_time`).
 //!
 //! Every error is a fieldless [`AuthError`] variant. The cause is dropped
@@ -102,9 +102,8 @@ pub enum AuthError {
 ///
 /// chrono's own serde impl always prints a fixed number of fractional digits;
 /// the stored format trims trailing zeros, omits the fraction entirely when it
-/// is zero, and writes `Z` rather than `+00:00` for a zero offset. The
-/// credential file has to match byte for byte, so the format is written out
-/// here.
+/// is zero, and writes `Z` rather than `+00:00` for a zero offset. The stored
+/// format is Go's `time.RFC3339Nano` layout, so it is written out here.
 pub(crate) mod go_time {
     use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Timelike};
     use serde::{Deserialize, Deserializer, Serializer};

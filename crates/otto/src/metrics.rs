@@ -2,8 +2,8 @@
 //!
 //! Every counter, gauge and histogram is hand-rolled: the output is the
 //! `version=0.0.4` text format, written in the order and with the label sets
-//! the previously released binary used, so an existing scrape config keeps
-//! working.
+//! defined in this module; a change to a metric name or label set changes what
+//! existing scrape configs and queries select.
 //!
 //! Ordering: each label-key map is written in sorted key order. The maps here
 //! are [`BTreeMap`]s, so iteration order already gives that without a sort

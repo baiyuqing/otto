@@ -77,7 +77,14 @@ fn lock_version(lock: &str, package: &str) -> String {
 fn release_version_is_consistent_across_files() {
     let mut found: Vec<(String, String)> = Vec::new();
     let lock = root_file("Cargo.lock");
-    for package in ["otto", "otto-core", "otto-server", "otto-acp", "otto-cli"] {
+    for package in [
+        "otto",
+        "otto-core",
+        "otto-server",
+        "otto-acp",
+        "otto-eval",
+        "otto-cli",
+    ] {
         found.push((
             format!("Cargo.lock ({package})"),
             lock_version(&lock, package),

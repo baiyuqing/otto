@@ -1774,6 +1774,7 @@ dependencies = [
  "otto",
  "otto-acp",
  "otto-core",
+ "otto-eval",
  "otto-server",
  "rcgen",
  "reqwest",
@@ -1803,6 +1804,21 @@ dependencies = [
  "tokio-util",
  "toml",
  "url",
+]
+
+[[package]]
+name = "otto-eval"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "otto",
+ "otto-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

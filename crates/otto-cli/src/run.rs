@@ -52,6 +52,7 @@ pub(crate) use otto::runtime::startup::{
 
 mod attach;
 mod delete;
+mod eval_gate;
 mod process;
 mod session_setup;
 mod subcommands;
@@ -162,6 +163,8 @@ pub async fn run(
     .await
 }
 
+#[cfg(test)]
+mod eval_gate_tests;
 #[cfg(test)]
 mod session_setup_tests;
 #[cfg(test)]

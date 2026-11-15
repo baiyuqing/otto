@@ -8,6 +8,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `otto eval memory-retraction`. Off by default: the default binary does not contain it.
+eval = ["dep:otto-eval"]
+
 # The shipped binary keeps its name; the package name tells it apart from the
 # `otto` library crate it composes.
 [[bin]]
@@ -19,6 +23,8 @@ otto.workspace = true
 otto-core.workspace = true
 otto-server.workspace = true
 otto-acp.workspace = true
+# Development evaluations (`otto eval`); linked only with the `eval` feature.
+otto-eval = { workspace = true, optional = true }
 async-trait.workspace = true
 chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true

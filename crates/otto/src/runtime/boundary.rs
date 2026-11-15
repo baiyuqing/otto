@@ -26,9 +26,8 @@ use otto_core::agent::redactor::Redactor;
 use otto_core::config::File;
 use otto_core::config::resolve::Runtime;
 use otto_core::model::ToolDefinition;
-use otto_core::safetext::{MAX_SECRET_BYTES, SecretCollector, canonicalize_utf8};
+use otto_core::safetext::SecretCollector;
 
-use otto_platform::gourl;
 use otto_platform::urlprivacy;
 
 /// Everything fixed at startup that the boundary is computed from.
@@ -225,16 +224,9 @@ pub(crate) fn fields_unchanged(
     }
 }
 
-/// The `host[:port]` of `base_url`, never its userinfo, path, or query, which
-/// may carry credentials. Empty when the URL is absent or unparsable.
+/// The `host[:port]` of `base_url`; see [`urlprivacy::endpoint_host`].
 pub(crate) fn endpoint_host_for(base_url: &str) -> String {
-    if base_url.is_empty() {
-        return String::new();
-    }
-    match gourl::parse(base_url.as_bytes()) {
-        Ok(parsed) => canonicalize_utf8(&parsed.host),
-        Err(()) => String::new(),
-    }
+    urlprivacy::endpoint_host(base_url)
 }
 
 fn environment_value<'a>(inputs: &'a BoundaryInputs<'_>, name: &str) -> &'a str {
@@ -285,7 +277,8 @@ fn json_unchanged(redactor: &Redactor, value: &serde_json::Value) -> bool {
     }
 }
 
-/// Collects every form a credential embedded in `raw` could take.
+/// Collects every form a credential embedded in `raw` could take, as
+/// [`urlprivacy::url_secret_forms`] extracts them.
 ///
 /// Returns whether extraction is provably complete. A URL that does not parse
 /// is never complete: it may still be sent somewhere that parses it more
@@ -297,82 +290,18 @@ fn collect_url_secret_values(raw: &str, collect: &mut Collect) -> bool {
     if !collect.add(raw) {
         return false;
     }
-    let complete = collect_raw_url_secret_values(raw, collect);
-
-    let Ok(parsed) = gourl::parse(raw.as_bytes()) else {
+    let forms = urlprivacy::url_secret_forms(raw);
+    // A form the collector refuses ends the scan of the unparsed text and
+    // makes it incomplete; the forms of the parsed URL are still collected.
+    let collected = forms.raw.iter().all(|form| collect.add(form));
+    let complete = collected && forms.raw_complete;
+    let Some(parsed) = forms.parsed else {
         return false;
     };
-    if let Some(user) = parsed.user.as_ref() {
-        let username = canonicalize_utf8(user.username());
-        if !collect.add(&username) {
-            return false;
-        }
-        let mut decoded = username;
-        if let Some(password) = user.password() {
-            let password = canonicalize_utf8(password);
-            if !collect.add(&password) {
-                return false;
-            }
-            decoded.push(':');
-            decoded.push_str(&password);
-        }
-        if !collect.add(&decoded) || !collect.add(&canonicalize_utf8(&user.encoded())) {
-            return false;
-        }
-    }
-    complete
-}
-
-/// Scans the unparsed text for credentials a parser would normalize away:
-/// userinfo forms, query parameter values, and the fragment.
-fn collect_raw_url_secret_values(raw: &str, collect: &mut Collect) -> bool {
-    let (userinfo, ambiguous) = urlprivacy::userinfo_forms(raw.as_bytes());
-    for value in userinfo {
-        if !collect.add(&value) {
-            return false;
-        }
-    }
-
-    let query_start = raw.find('?');
-    let fragment_start = raw.find('#');
-    if let Some(start) = query_start
-        && fragment_start.is_none_or(|fragment| start < fragment)
-    {
-        let end = fragment_start.unwrap_or(raw.len());
-        for item in raw[start + 1..end].split(['&', ';']) {
-            let Some((_, value)) = item.split_once('=') else {
-                continue;
-            };
-            if !collect.add(value) {
-                return false;
-            }
-            if let Ok(decoded) = gourl::unescape(value.as_bytes(), gourl::Encoding::QueryComponent)
-                && !collect.add(&canonicalize_utf8(&decoded))
-            {
-                return false;
-            }
-        }
-    }
-    if let Some(start) = fragment_start {
-        let fragment = &raw[start + 1..];
-        if !collect.add(fragment) {
-            return false;
-        }
-        if let Ok(decoded) = gourl::path_unescape(fragment.as_bytes())
-            && !collect.add(&canonicalize_utf8(&decoded))
-        {
-            return false;
-        }
-        if let Ok(decoded) = gourl::unescape(fragment.as_bytes(), gourl::Encoding::QueryComponent)
-            && !collect.add(&canonicalize_utf8(&decoded))
-        {
-            return false;
-        }
-    }
-    if raw.len() > MAX_SECRET_BYTES {
+    if !parsed.iter().all(|form| collect.add(form)) {
         return false;
     }
-    !ambiguous
+    complete
 }
 
 #[cfg(test)]

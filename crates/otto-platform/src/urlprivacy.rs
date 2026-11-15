@@ -5,7 +5,10 @@
 //! embeds a credential that has to be redacted from transcripts and withheld
 //! from sandboxed children. This module answers two questions about one value:
 //! which byte sequences are credential material, and whether that extraction
-//! can be proven complete.
+//! can be proven complete. [`userinfo_forms`] answers them for any text;
+//! [`url_secret_forms`] adds the query values, the fragment and the parsed
+//! userinfo of one URL; [`endpoint_host`] returns the part of a URL that
+//! carries no credential.
 //!
 //! Everything here is a pure function over borrowed bytes. There is no shared
 //! state, no I/O, and nothing to cancel. Bytes rather than `str` because
@@ -94,6 +97,94 @@ pub fn userinfo_forms(raw: &[u8]) -> (Vec<String>, bool) {
 
 /// The authority of `raw` when it has the shape of a normal URL, that is
 /// `scheme://authority...` or `//authority...` with a non-empty authority.
+/// The `host[:port]` of `url`, never its userinfo, path, or query, which may
+/// carry credentials. Empty when the URL is empty or does not parse.
+pub fn endpoint_host(url: &str) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+    match gourl::parse(url.as_bytes()) {
+        Ok(parsed) => safetext::canonicalize_utf8(&parsed.host),
+        Err(()) => String::new(),
+    }
+}
+
+/// Every form a credential embedded in one URL can take, in the order a caller
+/// records them.
+pub struct UrlSecretForms {
+    /// Forms found in the unparsed text, which a parser would normalize away:
+    /// the [`userinfo_forms`], each query parameter value as written and
+    /// unescaped, and the fragment as written, path-unescaped and
+    /// query-unescaped.
+    pub raw: Vec<String>,
+    /// Whether `raw` is provably every credential in the unparsed text: the
+    /// userinfo extraction is not ambiguous and the URL is at most
+    /// [`safetext::MAX_SECRET_BYTES`] long.
+    pub raw_complete: bool,
+    /// Forms from the parsed URL: the username, the password when present,
+    /// `username[:password]` and the escaped userinfo. `None` when the URL
+    /// does not parse; it may still be sent somewhere that parses it more
+    /// leniently, so the extraction is then never complete.
+    pub parsed: Option<Vec<String>>,
+}
+
+/// Extracts the [`UrlSecretForms`] of `raw`.
+pub fn url_secret_forms(raw: &str) -> UrlSecretForms {
+    let (mut forms, ambiguous) = userinfo_forms(raw.as_bytes());
+
+    let query_start = raw.find('?');
+    let fragment_start = raw.find('#');
+    if let Some(start) = query_start
+        && fragment_start.is_none_or(|fragment| start < fragment)
+    {
+        let end = fragment_start.unwrap_or(raw.len());
+        for item in raw[start + 1..end].split(['&', ';']) {
+            let Some((_, value)) = item.split_once('=') else {
+                continue;
+            };
+            forms.push(value.to_string());
+            if let Ok(decoded) = gourl::unescape(value.as_bytes(), gourl::Encoding::QueryComponent)
+            {
+                forms.push(safetext::canonicalize_utf8(&decoded));
+            }
+        }
+    }
+    if let Some(start) = fragment_start {
+        let fragment = &raw[start + 1..];
+        forms.push(fragment.to_string());
+        if let Ok(decoded) = gourl::path_unescape(fragment.as_bytes()) {
+            forms.push(safetext::canonicalize_utf8(&decoded));
+        }
+        if let Ok(decoded) = gourl::unescape(fragment.as_bytes(), gourl::Encoding::QueryComponent) {
+            forms.push(safetext::canonicalize_utf8(&decoded));
+        }
+    }
+
+    let parsed = gourl::parse(raw.as_bytes()).ok().map(|url| {
+        let mut forms = Vec::new();
+        if let Some(user) = url.user.as_ref() {
+            let username = safetext::canonicalize_utf8(user.username());
+            forms.push(username.clone());
+            let mut decoded = username;
+            if let Some(password) = user.password() {
+                let password = safetext::canonicalize_utf8(password);
+                forms.push(password.clone());
+                decoded.push(':');
+                decoded.push_str(&password);
+            }
+            forms.push(decoded);
+            forms.push(safetext::canonicalize_utf8(&user.encoded()));
+        }
+        forms
+    });
+
+    UrlSecretForms {
+        raw: forms,
+        raw_complete: raw.len() <= safetext::MAX_SECRET_BYTES && !ambiguous,
+        parsed,
+    }
+}
+
 fn normal_url_authority(raw: &[u8]) -> Option<&[u8]> {
     let start = if raw.starts_with(b"//") {
         2
@@ -351,7 +442,47 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::userinfo_forms;
+    use super::{endpoint_host, url_secret_forms, userinfo_forms};
+    use otto_core::safetext;
+
+    #[test]
+    fn endpoint_host_is_the_host_and_port_only() {
+        assert_eq!(
+            endpoint_host("https://u:p@example.com:8443/v1?key=s#f"),
+            "example.com:8443"
+        );
+        assert_eq!(endpoint_host(""), "");
+        assert_eq!(endpoint_host("http://[::1"), "");
+    }
+
+    #[test]
+    fn url_secret_forms_lists_the_raw_and_the_parsed_forms() {
+        let forms = url_secret_forms("https://us%65r:p%40ss@h/p?key=a%2Fb&flag#fr%20ag");
+        assert!(forms.raw_complete);
+        for expected in ["a%2Fb", "a/b", "fr%20ag", "fr ag"] {
+            assert!(
+                forms.raw.iter().any(|form| form == expected),
+                "{expected}: {:?}",
+                forms.raw
+            );
+        }
+        assert_eq!(
+            forms.parsed.expect("the URL parses"),
+            ["user", "p@ss", "user:p@ss", "user:p%40ss"]
+        );
+    }
+
+    #[test]
+    fn url_secret_forms_reports_an_unparsable_or_oversized_url() {
+        let unparsable = url_secret_forms("http://[::1/?key=value");
+        assert!(unparsable.parsed.is_none());
+        assert!(unparsable.raw.iter().any(|form| form == "value"));
+
+        let oversized = format!("http://h/?key={}", "a".repeat(safetext::MAX_SECRET_BYTES));
+        let forms = url_secret_forms(&oversized);
+        assert!(!forms.raw_complete);
+        assert_eq!(forms.parsed, Some(Vec::new()));
+    }
 
     /// Runs one case: userinfo in the authority is distinguished from a `@`
     /// in the path, query, or fragment.

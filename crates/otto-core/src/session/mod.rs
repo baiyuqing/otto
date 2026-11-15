@@ -208,25 +208,14 @@ pub enum SessionError {
     Persist(String),
 }
 
-/// Platform-specific bounds for an append-only transcript.
-///
-/// Native session futures are `Send`, so shared session references must be
-/// `Sync`. WASM session futures are local and do not need that bound.
-#[cfg(not(target_arch = "wasm32"))]
+/// Bounds for an append-only transcript: session futures are `Send`, so
+/// shared session references must be `Sync`.
 pub trait SessionBounds: Sync {}
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<T: Sync + ?Sized> SessionBounds for T {}
 
-#[cfg(target_arch = "wasm32")]
-pub trait SessionBounds {}
-
-#[cfg(target_arch = "wasm32")]
-impl<T: ?Sized> SessionBounds for T {}
-
 /// An append-only transcript.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 pub trait Session: SessionBounds {
     /// Stable runner identity when this transcript has one (for example its
     /// persisted header ID). Wrappers must forward this identity unchanged.
@@ -544,8 +533,7 @@ impl MemorySession {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Session for MemorySession {
     fn session_id(&self) -> Option<String> {
         self.session_id.clone()

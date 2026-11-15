@@ -4,8 +4,7 @@ use super::*;
 struct OperationalExecutor {
     calls: Arc<AtomicUsize>,
 }
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for OperationalExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         ["grep", "find", "read", "ls", "edit", "write", "bash"]
@@ -34,8 +33,7 @@ struct RewriteHook {
     before: AtomicUsize,
     rewrite: bool,
 }
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl crate::agent::hooks::Hooks for RewriteHook {
     async fn run(
         &self,
@@ -56,8 +54,7 @@ impl crate::agent::hooks::Hooks for RewriteHook {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn placeholders_are_rejected_before_hooks_or_effects_and_safe_replanning_can_continue() {
     let calls = Arc::new(AtomicUsize::new(0));
     let hooks = Arc::new(RewriteHook::default());
@@ -107,8 +104,7 @@ async fn placeholders_are_rejected_before_hooks_or_effects_and_safe_replanning_c
         .any(|b| b.block_type == BlockType::ToolResult && b.text.starts_with("redacted_input:")));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_hook_cannot_rewrite_valid_arguments_into_an_executable_placeholder() {
     let calls = Arc::new(AtomicUsize::new(0));
     let hooks = Arc::new(RewriteHook {
@@ -150,8 +146,7 @@ async fn a_hook_cannot_rewrite_valid_arguments_into_an_executable_placeholder() 
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn model_feedback_does_not_change_live_json_or_persist_new_annotations() {
     let candidate = ["gh", "p_", "abcdefghijkl", "mnopqrstuvwx"].concat();
     let output = format!(r#"{{"api_key":"{candidate}","count":2}}"#);

@@ -7,7 +7,7 @@ SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
 CHAT_CONNECTOR_DIR := chat-connector
 
-.PHONY: setup-git-hooks all build run install check-fast check check-tests check-linux rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
+.PHONY: setup-git-hooks all build run install check-fast check check-tests check-linux rust-fmt rust-lint rust-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
 
 all: build
 
@@ -45,12 +45,6 @@ rust-lint: ## run clippy across the Rust workspace with warnings as errors
 
 rust-test: ## run the full native Rust test suite
 	cargo test --workspace
-
-rust-wasm-check: ## verify otto-core still builds for wasm32
-	cargo check -p otto-core --target wasm32-unknown-unknown
-
-rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
-	wasm-pack test --node crates/otto-core
 
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
@@ -90,10 +84,10 @@ check-fast: ## local gate: only the checks for paths changed since origin/main
 
 check: code-limits rust-fmt rust-lint check-tests ## full macOS acceptance: code limits, format, lint, all Rust tests (PTY tests included), host integration (no release build; see `build`)
 
-check-tests: rust-test connect-check rust-wasm-test scripts-test ## `check` without rust-fmt and rust-lint
+check-tests: rust-test connect-check scripts-test ## `check` without rust-fmt and rust-lint
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-check-linux: code-limits rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test license-check ## Linux gate (code limits included): no Seatbelt, so no sandbox conformance
+check-linux: code-limits rust-fmt rust-lint rust-test connect-check scripts-test license-check ## Linux gate (code limits included): no Seatbelt, so no sandbox conformance
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 clean: ## remove the built binary and all Cargo build outputs in target/

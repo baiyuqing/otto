@@ -34,8 +34,7 @@ fn file_with(servers: Vec<(&str, McpServer)>) -> File {
     file
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn disabled_skips_server_validation() {
     let mut file = file_with(vec![("bad name", stdio_server(""))]);
     file.mcp.enabled = Some(false);
@@ -44,8 +43,7 @@ fn disabled_skips_server_validation() {
     assert!(runtime.servers.is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn defaults_enabled_with_no_servers() {
     let runtime = resolve_mcp(&File::default(), &HashMap::new(), "/work").expect("resolve");
     assert!(runtime.enabled);
@@ -54,16 +52,14 @@ fn defaults_enabled_with_no_servers() {
     assert!(runtime.servers.is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_invalid_server_name() {
     let file = file_with(vec![("bad name!", stdio_server("./run"))]);
     let err = resolve_mcp(&file, &HashMap::new(), "/work").unwrap_err();
     assert!(err.to_string().contains("invalid name"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn accepts_max_length_name() {
     let name = "a".repeat(32);
     let file = file_with(vec![(&name, stdio_server("./run"))]);
@@ -71,8 +67,7 @@ fn accepts_max_length_name() {
     assert_eq!(runtime.servers[0].name, name);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_too_long_name() {
     let name = "a".repeat(33);
     let file = file_with(vec![(&name, stdio_server("./run"))]);
@@ -80,8 +75,7 @@ fn rejects_too_long_name() {
     assert!(err.to_string().contains("invalid name"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_unknown_transport() {
     let mut server = stdio_server("./run");
     server.transport = "websocket".into();
@@ -90,8 +84,7 @@ fn rejects_unknown_transport() {
     assert!(err.to_string().contains("transport must be"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn stdio_requires_command() {
     let mut server = stdio_server("./run");
     server.command = None;
@@ -100,8 +93,7 @@ fn stdio_requires_command() {
     assert!(err.to_string().contains("command is required"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn stdio_rejects_http_only_fields() {
     let cases: [FieldRejectionCase; 4] = [
         (
@@ -131,8 +123,7 @@ fn stdio_rejects_http_only_fields() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn http_requires_url() {
     let mut server = http_server("https://example.com/mcp");
     server.url = None;
@@ -141,8 +132,7 @@ fn http_requires_url() {
     assert!(err.to_string().contains("url is required"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn http_rejects_stdio_only_fields() {
     let cases: [FieldRejectionCase; 4] = [
         (
@@ -172,8 +162,7 @@ fn http_rejects_stdio_only_fields() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn auth_defaults_to_none_and_rejects_unknown_value() {
     let file = file_with(vec![("s", http_server("https://example.com/mcp"))]);
     let runtime = resolve_mcp(&file, &HashMap::new(), "/work").expect("resolve");
@@ -189,8 +178,7 @@ fn auth_defaults_to_none_and_rejects_unknown_value() {
     assert!(err.to_string().contains("auth must be"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn oauth_fields_require_auth_oauth() {
     let mut server = http_server("https://example.com/mcp");
     server.oauth_client_id = Some("client".into());
@@ -228,8 +216,7 @@ fn oauth_fields_require_auth_oauth() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_authorization_header_with_oauth() {
     let mut server = http_server("https://example.com/mcp");
     server.auth = Some("oauth".into());
@@ -242,8 +229,7 @@ fn rejects_authorization_header_with_oauth() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn normalizes_url_trailing_slash_and_fragment() {
     let file = file_with(vec![(
         "s",
@@ -256,24 +242,21 @@ fn normalizes_url_trailing_slash_and_fragment() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_non_http_scheme() {
     let file = file_with(vec![("s", http_server("ftp://example.com/mcp"))]);
     let err = resolve_mcp(&file, &HashMap::new(), "/work").unwrap_err();
     assert!(err.to_string().contains("must use http or https"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_invalid_url() {
     let file = file_with(vec![("s", http_server("not a url"))]);
     let err = resolve_mcp(&file, &HashMap::new(), "/work").unwrap_err();
     assert!(err.to_string().contains("invalid url"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn expands_var_and_default_across_fields() {
     let mut server = stdio_server("${BIN}");
     server.args = Some(vec!["${MODE:-prod}".into()]);
@@ -306,8 +289,7 @@ fn expands_var_and_default_across_fields() {
     assert!(!entry.secrets.contains(&"prod".to_string()));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn stdio_command_args_and_cwd_substitutions_are_not_collected_as_secrets() {
     let mut server = stdio_server("${BIN}");
     server.args = Some(vec!["${ARG_VAR}".into()]);
@@ -328,8 +310,7 @@ fn stdio_command_args_and_cwd_substitutions_are_not_collected_as_secrets() {
     assert!(!entry.secrets.contains(&"sub".to_string()));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn http_url_substitutions_are_not_collected_as_secrets_but_headers_are() {
     let mut server = http_server("https://${HOST_VAR}/mcp");
     server.headers = Some(BTreeMap::from([("X-Token".into(), "${HEADER_VAR}".into())]));
@@ -341,8 +322,7 @@ fn http_url_substitutions_are_not_collected_as_secrets_but_headers_are() {
     assert!(!entry.secrets.contains(&"example.com".to_string()));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn dollar_dollar_and_bare_dollar_are_literal() {
     let mut server = stdio_server("echo $$5 and $HOME");
     server.env = None;
@@ -356,8 +336,7 @@ fn dollar_dollar_and_bare_dollar_are_literal() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn errors_on_unset_variable_without_default() {
     let server = stdio_server("${MISSING_VAR}");
     let file = file_with(vec![("s", server)]);
@@ -370,8 +349,7 @@ fn errors_on_unset_variable_without_default() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_literal_bearer_token_in_header() {
     let mut server = http_server("https://example.com/mcp");
     server.headers = Some(BTreeMap::from([(
@@ -386,8 +364,7 @@ fn rejects_literal_bearer_token_in_header() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_known_credential_prefixes_in_env() {
     for value in ["ghp_abcdef", "sk-abcdef", "xoxb-abcdef", "xoxp-abcdef"] {
         let mut server = stdio_server("./run");
@@ -401,8 +378,7 @@ fn rejects_known_credential_prefixes_in_env() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn allows_credential_prefix_inside_var_reference() {
     let mut server = http_server("https://example.com/mcp");
     server.headers = Some(BTreeMap::from([(
@@ -426,8 +402,7 @@ fn allows_credential_prefix_inside_var_reference() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn stdio_child_env_includes_inherited_keys_when_present_and_not_overridden() {
     let mut server = stdio_server("./run");
     server.env = Some(BTreeMap::from([("PATH".into(), "/custom/bin".into())]));
@@ -454,8 +429,7 @@ fn stdio_child_env_includes_inherited_keys_when_present_and_not_overridden() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn cwd_defaults_to_workspace_path() {
     let file = file_with(vec![("s", stdio_server("./run"))]);
     let runtime = resolve_mcp(&file, &HashMap::new(), "/work").expect("resolve");
@@ -465,8 +439,7 @@ fn cwd_defaults_to_workspace_path() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn cwd_resolves_home_relative_and_rejects_unresolvable_home() {
     let mut server = stdio_server("./run");
     server.cwd = Some("~/x".into());
@@ -483,8 +456,7 @@ fn cwd_resolves_home_relative_and_rejects_unresolvable_home() {
     assert!(err.to_string().contains("cwd cannot be resolved"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn disabled_server_stays_listed_but_still_validated() {
     let mut server = stdio_server("./run");
     server.enabled = Some(false);
@@ -501,8 +473,7 @@ fn disabled_server_stays_listed_but_still_validated() {
     assert!(err.to_string().contains("command is required"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_zero_timeouts() {
     let mut file = File::default();
     file.mcp.call_timeout_secs = Some(0);
@@ -515,8 +486,7 @@ fn rejects_zero_timeouts() {
     assert!(err.to_string().contains("connect_timeout_secs"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn accepts_custom_positive_timeouts() {
     let mut file = File::default();
     file.mcp.call_timeout_secs = Some(5);
@@ -526,15 +496,13 @@ fn accepts_custom_positive_timeouts() {
     assert_eq!(runtime.connect_timeout_secs, 3);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_unknown_field_in_mcp_table() {
     let err = crate::config::parse("[mcp]\nunknown = true\n").unwrap_err();
     assert!(err.to_string().contains("unknown"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn rejects_unknown_field_in_server_table() {
     let err = crate::config::parse(
         "[mcp.servers.s]\ntransport = \"stdio\"\ncommand = \"./run\"\nunknown = true\n",
@@ -543,8 +511,7 @@ fn rejects_unknown_field_in_server_table() {
     assert!(err.to_string().contains("unknown"), "{err}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn parses_toml_example_from_spec() {
     let file = crate::config::parse(
         r#"[mcp]

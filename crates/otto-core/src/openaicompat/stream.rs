@@ -1,7 +1,6 @@
 //! Server-sent-event assembler for a Chat Completions response stream.
 //!
-//! The assembler is push-based, so it depends on no I/O trait and builds for
-//! `wasm32-unknown-unknown`. The caller feeds response bytes to
+//! The assembler is push-based, so it depends on no I/O trait. The caller feeds response bytes to
 //! [`StreamAssembler::push`] in whatever sizes the transport delivers and calls
 //! [`StreamAssembler::finish`] at end of body. Line assembly spans pushes, so
 //! the result does not depend on where the chunk boundaries fall.
@@ -298,8 +297,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn reasoning_content_and_reasoning_fields_stream_as_reasoning() {
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Look \",\"content\":null}}]}\n\n",
@@ -329,8 +327,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn a_reasoning_delta_marks_the_stream_emitted() {
         let mut assembler = StreamAssembler::new();
         let mut sink = |_: StreamEvent| {};
@@ -397,15 +394,13 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn streams_text_and_assembles_tool_call() {
         let (response, events) = assemble(TEXT_AND_TOOL_CALL.as_bytes(), 0);
         check_text_and_tool_call(&response.expect("stream assembles"), &events);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn assembly_is_independent_of_chunk_boundaries() {
         for chunk in 1..=3 {
             let (response, events) = assemble(TEXT_AND_TOOL_CALL.as_bytes(), chunk);
@@ -413,8 +408,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn handles_sse_framing_and_multiple_indexed_calls() {
         let large = "x".repeat(70 << 10);
         let body = format!(
@@ -461,8 +455,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn emits_stable_tool_call_identity_for_interleaved_continuations() {
         let body = concat!(
             "data: \
@@ -509,8 +502,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_malformed_or_incomplete_streams() {
         let cases: &[(&str, &str, &str)] = &[
             (
@@ -539,8 +531,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn maps_unknown_finish_reason() {
         let body = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\ndata: [DONE]\n\n";
         let (response, _) = assemble(body.as_bytes(), 0);
@@ -550,8 +541,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn parses_both_cached_token_spellings() {
         let cases: &[(&str, i64)] = &[
             (
@@ -581,8 +571,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn preserves_usage_presence() {
         let missing =
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
@@ -597,8 +586,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn accepts_bare_data_lines_and_no_space_after_the_colon() {
         let body = "data\ndata:{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata:[DONE]\n\n";
         let (response, events) = assemble(body.as_bytes(), 0);
@@ -609,8 +597,7 @@ mod tests {
         assert_eq!(events, [StreamEvent::TextDelta { text: "hi".into() }]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn dispatches_a_trailing_event_that_has_no_blank_line() {
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}\n\ndata: [DONE]";
         let (response, _) = assemble(body.as_bytes(), 0);
@@ -622,8 +609,7 @@ mod tests {
 
     /// Phase 4 hands the provider's own sink straight to the assembler, so
     /// [`crate::provider::StreamSink`] has to coerce to the callback type.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn accepts_the_provider_stream_sink() {
         let mut count = 0usize;
         let mut sink = |_event: StreamEvent| count += 1;
@@ -639,8 +625,7 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn ignores_bytes_after_done_and_reports_emission() {
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: [DONE]\n\ndata: {not-json}\n\n";
         let mut events = Vec::new();

@@ -1,8 +1,8 @@
 //! Resolution of a Pi v3 entry tree into Otto's message list, and the
 //! model-to-entry direction used when appending.
 //!
-//! Nothing here touches the filesystem, the clock, or randomness, so the whole
-//! module builds for `wasm32-unknown-unknown`.
+//! Nothing here touches the filesystem, the clock, or randomness, so the module
+//! performs no I/O.
 //!
 //! Ownership: every function takes borrowed input and returns owned values.
 //! Concurrency: no shared state. Errors: every failure is a [`PiError`],

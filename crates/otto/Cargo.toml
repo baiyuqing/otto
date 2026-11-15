@@ -21,7 +21,7 @@ test-support = ["fault-injection"]
 
 [dependencies]
 # Static shell analysis for approval rules and review facts (`approval::shell`).
-# Native-only C grammar; otto-core must stay wasm32-buildable.
+# C grammar, compiled by the build script.
 tree-sitter = "=0.27.1"
 tree-sitter-bash = "=0.25.1"
 otto-core.workspace = true
@@ -34,8 +34,8 @@ reqwest.workspace = true
 htmd.workspace = true
 encoding_rs.workspace = true
 url.workspace = true
-# Native-only: the store timestamps records from the wall clock and converts
-# filesystem times, neither of which otto-core's wasm-safe chrono can do.
+# The store timestamps records from the wall clock and converts filesystem
+# times; otto-core's chrono has neither feature because it does no I/O.
 chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
 nix.workspace = true
@@ -53,8 +53,8 @@ tokio-util.workspace = true
 # Save() serializes, so the native crate needs "display" on top of otto-core's
 # parse-only feature set.
 toml = { workspace = true, features = ["display"] }
-# The terminal frontend (`otto::tui`). Native-only; otto-core must stay
-# wasm32-buildable so these are not workspace dependencies.
+# The terminal frontend (`otto::tui`); only this crate uses them, so they are
+# not workspace dependencies.
 pulldown-cmark = { version = "=0.13.6", default-features = false }
 # `all-widgets`/`macros`/`underline-color` are dropped: this TUI uses only the
 # widgets ratatui-widgets ships unconditionally (Paragraph, Block, List,

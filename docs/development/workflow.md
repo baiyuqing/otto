@@ -20,7 +20,7 @@ After merge, remove the worktree and its local branch.
 
 ## Rust workflow
 
-Use the toolchain and `wasm32-unknown-unknown` target pinned in
+Use the toolchain pinned in
 [`rust-toolchain.toml`](../../rust-toolchain.toml). Workspace dependencies are exact-pinned in
 `Cargo.toml`. Keep platform-specific code behind `cfg`.
 
@@ -39,15 +39,13 @@ Canonical targets (see root `Makefile`):
 | `make rust-lint` | Workspace/all-targets Clippy with warnings denied |
 | `make rust-test` | Workspace native tests, including PTY tests |
 | `make test-tui` | Only `tui_pty` and `tui_attach_pty` |
-| `make rust-wasm-check` | Check portable core for wasm32 |
-| `make rust-wasm-test` | Core WASM tests under Node (`wasm-pack`) |
 | `make connect-check` | Build test runtime; Go formatting, vet and race tests |
 | `make scripts-test` | Offline Node tests beside scripts |
 | `make license-check` | Rust non-dev dependency license policy |
 | `make code-limits` | File length, line length and file-name limits |
 | `make check` | macOS: code limits, formatting, lint and `check-tests` |
-| `make check-tests` | Native, connector, WASM and script tests; diff whitespace check |
-| `make check-linux` | Code limits, formatting, lint, native/connector tests, WASM check, script/license checks |
+| `make check-tests` | Native, connector and script tests; diff whitespace check |
+| `make check-linux` | Code limits, formatting, lint, native/connector tests, script/license checks |
 | `make check-fast` | Manual path-selected checks since merge-base with `origin/main` |
 
 The gates do not build a release binary or browser frontend. `connect-check`
@@ -134,7 +132,7 @@ scenario module rather than duplicating harnesses.
 
 ## Web UI workflow
 
-The browser frontend and WASM bindings are in
+The browser frontend is in
 [otto-plus](https://github.com/baiyuqing/otto-plus), not this checkout. Native
 build/install and verification do not require a web bundle. Keep shared API
 contracts in Otto and client implementation/tests in the frontend repository.

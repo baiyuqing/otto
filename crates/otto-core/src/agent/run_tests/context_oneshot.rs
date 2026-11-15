@@ -4,8 +4,7 @@ use super::*;
 
 // -- context report --------------------------------------------------------
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_context_report_lists_what_the_next_request_sends() {
     let agent = Agent::new(
         FakeProvider::new(vec![
@@ -79,8 +78,7 @@ async fn the_context_report_lists_what_the_next_request_sends() {
     assert!(report.estimated_total > 0);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn prompt_parts_that_do_not_match_the_prompt_fall_back_to_one_part() {
     let agent = Agent::new(
         FakeProvider::new(Vec::new()),
@@ -174,8 +172,7 @@ pub(super) fn text_request<'a>(
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn complete_text_sends_one_tool_less_redacted_message_and_touches_no_history() {
     const SECRET: &str = "sk-live-abcdef";
     let mut turn = Turn::summary("the answer");
@@ -220,8 +217,7 @@ async fn complete_text_sends_one_tool_less_redacted_message_and_touches_no_histo
     assert!(agent.session.messages().is_empty(), "no history appended");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn complete_text_redacts_the_response() {
     const SECRET: &str = "sk-live-abcdef";
     let provider = FakeProvider::new(vec![Turn::summary(&format!("leaked {SECRET}"))]);
@@ -243,8 +239,7 @@ async fn complete_text_redacts_the_response() {
     assert!(!response.text.contains(SECRET), "{}", response.text);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn complete_text_rejects_a_tool_call_a_wrong_role_and_an_oversized_answer() {
     let cases = [
         (Turn::tool_call("c1", "{}"), "non-text block"),
@@ -289,8 +284,7 @@ async fn complete_text_rejects_a_tool_call_a_wrong_role_and_an_oversized_answer(
     assert!(error.to_string().contains("assistant"), "{error}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn complete_text_stops_a_stream_that_runs_past_its_bound() {
     let turn = Turn::summary("x").with_events(vec![
         StreamEvent::TextDelta {
@@ -317,8 +311,7 @@ async fn complete_text_stops_a_stream_that_runs_past_its_bound() {
     assert!(error.to_string().contains("exceeded"), "{error}");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn complete_text_does_not_call_the_provider_when_already_cancelled_or_boundary_closed() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::summary("never")]),
@@ -356,8 +349,7 @@ async fn complete_text_does_not_call_the_provider_when_already_cancelled_or_boun
 }
 
 struct ApprovalBarrierExecutor(Arc<AtomicUsize>);
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for ApprovalBarrierExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()
@@ -378,8 +370,7 @@ impl ToolExecutor for ApprovalBarrierExecutor {
         EchoExecutor::default().execute(call, control).await
     }
 }
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn approval_barrier_settles_later_batch_calls_without_dispatch() {
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = Agent::new(
@@ -407,8 +398,7 @@ pub(super) struct CompactionHooks {
     events: Mutex<Vec<String>>,
     deny: bool,
 }
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl crate::agent::hooks::Hooks for CompactionHooks {
     async fn run(
         &self,
@@ -431,8 +421,7 @@ impl crate::agent::hooks::Hooks for CompactionHooks {
         Ok(Default::default())
     }
 }
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn compaction_hooks_gate_the_provider_and_observe_only_committed_checkpoints() {
     for deny in [false, true] {
         let hooks = Arc::new(CompactionHooks {

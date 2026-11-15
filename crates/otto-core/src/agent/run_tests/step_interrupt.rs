@@ -29,8 +29,7 @@ impl BlockingExecutor {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl ToolExecutor for BlockingExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
         EchoExecutor::default().definitions()
@@ -73,8 +72,7 @@ struct InterruptedFirstCallProvider {
     scripted: FakeProvider,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Provider for InterruptedFirstCallProvider {
     async fn complete(
         &self,
@@ -149,8 +147,7 @@ fn ended_outcomes(session: &TurnRecordingSession) -> Vec<TurnOutcome> {
         .collect()
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_interrupt_during_a_tool_batch_delivers_guidance_in_the_same_turn() {
     let steering = Arc::new(Steering::default());
     let invocations = Arc::new(AtomicUsize::new(0));
@@ -214,8 +211,7 @@ async fn an_interrupt_during_a_tool_batch_delivers_guidance_in_the_same_turn() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_interrupt_during_a_provider_call_delivers_guidance_in_the_same_turn() {
     let steering = Arc::new(Steering::default());
     let agent = Agent::new(
@@ -281,8 +277,7 @@ async fn an_interrupt_during_a_provider_call_delivers_guidance_in_the_same_turn(
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_interrupt_between_steps_settles_the_next_tool_call_as_not_started() {
     let steering = Arc::new(Steering::default());
     let invocations = Arc::new(AtomicUsize::new(0));
@@ -328,8 +323,7 @@ async fn an_interrupt_between_steps_settles_the_next_tool_call_as_not_started() 
     assert!(guidance > result);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_turn_cancel_during_a_tool_call_still_cancels_the_turn() {
     let steering = Arc::new(Steering::default());
     let invocations = Arc::new(AtomicUsize::new(0));
@@ -369,8 +363,7 @@ async fn a_turn_cancel_during_a_tool_call_still_cancels_the_turn() {
     assert_eq!(agent.provider().normal_requests().len(), 1);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn interrupted_tool_results_do_not_trip_the_progress_guard() {
     let steering = Arc::new(Steering::default());
     let interrupted_steps = 13;

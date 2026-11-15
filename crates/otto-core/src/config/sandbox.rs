@@ -350,8 +350,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn defaults_to_auto_allow_and_empty_lists() {
         let got = resolve_sandbox(&SandboxConfig::default(), None).expect("resolve");
         assert_eq!(
@@ -367,8 +366,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn accepts_and_sorts_valid_settings() {
         let raw = config(
             Some("seatbelt"),
@@ -383,16 +381,14 @@ mod tests {
         assert_eq!(got.allow_env, vec!["ALPHA_TOKEN", "ZETA_TOKEN"]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_explicit_empty_modes() {
         assert!(resolve_sandbox(&config(Some(""), None, &[], &[]), None).is_err());
         assert!(resolve_sandbox(&config(None, Some(""), &[], &[]), None).is_err());
         assert!(resolve_sandbox(&SandboxConfig::default(), Some("")).is_err());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_invalid_driver_values() {
         for value in ["docker", "apple-container", "podman", "AUTO", "unknown"] {
             let err = resolve_sandbox(&config(Some(value), None, &[], &[]), None).unwrap_err();
@@ -400,8 +396,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_invalid_network_values() {
         for value in ["block", "ALLOW", "off", "unknown"] {
             let err = resolve_sandbox(&config(None, Some(value), &[], &[]), None).unwrap_err();
@@ -413,8 +408,7 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn excluded_commands_match_a_prefix_or_the_exact_command() {
         let list = entries(&["acme-cli *", "gh auth status"]);
         for command in [
@@ -440,8 +434,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn excluded_commands_never_match_a_command_that_runs_something_else() {
         let list = entries(&["acme-cli *"]);
         for command in [
@@ -468,8 +461,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn excluded_command_entries_are_validated() {
         let mut raw = SandboxConfig {
             excluded_commands: entries(&[
@@ -507,8 +499,7 @@ mod tests {
         assert!(resolve_sandbox(&raw, None).is_err());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn approve_always_derives_the_exact_command_entry() {
         assert_eq!(
             excluded_command_entry("  acme-cli auth status").as_deref(),
@@ -530,8 +521,7 @@ mod tests {
         assert!(!excluded_command_matches(&entries, "find . -name x y"));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn approve_always_refuses_commands_the_model_could_steer() {
         for (command, reason) in [
             ("acme-cli auth && rm x", "chains"),
@@ -556,8 +546,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_invalid_read_paths() {
         let too_long = format!("/{}", "x".repeat(32 * 1024));
         for path in [
@@ -579,8 +568,7 @@ mod tests {
         assert_eq!(got.read_paths, vec![boundary]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn deny_read_paths_follow_the_read_paths_text_rules_and_sort() {
         let raw = SandboxConfig {
             deny_read_paths: vec![
@@ -615,8 +603,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_invalid_or_duplicate_allow_env() {
         let cases: &[&[&str]] = &[
             &[""],
@@ -632,8 +619,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn clones_inputs_without_aliasing() {
         let raw = config(
             None,
@@ -650,8 +636,7 @@ mod tests {
         assert_eq!(got.allow_env, vec!["ALPHA_TOKEN", "ZETA_TOKEN"]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn cli_driver_takes_precedence_without_changing_other_settings() {
         let raw = config(
             Some("seatbelt"),

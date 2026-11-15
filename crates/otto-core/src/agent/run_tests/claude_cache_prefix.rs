@@ -89,8 +89,7 @@ fn assert_turn_three_reuses_turn_two_prefix(
     assert!(later.to_string().contains("second reply"));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn third_turn_reuses_second_turn_cache_prefix_with_memory_message() {
     let agent = run_three_turns(
         EchoExecutor::default(),
@@ -104,8 +103,7 @@ async fn third_turn_reuses_second_turn_cache_prefix_with_memory_message() {
     assert_turn_three_reuses_turn_two_prefix(&claude_bodies(&agent), 1, 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn later_turn_reuses_cache_prefix_after_a_tool_result_overlay() {
     let agent = run_three_turns(
         EchoExecutor {

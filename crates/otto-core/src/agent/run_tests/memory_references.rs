@@ -13,8 +13,7 @@ fn user_message_ids(session: &MemorySession) -> Vec<String> {
         .collect()
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_turn_without_a_memory_binding_writes_an_empty_record() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok")]),
@@ -35,8 +34,7 @@ async fn a_turn_without_a_memory_binding_writes_an_empty_record() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_recall_writes_an_empty_record_and_still_warns() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok")]),
@@ -69,8 +67,7 @@ async fn a_failed_recall_writes_an_empty_record_and_still_warns() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn two_turns_write_two_records_anchored_to_their_own_user_messages() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("first"), Turn::text("second")]),
@@ -97,8 +94,7 @@ async fn two_turns_write_two_records_anchored_to_their_own_user_messages() {
     assert_eq!(anchored, user_ids);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_tool_loop_writes_one_record_per_turn() {
     let agent = Agent::new(
         FakeProvider::new(vec![

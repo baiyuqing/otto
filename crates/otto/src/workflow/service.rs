@@ -301,7 +301,7 @@ impl Controller {
             .and_then(std::sync::Weak::upgrade);
         if let Some(service) = service {
             let domain = self.approval_request(request_id)?;
-            let request = crate::approval::workflow::publish(&service, &self.workspace, &domain)
+            let request = crate::workflow::approval::publish(&service, &self.workspace, &domain)
                 .map_err(approval_failure)?;
             service
                 .decide(

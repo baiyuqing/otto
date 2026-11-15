@@ -406,14 +406,14 @@ impl ToolExecutor for ChildTools {
                     .await,
                 );
             }
-            crate::workflow::provenance::non_parent(self.registry.execute_with_scope(
+            crate::subagent::provenance::non_parent(self.registry.execute_with_scope(
                 call,
                 control,
                 Some(&scope),
             ))
             .await
         } else {
-            crate::workflow::provenance::non_parent(self.registry.execute(call, control)).await
+            crate::subagent::provenance::non_parent(self.registry.execute(call, control)).await
         }
     }
 }

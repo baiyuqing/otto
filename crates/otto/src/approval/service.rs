@@ -280,10 +280,10 @@ impl Service {
         let Some(claim) = self.store.claim(id)? else {
             return Ok(Recovery::Active);
         };
-        if crate::subagent::record::process_matches(claim.pid, &claim.started) != Some(false) {
+        if crate::process_identity::process_matches(claim.pid, &claim.started) != Some(false) {
             return Ok(Recovery::Active);
         }
-        let (pid, started) = crate::subagent::record::current_process();
+        let (pid, started) = crate::process_identity::current_process();
         let next = Claim {
             owner: self.owner.clone(),
             pid,

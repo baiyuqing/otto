@@ -589,7 +589,7 @@ fn adapt_server(
             .unwrap_or("/usr/bin:/bin");
         let executable = std::env::split_paths(path)
             .find_map(|directory| {
-                crate::runtime::sandbox_runtime::canonical_executable_file(
+                crate::fsops::canonical_executable_file(
                     &Path::new(cwd).join(directory).join(&*command),
                 )
                 .ok()

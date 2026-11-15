@@ -642,7 +642,7 @@ impl Service {
         let Ok(_permit) = slots().clone().try_acquire_owned() else {
             return Ok(());
         };
-        let (pid, started) = crate::subagent::record::current_process();
+        let (pid, started) = crate::process_identity::current_process();
         static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let lease = ReviewLease {

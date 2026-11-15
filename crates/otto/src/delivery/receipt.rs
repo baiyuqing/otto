@@ -359,7 +359,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
             return Err("delivery task binding is invalid".into());
         }
         let worktree = worktree.to_string_lossy().into_owned();
-        let (owner_pid, owner_started) = crate::subagent::record::current_process();
+        let (owner_pid, owner_started) = crate::process_identity::current_process();
         let connection = self
             .connection
             .lock()
@@ -504,7 +504,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
             .filter(|(_, pid, started)| {
                 *pid == 0
                     || started.is_empty()
-                    || crate::subagent::record::process_matches(*pid, started) == Some(false)
+                    || crate::process_identity::process_matches(*pid, started) == Some(false)
             })
             .map(|(approval_id, _, _)| approval_id)
             .collect())
@@ -571,7 +571,7 @@ CREATE TABLE IF NOT EXISTS delivery_tasks (
             state if state == expected => {
                 // Entering `applying` records this process as the owner.
                 let (owner_pid, owner_started) = if next == ReceiptState::Applying {
-                    crate::subagent::record::current_process()
+                    crate::process_identity::current_process()
                 } else {
                     (0, String::new())
                 };

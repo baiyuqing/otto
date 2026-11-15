@@ -20,7 +20,6 @@
 //! tool result.
 
 pub mod ownership;
-pub mod recovery;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

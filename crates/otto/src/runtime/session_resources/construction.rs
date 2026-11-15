@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use otto_core::agent::inbox::Inbox;
 
 use super::SessionResources;
-use crate::failover;
 use crate::runtime::builder::{Builder, SharedSession};
 use crate::schedule::remind::Reminders;
 use crate::subagent;
@@ -97,7 +96,7 @@ impl Builder {
         let starting_counter = 0;
         match &self.task_recorder {
             Some(store) => {
-                let (pid, process_started_at) = subagent::record::current_process();
+                let (pid, process_started_at) = crate::process_identity::current_process();
                 let parent_session = if self.no_session {
                     format!("memory:{pid}:{process_started_at}")
                 } else {
@@ -163,7 +162,7 @@ impl Builder {
         if self.sidecar_path(session, "inbox.json").is_none() {
             return;
         }
-        let recovery_warnings = failover::recovery::notify(
+        let recovery_warnings = subagent::session_recovery::notify(
             inbox.as_ref(),
             session.take_recovery(),
             children_dir,

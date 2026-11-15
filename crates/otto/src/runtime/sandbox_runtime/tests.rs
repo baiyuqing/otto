@@ -209,28 +209,3 @@ fn an_unavailable_runtime_without_a_reason_reports_a_runtime_failure() {
     let runtime = unavailable(SandboxReason::None, Vec::new(), true);
     assert_eq!(runtime.info.reason, SandboxReason::RuntimeFailure);
 }
-
-#[test]
-fn the_shell_must_be_a_regular_executable_file() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    assert!(canonical_executable_file(Path::new("/bin/sh")).is_ok());
-    assert!(canonical_executable_file(Path::new("")).is_err());
-    assert!(canonical_executable_file(dir.path()).is_err());
-    assert!(canonical_executable_file(Path::new("/bin/does-not-exist")).is_err());
-}
-
-#[test]
-fn a_canonical_directory_follows_symlinks_and_rejects_files() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let real = dir.path().join("real");
-    std::fs::create_dir(&real).expect("mkdir");
-    let link = dir.path().join("link");
-    std::os::unix::fs::symlink(&real, &link).expect("symlink");
-    assert_eq!(
-        canonical_directory(&link).expect("resolve"),
-        std::fs::canonicalize(&real).expect("canonical")
-    );
-    let file = dir.path().join("file");
-    std::fs::write(&file, "").expect("write");
-    assert!(canonical_directory(&file).is_err());
-}

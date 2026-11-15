@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::sandbox_runtime::canonical_directory;
+use crate::fsops::canonical_directory;
 
 /// Why a requested workspace path was rejected.
 #[derive(Debug, PartialEq, Eq)]

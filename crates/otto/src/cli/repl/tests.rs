@@ -73,7 +73,7 @@ async fn background_notices_print_before_the_prompt() {
         .find("memory: 1 candidate(s) queued")
         .expect("the notice is printed");
     let prompt = stdout
-        .find(crate::tui::gutter::USER_MARK)
+        .find(crate::cli::repl::USER_MARK)
         .expect("a prompt is printed");
     assert!(
         notice < prompt,

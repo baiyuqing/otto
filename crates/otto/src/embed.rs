@@ -95,9 +95,9 @@ use crate::runtime::builder::Builder;
 use crate::runtime::sandbox_switch::SandboxReloader;
 use crate::runtime::startup::{self, Disabled, StartOptions, WorkspaceSandbox};
 pub use crate::runtime::wiring::MemoryExtension;
-use crate::runtime::workspace_admission::{self as admission, Admission};
 use crate::sandbox::control::SandboxControl;
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
+use crate::workspace::admission::{self as admission, Admission};
 
 pub use crate::app::approval::{ApprovalDecision, ApprovalRequest, Stop};
 pub use crate::app::{ForkedFrom, Info};

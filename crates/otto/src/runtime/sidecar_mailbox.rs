@@ -66,7 +66,7 @@ pub(crate) fn hold_local_input_recovery(
 /// by 32 random hex digits, or empty when randomness is unavailable (the
 /// notification is then delivered at least once).
 pub fn new_input_id() -> String {
-    super::builder::random_id()
+    crate::random::random_id()
         .map(|random| format!("in_{random}"))
         .unwrap_or_default()
 }

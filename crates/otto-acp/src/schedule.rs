@@ -129,7 +129,7 @@ pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -
             )
         }
     };
-    let client_id = otto::runtime::builder::random_id().ok()?;
+    let client_id = otto::random::random_id().ok()?;
     if store
         .register_delivery_client(
             &client_id,

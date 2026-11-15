@@ -29,14 +29,14 @@ use otto_server::listen::{AllowedHosts, Listener, listen_tcp, listen_unix};
 use otto_server::tls::{TlsListener, load_acceptor};
 use otto_server::{self, Factory, Info, Options, SESSION_NOT_FOUND, Server};
 
+use otto::fsops::canonical_directory;
 use otto::runtime::builder::Builder;
-use otto::runtime::sandbox_runtime::canonical_directory;
 use otto::runtime::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use otto::runtime::startup::{Disabled, load_workspace};
-use otto::runtime::workspace_admission::{
+use otto::sandbox::info::SandboxInfo;
+use otto::workspace::admission::{
     Admission, admit_workspace, canonicalize_workspace_roots, trusted_projects,
 };
-use otto::sandbox::info::SandboxInfo;
 
 mod delivery;
 mod factory;
@@ -397,8 +397,7 @@ fn bind(listen: &ServerRuntime, server_token: &str, log: &Arc<Logger>) -> Result
             bound.token = server_token.to_string();
             bound.token_from_env = true;
         } else {
-            bound.token =
-                otto::runtime::builder::random_id().map_err(|error| format!("serve: {error}"))?;
+            bound.token = otto::random::random_id().map_err(|error| format!("serve: {error}"))?;
         }
         let acceptor = listen
             .tls

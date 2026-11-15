@@ -40,7 +40,7 @@ impl Controller {
                             .as_ref()
                             .and_then(std::sync::Weak::upgrade)
                         {
-                            crate::approval::workflow::publish(&service, &self.workspace, &request)
+                            crate::workflow::approval::publish(&service, &self.workspace, &request)
                                 .map_err(approval_failure)?;
                         }
                     }
@@ -104,7 +104,7 @@ impl Controller {
                         .step_timeout
                         .map_or_else(Deadline::unlimited, Deadline::after);
                     let control = Control::new(deadline);
-                    let execute = super::super::provenance::non_parent(executor.execute(attempt.clone(), &control));
+                    let execute = crate::subagent::provenance::non_parent(executor.execute(attempt.clone(), &control));
                     tokio::pin!(execute);
                     let mut timed_out = false;
                     let result = tokio::select! {

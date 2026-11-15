@@ -176,7 +176,7 @@ fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transc
 
 /// S7: the central migration path, exercised end to end from
 /// [`Runner::migrate`] down through [`crate::subagent::tasks::Tasks::begin_migration`]
-/// and [`crate::failover::recovery::notify_moved`]: a running task and a
+/// and [`crate::subagent::session_recovery::notify_moved`]: a running task and a
 /// queued task are both cancelled, both transcripts end up recorded
 /// interrupted, the parent inbox gets no `task_finished` notification for
 /// either, and it gets exactly one "moved" notification naming both.

@@ -1,7 +1,8 @@
 //! Lexical path helpers with Go `path/filepath` semantics.
 //!
 //! The workspace boundary and the search tools compare, split, and rebuild
-//! paths exactly the way `internal/tool` does. Rust's `std::path` has no
+//! paths with these functions, ported from Go (Otto was written in Go until
+//! #92). Rust's `std::path` has no
 //! lexical `Clean`, and its `Path::join`/`parent` differ from Go's `Join`/`Dir`
 //! on trailing separators, repeated separators, and `..`, so the Go functions
 //! are reproduced here on raw bytes.

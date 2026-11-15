@@ -47,8 +47,7 @@ mod tests {
         parse,
     };
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn project_plugins_can_only_add_disabling_preferences() {
         let mut merged = Merged::default();
         merged.add("[plugins]\nenabled=false\ndisabled=['one']\n[plugins.bindings.'one:tools'.env]\nTOKEN='${TOKEN}'", "user", Layer::User, true).unwrap();
@@ -71,8 +70,7 @@ mod tests {
                 .any(|d| d.key == "plugins.enabled")
         );
     }
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn project_can_disable_but_not_change_binding_authority() {
         let mut merged = Merged::default();
         merged
@@ -82,8 +80,7 @@ mod tests {
         assert!(parse("[plugins]\nunknown=true").is_err());
         assert_ne!(File::default().plugins.enabled, Some(false));
     }
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn memory_component_parses_and_is_omitted_when_absent() {
         let with: Components = serde_json::from_str(
             r#"{"version":1,"memory":{"command":["run","x"],"timeout":"5s"}}"#,
@@ -99,8 +96,7 @@ mod tests {
         assert!(!serde_json::to_string(&without).unwrap().contains("memory"));
         assert!(serde_json::to_string(&with).unwrap().contains("\"memory\""));
     }
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn credential_names_are_explicit_and_deduplicated() {
         let file=parse("[plugins.bindings.'example:tools'.env]\nA='${TOKEN}'\nB='${TOKEN:-fallback}'\nC='literal'\n[plugins.bindings.'example:remote'.headers]\nX='${REMOTE_KEY}'").unwrap();
         assert_eq!(

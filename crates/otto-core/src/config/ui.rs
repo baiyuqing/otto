@@ -173,15 +173,13 @@ mod tests {
         }));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn defaults_to_auto() {
         let mode = resolve_ui_mode(&File::default(), &HashMap::new(), "").expect("resolve");
         assert_eq!(mode, UiMode::Auto);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn override_wins_over_env_and_file() {
         let mut file = File::default();
         file.ui.mode = "tui".into();
@@ -191,8 +189,7 @@ mod tests {
         assert_eq!(mode, UiMode::Auto);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn env_wins_over_file() {
         let mut file = File::default();
         file.ui.mode = "tui".into();
@@ -202,8 +199,7 @@ mod tests {
         assert_eq!(mode, UiMode::Repl);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn file_is_used_last() {
         let mut file = File::default();
         file.ui.mode = "tui".into();
@@ -211,8 +207,7 @@ mod tests {
         assert_eq!(mode, UiMode::Tui);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_unknown_mode() {
         let err = resolve_ui_mode(&File::default(), &HashMap::new(), "bogus").unwrap_err();
         assert!(err.to_string().contains("invalid ui mode"), "{err}");

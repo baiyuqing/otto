@@ -291,8 +291,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn every_baseline_alias_is_known() {
         let cases: &[Case] = &[
             known_case("gpt-5.6", 1_050_000, 922_000, 272_000, 128_000),
@@ -386,8 +385,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn uses_exact_aliases_and_wrappers() {
         let known_cases: &[Case] = &[
             known_case("gpt-5.6-sol", 1_050_000, 922_000, 272_000, 128_000),

@@ -18,8 +18,7 @@ impl ObservingMemory {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl MemoryRecall for ObservingMemory {
     async fn recall(
         &self,
@@ -72,8 +71,7 @@ async fn run_tool_turn(memory: Arc<ObservingMemory>) -> (Result<(), AgentError>,
     (result, events)
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_observing_binding_receives_the_turn_without_hooks() {
     let memory = ObservingMemory::new(true, None);
     let (result, _) = run_tool_turn(memory.clone()).await;
@@ -107,8 +105,7 @@ async fn an_observing_binding_receives_the_turn_without_hooks() {
     assert_eq!(observed[0].1["messages"][0]["blocks"][0]["text"], "hello");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_binding_that_does_not_observe_receives_no_turn() {
     let memory = ObservingMemory::new(false, None);
     let (result, _) = run_tool_turn(memory.clone()).await;
@@ -116,8 +113,7 @@ async fn a_binding_that_does_not_observe_receives_no_turn() {
     assert!(memory.observed.lock().unwrap().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failed_observation_is_a_warning_and_the_run_succeeds() {
     let memory = ObservingMemory::new(true, Some("observe down"));
     let (result, events) = run_tool_turn(memory.clone()).await;

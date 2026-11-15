@@ -2,8 +2,7 @@
 
 use super::*;
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_options_cache_key_reaches_the_provider_request() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok")]),
@@ -22,8 +21,7 @@ async fn the_options_cache_key_reaches_the_provider_request() {
     assert_eq!(requests[0].cache_key, "sess-1");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn image_is_persisted_and_sent_with_the_user_prompt() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok")]),
@@ -51,8 +49,7 @@ async fn image_is_persisted_and_sent_with_the_user_prompt() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn image_without_text_is_persisted_and_sent() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok")]),
@@ -79,8 +76,7 @@ async fn image_without_text_is_persisted_and_sent() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn steering_is_delivered_to_the_active_run_and_closed_before_finish() {
     let steering = Arc::new(crate::agent::steering::Steering::default());
     let provider = FakeProvider::new(vec![Turn::text("first"), Turn::text("second")]);
@@ -143,8 +139,7 @@ async fn steering_is_delivered_to_the_active_run_and_closed_before_finish() {
     assert_eq!(request_guidance, ["change course", "and check the result"]);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn steering_waits_until_the_full_tool_batch_finishes() {
     let steering = Arc::new(crate::agent::steering::Steering::default());
     let agent = Agent::new(
@@ -193,8 +188,7 @@ async fn steering_waits_until_the_full_tool_batch_finishes() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn cancellation_discards_undelivered_steering() {
     let steering = Arc::new(crate::agent::steering::Steering::default());
     let cancel = CancellationToken::new();
@@ -248,8 +242,7 @@ async fn cancellation_discards_undelivered_steering() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn followup_request_is_context_not_user_authority() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("done")]),
@@ -286,8 +279,7 @@ async fn followup_request_is_context_not_user_authority() {
 
 // -- inbox and wake turns --------------------------------------------------
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn pending_notifications_are_delivered_before_the_user_message() {
     let inbox = Arc::new(Inbox::default());
     inbox.push(Notification {
@@ -353,8 +345,7 @@ async fn pending_notifications_are_delivered_before_the_user_message() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_inbox_is_drained_again_before_the_next_provider_request() {
     let inbox = Arc::new(Inbox::default());
     let provider = FakeProvider::new(vec![
@@ -402,8 +393,7 @@ async fn the_inbox_is_drained_again_before_the_next_provider_request() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn user_input_queued_during_a_provider_call_continues_the_same_turn() {
     let inbox = Arc::new(Inbox::default());
     let provider = FakeProvider::new(vec![Turn::text("first"), Turn::text("second")]);
@@ -448,8 +438,7 @@ async fn user_input_queued_during_a_provider_call_continues_the_same_turn() {
     assert_eq!(agent.provider().normal_requests().len(), 2);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn empty_text_without_notifications_fails() {
     let provider = FakeProvider::new(Vec::new());
     let agent = Agent::new(
@@ -473,8 +462,7 @@ async fn empty_text_without_notifications_fails() {
     assert!(agent.provider().requests().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn empty_text_with_a_notification_is_a_wake_turn() {
     let inbox = Arc::new(Inbox::default());
     inbox.push(Notification {
@@ -503,8 +491,7 @@ async fn empty_text_with_a_notification_is_a_wake_turn() {
     assert_eq!(messages[0].context_type, "task_notification");
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_notification_without_a_generated_task_id_still_persists() {
     let inbox = Arc::new(Inbox::default());
     inbox.push(Notification {

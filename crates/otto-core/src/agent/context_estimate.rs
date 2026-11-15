@@ -274,9 +274,9 @@ mod tests {
     #[test]
     fn estimate_request_falls_back_to_stable_system_messages_and_tools() {
         // The two schemas differ only in key order. serde_json keeps
-        // insertion order in native workspace builds and sorts keys in a
-        // wasm32 otto-core build, so the serialized strings may differ; the
-        // estimate counts characters and must not depend on the ordering.
+        // insertion order only with its `preserve_order` feature, so the
+        // serialized strings may differ; the estimate counts characters and
+        // must not depend on the ordering.
         let schema_a = serde_json::json!({
             "type": "object",
             "properties": {"path": {"type": "string"}, "mode": {"enum": ["r", "w"]}},

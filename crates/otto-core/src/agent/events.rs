@@ -288,13 +288,8 @@ impl Event {
 }
 
 /// The event callback a caller passes to [`super::Agent::run`]. See
-/// [`crate::provider::StreamSink`] for why the `Send` bound is target
-/// dependent.
-#[cfg(not(target_arch = "wasm32"))]
+/// [`crate::provider::StreamSink`] for why it is `Send`.
 pub type EventSink<'a> = &'a mut (dyn FnMut(Event) + Send);
-/// See the native definition above.
-#[cfg(target_arch = "wasm32")]
-pub type EventSink<'a> = &'a mut dyn FnMut(Event);
 
 /// Why a turn stopped early.
 ///

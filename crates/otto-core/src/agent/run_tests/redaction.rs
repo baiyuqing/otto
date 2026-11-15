@@ -37,8 +37,7 @@ async fn seeded_session_with_candidate(candidate: &str) -> MemorySession {
     session
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_egress_guard_redacts_ordinary_dynamic_fields_and_json() {
     let candidate = heuristic_credential();
     let email = "alice@example.com";
@@ -84,8 +83,7 @@ async fn provider_egress_guard_redacts_ordinary_dynamic_fields_and_json() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_egress_guard_redacts_local_compaction_request() {
     let candidate = heuristic_credential();
     let agent = Agent::new(
@@ -103,8 +101,7 @@ async fn provider_egress_guard_redacts_local_compaction_request() {
     assert!(!format!("{:?}", requests[0]).contains(&candidate));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn local_compaction_guard_blocks_before_planned_event_and_provider_poll() {
     let candidate = heuristic_credential();
     let session = MemorySession::new();
@@ -168,8 +165,7 @@ async fn local_compaction_guard_blocks_before_planned_event_and_provider_poll() 
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_egress_guard_redacts_remote_compaction_request() {
     let candidate = heuristic_credential();
     let provider = FakeProvider::new(vec![Turn::remote_compaction("guard-checkpoint", "opaque")])
@@ -190,8 +186,7 @@ async fn provider_egress_guard_redacts_remote_compaction_request() {
     assert!(!format!("{:?}", requests[0]).contains(&candidate));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_egress_guard_redacts_one_shot_request() {
     let candidate = heuristic_credential();
     let agent = Agent::new(
@@ -213,8 +208,7 @@ async fn provider_egress_guard_redacts_one_shot_request() {
     assert!(!format!("{:?}", requests[0]).contains(&candidate));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_egress_guard_refuses_structural_image_before_all_turn_sinks() {
     let candidate = heuristic_credential();
     let diagnostics = Arc::new(CapturingDiagnostics::default());
@@ -254,8 +248,7 @@ async fn provider_egress_guard_refuses_structural_image_before_all_turn_sinks() 
     assert!(collect(&events).is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn remote_compaction_guard_blocks_before_planned_event_and_provider_poll() {
     let candidate = heuristic_credential();
     let session = MemorySession::new();
@@ -309,8 +302,7 @@ async fn remote_compaction_guard_blocks_before_planned_event_and_provider_poll()
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn provider_egress_guard_refuses_structural_secret_without_provider_poll() {
     let candidate = heuristic_credential();
     let diagnostics = Arc::new(CapturingDiagnostics::default());
@@ -354,8 +346,7 @@ async fn provider_egress_guard_refuses_structural_secret_without_provider_poll()
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_credential_is_redacted_from_events_persistence_and_history() {
     const SECRET: &str = "sk-live-abcdef";
     let provider = FakeProvider::new(vec![
@@ -403,8 +394,7 @@ async fn a_credential_is_redacted_from_events_persistence_and_history() {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_provider_retry_is_forwarded_before_the_reply() {
     let mut turn = Turn::text("ok");
     turn.events.insert(
@@ -463,8 +453,7 @@ async fn a_provider_retry_is_forwarded_before_the_reply() {
     assert!(retry < text);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn reasoning_is_streamed_redacted_and_persisted() {
     const SECRET: &str = "sk-live-abcdef";
     let reasoning = format!("use {SECRET} then");
@@ -539,8 +528,7 @@ async fn reasoning_is_streamed_redacted_and_persisted() {
     assert_eq!(first_reply.blocks[0], Block::reasoning(redacted));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_incomplete_redactor_runs_no_provider_tool_or_session_call() {
     let provider = FakeProvider::new(vec![Turn::text("never sent")]);
     let agent = Agent::with_redactor(
@@ -568,8 +556,7 @@ async fn an_incomplete_redactor_runs_no_provider_tool_or_session_call() {
     assert!(agent.session().messages().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn an_incomplete_redactor_still_reports_cancellation() {
     let agent = Agent::with_redactor(
         FakeProvider::new(Vec::new()),
@@ -588,8 +575,7 @@ async fn an_incomplete_redactor_still_reports_cancellation() {
     assert!(agent.session().messages().is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_secret_in_the_configuration_downgrades_the_redactor() {
     let agent = Agent::with_redactor(
         FakeProvider::new(vec![Turn::text("never sent")]),

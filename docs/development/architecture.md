@@ -33,6 +33,48 @@
 - `chat-connector/` is an independent Go ACP client; it links no Otto runtime
   code. The browser UI lives in [otto-plus](https://github.com/baiyuqing/otto-plus).
 
+### Layers inside `otto`
+
+Each top-level module of `crates/otto/src` belongs to one layer. A module
+imports only modules in its own layer or in a lower layer, and the imports
+between modules of one layer contain no cycle. `otto-core` is below every
+layer; the frontend crates are above it.
+
+| Layer | Modules | Owns |
+| --- | --- | --- |
+| platform | `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr` | Process-wide primitives with no domain knowledge |
+| persistence | `storage`, `workspace`, `session`, `usage` | Storage drivers, the SQL and file layers, workspace identity, the session store |
+| capability | `auth`, `provider`, `typesafe`, `sandbox`, `config`, `tool`, `mcp`, `skill`, `memory`, `approval`, `decision` | What one agent turn uses: model access, the `Tool` trait and `Registry` with the file, Bash and web tools, sandboxed execution, memory, approval |
+| orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
+| assembly | `runtime` | Building one runnable agent from resolved configuration |
+| application | `app` | Session lifecycle shared by every frontend |
+| frontend | `embed`, `cli`, `client`, `tui` | The frontends that stay in this crate |
+| test support | `fixtures`, `faults` | Compiled only for tests or the `fault-injection` feature; production code never imports them |
+
+`crates/otto/tests/layer_boundary.rs` holds this table and checks the
+non-test source of every module. Rules:
+
+- A new top-level module is added to the table in the same PR; the test fails
+  on a module that has no layer.
+- When a lower module needs an item from a higher one, move the type or
+  contract down to the lowest layer that uses it, or define a trait in the
+  lower layer and pass the implementation in from the higher one. Do not
+  import upward.
+- `tool` holds the `Tool` trait, the `Registry`, and tools that need only the
+  platform, persistence and capability layers. A tool that belongs to a
+  feature (scheduling, sub-agents, workflows, task control, delivery) lives in
+  that feature's module and is registered by `runtime`.
+- A domain's repository implementation (SQLite or file) lives in the domain
+  module. `storage` provides the drivers, the SQL layer and the capability
+  contracts.
+- `KNOWN_VIOLATIONS` in the test lists the imports that broke these rules
+  when the table was introduced. A PR that fixes one removes its entry; the
+  test fails when an entry no longer occurs, so the list only shrinks. No
+  entry is added. Until the list is empty, the two rules above about `tool`
+  and repository placement describe the target state, not the current code.
+- Extracting a layer into its own crate happens only after its imports satisfy
+  these rules; then the extraction moves files and changes no imports.
+
 Use the [ownership map](../code-organization.md) for module entry points rather
 than duplicating their inventory here. Dependencies point toward shared
 contracts; interfaces belong at actual consumer boundaries, not speculative ones.

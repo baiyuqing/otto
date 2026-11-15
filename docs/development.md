@@ -5,7 +5,7 @@ first, then use the relevant current contract below.
 
 | Guide | Covers |
 | --- | --- |
-| [Architecture](development/architecture.md) | Package boundaries, workspace/storage ownership, lifecycle and embedding API |
+| [Architecture](development/architecture.md) | Package boundaries, layers inside `otto`, workspace/storage ownership, lifecycle and embedding API |
 | [Workflow](development/workflow.md) | Worktrees, local checks, secret scanning, changelog and releases |
 | [Testing](development/testing.md) | Test ownership, fault injection and Docker acceptance |
 | [Implementation contracts](development/contracts.md) | Safety, approvals, plugins, agent implementation and capability descriptions |

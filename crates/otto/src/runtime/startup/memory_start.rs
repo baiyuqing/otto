@@ -118,7 +118,6 @@ pub struct StartOptions {
     pub cwd: String,
     pub overrides: Overrides,
     pub logger: Arc<crate::log::Logger>,
-    pub disabled: Disabled,
 }
 
 pub struct Started {
@@ -154,9 +153,6 @@ pub async fn start(
         &options.overrides,
         &mut *stderr,
     )?;
-    // After the boundary and the credential capture, so the redaction set
-    // does not depend on the disabled components.
-    options.disabled.apply(&mut loaded.config);
     let workspace_path = canonical_workspace(&options.cwd, &loaded.boundary)?;
     let prepared = prepare_workspace(&loaded, &configured.environment, &workspace_path)?;
     let composed = compose(
@@ -168,7 +164,6 @@ pub async fn start(
             overrides: options.overrides.clone(),
             explicit_config: options.explicit_config,
             logger: options.logger,
-            disabled: options.disabled,
         },
         &loaded,
         &configured,
@@ -189,7 +184,6 @@ pub async fn start(
         None,
         &runtime.api_key_env,
         true,
-        &options.disabled,
         cancel,
         &mut *stderr,
     )

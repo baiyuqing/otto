@@ -613,12 +613,6 @@ pub(crate) fn sandbox_runtime_warning(info: &SandboxInfo) -> Option<String> {
     }
 }
 
-/// The runtime for a host that switched bash off: no executor, bash
-/// unavailable, and a redaction set that is complete because nothing opened.
-pub(crate) fn policy_disabled_runtime() -> SandboxRuntime {
-    unavailable(SandboxReason::PolicyUnsupported, Vec::new(), true)
-}
-
 fn unavailable(reason: SandboxReason, redactions: Vec<String>, complete: bool) -> SandboxRuntime {
     SandboxRuntime {
         executor: None,

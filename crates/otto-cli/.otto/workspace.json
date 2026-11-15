@@ -6,6 +6,7 @@
   "paths": [
     "/Users/user/Work/code/otto/.worktree/update-deps/crates/otto-cli",
     "/Users/user/Work/code/otto/.worktree/sqlite-migration-test/crates/otto-cli",
-    "/Users/user/Work/code/otto/.worktree/layering/crates/otto-cli"
+    "/Users/user/Work/code/otto/.worktree/layering/crates/otto-cli",
+    "/Users/user/Work/code/otto/.worktree/remove-disabled/crates/otto-cli"
   ]
 }

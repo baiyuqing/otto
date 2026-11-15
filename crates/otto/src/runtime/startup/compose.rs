@@ -11,7 +11,6 @@ pub struct ComposeOptions {
     pub overrides: Overrides,
     pub explicit_config: bool,
     pub logger: Arc<crate::log::Logger>,
-    pub disabled: Disabled,
 }
 
 pub struct Composed {
@@ -39,7 +38,6 @@ pub fn compose(
     let config_file = &loaded.config;
     let environment = &configured.environment;
     let home = &loaded.home;
-    let disabled = options.disabled;
     if options.logger.enable_diagnostics(Path::new(home)).is_err() {
         let _ = writeln!(stderr, "warning: diagnostic file logging unavailable");
     }
@@ -62,39 +60,27 @@ pub fn compose(
         Ok(config) => config,
         Err(error) => return Err(error.to_string()),
     };
-    let usage = if disabled.usage {
-        None
-    } else {
-        match storage.usage(&Path::new(home).join(".otto/usage.db")) {
-            Ok(store) => Some(store),
-            Err(_) => {
-                let _ = writeln!(
-                    stderr,
-                    "warning: usage store unavailable, continuing without usage history"
-                );
-                None
-            }
+    let usage = match storage.usage(&Path::new(home).join(".otto/usage.db")) {
+        Ok(store) => Some(store),
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "warning: usage store unavailable, continuing without usage history"
+            );
+            None
         }
     };
-    let task_recorder = if disabled.task_history {
-        None
-    } else {
-        match storage.tasks(&Path::new(home).join(".otto/tasks.db")) {
-            Ok(store) => Some(store),
-            Err(_) => {
-                let _ = writeln!(
-                    stderr,
-                    "warning: task history store unavailable, continuing without task recording"
-                );
-                None
-            }
+    let task_recorder = match storage.tasks(&Path::new(home).join(".otto/tasks.db")) {
+        Ok(store) => Some(store),
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "warning: task history store unavailable, continuing without task recording"
+            );
+            None
         }
     };
-    let schedule = if disabled.schedule {
-        None
-    } else {
-        open_schedule(storage, home, &mut *stderr)
-    };
+    let schedule = open_schedule(storage, home, &mut *stderr);
     let skill_checker = skill_checker(storage, config_file, environment, home, &mut *stderr);
     let approvals = match storage
         .approvals(&Path::new(home).join(".otto/approvals.db"))
@@ -114,7 +100,7 @@ pub fn compose(
         home: home.clone(),
         session_root: prepared.session_root.clone(),
         shell: shell.clone(),
-        no_session: options.no_session || disabled.session_persistence,
+        no_session: options.no_session,
         headless: options.headless,
         overrides: options.overrides,
         host_entries: host_entries.to_vec(),

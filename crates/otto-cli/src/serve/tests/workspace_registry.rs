@@ -273,7 +273,6 @@ async fn create_in_a_named_workspace_uses_that_workspaces_builder() {
     let (mut builder, sandbox) = load_workspace(
         shared,
         &other_path,
-        &Disabled::default(),
         &CancellationToken::new(),
         &mut Vec::new(),
     )

@@ -43,8 +43,7 @@ use otto::runtime::SESSION_OPERATION_UNAVAILABLE;
 use otto::runtime::boundary;
 use otto::runtime::builder::{Builder, SharedSession};
 use otto::runtime::startup::{
-    self, Disabled, EnvironmentLookup, capture_environment, environment_lookup, redact_with,
-    resolve_home,
+    self, EnvironmentLookup, capture_environment, environment_lookup, redact_with, resolve_home,
 };
 // Helpers other `cli` modules and `plugin` call through this path.
 pub(crate) use otto::runtime::startup::{

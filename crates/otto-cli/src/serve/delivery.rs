@@ -380,14 +380,8 @@ impl DeliveryService {
             .upgrade()
             .ok_or("delivery broker is no longer available")?;
         let mut stderr = std::io::sink();
-        let (builder, sandbox) = load_workspace(
-            shared,
-            &receipt.preview.plan.path,
-            &Disabled::default(),
-            cancel,
-            &mut stderr,
-        )
-        .await?;
+        let (builder, sandbox) =
+            load_workspace(shared, &receipt.preview.plan.path, cancel, &mut stderr).await?;
         let builder = Arc::new(builder);
         if builder.workspace_path != receipt.preview.plan.path.to_string_lossy() {
             return Err("delivery worktree builder root is invalid".into());

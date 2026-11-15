@@ -502,15 +502,10 @@ async fn load_workspace_reuses_the_shared_memory_service() {
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stderr = Vec::new();
 
-    let (builder, _reloader) = load_workspace(
-        Arc::clone(&shared),
-        &canonical,
-        &Disabled::default(),
-        &cancel,
-        &mut stderr,
-    )
-    .await
-    .expect("load workspace");
+    let (builder, _reloader) =
+        load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+            .await
+            .expect("load workspace");
 
     assert!(Arc::ptr_eq(&builder.memory.service, &shared.memory.service));
     assert_eq!(builder.workspace_path, canonical.to_string_lossy());
@@ -527,15 +522,10 @@ async fn load_workspace_opens_its_own_sandbox() {
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stderr = Vec::new();
 
-    let (builder, _reloader) = load_workspace(
-        Arc::clone(&shared),
-        &canonical,
-        &Disabled::default(),
-        &cancel,
-        &mut stderr,
-    )
-    .await
-    .expect("load workspace");
+    let (builder, _reloader) =
+        load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+            .await
+            .expect("load workspace");
 
     assert_eq!(
         builder.sandbox_info.mode,
@@ -560,7 +550,6 @@ async fn load_workspace_binds_a_delivery_worktree_as_its_own_file_root() {
     let (builder, _sandbox) = load_workspace(
         shared,
         &worktree,
-        &Disabled::default(),
         &CancellationToken::new(),
         &mut Vec::new(),
     )
@@ -601,15 +590,10 @@ async fn load_workspace_honors_the_shared_sandbox_driver_override() {
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stderr = Vec::new();
 
-    let (builder, _reloader) = load_workspace(
-        Arc::clone(&shared),
-        &canonical,
-        &Disabled::default(),
-        &cancel,
-        &mut stderr,
-    )
-    .await
-    .expect("load workspace");
+    let (builder, _reloader) =
+        load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+            .await
+            .expect("load workspace");
 
     assert_eq!(
         builder.sandbox_info.mode,
@@ -645,15 +629,9 @@ async fn load_workspace_seatbelt_gets_bash_approvals() {
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stderr = Vec::new();
 
-    let (builder, sandbox) = load_workspace(
-        Arc::clone(&shared),
-        &canonical,
-        &Disabled::default(),
-        &cancel,
-        &mut stderr,
-    )
-    .await
-    .expect("load workspace");
+    let (builder, sandbox) = load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+        .await
+        .expect("load workspace");
 
     assert_eq!(
         builder.sandbox_info.mode,

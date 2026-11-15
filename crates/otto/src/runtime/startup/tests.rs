@@ -1,10 +1,9 @@
 use super::*;
 
-/// `start` composes the `otto acp` runtime without a frontend, and a
-/// disabled component stays off: MCP is switched off in the resolved
-/// configuration and the usage store is never opened.
+/// `start` composes the `otto acp` runtime without a frontend: `[mcp]
+/// enabled = false` reaches the builder and the usage and task stores open.
 #[tokio::test]
-async fn start_honors_the_disabled_components() {
+async fn start_composes_the_runtime_from_the_user_config() {
     let directory = tempfile::tempdir().expect("tempdir");
     let home = directory.path().join("home");
     let workspace = directory.path().join("workspace");
@@ -22,6 +21,9 @@ api_key_env = "ALPHA_KEY"
 models."gpt-test" = {}
 
 [memory]
+enabled = false
+
+[mcp]
 enabled = false
 
 [sandbox]
@@ -44,11 +46,6 @@ driver = "off"
             cwd: workspace.to_string_lossy().into_owned(),
             overrides: Overrides::default(),
             logger: Arc::new(crate::log::Logger::discard()),
-            disabled: Disabled {
-                mcp: true,
-                usage: true,
-                ..Disabled::default()
-            },
         },
         &cancel,
         &mut stderr,
@@ -57,33 +54,12 @@ driver = "off"
     .unwrap_or_else(|message| panic!("start: {message}"));
 
     assert!(!started.builder.mcp.enabled);
-    assert!(!home.join(".otto/usage.db").exists());
-    assert!(
-        home.join(".otto/tasks.db").exists(),
-        "an enabled store still opens"
-    );
+    assert!(home.join(".otto/usage.db").exists());
+    assert!(home.join(".otto/tasks.db").exists());
     started
         .sandbox
         .control
         .close()
         .await
         .expect("close sandbox");
-}
-
-/// The component switches write `enabled = false` for exactly the
-/// disabled components.
-#[test]
-fn disabled_applies_only_the_chosen_switches() {
-    let mut file = File::default();
-    Disabled {
-        skills: true,
-        subagents: true,
-        ..Disabled::default()
-    }
-    .apply(&mut file);
-    assert_eq!(file.skills.enabled, Some(false));
-    assert_eq!(file.agents.enabled, Some(false));
-    assert_eq!(file.mcp.enabled, None);
-    assert_eq!(file.memory.enabled, None);
-    assert_eq!(file.plugins.enabled, None);
 }

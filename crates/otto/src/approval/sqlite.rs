@@ -4,6 +4,7 @@ use crate::storage::drivers::sqlite::SqliteDriver;
 use crate::storage::{Connection, OptionalExtension, Transaction, params};
 use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 use otto_core::approval::*;
+use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex, time::Duration};
 
 mod checks;
@@ -205,17 +206,16 @@ impl ApprovalStore for Store {
     ) -> Result<()> {
         let mut connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
         let tx = connection.transaction().map_err(storage_error)?;
-        let forced = otto_core::config::ApprovalConfig {
+        let row = ManagedRow {
             policy: forced.policy,
             reviewer: forced.reviewer,
-            ..Default::default()
         };
         tx.execute(
             "INSERT INTO approval_managed_policy VALUES (?1,?2) ON \
             CONFLICT(workspace) DO UPDATE SET body=excluded.body",
             params![
                 workspace,
-                serde_json::to_string(&forced).map_err(|_| Error::Unavailable)?
+                serde_json::to_string(&row).map_err(|_| Error::Unavailable)?
             ],
         )
         .map_err(storage_error)?;
@@ -610,6 +610,17 @@ fn write_settings(
         .map(|_| ())
         .map_err(storage_error)
 }
+/// The stored managed approval policy: the two fields that bind approval
+/// settings. It is a record of its own rather than `ApprovalConfig`, so a
+/// change to the configuration schema does not make stored rows unreadable.
+/// Keys it does not know are ignored; the row is rewritten from the managed
+/// configuration each time a runner starts.
+#[derive(Serialize, Deserialize)]
+struct ManagedRow {
+    policy: Option<ApprovalPolicy>,
+    reviewer: Option<ApprovalReviewer>,
+}
+
 fn read_managed(
     connection: &Connection,
     workspace: &str,
@@ -623,7 +634,13 @@ fn read_managed(
         .optional()
         .map_err(storage_error)?;
     body.map(|body| {
-        serde_json::from_str(&body).map_err(|_| Error::Invalid("invalid managed approval policy"))
+        let row: ManagedRow = serde_json::from_str(&body)
+            .map_err(|_| Error::Invalid("invalid managed approval policy"))?;
+        Ok(otto_core::config::ApprovalConfig {
+            policy: row.policy,
+            reviewer: row.reviewer,
+            ..Default::default()
+        })
     })
     .transpose()
 }

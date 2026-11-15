@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS approval_visibility (
 CREATE INDEX IF NOT EXISTS approvals_scope ON approvals(workspace, session_id, state);
 ";
 
-pub(in crate::storage::backends::sqlite) fn initialize(connection: &mut Connection) -> Result<()> {
+pub(super) fn initialize(connection: &mut Connection) -> Result<()> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(storage_error)?;
@@ -156,7 +156,7 @@ pub(super) fn backup_before_v4(
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
-        super::super::schema_objects::validate_objects(
+        crate::storage::schema_objects::validate_objects(
             &[source_sql],
             std::slice::from_ref(&expected),
         )
@@ -185,7 +185,7 @@ pub(super) fn backup_before_v4(
         let trusted = variants
             .into_iter()
             .find(|candidate| {
-                super::super::schema_objects::validate_objects(
+                crate::storage::schema_objects::validate_objects(
                     std::slice::from_ref(source_sql),
                     std::slice::from_ref(candidate),
                 )

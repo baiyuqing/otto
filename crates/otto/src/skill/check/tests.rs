@@ -5,8 +5,8 @@ use std::time::Duration;
 use super::*;
 use crate::faults::http;
 use crate::skill::check_repository::StoreError;
+use crate::skill::sqlite::{SCHEMA, Store};
 use crate::storage::Connection;
-use crate::storage::backends::sqlite::skill_checks::{SCHEMA, Store};
 
 // ---------------------------------------------------------------------------
 // HTTP stub on the shared loopback server.

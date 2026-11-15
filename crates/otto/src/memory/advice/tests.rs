@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::faults::http;
+use crate::memory::advice::sqlite::Store as SqliteAuditStore;
 use crate::memory::files::testsupport::open_temp;
 use crate::memory::{Origin, Provenance, RememberRequest, decide_default_policy};
-use crate::storage::backends::sqlite::memory_advice::Store as SqliteAuditStore;
 
 fn service() -> (tempfile::TempDir, Arc<Service>) {
     let (directory, store) = open_temp();

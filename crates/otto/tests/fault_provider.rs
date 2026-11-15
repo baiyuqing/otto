@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use otto::auth::Credentials;
 use otto::auth::token::TokenSource;
-use otto::deadline::{Control, Deadline};
 use otto::faults::http::{self, Script, Server, Step};
 use otto::provider::{chatgpt, openaicompat};
 use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{Provider, ProviderError, ProviderSettlement, Request, StreamEvent};
+use otto_platform::deadline::{Control, Deadline};
 use tokio_util::sync::CancellationToken;
 
 fn request() -> Request {

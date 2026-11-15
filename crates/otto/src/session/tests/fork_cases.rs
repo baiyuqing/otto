@@ -61,9 +61,13 @@ fn a_fork_copies_the_history_before_a_turn_and_leaves_the_source_alone() {
     let source = PathBuf::from(store.path());
     let before = fs::read(&source).expect("read source");
 
-    let forked =
-        super::super::fork::fork(&crate::fsops::PosixDriver, &source, Some(&second), FORK_ID)
-            .expect("fork");
+    let forked = super::super::fork::fork(
+        &otto_platform::fsops::PosixDriver,
+        &source,
+        Some(&second),
+        FORK_ID,
+    )
+    .expect("fork");
     assert_eq!(fs::read(&source).expect("read source"), before);
     assert_eq!(
         forked.path,
@@ -104,7 +108,7 @@ fn a_fork_keeps_a_compaction_before_the_cut() {
     let third = completed_turn(&store, "t3", "three");
 
     let forked = super::super::fork::fork(
-        &crate::fsops::PosixDriver,
+        &otto_platform::fsops::PosixDriver,
         Path::new(&store.path()),
         Some(&third),
         FORK_ID,
@@ -207,7 +211,7 @@ fn a_whole_fork_leaves_out_an_interrupted_turn() {
     assert!(store.interrupted_turn().is_some());
 
     let forked = super::super::fork::fork(
-        &crate::fsops::PosixDriver,
+        &otto_platform::fsops::PosixDriver,
         Path::new(&store.path()),
         None,
         FORK_ID,
@@ -249,9 +253,13 @@ fn an_invalid_fork_point_or_a_taken_id_writes_nothing() {
     let files = session_files(&directory);
 
     for before in [steer.as_str(), "ffffffff"] {
-        let error =
-            super::super::fork::fork(&crate::fsops::PosixDriver, &source, Some(before), FORK_ID)
-                .expect_err("invalid fork point");
+        let error = super::super::fork::fork(
+            &otto_platform::fsops::PosixDriver,
+            &source,
+            Some(before),
+            FORK_ID,
+        )
+        .expect_err("invalid fork point");
         assert!(matches!(error, ForkError::InvalidPoint(_)), "{error}");
         assert_eq!(session_files(&directory), files);
     }
@@ -261,14 +269,14 @@ fn an_invalid_fork_point_or_a_taken_id_writes_nothing() {
     let taken_path = directory.join(format!("{taken}.jsonl"));
     fs::copy(&source, &taken_path).expect("occupy id");
     let files = session_files(&directory);
-    super::super::fork::fork(&crate::fsops::PosixDriver, &source, None, &taken)
+    super::super::fork::fork(&otto_platform::fsops::PosixDriver, &source, None, &taken)
         .expect_err("taken id");
     assert_eq!(session_files(&directory), files);
     store.close().expect("close");
 }
 
 pub(super) fn fork_failing_at(
-    step: crate::fsops::PublishStep,
+    step: otto_platform::fsops::PublishStep,
 ) -> (TempDir, Store, PathBuf, Result<(), String>) {
     let temp = TempDir::new();
     let (store, _) = new_store(&temp);
@@ -280,7 +288,7 @@ pub(super) fn fork_failing_at(
         Fault::Before(FaultError::Os(libc::EIO)),
     )]);
     let result = super::super::fork::fork_with(
-        &crate::fsops::PosixDriver,
+        &otto_platform::fsops::PosixDriver,
         &source,
         None,
         FORK_ID,
@@ -295,7 +303,7 @@ pub(super) fn fork_failing_at(
 
 #[test]
 fn a_fork_rename_failure_publishes_nothing_and_removes_the_temporary_file() {
-    let (_temp, store, source, result) = fork_failing_at(crate::fsops::PublishStep::Rename);
+    let (_temp, store, source, result) = fork_failing_at(otto_platform::fsops::PublishStep::Rename);
     let error = result.expect_err("rename fails");
     assert!(error.contains("publish fork file"), "{error}");
     let names = session_files(source.parent().expect("directory"));
@@ -308,7 +316,8 @@ fn a_fork_rename_failure_publishes_nothing_and_removes_the_temporary_file() {
 
 #[test]
 fn a_fork_directory_sync_failure_is_reported_after_the_fork_is_in_place() {
-    let (_temp, store, source, result) = fork_failing_at(crate::fsops::PublishStep::DirSync);
+    let (_temp, store, source, result) =
+        fork_failing_at(otto_platform::fsops::PublishStep::DirSync);
     let error = result.expect_err("directory sync fails");
     assert!(error.contains("sync session directory"), "{error}");
     let fork_path = source.with_file_name(format!("{FORK_ID}.jsonl"));
@@ -330,7 +339,7 @@ fn a_crash_after_the_fork_rename_leaves_a_complete_fork_and_no_temporary_file() 
             completed_turn(&store, "t1", "first");
             // The rename has happened and the directory sync has not.
             let plan = FaultPlan::new(vec![Rule::new(
-                crate::fsops::PublishStep::DirSync,
+                otto_platform::fsops::PublishStep::DirSync,
                 Trigger::Always,
                 Fault::Exit,
             )]);
@@ -385,7 +394,7 @@ fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
     )
     .expect("leftover");
     super::super::fork::fork(
-        &crate::fsops::PosixDriver,
+        &otto_platform::fsops::PosixDriver,
         &source,
         None,
         "fedcba9876543210fedcba9876543210",

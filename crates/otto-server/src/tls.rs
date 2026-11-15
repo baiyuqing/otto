@@ -1,6 +1,6 @@
 //! TLS termination for the TCP listener.
 //!
-//! rustls with the process-wide crypto provider (`otto::tls_provider`),
+//! rustls with the process-wide crypto provider (`otto_platform::tls_provider`),
 //! server side only, no client
 //! certificates. Handshakes run in separate tasks, so one client that sends
 //! nothing cannot block `accept`; each handshake is bounded by
@@ -17,7 +17,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObj
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::{TlsAcceptor, rustls};
 
-use otto::log::Logger;
+use otto_platform::log::Logger;
 
 /// Time a client has to finish the TLS handshake after the TCP connection.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,7 +36,7 @@ pub fn load_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, Str
     }
     let private_key = PrivateKeyDer::from_pem_file(key_path)
         .map_err(|error| format!("read TLS key {key_path}: {error}"))?;
-    let provider = otto::tls_provider::install();
+    let provider = otto_platform::tls_provider::install();
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|error| format!("TLS certificate {cert_path} and key {key_path}: {error}"))?
@@ -201,7 +201,7 @@ mod tests {
     fn connector(identity: &Identity) -> TlsConnector {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(identity.cert_der.clone()).expect("add root");
-        let provider = otto::tls_provider::install();
+        let provider = otto_platform::tls_provider::install();
         let config = rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("versions")

@@ -25,6 +25,7 @@ test-support = ["fault-injection"]
 tree-sitter = "=0.27.1"
 tree-sitter-bash = "=0.25.1"
 otto-core.workspace = true
+otto-platform.workspace = true
 mlua.workspace = true
 async-trait.workspace = true
 base64.workspace = true
@@ -52,7 +53,6 @@ tokio-util.workspace = true
 # Save() serializes, so the native crate needs "display" on top of otto-core's
 # parse-only feature set.
 toml = { workspace = true, features = ["display"] }
-tokio-rustls.workspace = true
 
 [dev-dependencies]
 # Gives the integration tests `otto::faults` and `otto::fixtures` without

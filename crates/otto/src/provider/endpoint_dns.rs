@@ -72,7 +72,7 @@ fn forbidden(address: IpAddr) -> bool {
 /// Proxies are disabled: an environment proxy would otherwise resolve the
 /// destination outside this resolver. Caller HTTP clients are not accepted.
 pub(super) fn http_client_builder() -> reqwest::ClientBuilder {
-    crate::tls_provider::http_client_builder()
+    otto_platform::tls_provider::http_client_builder()
         .no_proxy()
         .dns_resolver(Arc::new(EndpointResolver::default()))
 }

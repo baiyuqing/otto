@@ -70,7 +70,7 @@ async fn run_login_logout(
         );
     };
     let environment = super::run::config_environment_for(&config_file, lookup);
-    let Ok(workspace) = otto::fsops::canonical_directory(Path::new(".")) else {
+    let Ok(workspace) = otto_platform::fsops::canonical_directory(Path::new(".")) else {
         return fail(stderr, "working directory is invalid or unavailable");
     };
     let Ok(mcp_config) = resolve_mcp(&config_file, &environment, &workspace.to_string_lossy())

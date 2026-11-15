@@ -19,7 +19,7 @@ fn transient_http_statuses_and_retry_after_are_classified_without_a_body() {
     }
     let retry = transient_http_retry(503, &headers).expect("retryable status");
     assert_eq!(
-        crate::retry::next_delay(
+        otto_platform::retry::next_delay(
             RETRY_POLICY,
             1,
             retry.retry_after,
@@ -497,7 +497,8 @@ async fn stopping_during_backoff_prevents_another_request() {
         })
         .await;
         let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
-        let control = crate::deadline::Control::new(crate::deadline::Deadline::unlimited());
+        let control =
+            otto_platform::deadline::Control::new(otto_platform::deadline::Deadline::unlimited());
         let mut retries = 0;
         let settlement = client
             .complete(
@@ -540,7 +541,7 @@ async fn stopping_during_backoff_prevents_another_request() {
 async fn insufficient_deadline_budget_skips_backoff() {
     let server = testserver::spawn(|_| testserver::truncated_sse_response("", 4096)).await;
     let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
-    let control = crate::deadline::Control::new(crate::deadline::Deadline::after(
+    let control = otto_platform::deadline::Control::new(otto_platform::deadline::Deadline::after(
         Duration::from_millis(1500),
     ));
     let settlement = client

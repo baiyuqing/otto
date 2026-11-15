@@ -543,7 +543,7 @@ mod tests {
     use super::*;
 
     async fn get(url: &str) -> reqwest::Result<(u16, String)> {
-        let response = crate::tls_provider::http_client()
+        let response = otto_platform::tls_provider::http_client()
             .post(url)
             .body("ping")
             .send()
@@ -601,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn a_stall_before_the_head_leaves_the_request_recorded() {
         let server = spawn_scripted(vec![Script::stall_before_head()]).await;
-        let client = crate::tls_provider::http_client_builder()
+        let client = otto_platform::tls_provider::http_client_builder()
             .timeout(Duration::from_millis(200))
             .build()
             .unwrap();

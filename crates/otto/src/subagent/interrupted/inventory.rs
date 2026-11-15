@@ -36,7 +36,7 @@ pub(crate) fn open_validated(record: &ChildRecord) -> Result<crate::session::Sto
                     "recovery transcript changed before write admission",
                 )
             };
-            if crate::fsops::file_identity(metadata) != evidence.identity
+            if otto_platform::fsops::file_identity(metadata) != evidence.identity
                 || metadata.len() != evidence.bytes.len() as u64
             {
                 return Err(changed());
@@ -80,7 +80,7 @@ pub fn inventory(parent: &Path) -> Inventory {
         complete: true,
         ..Inventory::default()
     };
-    let dir = match crate::fsops::open_dir_no_follow(&directory) {
+    let dir = match otto_platform::fsops::open_dir_no_follow(&directory) {
         Ok(dir) => dir,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             result.directory_missing = true;
@@ -95,7 +95,7 @@ pub fn inventory(parent: &Path) -> Inventory {
             return result;
         }
     };
-    let mut names = match crate::fsops::read_directory_names(&dir, MAX_CHILDREN) {
+    let mut names = match otto_platform::fsops::read_directory_names(&dir, MAX_CHILDREN) {
         Ok(names) => names,
         Err(error) => {
             result.complete = false;
@@ -123,9 +123,12 @@ pub fn inventory(parent: &Path) -> Inventory {
             result.highest_counter = result.highest_counter.max(counter);
         }
         let checked = (|| -> Result<ChildRecord, String> {
-            let file =
-                crate::fsops::open_at_no_follow(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)
-                    .map_err(|error| error.to_string())?;
+            let file = otto_platform::fsops::open_at_no_follow(
+                &dir,
+                &name,
+                libc::O_RDONLY | libc::O_NONBLOCK,
+            )
+            .map_err(|error| error.to_string())?;
             let metadata = file.metadata().map_err(|error| error.to_string())?;
             if !metadata.is_file() || metadata.len() > MAX_CHILD_BYTES {
                 return Err("not a regular bounded transcript".into());
@@ -194,13 +197,13 @@ pub fn inventory(parent: &Path) -> Inventory {
                     }
                 }
             }
-            let expected = crate::fsops::clean_go_path(&parent.to_string_lossy());
+            let expected = otto_platform::fsops::clean_go_path(&parent.to_string_lossy());
             let linked = decoded
                 .header
                 .parent_session
                 .as_deref()
                 .ok_or("missing parentSession linkage")?;
-            if crate::fsops::clean_go_path(linked) != expected {
+            if otto_platform::fsops::clean_go_path(linked) != expected {
                 return Err("parentSession does not match selected parent".into());
             }
             let child_id = &decoded.header.id;
@@ -218,7 +221,7 @@ pub fn inventory(parent: &Path) -> Inventory {
                 return Err("task/header/filename identity mismatch".into());
             }
             record.evidence = Some(std::sync::Arc::new(Evidence {
-                identity: crate::fsops::file_identity(&metadata),
+                identity: otto_platform::fsops::file_identity(&metadata),
                 bytes,
             }));
             if !task_ids.insert(record.task_id.clone()) {

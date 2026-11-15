@@ -86,7 +86,7 @@ pub(super) fn parse_request_id(params: &Value) -> Option<String> {
         .get("otto")?
         .get("requestId")?
         .as_str()?;
-    Some(otto::log::request_id(raw.as_bytes())).filter(|id| !id.is_empty())
+    Some(otto_platform::log::request_id(raw.as_bytes())).filter(|id| !id.is_empty())
 }
 
 /// The idempotency key of a `session/prompt`, from `_meta.otto.inputId`: a

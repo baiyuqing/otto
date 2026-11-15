@@ -8,6 +8,14 @@
   remain I/O-free: no filesystem, network, process, environment,
   stdio or wall-clock access. Provider-specific wire types stay in
   `openaicompat` and `openairesponses`, behind the neutral provider contract.
+- `otto-platform` holds the process-wide primitives with no domain knowledge:
+  the pinned POSIX file driver (`fsops`, with its `FileDriver` contract), the
+  process log, retry and deadline helpers, TLS provider selection, URL parsing
+  and redaction (`gourl`, `urlprivacy`), the registry of child processes to
+  kill when a session lease is lost (`child_fence`) and the process id with
+  its start time (`process_identity`). It imports `otto-core` only. `otto` and the
+  frontend crates import it as `otto_platform::...`; `otto` does not re-export
+  its modules.
 - `otto` is a library. It owns native I/O, tools, sandboxing, storage and
   authentication. `app` owns shared use cases; frontends adapt presentation and transport rather than
   reimplementing domain behavior.
@@ -15,7 +23,8 @@
   and the REPL), `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio
   and attach frontends) and `otto-cli` (the `otto` binary and composition
   root) are separate packages. Dependencies are one-way:
-  `otto-core` <- `otto` <- {`otto-client`, `otto-server`, `otto-eval`};
+  `otto-core` <- `otto-platform` <- `otto` <- {`otto-client`, `otto-server`,
+  `otto-eval`};
   `otto-server` and `otto-client` <- `otto-acp`; `otto` and `otto-client` <-
   `otto-terminal`; every crate <- `otto-cli`. A crate never imports one that
   depends on it. `otto-server` does not import `otto-terminal`. A one-line
@@ -40,13 +49,14 @@
 
 Each top-level module of `crates/otto/src` belongs to one layer. A module
 imports only modules in its own layer or in a lower layer, and the imports
-between modules of one layer contain no cycle. `otto-core` is below every
-layer; the frontend crates (`otto-client`, `otto-terminal`, `otto-server`,
-`otto-acp`, `otto-cli`) are above it and are not part of this table.
+between modules of one layer contain no cycle. `otto-core` and `otto-platform`
+are below every layer and are not part of this table; `otto` modules import
+`otto-platform` as `otto_platform::...`. The frontend crates (`otto-client`,
+`otto-terminal`, `otto-server`, `otto-acp`, `otto-cli`) are above it and are
+not part of this table.
 
 | Layer | Modules | Owns |
 | --- | --- | --- |
-| platform | `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | Process-wide primitives with no domain knowledge; `fsops` holds the pinned POSIX file driver and its `FileDriver` contract, `child_fence` the registry of child processes to kill when a session lease is lost, `process_identity` the process id with its start time |
 | persistence | `storage`, `workspace`, `session`, `usage` | Storage drivers and the SQL layer, workspace identity, the session store with its writer lease and the `Origin` of a turn, the usage store |
 | capability | `auth`, `provider`, `typesafe`, `sandbox`, `config`, `tool`, `mcp`, `skill`, `memory`, `approval`, `decision` | What one agent turn uses: model access, the `Tool` trait and `Registry` with the file, Bash and web tools, sandboxed execution, memory, approval |
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
@@ -64,12 +74,12 @@ non-test source of every module. Rules:
   lower layer and pass the implementation in from the higher one. Do not
   import upward.
 - `tool` holds the `Tool` trait, the `Registry`, and tools that need only the
-  platform, persistence and capability layers. A tool that belongs to a
+  persistence and capability layers and `otto-platform`. A tool that belongs to a
   feature (scheduling, sub-agents, workflows, task control, delivery) lives in
   that feature's module and is registered by `runtime`. Inside the capability
   layer `tool` imports `sandbox`, `skill`, `config`, `approval`, `memory` and
   `mcp`; those modules do not import `tool`. A type they share with `tool`
-  lives in `tool` or in a lower module (`fsops`, `workspace`, `approval::shell`,
+  lives in `tool` or in a lower module (`otto_platform::fsops`, `workspace`, `approval::shell`,
   `session::origin`, `sandbox::info`).
 - A domain's repository implementation (SQLite or file) lives in the domain
   module. `storage` provides the drivers, the SQL layer and the capability

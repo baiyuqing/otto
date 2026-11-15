@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use otto::faults::files::{FaultyFileDriver, FileOp};
 use otto::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
-use otto::fsops::PosixDriver;
 use otto::session::{Prepared, Store};
 use otto_core::model::{Block, Message, Role};
 use otto_core::session::{Header, PiErrorKind};
+use otto_platform::fsops::PosixDriver;
 
 const EIO: FaultError = FaultError::Os(libc::EIO);
 

@@ -35,7 +35,7 @@ impl Controller {
     }
 
     pub fn prepare_input(&self, text: &str, delivery: InputDelivery) -> Result<Submission, String> {
-        let id = crate::random::random_id().map_err(|error| error.to_string())?;
+        let id = otto_platform::random::random_id().map_err(|error| error.to_string())?;
         let mut provenance = InputProvenance::local(InputSource::Tui);
         provenance.delivery = delivery;
         let info = self.info();

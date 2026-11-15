@@ -28,7 +28,7 @@ impl Runner {
             .and_then(|(session, _)| session.session_id())
         {
             Some(session_id) => session_id,
-            None => crate::random::random_id()
+            None => otto_platform::random::random_id()
                 .map_err(|error| StartError::SessionIdentity(error.to_string()))?,
         };
         let cancel = CancellationToken::new();
@@ -179,7 +179,7 @@ impl Runner {
 
         // A versioned attempt boundary is durable before any provider/tool work.
         // No process snapshot or uncertain external effect is replayed.
-        let attempt_id = crate::random::random_id()
+        let attempt_id = otto_platform::random::random_id()
             .map_err(|error| StartError::SessionIdentity(error.to_string()))?;
         // Keep the last acknowledged attempt until the append succeeds.
         // Exact inventory evidence distinguishes a clean pre-write failure from

@@ -117,7 +117,7 @@ pub struct StartOptions {
     pub explicit_config: bool,
     pub cwd: String,
     pub overrides: Overrides,
-    pub logger: Arc<crate::log::Logger>,
+    pub logger: Arc<otto_platform::log::Logger>,
 }
 
 pub struct Started {

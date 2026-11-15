@@ -35,7 +35,7 @@ use super::sandbox_runtime::{
     settings_from_config,
 };
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
-use crate::fsops::{canonical_directory, canonical_executable_file};
+use otto_platform::fsops::{canonical_directory, canonical_executable_file};
 
 /// Darwin's process argument/environment budget is about 1 MiB. These
 /// ceilings are deliberately larger while still bounding injected snapshots.

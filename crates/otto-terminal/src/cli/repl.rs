@@ -136,7 +136,7 @@ pub struct Repl<'a> {
     pub(super) controller: &'a Controller,
     pub(super) stdout: Box<dyn Write + Send + 'a>,
     pub(super) stderr: Box<dyn Write + Send + 'a>,
-    program_status: Option<otto::program_status::Reporter>,
+    program_status: Option<otto_platform::program_status::Reporter>,
     delete_confirmation: Option<String>,
     input_source: otto_core::model::InputSource,
 }
@@ -164,8 +164,8 @@ impl<'a> Repl<'a> {
         mut stdout: Box<dyn Write + Send + 'a>,
         stderr: Box<dyn Write + Send + 'a>,
     ) -> Self {
-        let reporter = otto::program_status::Reporter::default();
-        reporter.report(&mut *stdout, otto::program_status::State::Idle);
+        let reporter = otto_platform::program_status::Reporter::default();
+        reporter.report(&mut *stdout, otto_platform::program_status::State::Idle);
         Self {
             controller,
             stdout,

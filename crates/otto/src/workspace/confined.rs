@@ -7,7 +7,7 @@
 //! - the root is canonicalized once at construction and kept open as a
 //!   directory handle, so renaming or replacing the root directory afterwards
 //!   cannot redirect a tool to another tree;
-//! - relative paths are resolved through that handle (`crate::fsops::root::Root`),
+//! - relative paths are resolved through that handle (`otto_platform::fsops::root::Root`),
 //!   which refuses `..` that leaves the root and refuses absolute symlink
 //!   targets;
 //! - absolute paths, paths containing `..`, and paths crossing a symlink are
@@ -38,10 +38,10 @@ use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 
 use super::git_read_only::refuse_git_read_only;
-use crate::fsops::gopath::{
+use otto_platform::fsops::gopath::{
     base, bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel,
 };
-use crate::fsops::root::{Root, is_symlink};
+use otto_platform::fsops::root::{Root, is_symlink};
 
 /// Maximum number of symbolic links followed while resolving a write target.
 const MAX_WRITE_SYMLINKS: usize = 40;

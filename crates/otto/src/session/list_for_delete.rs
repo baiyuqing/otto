@@ -11,8 +11,8 @@ use super::list::{
     open_workspace_session_directory_no_follow, same_list_candidate_metadata,
 };
 use super::store::{reject_oversized_session_file, validate_pi_header};
-use crate::fsops::{self, Dir};
 use crate::session::DeleteCandidate;
+use otto_platform::fsops::{self, Dir};
 
 pub(super) fn list_for_delete(
     root: &Path,

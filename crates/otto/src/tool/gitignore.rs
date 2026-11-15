@@ -26,7 +26,7 @@
 
 use std::path::Path;
 
-use crate::fsops::root::Root;
+use otto_platform::fsops::root::Root;
 
 /// The largest `.gitignore` read. A larger file is ignored rather than loaded.
 const MAX_GITIGNORE_BYTES: u64 = 1 << 20;

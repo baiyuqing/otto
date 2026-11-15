@@ -107,7 +107,7 @@ pub struct Client {
 impl Client {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            http: crate::tls_provider::http_client(),
+            http: otto_platform::tls_provider::http_client(),
             base_url: base_url.into(),
             api_key: api_key.into(),
             backoff: DEFAULT_BACKOFF.to_vec(),

@@ -22,7 +22,7 @@ impl<'a> Repl<'a> {
         })?;
         let Some(wake) = wake else { return Ok(false) };
         if let Some(reporter) = program_status {
-            reporter.report(&mut **stdout, otto::program_status::State::Working);
+            reporter.report(&mut **stdout, otto_platform::program_status::State::Working);
         }
         let _ = writeln!(stdout);
         let turn = cancel.child_token();
@@ -42,9 +42,9 @@ impl<'a> Repl<'a> {
             let canceled = cancel.is_cancelled()
                 || result.as_ref().err().is_some_and(AgentError::is_cancelled);
             let completion = if canceled {
-                otto::program_status::Completion::Canceled
+                otto_platform::program_status::Completion::Canceled
             } else {
-                otto::program_status::Completion::from_result(&result)
+                otto_platform::program_status::Completion::from_result(&result)
             };
             reporter.report(&mut **stdout, completion.into());
         };
@@ -110,7 +110,7 @@ impl<'a> Repl<'a> {
         } = self;
         *delete_confirmation = None;
         if let Some(reporter) = program_status {
-            reporter.report(&mut **stdout, otto::program_status::State::Working);
+            reporter.report(&mut **stdout, otto_platform::program_status::State::Working);
         }
         let turn = cancel.child_token();
         let mut error_rendered = false;
@@ -132,9 +132,9 @@ impl<'a> Repl<'a> {
             let canceled = cancel.is_cancelled()
                 || result.as_ref().err().is_some_and(AgentError::is_cancelled);
             let completion = if canceled {
-                otto::program_status::Completion::Canceled
+                otto_platform::program_status::Completion::Canceled
             } else {
-                otto::program_status::Completion::from_result(&result)
+                otto_platform::program_status::Completion::from_result(&result)
             };
             reporter.report(&mut **stdout, completion.into());
         }
@@ -168,7 +168,10 @@ impl<'a> Repl<'a> {
     ) -> Result<(), Error> {
         let controller = self.controller;
         if let Some(reporter) = &self.program_status {
-            reporter.report(&mut *self.stdout, otto::program_status::State::Working);
+            reporter.report(
+                &mut *self.stdout,
+                otto_platform::program_status::State::Working,
+            );
         }
         let turn = cancel.child_token();
         let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
@@ -271,9 +274,9 @@ impl<'a> Repl<'a> {
             let canceled = cancel.is_cancelled()
                 || result.as_ref().err().is_some_and(AgentError::is_cancelled);
             let completion = if canceled {
-                otto::program_status::Completion::Canceled
+                otto_platform::program_status::Completion::Canceled
             } else {
-                otto::program_status::Completion::from_result(&result)
+                otto_platform::program_status::Completion::from_result(&result)
             };
             reporter.report(&mut *self.stdout, completion.into());
         }

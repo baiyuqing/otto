@@ -16,7 +16,7 @@ use otto_core::{memory as port, operation::OperationControl};
 use sha2::{Digest, Sha256};
 
 use super::{Candidate, CandidateAction, CandidateState, Record, Scope, Service};
-use crate::hex::to_hex;
+use otto_platform::hex::to_hex;
 
 pub struct BuiltinAdapter {
     service: Arc<Service>,

@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use otto_core::agent::inbox::{Entry, Inbox};
 
-use crate::fsops::{PosixPublish, PublishOps};
 use crate::schedule::remind;
+use otto_platform::fsops::{PosixPublish, PublishOps};
 
 /// IDs backed by a recoverable intent in this exact session/workspace.
 pub(crate) fn recoverable_local_ids(
@@ -66,7 +66,7 @@ pub fn hold_local_input_recovery(
 /// by 32 random hex digits, or empty when randomness is unavailable (the
 /// notification is then delivered at least once).
 pub fn new_input_id() -> String {
-    crate::random::random_id()
+    otto_platform::random::random_id()
         .map(|random| format!("in_{random}"))
         .unwrap_or_default()
 }
@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use crate::faults::publish::FaultyPublishOps;
     use crate::faults::{Fault, FaultPlan, Rule, Trigger};
-    use crate::fsops::PublishStep;
+    use otto_platform::fsops::PublishStep;
 
     fn session_dir() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("dir");

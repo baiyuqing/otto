@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
-use crate::random::random_hex;
+use otto_platform::random::random_hex;
 
 pub(crate) const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
 

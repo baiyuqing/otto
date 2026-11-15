@@ -5,11 +5,11 @@
 //! [`files::FileDriver`] contract it implements.
 pub mod canonical;
 pub mod files;
-pub(crate) mod gopath;
+pub mod gopath;
 pub mod posix;
-pub(crate) mod root;
+pub mod root;
 pub use canonical::canonical_directory;
-pub(crate) use canonical::canonical_executable_file;
+pub use canonical::canonical_executable_file;
 use otto_core::session::PiError;
 pub use posix::*;
 use std::io::Write;
@@ -46,7 +46,7 @@ pub fn canonical_workspace(path: &Path) -> Result<String, PiError> {
 /// Go's `path/filepath.Clean` semantics, which the on-disk session paths are
 /// written with: `..` is collapsed lexically, which Rust's `std::path` does
 /// not do.
-pub(crate) fn clean_go_path(path: &str) -> String {
+pub fn clean_go_path(path: &str) -> String {
     if path.is_empty() {
         return ".".into();
     }
@@ -156,7 +156,7 @@ pub trait PublishOps: Send + Sync {
 
 /// [`PublishOps`] over the pinned POSIX primitives.
 #[derive(Debug, Default)]
-pub(crate) struct PosixPublish;
+pub struct PosixPublish;
 
 impl PublishOps for PosixPublish {
     fn create_temp(&self, dir: &Dir, target: &Publish<'_>) -> io::Result<File> {
@@ -240,7 +240,7 @@ pub fn publish_file(
 /// Opens the directory `path` lives in, following symbolic links as
 /// `std::fs` does, and returns it with `path`'s final component. A bare file
 /// name lives in the working directory.
-pub(crate) fn open_parent(path: &Path) -> io::Result<(Dir, &str)> {
+pub fn open_parent(path: &Path) -> io::Result<(Dir, &str)> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())

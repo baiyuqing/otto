@@ -383,7 +383,7 @@ pub struct Controller {
     /// Reports this session's lifecycle to the Herdr pane that started the
     /// process. `None` outside Herdr and for every frontend that is not the
     /// pane's agent.
-    herdr: std::sync::RwLock<Option<Arc<crate::herdr::Reporter>>>,
+    herdr: std::sync::RwLock<Option<Arc<otto_platform::herdr::Reporter>>>,
     /// Parsed session files read for the trace.
     trace_cache: trace::TraceCache,
     observer_cache: task_observer::ObserverCache,

@@ -1,9 +1,9 @@
 //! A child's private workspace-local research directory. Its pinned handles
 //! survive path swaps; drop removes only this generated tree, never siblings.
-use crate::fsops::root::Root;
 use crate::tool::session_directory::{create_session_directory, session_directory_name};
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
+use otto_platform::fsops::root::Root;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -30,7 +30,7 @@ impl Scratch {
             Err(error) => return Err(error),
         }
         let parent = create_session_directory(&output, session_directory_name)?;
-        let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
+        let id = otto_platform::random::random_hex::<16>().map_err(io::Error::other)?;
         let name = format!("research-{id}");
         let directory = parent.create_new_child_directory(&name, Mode::S_IRWXU)?;
         Ok(Self {

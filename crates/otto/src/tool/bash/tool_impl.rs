@@ -1,7 +1,7 @@
 //! The `Tool` trait implementation for the bash tool.
 
 use super::*;
-use crate::hex::to_hex;
+use otto_platform::hex::to_hex;
 
 #[async_trait::async_trait]
 impl Tool for BashTool {

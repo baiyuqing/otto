@@ -39,8 +39,8 @@ use super::bash_output::{Logs, Output, PREVIEW_BYTES};
 use super::result::{RedactingCollector, decode_strict_json, redact_exact_text};
 use super::{Tool, definition};
 use crate::approval::shell;
-use crate::fsops::root::Root;
 use crate::workspace::confined::Workspace;
+use otto_platform::fsops::root::Root;
 
 mod approvals;
 mod execute;

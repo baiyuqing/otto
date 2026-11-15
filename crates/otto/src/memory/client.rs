@@ -18,7 +18,7 @@ use super::{
     GuardField, GuardInput,
     guard::{ContentGuard, DefaultGuard},
 };
-use crate::hex::to_hex;
+use otto_platform::hex::to_hex;
 
 const MAX_PREPARED: usize = 64;
 

@@ -146,7 +146,7 @@ async fn a_connected_and_a_failed_server_each_write_their_event() {
         ],
     );
     let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-    builder.shared_mut().logger = Arc::new(crate::log::Logger::new(Box::new(CapturedLog(
+    builder.shared_mut().logger = Arc::new(otto_platform::log::Logger::new(Box::new(CapturedLog(
         Arc::clone(&bytes),
     ))));
 

@@ -1,10 +1,10 @@
 use super::*;
-use otto::fsops::canonical_directory;
 use otto::runtime::startup::{
     MAX_CAPTURED_ENVIRONMENT_BYTES, MAX_CAPTURED_ENVIRONMENT_ENTRIES, config_environment,
     load_workspace, skill_checker,
 };
 use otto_core::config::File;
+use otto_platform::fsops::canonical_directory;
 use std::collections::HashMap;
 use std::io::Cursor;
 

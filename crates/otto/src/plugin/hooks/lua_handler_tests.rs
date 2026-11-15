@@ -38,7 +38,7 @@ fn runtime(fixture: &Fixture) -> Arc<Runtime> {
             workspace: fixture.home.path().to_owned(),
             guard: None,
             secrets: vec!["never-exposed".into()],
-            logger: Arc::new(crate::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
         },
     )
     .unwrap()

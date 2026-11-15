@@ -19,9 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::store::{Item, WorkspaceAdmit, delivery_text, run_text};
 use super::{RunOutcome, ScheduleStore, Scope};
-use crate::log::Logger;
 use crate::metrics::Metrics;
 use crate::session::origin::Origin;
+use otto_platform::log::Logger;
 
 /// A run is cancelled after this long; the claim lease is 15 min.
 const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);

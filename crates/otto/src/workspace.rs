@@ -18,8 +18,8 @@ use otto_core::session::PiError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::fsops;
-use crate::hex::to_hex;
+use otto_platform::fsops;
+use otto_platform::hex::to_hex;
 
 pub const MARKER: &str = ".otto/workspace.json";
 /// Protect the marker and its parent entry from model-originated replacement.
@@ -157,7 +157,7 @@ pub fn read(workspace: &Path) -> Result<Option<Identity>, PiError> {
 }
 
 fn uuid() -> Result<String, PiError> {
-    let mut bytes = crate::random::random_bytes::<16>().map_err(io_error)?;
+    let mut bytes = otto_platform::random::random_bytes::<16>().map_err(io_error)?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -183,7 +183,7 @@ fn publish(
     }
     let temp_name = format!(
         ".workspace-{}",
-        crate::random::random_hex::<8>().map_err(io_error)?
+        otto_platform::random::random_hex::<8>().map_err(io_error)?
     );
     fsops::publish_file(
         dir,
@@ -317,7 +317,7 @@ mod tests {
     }
     use crate::faults::publish::FaultyPublishOps;
     use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
-    use crate::fsops::PublishStep;
+    use otto_platform::fsops::PublishStep;
     use std::fs;
     use std::os::unix::fs::symlink;
 

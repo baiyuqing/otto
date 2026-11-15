@@ -15,27 +15,27 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 /// Borrows a path as the raw bytes the Go functions operate on.
-pub(crate) fn bytes(path: &Path) -> &[u8] {
+pub fn bytes(path: &Path) -> &[u8] {
     path.as_os_str().as_bytes()
 }
 
 /// Wraps raw bytes back into a path without validating UTF-8.
-pub(crate) fn path_from(bytes: Vec<u8>) -> PathBuf {
+pub fn path_from(bytes: Vec<u8>) -> PathBuf {
     PathBuf::from(OsString::from_vec(bytes))
 }
 
 /// Reports whether `path` starts at the filesystem root, like `filepath.IsAbs`.
-pub(crate) fn is_abs(path: &[u8]) -> bool {
+pub fn is_abs(path: &[u8]) -> bool {
     path.first() == Some(&b'/')
 }
 
 /// Reports whether any component of `path` is `..`, like `hasParentTraversal`.
-pub(crate) fn has_parent_traversal(path: &[u8]) -> bool {
+pub fn has_parent_traversal(path: &[u8]) -> bool {
     path.split(|byte| *byte == b'/').any(|part| part == b"..")
 }
 
 /// Returns the shortest lexically equivalent path, like `filepath.Clean`.
-pub(crate) fn clean(path: &[u8]) -> Vec<u8> {
+pub fn clean(path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
         return b".".to_vec();
     }
@@ -92,7 +92,7 @@ pub(crate) fn clean(path: &[u8]) -> Vec<u8> {
 }
 
 /// Returns all but the last element of `path`, cleaned, like `filepath.Dir`.
-pub(crate) fn dir(path: &[u8]) -> Vec<u8> {
+pub fn dir(path: &[u8]) -> Vec<u8> {
     let mut end = path.len();
     while end > 0 && path[end - 1] != b'/' {
         end -= 1;
@@ -101,7 +101,7 @@ pub(crate) fn dir(path: &[u8]) -> Vec<u8> {
 }
 
 /// Returns the last element of `path`, like `filepath.Base`.
-pub(crate) fn base(path: &[u8]) -> Vec<u8> {
+pub fn base(path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
         return b".".to_vec();
     }
@@ -120,7 +120,7 @@ pub(crate) fn base(path: &[u8]) -> Vec<u8> {
 }
 
 /// Joins non-empty elements with `/` and cleans the result, like `filepath.Join`.
-pub(crate) fn join(elements: &[&[u8]]) -> Vec<u8> {
+pub fn join(elements: &[&[u8]]) -> Vec<u8> {
     let mut joined: Vec<u8> = Vec::new();
     for element in elements {
         if element.is_empty() {
@@ -139,7 +139,7 @@ pub(crate) fn join(elements: &[&[u8]]) -> Vec<u8> {
 
 /// Returns a path relative to `base` that joins back to `target`, like
 /// `filepath.Rel`. Fails when the two cannot be related lexically.
-pub(crate) fn rel(base_path: &[u8], target: &[u8]) -> std::io::Result<Vec<u8>> {
+pub fn rel(base_path: &[u8], target: &[u8]) -> std::io::Result<Vec<u8>> {
     let base_clean = clean(base_path);
     let target_clean = clean(target);
     if base_clean == target_clean {

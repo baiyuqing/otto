@@ -23,7 +23,7 @@ fn runtime(hooks: otto_core::config::plugins::Hooks) -> (tempfile::TempDir, Arc<
             workspace,
             guard: None,
             secrets: vec!["test-private-value".into()],
-            logger: Arc::new(crate::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
         },
     )
     .unwrap();

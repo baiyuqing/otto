@@ -92,7 +92,7 @@ impl Client {
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
-                .and_then(crate::retry::parse_retry_after_seconds);
+                .and_then(otto_platform::retry::parse_retry_after_seconds);
             let (error, names_cache_key) = self
                 .error_response(status.as_u16(), response, control)
                 .await;

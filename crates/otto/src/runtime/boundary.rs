@@ -28,8 +28,8 @@ use otto_core::config::resolve::Runtime;
 use otto_core::model::ToolDefinition;
 use otto_core::safetext::{MAX_SECRET_BYTES, SecretCollector, canonicalize_utf8};
 
-use crate::gourl;
-use crate::urlprivacy;
+use otto_platform::gourl;
+use otto_platform::urlprivacy;
 
 /// Everything fixed at startup that the boundary is computed from.
 pub struct BoundaryInputs<'a> {

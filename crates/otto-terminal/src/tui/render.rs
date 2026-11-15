@@ -17,9 +17,9 @@ use super::layout::{
     format_token_count,
 };
 use super::transcript;
-use otto::deadline::round_to_seconds;
 use otto::subagent::format::one_line;
 use otto::subagent::tasks::{Task, TaskStatus};
+use otto_platform::deadline::round_to_seconds;
 
 /// Draws one frame.
 pub(crate) fn draw(frame: &mut Frame, app: &App) {

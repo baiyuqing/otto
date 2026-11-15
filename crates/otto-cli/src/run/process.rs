@@ -248,9 +248,9 @@ pub async fn run_with_extensions(
     // frontends own the terminal or already print warnings there.
     let logger = Arc::new(
         if options.serve || options.acp || workflow_command.is_some() || eval_command.is_some() {
-            otto::log::Logger::stderr()
+            otto_platform::log::Logger::stderr()
         } else {
-            otto::log::Logger::discard()
+            otto_platform::log::Logger::discard()
         },
     );
     let composed = match startup::compose(
@@ -604,9 +604,8 @@ pub async fn run_with_extensions(
     // serve`, `--acp`, `--attach` and headless runs are not it. Reporting is
     // inert unless Herdr started this process.
     let herdr = match frontend {
-        Frontend::Tui | Frontend::Repl => {
-            otto::herdr::Config::from_environment(&lookup).map(otto::herdr::Reporter::start)
-        }
+        Frontend::Tui | Frontend::Repl => otto_platform::herdr::Config::from_environment(&lookup)
+            .map(otto_platform::herdr::Reporter::start),
         Frontend::Once => None,
     };
     if let Some(reporter) = &herdr {

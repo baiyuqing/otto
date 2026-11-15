@@ -111,7 +111,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         schedule: None,
         skill_checker: None,
         memory: Default::default(),
-        logger: Arc::new(crate::log::Logger::discard()),
+        logger: Arc::new(otto_platform::log::Logger::discard()),
         parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     });
     let mut builder = Builder::for_workspace(
@@ -171,7 +171,7 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
         schedule: None,
         skill_checker: None,
         memory: Default::default(),
-        logger: Arc::new(crate::log::Logger::discard()),
+        logger: Arc::new(otto_platform::log::Logger::discard()),
         parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     })
 }
@@ -208,7 +208,7 @@ pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Sha
         schedule: None,
         skill_checker: None,
         memory: Default::default(),
-        logger: Arc::new(crate::log::Logger::discard()),
+        logger: Arc::new(otto_platform::log::Logger::discard()),
         parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     })
 }

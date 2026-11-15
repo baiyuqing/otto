@@ -171,7 +171,7 @@ impl Client {
     }
     #[cfg(unix)]
     pub fn new(socket: &Path) -> Result<Self, Error> {
-        let http = otto::tls_provider::http_client_builder()
+        let http = otto_platform::tls_provider::http_client_builder()
             .unix_socket(socket)
             .no_proxy()
             .build()
@@ -187,7 +187,7 @@ impl Client {
     /// Dispatch against the same serve router without a socket or extra process.
     pub fn in_process(router: axum::Router) -> Self {
         Self {
-            http: otto::tls_provider::http_client(),
+            http: otto_platform::tls_provider::http_client(),
             router: Some(router),
             client_source: None,
             queued_input: false,

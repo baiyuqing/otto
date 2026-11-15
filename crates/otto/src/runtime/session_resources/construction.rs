@@ -96,7 +96,7 @@ impl Builder {
         let starting_counter = 0;
         match &self.task_recorder {
             Some(store) => {
-                let (pid, process_started_at) = crate::process_identity::current_process();
+                let (pid, process_started_at) = otto_platform::process_identity::current_process();
                 let parent_session = if self.no_session {
                     format!("memory:{pid}:{process_started_at}")
                 } else {

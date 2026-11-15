@@ -6,11 +6,11 @@ use crate::fixtures::subagent_doubles::{
     match_any, match_prompt, raw, redaction, redactor, stub, test_config, test_prompt_for,
     tool_names, wait_status,
 };
-use crate::fsops::PosixDriver;
-use crate::fsops::files::FileDriver;
 use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role, Usage};
 use otto_core::provider::Response;
+use otto_platform::fsops::PosixDriver;
+use otto_platform::fsops::files::FileDriver;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 

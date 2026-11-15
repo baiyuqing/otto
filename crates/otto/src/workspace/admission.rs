@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::fsops::canonical_directory;
+use otto_platform::fsops::canonical_directory;
 
 /// Why a requested workspace path was rejected.
 #[derive(Debug, PartialEq, Eq)]

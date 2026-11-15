@@ -55,8 +55,8 @@ impl Manager {
                 cancellation_grace,
                 termination: Mutex::new(Termination::default()),
                 cleanup_changed: tokio::sync::Notify::new(),
-                _fence_registration: crate::child_fence::Children::register(
-                    crate::child_fence::Children::global(),
+                _fence_registration: otto_platform::child_fence::Children::register(
+                    otto_platform::child_fence::Children::global(),
                     pid,
                     true,
                 ),

@@ -129,7 +129,7 @@ impl Service {
     }
 
     /// Builds a service over a shared repository selected by runtime wiring.
-    pub fn from_store(store: Arc<dyn MemoryStore>, policy: Policy) -> Self {
+    pub(crate) fn from_store(store: Arc<dyn MemoryStore>, policy: Policy) -> Self {
         Self {
             store: Some(store),
             policy,
@@ -168,7 +168,7 @@ impl Service {
     /// A content-free signal that changes after a pending candidate was
     /// durably created. The receiver has no candidate id, text, reason, or
     /// scope; consumers must use their existing scoped review query.
-    pub fn review_available_changed(&self) -> watch::Receiver<u64> {
+    pub(crate) fn review_available_changed(&self) -> watch::Receiver<u64> {
         self.review_available.subscribe()
     }
 
@@ -212,7 +212,7 @@ impl Service {
         self.ready()?.list(request)
     }
 
-    pub fn get_tombstone(&self, reference: &RecordRef) -> Result<Tombstone> {
+    pub(crate) fn get_tombstone(&self, reference: &RecordRef) -> Result<Tombstone> {
         self.ready()?.get_tombstone(reference)
     }
 
@@ -375,7 +375,7 @@ impl Service {
     }
 
     /// The standing records of `user_scope`, oldest first.
-    pub fn standing_records(&self, user_scope: &Scope) -> Result<Vec<Record>> {
+    pub(crate) fn standing_records(&self, user_scope: &Scope) -> Result<Vec<Record>> {
         self.ready()?.standing_records(user_scope, now_utc())
     }
 
@@ -510,7 +510,7 @@ impl Service {
     /// runs, and writes nothing. A caller that spends something before
     /// proposing (a model call) uses it to stop early on a request that would
     /// be refused.
-    pub fn check_proposal(&self, request: &ProposeRequest) -> Result<()> {
+    pub(crate) fn check_proposal(&self, request: &ProposeRequest) -> Result<()> {
         let store = self.ready()?;
         let candidate = self.checked_candidate(request)?;
         store.check_proposals(std::slice::from_ref(&candidate))

@@ -26,7 +26,8 @@ use crate::tool::{
     ApprovalSpec, CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result,
 };
 
-pub const NAMES: [&str; 3] = ["schedule", "schedule_list", "schedule_cancel"];
+#[cfg(test)]
+pub(crate) const NAMES: [&str; 3] = ["schedule", "schedule_list", "schedule_cancel"];
 
 const MAX_TEXT_CHARS: usize = 500;
 const MAX_PROMPT_CHARS: usize = 2000;
@@ -91,7 +92,7 @@ pub fn tools(context: &Context) -> Vec<Box<dyn Tool + Send + Sync>> {
     ]
 }
 
-pub fn tools_with_session(
+pub(crate) fn tools_with_session(
     context: &Context,
     session: Arc<dyn crate::session::SessionHandle>,
 ) -> Vec<Box<dyn Tool + Send + Sync>> {
@@ -103,7 +104,7 @@ pub fn tools_with_session(
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct ScheduledAuthority {
+pub(crate) struct ScheduledAuthority {
     pub body_digest: String,
     pub source_session: String,
     pub context: crate::approval::reviewer::ReviewContext,

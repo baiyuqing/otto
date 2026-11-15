@@ -23,7 +23,7 @@ pub struct Loaded {
     pub trusted: bool,
 }
 
-pub fn managed_path() -> &'static Path {
+pub(crate) fn managed_path() -> &'static Path {
     #[cfg(target_os = "macos")]
     let path = "/Library/Application Support/Otto/policy.toml";
     #[cfg(not(target_os = "macos"))]
@@ -31,7 +31,7 @@ pub fn managed_path() -> &'static Path {
     Path::new(path)
 }
 
-pub fn policy_at(path: &Path) -> Result<Option<ManagedPolicy>, String> {
+pub(crate) fn policy_at(path: &Path) -> Result<Option<ManagedPolicy>, String> {
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("cannot inspect managed policy".into()),
@@ -138,7 +138,7 @@ pub fn directories(workspace: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Management commands read and edit the owning user source, never a merged project.
-pub fn load_user(_home: &Path, user: &Path, explicit: bool) -> Result<File, String> {
+pub(crate) fn load_user(_home: &Path, user: &Path, explicit: bool) -> Result<File, String> {
     let mut merged = Merged::default();
     match std::fs::read_to_string(user) {
         Ok(text) => merged
@@ -174,7 +174,7 @@ fn load_with_policy(
     assemble(home, user, explicit, workspace, policy, None)
 }
 
-pub fn for_workspace(
+pub(crate) fn for_workspace(
     home: &Path,
     user: &Path,
     base: &File,
@@ -258,7 +258,7 @@ fn assemble(
     })
 }
 
-pub fn catalog_roots(
+pub(crate) fn catalog_roots(
     file: &File,
     home: &Path,
     workspace: &Path,
@@ -544,11 +544,11 @@ pub fn approved(home: &Path, workspace: &Path) -> Result<bool, String> {
     approved_for(home, &home.join(".config/otto/config.toml"), workspace)
 }
 
-pub fn approved_for(home: &Path, user: &Path, workspace: &Path) -> Result<bool, String> {
+pub(crate) fn approved_for(home: &Path, user: &Path, workspace: &Path) -> Result<bool, String> {
     authorized_digest(home, user, workspace).map(|identity| identity.is_some())
 }
 
-pub fn authorized_digest(
+pub(crate) fn authorized_digest(
     home: &Path,
     user: &Path,
     workspace: &Path,
@@ -569,7 +569,12 @@ pub fn authorized_digest(
         .then_some(identity))
 }
 
-pub fn set_trust(home: &Path, workspace: &Path, enable: bool) -> Result<Vec<String>, String> {
+#[cfg(test)]
+pub(crate) fn set_trust(
+    home: &Path,
+    workspace: &Path,
+    enable: bool,
+) -> Result<Vec<String>, String> {
     set_trust_for(
         home,
         &home.join(".config/otto/config.toml"),
@@ -610,7 +615,10 @@ pub fn set_trust_for(
     Ok(sources)
 }
 
-pub fn instruction_files(home: &Path, workspace: &Path) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn instruction_files(
+    home: &Path,
+    workspace: &Path,
+) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     let user = home.join(".config/otto");
     if let Some(text) = project_read(&user, "AGENTS.md")? {

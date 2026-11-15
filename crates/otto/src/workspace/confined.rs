@@ -137,7 +137,7 @@ impl Workspace {
 
     /// The cleaned absolute root as the caller spelled it, before symbolic
     /// links were resolved. `bash` uses it to validate its working directory.
-    pub fn lexical_root(&self) -> &Path {
+    pub(crate) fn lexical_root(&self) -> &Path {
         &self.lexical_root
     }
 
@@ -162,7 +162,7 @@ impl Workspace {
 
     /// Resolves an existing path to its canonical absolute location inside the
     /// workspace, following symbolic links.
-    pub fn resolve_existing(&self, path: &Path) -> io::Result<PathBuf> {
+    pub(crate) fn resolve_existing(&self, path: &Path) -> io::Result<PathBuf> {
         self.canonical_existing(path)
     }
 
@@ -170,7 +170,7 @@ impl Workspace {
     /// workspace. The final element need not exist; missing parents are
     /// allowed, and a symbolic link that stays inside the workspace resolves to
     /// its target.
-    pub fn resolve_for_write(&self, path: &Path) -> io::Result<PathBuf> {
+    pub(crate) fn resolve_for_write(&self, path: &Path) -> io::Result<PathBuf> {
         self.canonical_for_write(path)
     }
 

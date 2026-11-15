@@ -10,7 +10,7 @@ use super::{Catalog, Definition};
 use crate::skill::prompt::{collapse_whitespace, escape_html, truncate_chars};
 
 /// Caps the rendered prompt section, the same cap the skills section uses.
-pub const MAX_LISTING_BYTES: usize = 8 << 10;
+pub(crate) const MAX_LISTING_BYTES: usize = 8 << 10;
 
 /// The number of description characters a truncated entry keeps.
 const SHORT_DESCRIPTION_CHARS: usize = 120;
@@ -59,7 +59,7 @@ const AGENTS_FOOTER: &str = "</available_agents>\n</agents>";
 /// listing fits [`MAX_LISTING_BYTES`], so a large catalog stays complete and
 /// one warning names the level it fell back to. Only a catalog too large even
 /// for bare names loses entries, and that warning names them.
-pub fn prompt_section(catalog: &Catalog) -> (String, Vec<String>) {
+pub(crate) fn prompt_section(catalog: &Catalog) -> (String, Vec<String>) {
     let definitions = catalog.definitions();
     if definitions.is_empty() {
         return (String::new(), Vec::new());

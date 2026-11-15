@@ -25,7 +25,7 @@ pub fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<St
 
 /// Resolves `[sandbox]` with the CLI driver override and checks the result
 /// against the managed policy.
-pub fn resolve_sandbox_settings(
+pub(crate) fn resolve_sandbox_settings(
     file: &File,
     driver_override: Option<&str>,
 ) -> Result<SandboxSettings, String> {

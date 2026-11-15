@@ -37,8 +37,6 @@ use super::{
 
 #[path = "audit_contracts.rs"]
 pub mod audit;
-pub mod jev;
-pub mod session;
 pub mod sqlite;
 
 /// The longest a model has to answer for one candidate.
@@ -64,14 +62,14 @@ pub use crate::decision::{Answer, Backend, Exchange, Failure, Kind, Question};
 
 /// Where a candidate should apply, as advised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeAdvice {
+pub(crate) enum ScopeAdvice {
     User,
     Workspace,
 }
 
 /// How a candidate relates to the standing records.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Relation {
+pub(crate) enum Relation {
     New,
     Duplicate(String),
     Conflict(String),
@@ -79,7 +77,7 @@ pub enum Relation {
 
 /// The three answers about one candidate.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Advice {
+pub(crate) struct Advice {
     pub model: String,
     pub auxiliary: bool,
     pub scope: ScopeAdvice,
@@ -369,7 +367,7 @@ impl Advisor {
     }
 
     /// Builds an advisor with an injected typed audit repository.
-    pub fn new_with_audit(
+    pub(crate) fn new_with_audit(
         backend: Box<dyn Backend>,
         audit: Option<Arc<dyn audit::AuditStore>>,
     ) -> Self {
@@ -388,7 +386,8 @@ impl Advisor {
     }
 
     /// Whether the auxiliary model answers.
-    pub fn is_auxiliary(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_auxiliary(&self) -> bool {
         self.backend.auxiliary()
     }
 

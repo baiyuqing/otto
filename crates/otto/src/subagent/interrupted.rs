@@ -11,13 +11,13 @@
 use std::path::{Path, PathBuf};
 
 mod inventory;
+pub use inventory::inventory;
 pub(crate) use inventory::open_validated;
-pub use inventory::{Inventory, inventory};
 
 use otto_core::model::{Message, Role};
 use otto_core::session::context::pending_tool_calls;
 
-pub use crate::session::UnansweredCall;
+pub(crate) use crate::session::UnansweredCall;
 use crate::session::unanswered_calls_from;
 
 use super::runner::{
@@ -190,7 +190,7 @@ fn record_from_entries(
 /// Opens `path` for writing, which repairs any dangling tool call by
 /// appending a stand-in tool result, and appends an `otto.task_result` entry
 /// with status [`INTERRUPTED_STATUS`] and an empty error.
-pub fn mark_interrupted(path: &Path) -> Result<(), String> {
+pub(crate) fn mark_interrupted(path: &Path) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or("child has no parent directory")?

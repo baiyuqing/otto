@@ -365,7 +365,7 @@ fn unquote_double(text: &str) -> Option<String> {
 }
 
 /// True when `word` names `program`, with or without a directory.
-pub fn is_program(word: &str, program: &str) -> bool {
+pub(crate) fn is_program(word: &str, program: &str) -> bool {
     Path::new(word)
         .file_name()
         .is_some_and(|name| name == program)
@@ -375,7 +375,7 @@ pub fn is_program(word: &str, program: &str) -> bool {
 /// options `-C <dir>`, `-c <k=v>`, `--no-pager`, `--git-dir=<p>` and
 /// `--work-tree=<p>`. `None` when `words` is not a git command, has an
 /// unrecognized option before the subcommand, or has no subcommand.
-pub fn git_subcommand(words: &[String]) -> Option<(usize, &str)> {
+pub(crate) fn git_subcommand(words: &[String]) -> Option<(usize, &str)> {
     if !is_program(words.first()?, "git") {
         return None;
     }

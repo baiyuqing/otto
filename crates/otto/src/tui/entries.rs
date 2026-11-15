@@ -19,7 +19,7 @@ use otto_core::session::COMPACTION_CONTEXT_TYPE;
 
 /// What one transcript entry renders as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryKind {
+pub(crate) enum EntryKind {
     User,
     Assistant,
     /// Model reasoning, drawn dimmed above the reply it precedes.
@@ -73,7 +73,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn execution_elapsed(&self, now: Instant) -> Option<Duration> {
+    pub(crate) fn execution_elapsed(&self, now: Instant) -> Option<Duration> {
         self.tool_elapsed.or_else(|| {
             self.tool_started
                 .map(|start| now.saturating_duration_since(start))
@@ -93,13 +93,16 @@ impl Entry {
 /// Legacy frames can only match pending provider calls; completed calls remain
 /// distinct because legacy streams do not carry a replay-safe invocation key.
 #[cfg(test)]
-pub fn reduce_tool_event(entries: &mut Vec<Entry>, event: &otto_core::wire::events::WireEvent) {
+pub(crate) fn reduce_tool_event(
+    entries: &mut Vec<Entry>,
+    event: &otto_core::wire::events::WireEvent,
+) {
     reduce_tool_event_at(entries, event, Some(Instant::now()));
 }
 
 /// Attach streams replay from frame zero without execution timestamps, so their
 /// delivery intervals cannot establish tool execution duration.
-pub fn reduce_tool_event_at(
+pub(crate) fn reduce_tool_event_at(
     entries: &mut Vec<Entry>,
     event: &otto_core::wire::events::WireEvent,
     now: Option<Instant>,
@@ -176,7 +179,7 @@ pub fn reduce_tool_event_at(
 
 /// Reduces a session's whole history into transcript entries plus the total
 /// usage across every message.
-pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
+pub(crate) fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
     let mut entries: Vec<Entry> = Vec::with_capacity(history.len());
     // Tool-call entry indexes awaiting their result, keyed by tool_call_id,
     // oldest first (a duplicated call id resolves in call order).
@@ -530,7 +533,7 @@ fn pair_tool_result(
 mod tests;
 
 /// Merge independent human receipts into the display without creating Messages.
-pub fn project_local_commands(
+pub(crate) fn project_local_commands(
     entries: &mut Vec<Entry>,
     receipts: &[otto_core::session::local_command::LocalCommandReceipt],
 ) {

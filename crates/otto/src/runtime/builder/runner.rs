@@ -11,7 +11,7 @@ impl Runner {
             .map_or_else(Deadline::unlimited, Deadline::after)
     }
 
-    pub async fn end_session_hooks(self: &Arc<Self>) {
+    pub(crate) async fn end_session_hooks(self: &Arc<Self>) {
         if self.agent.claim_end_hooks() {
             let runner = self.clone();
             tokio::spawn(async move {
@@ -67,7 +67,7 @@ impl Runner {
     }
 
     /// Runs one model-originated follow-up as display-only context.
-    pub async fn run_followup_with_system_context(
+    pub(crate) async fn run_followup_with_system_context(
         &self,
         text: &str,
         system_context: &str,
@@ -286,7 +286,7 @@ impl Runner {
 
     /// A bounded approval-only dialogue. It has an isolated memory transcript,
     /// the existing provider and usage collector, and no effectful task tools.
-    pub async fn approval_dialogue(
+    pub(crate) async fn approval_dialogue(
         &self,
         text: &str,
         tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>>,
@@ -569,7 +569,7 @@ impl Runner {
     /// test injects, in place of none. Test-only: lets a close-ordering test
     /// use a [`crate::mcp::Servers`] with a fake connected client.
     #[cfg(test)]
-    pub fn with_mcp(self, mcp: Arc<crate::mcp::Servers>) -> Self {
+    pub(crate) fn with_mcp(self, mcp: Arc<crate::mcp::Servers>) -> Self {
         let resources = self.session().resources().expect("scripted resources");
         resources.set_test_mcp(mcp);
         self

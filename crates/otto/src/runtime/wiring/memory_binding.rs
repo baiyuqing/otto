@@ -40,7 +40,7 @@ impl Builder {
     }
 
     /// The memory tools, in the order they are registered.
-    pub fn memory_tools(
+    pub(crate) fn memory_tools(
         &self,
         max_output: usize,
         advisor: Option<Arc<crate::memory::advice::Advisor>>,
@@ -105,7 +105,7 @@ impl Builder {
     /// The generator behind `/memory propose`, over the same kind of backend
     /// as [`Self::advisor`] and the same audit log. `None` when memory is
     /// unusable or external.
-    pub fn proposal_generator(
+    pub(crate) fn proposal_generator(
         &self,
         agent: super::super::builder::AdviceAgent,
         model: &str,
@@ -149,14 +149,14 @@ impl Builder {
 
     /// Whether memory tools belong in this build. The boundary half of the
     /// decision is checked by the caller that already knows it.
-    pub fn memory_usable(&self) -> bool {
+    pub(crate) fn memory_usable(&self) -> bool {
         self.memory.usable
     }
 }
 
 impl Builder {
     /// Binds the memory service for one session.
-    pub fn bind_memory(&self) -> Result<Binding, BuildError> {
+    pub(crate) fn bind_memory(&self) -> Result<Binding, BuildError> {
         self.memory
             .service
             .bind(BindOptions {
@@ -169,7 +169,7 @@ impl Builder {
 
     /// Binds the memory source of the runner for one session. `client` is the
     /// runner's client; it is ignored for the file store.
-    pub fn bind_selected_memory(
+    pub(crate) fn bind_selected_memory(
         &self,
         session_id: String,
         client: Option<Arc<crate::memory::client::Client>>,
@@ -195,7 +195,7 @@ impl Builder {
 
     /// The memory, skill and sub-agent halves of `boundaryToolDefinitions`. The
     /// caller splices them around the bash definition.
-    pub fn boundary_memory_definitions(&self, max_output: usize) -> Vec<ToolDefinition> {
+    pub(crate) fn boundary_memory_definitions(&self, max_output: usize) -> Vec<ToolDefinition> {
         if !self.memory.usable {
             return Vec::new();
         }
@@ -216,7 +216,7 @@ impl Builder {
 
     /// The skill and sub-agent definitions the boundary check must see.
     /// `dynamic` is the redaction-boundary gate on the sub-agent tools.
-    pub fn boundary_catalog_definitions(
+    pub(crate) fn boundary_catalog_definitions(
         &self,
         max_output: usize,
         dynamic: bool,

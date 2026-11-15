@@ -76,7 +76,7 @@ impl Children {
 
     /// Sends `SIGKILL` to every registered pid or process group. Best-effort:
     /// an already-exited pid is skipped.
-    pub fn kill_all(&self) {
+    pub(crate) fn kill_all(&self) {
         let entries = self.state.lock().unwrap().entries.clone();
         for entry in entries {
             let target = if entry.process_group {

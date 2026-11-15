@@ -180,14 +180,14 @@ impl Default for OptionsTemplate {
 }
 
 /// Renders the parent's static system prompt for a tool set.
-pub type PromptFor = Arc<dyn Fn(&[ToolDefinition]) -> String + Send + Sync>;
+pub(crate) type PromptFor = Arc<dyn Fn(&[ToolDefinition]) -> String + Send + Sync>;
 
 /// Returns the parent's current message list.
-pub type ParentSession = Arc<dyn Fn() -> Vec<Message> + Send + Sync>;
+pub(crate) type ParentSession = Arc<dyn Fn() -> Vec<Message> + Send + Sync>;
 
 /// Returns the parent's messages as they were before the turn that the quoted
 /// user prompt opened, read from the parent's session file.
-pub type ParentFork = Arc<dyn Fn(&str) -> Result<Vec<Message>, String> + Send + Sync>;
+pub(crate) type ParentFork = Arc<dyn Fn(&str) -> Result<Vec<Message>, String> + Send + Sync>;
 
 /// Everything a [`Runner`] needs from the parent runtime.
 pub struct Config {
@@ -496,7 +496,7 @@ impl Runner {
     }
 
     /// The tool definitions a child with no named definition would see.
-    pub fn child_definitions(&self) -> Vec<ToolDefinition> {
+    pub(crate) fn child_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = self.child_registry.definitions();
         // Discovery needs the schema only; no catalog binds a runner identity.
         definitions.push(
@@ -571,8 +571,8 @@ mod start;
 mod task_spec;
 
 pub use child_tools::*;
-pub use completion::*;
-pub use shared_provider::*;
+pub(crate) use completion::*;
+pub(crate) use shared_provider::*;
 pub(crate) use task_spec::*;
 
 #[cfg(test)]

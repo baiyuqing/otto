@@ -172,7 +172,7 @@ pub(crate) struct Completion {
     pub result: Result<Reply, String>,
 }
 
-pub(crate) struct Driver {
+pub struct Driver {
     connection: Connection,
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
@@ -241,12 +241,12 @@ impl Driver {
             .expect("driver keeps completion sender")
     }
 
-    pub fn try_next(&mut self) -> Option<Completion> {
+    pub(crate) fn try_next(&mut self) -> Option<Completion> {
         self.rx.try_recv().ok()
     }
 
     /// Call during clean shutdown; effects already admitted are never replayed.
-    pub async fn drain_pending_writes(&mut self) -> Vec<Completion> {
+    pub(crate) async fn drain_pending_writes(&mut self) -> Vec<Completion> {
         for (mutation, task) in &mut self.tasks {
             if *mutation {
                 let _ = task.await;

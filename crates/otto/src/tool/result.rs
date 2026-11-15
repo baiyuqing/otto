@@ -338,7 +338,7 @@ pub(crate) fn redact_exact_text(value: &str, values: &[String], marker: &str) ->
 
 /// Caps `content` at `max_output_bytes`, appending an omission marker,
 /// matching `CappedTextResult`.
-pub fn capped_text_result(content: &str, max_output_bytes: usize) -> ToolResult {
+pub(crate) fn capped_text_result(content: &str, max_output_bytes: usize) -> ToolResult {
     let mut collector = CappedByteCollector::new(max_output_bytes);
     collector.write(content.as_bytes());
     if collector.discarded() == 0 {

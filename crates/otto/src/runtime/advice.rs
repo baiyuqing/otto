@@ -20,12 +20,12 @@ use crate::tool::registry::Registry;
 use super::builder::{ProviderClient, SharedSession};
 
 /// The usage task id of advice requests.
-pub const TASK_ID: &str = "memory-advice";
+pub(crate) const TASK_ID: &str = "memory-advice";
 
 /// The largest accepted answer, in bytes. Five short JSON keys fit well below.
 const MAXIMUM_BYTES: usize = 4096;
 
-pub struct SessionBackend {
+pub(crate) struct SessionBackend {
     agent: Agent<ProviderClient, Registry, SharedSession>,
     model: String,
     usage: Option<crate::usage::Collector>,

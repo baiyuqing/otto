@@ -44,7 +44,7 @@ pub(super) struct Pane {
 }
 
 impl Observer {
-    pub fn reset_scope(&mut self, workspace: &str, session: &str) {
+    pub(crate) fn reset_scope(&mut self, workspace: &str, session: &str) {
         let scope = (workspace.to_owned(), session.to_owned());
         if self.scope != scope {
             let active = self.active;
@@ -170,7 +170,7 @@ impl Observer {
         true // Never forward typing, submission or task-control keys to the composer.
     }
 
-    pub fn toggle_at(&mut self, col: u16, row: u16) -> bool {
+    pub(crate) fn toggle_at(&mut self, col: u16, row: u16) -> bool {
         let found = self
             .geometry
             .borrow()
@@ -206,7 +206,7 @@ impl Observer {
         }
     }
 
-    pub fn focus_at(&mut self, col: u16, row: u16) {
+    pub(crate) fn focus_at(&mut self, col: u16, row: u16) {
         let found = self
             .geometry
             .borrow()
@@ -218,7 +218,7 @@ impl Observer {
         }
     }
 
-    pub fn scroll_by(&mut self, amount: i32) {
+    pub(crate) fn scroll_by(&mut self, amount: i32) {
         if let Some(pane) = self.panes.get_mut(self.focused) {
             let max = pane.max_scroll.get();
             let next = pane

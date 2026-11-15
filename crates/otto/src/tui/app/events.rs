@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub fn apply_event(&mut self, event: &WireEvent) -> bool {
+    pub(crate) fn apply_event(&mut self, event: &WireEvent) -> bool {
         if let Some(reporter) = &self.program_status {
             reporter.observe_wire_stdout(event);
         }

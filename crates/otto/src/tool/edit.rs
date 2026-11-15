@@ -143,7 +143,7 @@ fn replacement(old_text: Option<&str>, new_text: Option<&str>) -> Result<EditRep
 }
 
 /// Replaces text in a workspace file.
-pub struct EditTool<'a> {
+pub(crate) struct EditTool<'a> {
     workspace: Arc<Workspace>,
     publish: &'a dyn PublishOps,
 }

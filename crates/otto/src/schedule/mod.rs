@@ -19,9 +19,12 @@ pub mod worker;
 
 pub use crate::schedule::sqlite::SqliteScheduleStore as Store;
 use crate::session::origin::Origin;
+pub(crate) use store::CreateError;
+#[cfg(test)]
+pub(crate) use store::run_text;
 pub use store::{
-    CreateError, Delivery, Error, Item, NewItem, Result, ScheduleStore, WorkspaceAdmit,
-    delivery_text, parse_label, run_text,
+    Delivery, Error, Item, NewItem, Result, ScheduleStore, WorkspaceAdmit, delivery_text,
+    parse_label,
 };
 
 /// Which origins a process runs or delivers.

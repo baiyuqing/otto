@@ -6,7 +6,7 @@ use std::path::Path;
 
 /// A tool call in Claude Code's shape: `tool_name` and `tool_input`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClaudeTool {
+pub(crate) struct ClaudeTool {
     pub name: String,
     pub input: Value,
 }
@@ -99,7 +99,7 @@ fn relativize(input: &mut Value, field: &str, workspace: &Path) {
 
 /// Claude's `tool_name` and `tool_input` for an Otto tool call. Unmapped tools keep their
 /// name and arguments; `mcp_call_tool` unwraps to the MCP tool name and its arguments.
-pub fn to_claude(otto_tool: &str, arguments: &Value, workspace: &Path) -> ClaudeTool {
+pub(crate) fn to_claude(otto_tool: &str, arguments: &Value, workspace: &Path) -> ClaudeTool {
     if otto_tool == MCP_DISPATCHER {
         let name = arguments
             .get("tool")
@@ -134,7 +134,7 @@ pub fn to_claude(otto_tool: &str, arguments: &Value, workspace: &Path) -> Claude
 /// Otto `arguments` for a Claude `updatedInput` on the same tool call. `updated_input` must
 /// be an object. For `mcp_call_tool` it replaces `arguments.arguments` and keeps the other
 /// fields of `original_arguments`.
-pub fn to_otto(
+pub(crate) fn to_otto(
     otto_tool: &str,
     original_arguments: &Value,
     updated_input: &Value,

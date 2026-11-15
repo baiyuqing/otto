@@ -222,7 +222,11 @@ impl SqliteScheduleStore {
         })
     }
 
-    pub fn refresh_delivery_client(&self, id: &str, now: DateTime<Utc>) -> Result<Vec<String>> {
+    pub(crate) fn refresh_delivery_client(
+        &self,
+        id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
         self.write(|connection| {
             connection.execute(
                 "UPDATE delivery_clients SET expires_at = ?2 WHERE id = ?1",
@@ -232,7 +236,7 @@ impl SqliteScheduleStore {
         })
     }
 
-    pub fn unregister_delivery_client(&self, id: &str) -> Result<()> {
+    pub(crate) fn unregister_delivery_client(&self, id: &str) -> Result<()> {
         self.write(|connection| {
             connection.execute("DELETE FROM delivery_clients WHERE id = ?1", params![id])?;
             Ok(())
@@ -242,7 +246,7 @@ impl SqliteScheduleStore {
     }
 
     /// Wakes in-process workers after an item is created or cancelled.
-    pub fn notifier(&self) -> &Notify {
+    pub(crate) fn notifier(&self) -> &Notify {
         &self.notify
     }
 

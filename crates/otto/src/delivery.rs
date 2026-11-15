@@ -31,7 +31,7 @@ const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
 const MAX_SOURCE_REFS: usize = 32;
 const MAX_SOURCE_REF_BYTES: usize = 4 * 1024;
 
-pub const HANDOFF_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const HANDOFF_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -132,7 +132,7 @@ pub fn plan(target: Target, delivery_id: &str, branch: String) -> Result<Worktre
 /// perform. The caller must execute it through an approval-scoped constrained
 /// executor, then canonicalize and revalidate the created worktree before it
 /// can become a tool root.
-pub fn worktree_add_argv(plan: &WorktreePlan, base: &str) -> Result<Vec<String>, String> {
+pub(crate) fn worktree_add_argv(plan: &WorktreePlan, base: &str) -> Result<Vec<String>, String> {
     if !valid_object_id(base) {
         return Err("invalid delivery base revision".into());
     }

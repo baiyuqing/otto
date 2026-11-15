@@ -26,7 +26,7 @@ pub(crate) struct View {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Row {
+pub struct Row {
     pub id: String,
     pub cells: Vec<String>,
     pub detail: String,

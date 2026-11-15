@@ -4,7 +4,7 @@ use super::*;
 
 /// Shares one provider between the parent and every child, because [`Agent`]
 /// owns the provider it calls.
-pub struct SharedProvider {
+pub(crate) struct SharedProvider {
     pub(super) provider: Arc<dyn Provider + Send + Sync>,
     pub(super) timeout: Option<Duration>,
     pub(super) cancellation_grace: Duration,

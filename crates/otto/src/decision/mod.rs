@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
-pub mod jev;
+pub(crate) mod jev;
 pub mod session;
 pub(crate) const YES: &str = "yes";
 pub(crate) const NO: &str = "no";
@@ -37,7 +37,7 @@ pub struct Answer {
 
 impl Answer {
     /// Confidence is observational only; it cannot confer authority.
-    pub fn valid_probability(&self) -> bool {
+    pub(crate) fn valid_probability(&self) -> bool {
         self.probability
             .is_none_or(|p| p.is_finite() && (0.0..=1.0).contains(&p))
     }

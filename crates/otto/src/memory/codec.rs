@@ -11,12 +11,12 @@ use crate::memory::{Error, ErrorKind, MAX_METADATA_BYTES, Origin, Provenance, Re
 
 /// The stored timestamp layout, `"2006-01-02T15:04:05.000000000Z"`. Exactly 30
 /// bytes, which the schema's `length(...) = 30` checks depend on.
-pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.9fZ";
+pub(crate) const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.9fZ";
 /// Byte length of a value in [`TIMESTAMP_FORMAT`].
-pub const TIMESTAMP_BYTES: usize = 30;
+pub(crate) const TIMESTAMP_BYTES: usize = 30;
 
-pub const MAX_LABELS_JSON_BYTES: usize = 8192;
-pub const MAX_SOURCE_JSON_BYTES: usize = 8192;
+pub(crate) const MAX_LABELS_JSON_BYTES: usize = 8192;
+pub(crate) const MAX_SOURCE_JSON_BYTES: usize = 8192;
 
 fn corrupt() -> Error {
     Error::new(ErrorKind::Corrupt)
@@ -24,7 +24,7 @@ fn corrupt() -> Error {
 
 /// The four blob and timestamp columns of one record row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedRecord {
+pub(crate) struct EncodedRecord {
     pub labels: String,
     pub metadata: String,
     pub source: String,
@@ -37,7 +37,7 @@ fn origin_text(origin: Option<Origin>) -> &'static str {
     origin.map_or("", Origin::as_str)
 }
 
-pub fn encode_provenance(source: &Provenance) -> String {
+pub(crate) fn encode_provenance(source: &Provenance) -> String {
     let mut out = String::from("{\"origin\":");
     json::encode_string(origin_text(source.origin), &mut out);
     out.push_str(",\"session_id\":");
@@ -58,18 +58,7 @@ pub fn encode_provenance(source: &Provenance) -> String {
     out
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProvenanceWire {
-    origin: String,
-    session_id: String,
-    message_ids: Vec<String>,
-    observation_id: String,
-    decision_at: Option<String>,
-    decision_source: String,
-}
-
-pub fn encode_record(record: &Record) -> Result<EncodedRecord> {
+pub(crate) fn encode_record(record: &Record) -> Result<EncodedRecord> {
     let labels = json::encode_string_slice(&record.labels);
     if labels.len() > MAX_LABELS_JSON_BYTES {
         return Err(corrupt());
@@ -92,62 +81,11 @@ pub fn encode_record(record: &Record) -> Result<EncodedRecord> {
     })
 }
 
-pub fn decode_labels(raw: &str) -> Result<Vec<String>> {
-    if raw.len() > MAX_LABELS_JSON_BYTES {
-        return Err(corrupt());
-    }
-    let value = json::decode_string_slice(raw).ok_or_else(corrupt)?;
-    if json::encode_string_slice(&value) != raw {
-        return Err(corrupt());
-    }
-    Ok(value)
-}
-
-pub fn decode_metadata(raw: &str) -> Result<std::collections::BTreeMap<String, String>> {
-    if raw.len() > MAX_METADATA_BYTES {
-        return Err(corrupt());
-    }
-    let value = json::decode_string_map(raw).ok_or_else(corrupt)?;
-    if json::encode_string_map(&value) != raw {
-        return Err(corrupt());
-    }
-    Ok(value)
-}
-
-fn decode_origin(value: &str) -> Result<Option<Origin>> {
-    if value.is_empty() {
-        return Ok(None);
-    }
-    Origin::parse(value).map(Some).ok_or_else(corrupt)
-}
-
-pub fn decode_provenance(raw: &str) -> Result<Provenance> {
-    if raw.len() > MAX_SOURCE_JSON_BYTES {
-        return Err(corrupt());
-    }
-    let wire: ProvenanceWire = serde_json::from_str(raw).map_err(|_| corrupt())?;
-    let mut value = Provenance {
-        origin: decode_origin(&wire.origin)?,
-        session_id: wire.session_id,
-        message_ids: wire.message_ids,
-        observation_id: wire.observation_id,
-        decision_at: None,
-        decision_source: decode_origin(&wire.decision_source)?,
-    };
-    if let Some(at) = &wire.decision_at {
-        value.decision_at = Some(parse_timestamp(at)?);
-    }
-    if encode_provenance(&value) != raw {
-        return Err(corrupt());
-    }
-    Ok(value)
-}
-
-pub fn format_timestamp(value: DateTime<Utc>) -> String {
+pub(crate) fn format_timestamp(value: DateTime<Utc>) -> String {
     value.format(TIMESTAMP_FORMAT).to_string()
 }
 
-pub fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
+pub(crate) fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
     if value.len() != TIMESTAMP_BYTES {
         return Err(corrupt());
     }
@@ -160,7 +98,7 @@ pub fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
 }
 
 /// A valid stored float: finite and inside `[0, 1]`.
-pub fn valid_stored_float(value: f64) -> bool {
+pub(crate) fn valid_stored_float(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
@@ -203,27 +141,6 @@ mod tests {
             encode_provenance(&Provenance::default()),
             r#"{"origin":"","session_id":"","message_ids":[],"observation_id":"","decision_at":null,"decision_source":""}"#
         );
-    }
-
-    #[test]
-    fn provenance_round_trips_through_its_wire_form() {
-        let source = Provenance {
-            origin: Some(Origin::Human),
-            session_id: "s1".into(),
-            message_ids: vec!["m1".into(), "m2".into()],
-            observation_id: "o1".into(),
-            decision_at: Some(at(0)),
-            decision_source: Some(Origin::Model),
-        };
-        let encoded = encode_provenance(&source);
-        assert_eq!(decode_provenance(&encoded).expect("decode"), source);
-    }
-
-    #[test]
-    fn decoding_rejects_a_non_canonical_blob() {
-        assert!(decode_provenance(r#"{"origin":"human"}"#).is_err());
-        assert!(decode_labels(r#"[ "a" ]"#).is_err());
-        assert!(decode_metadata(r#"{"b":"2","a":"1"}"#).is_err());
     }
 
     #[test]

@@ -34,7 +34,7 @@ impl TaskStatus {
     }
 
     /// Whether this is a terminal status.
-    pub fn is_final(self) -> bool {
+    pub(crate) fn is_final(self) -> bool {
         matches!(
             self,
             Self::Succeeded | Self::Failed | Self::Canceled | Self::Interrupted | Self::Unavailable
@@ -109,7 +109,7 @@ pub struct Task {
 
 impl Task {
     /// Whether the task has reached a terminal status.
-    pub fn is_final(&self) -> bool {
+    pub(crate) fn is_final(&self) -> bool {
         self.status.is_final()
     }
 }

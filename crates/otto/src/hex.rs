@@ -1,7 +1,7 @@
 //! Lowercase hex encoding for digests.
 
 /// `bytes` as lowercase hex, two characters per byte.
-pub fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

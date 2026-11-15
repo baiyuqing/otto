@@ -45,7 +45,7 @@ use super::record::{Recorder, TaskContext};
 /// How many `agent_report` calls a child may make on its own initiative over
 /// the life of one task, before [`Tasks::send_message`] grants another. See
 /// [`crate::subagent::runner::ChildTools::report`].
-pub const REPORT_BUDGET: usize = 10;
+pub(crate) const REPORT_BUDGET: usize = 10;
 
 /// What the registry stores beside the record.
 struct Entry {
@@ -139,7 +139,7 @@ impl Tasks {
 
     /// Creates an empty registry, without a recorder, whose id counter starts
     /// at `starting_counter`. See [`Tasks::with_recorder_from`].
-    pub fn new_from(starting_counter: u64) -> Self {
+    pub(crate) fn new_from(starting_counter: u64) -> Self {
         Self::new_inner(None, starting_counter)
     }
 
@@ -154,7 +154,7 @@ impl Tasks {
     /// so the next task added gets id `t{starting_counter + 1}`. Used to
     /// resume a session without reusing a task id a prior run already gave
     /// to a child transcript; see [`highest_task_counter`].
-    pub fn with_recorder_from(
+    pub(crate) fn with_recorder_from(
         recorder: Arc<dyn Recorder>,
         context: TaskContext,
         starting_counter: u64,
@@ -196,7 +196,7 @@ impl Tasks {
     /// A lazy session store has no path before its first write, so the path
     /// captured in `TaskContext` at construction can be empty; a non-empty
     /// resolver result replaces it in the recorded row.
-    pub fn with_parent_session_path_resolver(
+    pub(crate) fn with_parent_session_path_resolver(
         mut self,
         resolver: Arc<dyn Fn() -> String + Send + Sync>,
     ) -> Self {
@@ -208,7 +208,7 @@ impl Tasks {
     /// once. The first caller sets the permit count to `max_parallel`; later
     /// callers get the same semaphore and their `max_parallel` is ignored, so
     /// a replaced runner and its successor admit children against one cap.
-    pub fn child_slots(&self, max_parallel: usize) -> Arc<Semaphore> {
+    pub(crate) fn child_slots(&self, max_parallel: usize) -> Arc<Semaphore> {
         Arc::clone(
             self.child_slots
                 .get_or_init(|| Arc::new(Semaphore::new(max_parallel))),
@@ -419,7 +419,7 @@ impl Tasks {
     /// Removes one final task and its undelivered completion notification.
     /// Durable workflows use this after copying the result to their own store;
     /// interactive tasks remain queryable because they never call it.
-    pub fn remove_final(&self, id: &str) -> Option<Task> {
+    pub(crate) fn remove_final(&self, id: &str) -> Option<Task> {
         let task = {
             let mut state = self.lock();
             let entry = state.entries.get(id)?;
@@ -458,7 +458,7 @@ impl Tasks {
 
     /// The task's private inbox, used to deliver parent messages into the
     /// child at its next agent-loop notification checkpoint.
-    pub fn child_inbox(&self, reference: &str) -> Option<Arc<dyn Mailbox>> {
+    pub(crate) fn child_inbox(&self, reference: &str) -> Option<Arc<dyn Mailbox>> {
         let state = self.lock();
         let entry = Self::entry(&state, reference)?;
         Some(Arc::clone(&entry.inbox))
@@ -467,7 +467,7 @@ impl Tasks {
     /// Replaces the task's mailbox with `mailbox` (a durable one, built once
     /// the child's transcript path is known). Messages already queued in the
     /// old mailbox move after the ones `mailbox` restored, in order.
-    pub fn replace_child_inbox(&self, reference: &str, mailbox: Arc<dyn Mailbox>) {
+    pub(crate) fn replace_child_inbox(&self, reference: &str, mailbox: Arc<dyn Mailbox>) {
         let old = {
             let mut state = self.lock();
             let Some(id) = Self::entry(&state, reference).map(|entry| entry.task.id.clone()) else {
@@ -486,7 +486,7 @@ impl Tasks {
 
     /// The task's `agent_report` budget counter, shared with the running
     /// child's `ChildTools`. `None` when `reference` names no task.
-    pub fn report_allowance(&self, reference: &str) -> Option<Arc<AtomicUsize>> {
+    pub(crate) fn report_allowance(&self, reference: &str) -> Option<Arc<AtomicUsize>> {
         let state = self.lock();
         let entry = Self::entry(&state, reference)?;
         Some(Arc::clone(&entry.reports_left))
@@ -496,7 +496,7 @@ impl Tasks {
     /// is the canonical task id, even when `reference` was a task name. Also
     /// grants the child one more `agent_report` call, on top of
     /// [`REPORT_BUDGET`], so it can answer the message.
-    pub fn send_message(&self, reference: &str, message: &str) -> Result<String, TaskError> {
+    pub(crate) fn send_message(&self, reference: &str, message: &str) -> Result<String, TaskError> {
         let (id, inbox, reports_left) = {
             let state = self.lock();
             let Some(entry) = Self::entry(&state, reference) else {
@@ -591,7 +591,7 @@ impl Tasks {
     /// token, admits no more tasks, drops the update sender), and returns
     /// the ids that were not yet final at that moment. Idempotent: a second
     /// call returns an empty list.
-    pub fn begin_migration(&self) -> Vec<String> {
+    pub(crate) fn begin_migration(&self) -> Vec<String> {
         let ids = {
             let mut state = self.lock();
             if state.migrating {
@@ -615,7 +615,7 @@ impl Tasks {
     }
 
     /// Whether [`Tasks::begin_migration`] has run.
-    pub fn is_migrating(&self) -> bool {
+    pub(crate) fn is_migrating(&self) -> bool {
         self.lock().migrating
     }
 
@@ -623,7 +623,7 @@ impl Tasks {
     /// [`Tasks::wait`] with a token that never fires: a task whose cancel
     /// token [`Tasks::begin_migration`] fired always reaches a final status
     /// on its own. An id no longer in the registry is skipped.
-    pub async fn wait_final(&self, ids: &[String]) {
+    pub(crate) async fn wait_final(&self, ids: &[String]) {
         let never = CancellationToken::new();
         for id in ids {
             let _ = self.wait(id, &never).await;
@@ -654,7 +654,8 @@ impl Tasks {
     }
 
     /// Whether the registry has been closed.
-    pub fn is_closed(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
         self.lock().closed
     }
 
@@ -712,7 +713,7 @@ mod task;
 mod task_names;
 
 pub use task::*;
-pub use task_names::*;
+use task_names::*;
 
 #[cfg(test)]
 mod tests;

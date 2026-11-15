@@ -41,7 +41,7 @@ const DERIVED_CACHE_NAMES: [&str; 7] = ["cargo", "go-build", "go-mod", "npm", "p
 /// `allow_names` come from configuration, which is UTF-8 by construction, so
 /// they need no UTF-8 check.
 #[derive(Debug, Clone, Default)]
-pub struct EnvironmentOptions {
+pub(crate) struct EnvironmentOptions {
     pub host_entries: Vec<Vec<u8>>,
     pub provider_names: Vec<String>,
     pub allow_names: Vec<String>,
@@ -51,7 +51,7 @@ pub struct EnvironmentOptions {
 /// The environment a sandboxed child will receive, plus the values that must
 /// never appear in model-visible text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EnvironmentSnapshot {
+pub(crate) struct EnvironmentSnapshot {
     entries: Option<Vec<String>>,
     redactions: Vec<String>,
     redactions_complete: bool,
@@ -71,7 +71,7 @@ impl EnvironmentSnapshot {
 
     /// Whether the redaction set is provably complete. A `false` here means the
     /// caller must suppress the child's output rather than redact it.
-    pub fn redactions_complete(&self) -> bool {
+    pub(crate) fn redactions_complete(&self) -> bool {
         self.redactions_complete
     }
 }
@@ -79,7 +79,7 @@ impl EnvironmentSnapshot {
 /// A rejected environment, carrying the bounded redactions salvaged before the
 /// rejection so the caller can still hide what it collected.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RejectedEnvironment {
+pub(crate) struct RejectedEnvironment {
     snapshot: EnvironmentSnapshot,
 }
 
@@ -115,7 +115,7 @@ impl From<RejectedEnvironment> for Error {
 ///
 /// Returns [`RejectedEnvironment`] when any input is unsafe. That path never
 /// creates directories: the bounds are enforced first.
-pub fn resolve_environment(
+pub(crate) fn resolve_environment(
     options: &EnvironmentOptions,
 ) -> Result<EnvironmentSnapshot, RejectedEnvironment> {
     let mut collector = SecretCollector::new();

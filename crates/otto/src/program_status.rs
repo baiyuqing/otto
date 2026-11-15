@@ -111,7 +111,7 @@ impl Reporter {
         write_state(&mut inner, writer, state);
     }
 
-    pub fn report_stdout(&self, state: State) {
+    pub(crate) fn report_stdout(&self, state: State) {
         self.report(&mut io::stdout(), state);
     }
 
@@ -141,7 +141,7 @@ impl Reporter {
     }
 
     /// Projects attached-server frames onto protocol states.
-    pub fn observe_wire(&self, writer: &mut dyn Write, event: &WireEvent) {
+    pub(crate) fn observe_wire(&self, writer: &mut dyn Write, event: &WireEvent) {
         match event.event_type.as_str() {
             "agent_started" => self.report(writer, State::Working),
             APPROVAL_REQUESTED => {
@@ -168,7 +168,7 @@ impl Reporter {
         }
     }
 
-    pub fn observe_wire_stdout(&self, event: &WireEvent) {
+    pub(crate) fn observe_wire_stdout(&self, event: &WireEvent) {
         self.observe_wire(&mut io::stdout(), event);
     }
 }

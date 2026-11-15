@@ -261,51 +261,6 @@ impl Controller {
             .await
     }
 
-    pub async fn prompt_with_image(
-        &self,
-        text: &str,
-        image: Block,
-        emit: EventSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<(), AgentError> {
-        self.prompt_with_image_and_system_context(
-            text,
-            image,
-            "",
-            Some(crate::session::origin::Origin::terminal()),
-            emit,
-            cancel,
-        )
-        .await
-    }
-
-    pub(crate) async fn prompt_with_image_and_system_context(
-        &self,
-        text: &str,
-        image: Block,
-        system_context: &str,
-        origin: Option<crate::session::origin::Origin>,
-        emit: EventSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<(), AgentError> {
-        let _admission = self.begin_operation().map_err(AgentError::Other)?;
-        let runner = self.runner().map_err(AgentError::Other)?;
-        let _presentation = self.begin_user_turn(&runner, origin).await;
-        runner.record_user_authorization(text).await?;
-        let task_run = runner
-            .task_control()
-            .begin(&runner.session().header().id, &runner.redact_text(text))
-            .map_err(AgentError::Other)?;
-        self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
-            .await?;
-        let result = runner
-            .run_with_image_system_context(text, image, system_context, emit, cancel)
-            .await;
-        result?;
-        self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
-            .await
-    }
-
     pub async fn compact(
         &self,
         focus: &str,

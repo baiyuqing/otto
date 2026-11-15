@@ -19,7 +19,7 @@ use crate::subagent::tasks::{TaskError, TaskStatus as SubagentStatus, Tasks as R
 
 /// The server maps it to 409 `task_done`.
 pub const TASK_FINISHED: &str = "task already finished";
-pub const TASK_NOT_FOUND: &str = "task not found";
+pub(crate) const TASK_NOT_FOUND: &str = "task not found";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,7 +139,7 @@ fn wire(task: &crate::subagent::tasks::Task) -> Task {
 
 /// The registry record for one wire task, as a client of serve reads it.
 /// `prompt` and `context` are empty because the wire omits them.
-pub fn from_wire(task: Task) -> crate::subagent::tasks::Task {
+pub(crate) fn from_wire(task: Task) -> crate::subagent::tasks::Task {
     crate::subagent::tasks::Task {
         id: task.id,
         name: task.name,

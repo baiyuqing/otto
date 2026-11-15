@@ -71,7 +71,7 @@ fn open_result(fd: libc::c_int) -> io::Result<RawFd> {
 
 /// `open(path, flags|O_CLOEXEC|O_NOFOLLOW)`. A symlink at the final component
 /// fails with `ELOOP` instead of being followed.
-pub fn open_no_follow(path: &Path, flags: libc::c_int) -> io::Result<File> {
+pub(crate) fn open_no_follow(path: &Path, flags: libc::c_int) -> io::Result<File> {
     let c = c_path(path)?;
     // SAFETY: c is a NUL-terminated path that outlives the call.
     let fd =
@@ -91,7 +91,7 @@ pub fn open_no_follow(path: &Path, flags: libc::c_int) -> io::Result<File> {
 pub(crate) const SESSION_LOCK_SPAWN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Nonblocking exclusive advisory lock on `file`.
-pub fn try_lock_exclusive(file: &File) -> io::Result<()> {
+pub(crate) fn try_lock_exclusive(file: &File) -> io::Result<()> {
     // SAFETY: the borrowed descriptor stays open through this call.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
         return Err(io::Error::last_os_error());
@@ -100,7 +100,7 @@ pub fn try_lock_exclusive(file: &File) -> io::Result<()> {
 }
 
 /// Acquires the session's non-blocking advisory write lock.
-pub fn lock_exclusive(file: &File) -> io::Result<()> {
+pub(crate) fn lock_exclusive(file: &File) -> io::Result<()> {
     let deadline = std::time::Instant::now() + SESSION_LOCK_SPAWN_GRACE;
     loop {
         // SAFETY: the borrowed descriptor stays open through this call.
@@ -124,7 +124,7 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
 
 /// `openat(dir, name, flags|O_CLOEXEC|O_NOFOLLOW)`. `name` must be a single
 /// path component; the caller is responsible for rejecting separators.
-pub fn open_at_no_follow(dir: &Dir, name: &str, flags: libc::c_int) -> io::Result<File> {
+pub(crate) fn open_at_no_follow(dir: &Dir, name: &str, flags: libc::c_int) -> io::Result<File> {
     let c = if name == "." && flags & libc::O_DIRECTORY != 0 {
         c_path(Path::new("."))?
     } else {
@@ -146,7 +146,7 @@ pub fn open_at_no_follow(dir: &Dir, name: &str, flags: libc::c_int) -> io::Resul
 /// `openat(dir, name, flags|O_CREAT|O_CLOEXEC|O_NOFOLLOW, mode)`. Add
 /// `O_EXCL` to `flags` to fail with `EEXIST` on an existing name. `name` must
 /// be a single path component.
-pub fn create_at_no_follow(
+pub(crate) fn create_at_no_follow(
     dir: &Dir,
     name: &str,
     flags: libc::c_int,
@@ -181,7 +181,7 @@ pub fn open_dir_no_follow(path: &Path) -> io::Result<Dir> {
 }
 
 /// Opens a subdirectory relative to `dir` with `O_NOFOLLOW|O_DIRECTORY`.
-pub fn open_dir_at_no_follow(dir: &Dir, name: &str) -> io::Result<Dir> {
+pub(crate) fn open_dir_at_no_follow(dir: &Dir, name: &str) -> io::Result<Dir> {
     let c = if name == "." {
         c_path(Path::new("."))?
     } else {
@@ -199,7 +199,7 @@ pub fn open_dir_at_no_follow(dir: &Dir, name: &str) -> io::Result<Dir> {
 }
 
 /// `mkdirat(dir, name, mode)`. `EEXIST` is returned to the caller.
-pub fn mkdir_at(dir: &Dir, name: &str, mode: libc::mode_t) -> io::Result<()> {
+pub(crate) fn mkdir_at(dir: &Dir, name: &str, mode: libc::mode_t) -> io::Result<()> {
     let c = c_name(name)?;
     // SAFETY: dir.fd() is open and c is a valid NUL-terminated name.
     if unsafe { libc::mkdirat(dir.fd(), c.as_ptr(), mode) } < 0 {
@@ -210,7 +210,7 @@ pub fn mkdir_at(dir: &Dir, name: &str, mode: libc::mode_t) -> io::Result<()> {
 
 /// True when `name` exists under `dir`, without following a symlink at the
 /// final component. An `AT_SYMLINK_NOFOLLOW` stat probe.
-pub fn exists_at_no_follow(dir: &Dir, name: &str) -> io::Result<bool> {
+pub(crate) fn exists_at_no_follow(dir: &Dir, name: &str) -> io::Result<bool> {
     let c = c_name(name)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: dir.fd() is open, c is NUL-terminated, and stat points at
@@ -244,7 +244,7 @@ pub fn lock_directory(dir: &Dir) -> io::Result<File> {
 }
 
 /// Atomically replaces a name inside a pinned directory.
-pub fn rename_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
+pub(crate) fn rename_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
     let (from, to) = (c_name(from)?, c_name(to)?);
     // SAFETY: dir is open and both names outlive the syscall.
     if unsafe { libc::renameat(dir.fd(), from.as_ptr(), dir.fd(), to.as_ptr()) } < 0 {
@@ -257,7 +257,7 @@ pub fn rename_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
 /// replacement exchanges both names atomically, leaving the old tree at `from`.
 /// Exclusive creation also works for a file.
 /// No fallback to a non-atomic sequence on unsupported filesystems.
-pub fn publish_directory(dir: &Dir, from: &str, to: &str, replace: bool) -> io::Result<()> {
+pub(crate) fn publish_directory(dir: &Dir, from: &str, to: &str, replace: bool) -> io::Result<()> {
     let (from, to) = (c_name(from)?, c_name(to)?);
     // SAFETY: the directory descriptor and both single-component names live
     // through the call. Callers validate the names and own the staged directory.
@@ -290,7 +290,7 @@ pub fn publish_directory(dir: &Dir, from: &str, to: &str, replace: bool) -> io::
 
 /// `fsync` on a pinned directory, which makes the names created, renamed or
 /// removed in it durable.
-pub fn sync_dir(dir: &Dir) -> io::Result<()> {
+pub(crate) fn sync_dir(dir: &Dir) -> io::Result<()> {
     // SAFETY: the pinned directory descriptor remains live through fsync.
     if unsafe { libc::fsync(dir.fd()) } < 0 {
         return Err(io::Error::last_os_error());
@@ -299,7 +299,7 @@ pub fn sync_dir(dir: &Dir) -> io::Result<()> {
 }
 
 /// Removes a file name inside a pinned directory.
-pub fn unlink_at(dir: &Dir, name: &str) -> io::Result<()> {
+pub(crate) fn unlink_at(dir: &Dir, name: &str) -> io::Result<()> {
     let name = c_name(name)?;
     // SAFETY: dir is open and name outlives the syscall.
     if unsafe { libc::unlinkat(dir.fd(), name.as_ptr(), 0) } < 0 {
@@ -310,7 +310,7 @@ pub fn unlink_at(dir: &Dir, name: &str) -> io::Result<()> {
 
 /// Recursively removes one name without following symbolic links. Missing names
 /// are accepted; every other error, including entry limits, is propagated.
-pub fn remove_tree_at_no_follow(dir: &Dir, name: &str) -> io::Result<()> {
+pub(crate) fn remove_tree_at_no_follow(dir: &Dir, name: &str) -> io::Result<()> {
     match open_dir_at_no_follow(dir, name) {
         Ok(child) => {
             for child_name in read_directory_names(&child, 100_000)? {
@@ -350,7 +350,7 @@ fn link_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
 /// rather than the glibc wrapper, which only exists from glibc 2.28; a
 /// kernel older than 3.15 reports `ENOSYS`, and that is returned to the
 /// caller rather than falling back to a non-atomic link-and-unlink.
-pub fn rename_excl(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_excl(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (c_path(from)?, c_path(to)?);
     // SAFETY: both paths are NUL-terminated and outlive the call.
     if unsafe { rename_exclusive(from.as_ptr(), to.as_ptr()) } < 0 {
@@ -391,7 +391,7 @@ unsafe fn rename_exclusive(from: *const libc::c_char, to: *const libc::c_char) -
 }
 
 /// `fchmod(dir, 0700)`.
-pub fn fchmod_dir(dir: &Dir) -> io::Result<()> {
+pub(crate) fn fchmod_dir(dir: &Dir) -> io::Result<()> {
     // SAFETY: dir.fd() is a valid open descriptor for the duration of the call.
     if unsafe { libc::fchmod(dir.fd(), 0o700) } < 0 {
         return Err(io::Error::last_os_error());
@@ -400,29 +400,29 @@ pub fn fchmod_dir(dir: &Dir) -> io::Result<()> {
 }
 
 /// The device and inode pair that identifies a file.
-pub fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+pub(crate) fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
 /// True when the `errno` is `ELOOP`, the signal that a no-follow open refused
 /// to traverse a symlink.
-pub fn is_eloop(error: &io::Error) -> bool {
+pub(crate) fn is_eloop(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::ELOOP)
 }
 
 /// True when the `errno` is `ENOTDIR`.
-pub fn is_enotdir(error: &io::Error) -> bool {
+pub(crate) fn is_enotdir(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::ENOTDIR)
 }
 
 /// True when the `errno` is `ENOENT`.
-pub fn is_enoent(error: &io::Error) -> bool {
+pub(crate) fn is_enoent(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::ENOENT)
 }
 
 /// Enumerate a pinned directory with an independent cursor and a strict bound.
 /// No path is reopened; names that cannot be represented exactly are refused.
-pub fn read_directory_names(dir: &Dir, max_entries: usize) -> io::Result<Vec<String>> {
+pub(crate) fn read_directory_names(dir: &Dir, max_entries: usize) -> io::Result<Vec<String>> {
     struct DirectoryStream(*mut libc::DIR);
     impl Drop for DirectoryStream {
         fn drop(&mut self) {

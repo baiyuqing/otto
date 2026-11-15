@@ -66,7 +66,7 @@ impl<'de> serde::Deserialize<'de> for PersistedFields {
 /// Additive persisted envelope metadata is opaque. Authority remains the exact
 /// current wire schema; nested authority fields and unknown schema versions
 /// fail. Unknown additive review metadata is retained but never grants rights.
-pub fn decode_persisted(body: &str) -> Result<Request> {
+pub(crate) fn decode_persisted(body: &str) -> Result<Request> {
     let PersistedFields(fields) = serde_json::from_str(body)
         .map_err(|_| Error::Invalid("invalid persisted approval envelope"))?;
     let mut known = fields
@@ -107,7 +107,7 @@ pub fn decode_persisted(body: &str) -> Result<Request> {
     request.validate().map_err(Error::Invalid)?;
     Ok(request)
 }
-pub fn merge_persisted(body: &str, next: &Request) -> Result<String> {
+pub(crate) fn merge_persisted(body: &str, next: &Request) -> Result<String> {
     let PersistedFields(mut fields) = serde_json::from_str(body)
         .map_err(|_| Error::Invalid("invalid persisted approval envelope"))?;
     let PersistedFields(mut updated) =

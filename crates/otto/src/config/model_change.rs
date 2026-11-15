@@ -560,7 +560,7 @@ fn append_provider_header(
 
 /// Commits a previously generated preview through the normal atomic,
 /// CAS-backed configuration writer.
-pub fn commit_model_change(
+pub(crate) fn commit_model_change(
     path: &Path,
     preview: &ModelChangePreview,
 ) -> Result<(), NativeConfigError> {

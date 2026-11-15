@@ -62,6 +62,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> Session<R, W> {
     }
 
     /// Deliver a prompt and stream updates from this session to the caller.
+    #[cfg(test)]
     pub async fn prompt(
         &mut self,
         prompt: &str,
@@ -70,7 +71,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> Session<R, W> {
         self.prompt_inner(prompt, None, update).await
     }
 
-    pub async fn prompt_cancellable(
+    pub(crate) async fn prompt_cancellable(
         &mut self,
         prompt: &str,
         cancel: &CancellationToken,

@@ -107,7 +107,7 @@ pub struct ReviewResult {
 
 /// Counts the tokens one candidate would cost. A plain function pointer keeps
 /// the request `Clone` and `Debug` without an allocation.
-pub type TokenEstimator = fn(&str) -> usize;
+pub(crate) type TokenEstimator = fn(&str) -> usize;
 
 #[derive(Debug, Clone)]
 pub struct RetrievalRequest {
@@ -306,7 +306,7 @@ pub struct StoreRestoreRequest {
 
 /// The metadata name a restored revision carries; its value is the decimal
 /// revision number the content was taken from.
-pub const RESTORED_FROM_REVISION_METADATA: &str = "otto.restored_from_revision";
+pub(crate) const RESTORED_FROM_REVISION_METADATA: &str = "otto.restored_from_revision";
 
 /// A history file the store could not read; `file` is its path relative to
 /// the store root and `reason` names the problem without file content.

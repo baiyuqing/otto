@@ -37,7 +37,7 @@ fn global() -> &'static WriterRegistry {
     REGISTRY.get_or_init(WriterRegistry::default)
 }
 
-pub fn register_writer_session(session: &Arc<dyn SessionHandle>) {
+pub(crate) fn register_writer_session(session: &Arc<dyn SessionHandle>) {
     global().register(session);
 }
 

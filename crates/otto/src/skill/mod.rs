@@ -30,16 +30,16 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub use frontmatter::{Fields, parse as parse_frontmatter};
-pub use prompt::{MAX_LISTING_BYTES, prompt_section};
+pub(crate) use prompt::prompt_section;
 
 use crate::fsops::root::{self, Root};
 
 /// The largest `SKILL.md`, or sibling skill file, this loader will read.
-pub const MAX_SKILL_FILE_BYTES: u64 = 64 << 20;
+pub(crate) const MAX_SKILL_FILE_BYTES: u64 = 64 << 20;
 pub(crate) const MAX_SKILL_NAME_LENGTH: usize = 64;
 pub(crate) const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 /// The bound on each half of a declared contract.
-pub const MAX_SKILL_CONTRACT_CHARS: usize = 1024;
+pub(crate) const MAX_SKILL_CONTRACT_CHARS: usize = 1024;
 
 /// What a skill promises to be given and to return.
 ///
@@ -150,7 +150,7 @@ impl Catalog {
     }
 
     /// Adds package Skills without changing their local name validation.
-    pub fn extend_plugin(
+    pub(crate) fn extend_plugin(
         &mut self,
         plugin: &str,
         package: &Path,
@@ -204,7 +204,7 @@ impl Catalog {
     }
 
     /// Removes skills whose names are in `names`, preserving name order.
-    pub fn without_names(&self, names: &std::collections::BTreeSet<String>) -> Self {
+    pub(crate) fn without_names(&self, names: &std::collections::BTreeSet<String>) -> Self {
         Self {
             skills: self
                 .skills
@@ -398,7 +398,7 @@ pub fn load(skill: &Skill) -> Result<String, String> {
 /// recursively: `SKILL.md` at the top level is excluded, hidden names are
 /// skipped, symbolic links are neither listed nor descended, the result is
 /// sorted and truncated to `limit`. `total` is the count before truncation.
-pub fn list_files(directory: &Path, limit: usize) -> io::Result<(Vec<String>, usize)> {
+pub(crate) fn list_files(directory: &Path, limit: usize) -> io::Result<(Vec<String>, usize)> {
     let root_fs = Root::open(directory)?;
     let mut files = Vec::new();
     collect_skill_files(&root_fs, "", &mut files)?;
@@ -434,7 +434,7 @@ fn collect_skill_files(root_fs: &Root, prefix: &str, files: &mut Vec<String>) ->
 }
 
 /// Reads one regular file below `root_fs`, bounded by [`MAX_SKILL_FILE_BYTES`].
-pub fn read_root_file(root_fs: &Root, name: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn read_root_file(root_fs: &Root, name: &Path) -> io::Result<Vec<u8>> {
     let file = root_fs.open_file(
         name,
         nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NONBLOCK,

@@ -37,7 +37,7 @@ impl Logger {
 
     /// Enables a separate content-free file sink, including on terminal-safe
     /// discard loggers. Ordinary stderr lines are never copied into this file.
-    pub fn enable_diagnostics(&self, home: &std::path::Path) -> std::io::Result<()> {
+    pub(crate) fn enable_diagnostics(&self, home: &std::path::Path) -> std::io::Result<()> {
         if self.diagnostics.get().is_none() {
             let log = diagnostics::Log::open(home)?;
             let _ = self.diagnostics.set(log);
@@ -45,7 +45,7 @@ impl Logger {
         Ok(())
     }
 
-    pub fn diagnostic_scope(
+    pub(crate) fn diagnostic_scope(
         &self,
         session: &str,
         task: &str,

@@ -79,7 +79,7 @@ pub fn verification_definition() -> ToolDefinition {
     )
 }
 
-pub struct SubmitVerification {
+pub(crate) struct SubmitVerification {
     session: SharedSession,
 }
 

@@ -26,7 +26,7 @@ struct LsArgs {
 }
 
 /// Lists a workspace directory.
-pub struct LsTool {
+pub(crate) struct LsTool {
     workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }

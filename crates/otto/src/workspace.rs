@@ -25,7 +25,7 @@ pub const MARKER: &str = ".otto/workspace.json";
 /// Protect the marker and its parent entry from model-originated replacement.
 pub(crate) const READ_ONLY_PATHS: [(&str, bool); 2] = [(".otto", false), (MARKER, false)];
 /// The longest memory scope ID, in bytes.
-pub const MAX_SCOPE_ID_BYTES: usize = 128;
+pub(crate) const MAX_SCOPE_ID_BYTES: usize = 128;
 
 /// `validOpaqueID`: non-empty, within `max_bytes`, ASCII alphanumerics plus
 /// `.`, `_`, `:` and `-`.
@@ -45,7 +45,7 @@ pub fn workspace_id(physical: &str) -> String {
 /// `<sanitized last component of path>-<first 12 chars of hex>`. The name keeps
 /// `[A-Za-z0-9._]`, maps other characters to `-`, collapses and trims `-`,
 /// is cut at 64 bytes, and falls back to `workspace` when empty.
-pub fn named_workspace_id(path: &str, hex: &str) -> String {
+pub(crate) fn named_workspace_id(path: &str, hex: &str) -> String {
     let base = std::path::Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())

@@ -58,7 +58,7 @@ impl Notification {
 
 /// An incoming JSON-RPC message. Batches and messages with both result and error are rejected.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Incoming {
+pub(crate) enum Incoming {
     Response {
         id: RequestId,
         result: Value,
@@ -89,12 +89,12 @@ pub struct RpcError {
 }
 
 /// Error codes defined by JSON-RPC 2.0 spec extensions.
-pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32020;
+pub(crate) const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32020;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 
 /// Parse a single JSON-RPC message text. Rejects batches, missing jsonrpc: "2.0", and messages with both result and error.
-pub fn parse_incoming(text: &str) -> Result<Incoming, String> {
+pub(crate) fn parse_incoming(text: &str) -> Result<Incoming, String> {
     let value: Value = serde_json::from_str(text).map_err(|e| format!("invalid json: {}", e))?;
 
     // Reject batches (arrays)
@@ -190,7 +190,7 @@ pub fn modern_meta(params: Value) -> Value {
 }
 
 /// Build the initialize request parameters for the legacy protocol version.
-pub fn initialize_params() -> Value {
+pub(crate) fn initialize_params() -> Value {
     json!({
         "protocolVersion": LEGACY_VERSION,
         "capabilities": {},
@@ -202,7 +202,7 @@ pub fn initialize_params() -> Value {
 }
 
 /// Decode the initialize response to extract the server's protocolVersion.
-pub fn decode_initialize(result: &Value) -> Result<String, String> {
+pub(crate) fn decode_initialize(result: &Value) -> Result<String, String> {
     let initialize_object = result
         .as_object()
         .ok_or_else(|| "initialize result must be an object".to_string())?;
@@ -221,7 +221,7 @@ pub fn decode_initialize(result: &Value) -> Result<String, String> {
 
 /// Decode a tools/list response into a vector of ToolInfo and optional nextCursor.
 /// Entries that fail to decode are skipped (not fatal); unknown fields are ignored.
-pub fn decode_tools_list(result: &Value) -> Result<(Vec<ToolInfo>, Option<String>), String> {
+pub(crate) fn decode_tools_list(result: &Value) -> Result<(Vec<ToolInfo>, Option<String>), String> {
     let tools_list_object = result
         .as_object()
         .ok_or_else(|| "tools/list result must be an object".to_string())?;
@@ -251,7 +251,7 @@ pub fn decode_tools_list(result: &Value) -> Result<(Vec<ToolInfo>, Option<String
 /// Decodes a `tools/call` result. Blocks of an unknown type, or missing a
 /// required field, are skipped. On a modern server a `resultType` other than
 /// `"complete"` is an error.
-pub fn decode_call_result(result: &Value, era: &Era) -> Result<CallOutcome, String> {
+pub(crate) fn decode_call_result(result: &Value, era: &Era) -> Result<CallOutcome, String> {
     let call_result_object = result
         .as_object()
         .ok_or_else(|| "call result must be an object".to_string())?;
@@ -309,7 +309,7 @@ fn decode_block(block: &Value) -> Option<ContentBlock> {
 }
 
 /// Check if an RpcError indicates the server does not support the modern protocol version.
-pub fn supports_modern(error: &RpcError) -> bool {
+pub(crate) fn supports_modern(error: &RpcError) -> bool {
     error.code == UNSUPPORTED_PROTOCOL_VERSION
         && error
             .data

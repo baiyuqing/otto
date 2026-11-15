@@ -356,7 +356,7 @@ impl Metrics {
         }
     }
 
-    pub fn schedule_run(&self, outcome: &str) {
+    pub(crate) fn schedule_run(&self, outcome: &str) {
         *self
             .lock()
             .schedule_runs_total
@@ -364,7 +364,7 @@ impl Metrics {
             .or_default() += 1;
     }
 
-    pub fn schedule_delivery(&self, channel: &str, outcome: &str) {
+    pub(crate) fn schedule_delivery(&self, channel: &str, outcome: &str) {
         *self
             .lock()
             .schedule_deliveries_total

@@ -12,7 +12,7 @@ impl Controller {
             .collect()
     }
 
-    pub fn model_summaries(&self) -> Vec<ModelSummary> {
+    pub(crate) fn model_summaries(&self) -> Vec<ModelSummary> {
         if !self.dynamic_content_available() {
             return Vec::new();
         }
@@ -71,7 +71,7 @@ impl Controller {
             .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 
-    pub fn model_effective_thinking(&self, model: &str) -> String {
+    pub(crate) fn model_effective_thinking(&self, model: &str) -> String {
         if !self.dynamic_content_available() {
             return String::new();
         }
@@ -110,7 +110,7 @@ impl Controller {
         Ok(())
     }
 
-    pub fn save_model_thinking(&self, thinking: &str) -> Result<(), String> {
+    pub(crate) fn save_model_thinking(&self, thinking: &str) -> Result<(), String> {
         validate_thinking_arg(thinking)?;
         if self.lock().is_closed() {
             return Err(CLOSED.to_string());

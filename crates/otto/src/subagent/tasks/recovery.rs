@@ -163,7 +163,7 @@ impl Tasks {
     }
 
     /// Coverage and repair errors remain inspectable even if execution is disabled.
-    pub fn recovery_diagnostics(&self) -> Vec<String> {
+    pub(crate) fn recovery_diagnostics(&self) -> Vec<String> {
         self.lock().recovery_diagnostics.clone()
     }
 }

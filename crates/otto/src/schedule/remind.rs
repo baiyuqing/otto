@@ -115,7 +115,7 @@ impl std::fmt::Display for ReminderError {
 }
 /// What `remind_status` and `/timers` print for an empty registry, in the
 /// shape `agent_status` and `/tasks` use for theirs.
-pub const NO_TIMERS: &str = "no timers in this session";
+pub(crate) const NO_TIMERS: &str = "no timers in this session";
 
 const DESCRIPTION: &str = "Schedule a reminder that arrives later as a [timer] message and starts \
     a wake turn. Returns immediately; does not block. Timers are kept with \
@@ -359,7 +359,7 @@ impl Reminders {
     /// Restores any timers already stored at `path`, then keeps writing new
     /// ones there. A timer that is already due fires as soon as the runtime
     /// polls it.
-    pub fn with_persist(mailbox: Arc<dyn Mailbox>, path: PathBuf) -> Self {
+    pub(crate) fn with_persist(mailbox: Arc<dyn Mailbox>, path: PathBuf) -> Self {
         let stored: Vec<StoredReminder> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -544,7 +544,7 @@ fn delay_until(fire_at: DateTime<Utc>) -> Duration {
 
 /// One timer in the layout shared by `remind_status` and `/timers`: id, the
 /// wait until it fires (`due` once that time has passed), and the message.
-pub fn timer_line(item: &StoredReminder, now: DateTime<Utc>) -> String {
+pub(crate) fn timer_line(item: &StoredReminder, now: DateTime<Utc>) -> String {
     let remaining = item.fire_at - now;
     let when = if remaining <= TimeDelta::zero() {
         "due".to_string()
@@ -580,7 +580,7 @@ pub fn tools(reminders: &Arc<Reminders>) -> Vec<Box<dyn Tool + Send + Sync>> {
 }
 
 /// The schema advertised for `remind`.
-pub fn remind_definition() -> ToolDefinition {
+pub(crate) fn remind_definition() -> ToolDefinition {
     definition(
         "remind",
         DESCRIPTION,
@@ -603,7 +603,7 @@ pub fn remind_definition() -> ToolDefinition {
 }
 
 /// The schema advertised for `remind_status`.
-pub fn remind_status_definition() -> ToolDefinition {
+pub(crate) fn remind_status_definition() -> ToolDefinition {
     definition(
         "remind_status",
         STATUS_DESCRIPTION,
@@ -616,7 +616,7 @@ pub fn remind_status_definition() -> ToolDefinition {
 }
 
 /// The schema advertised for `remind_cancel`.
-pub fn remind_cancel_definition() -> ToolDefinition {
+pub(crate) fn remind_cancel_definition() -> ToolDefinition {
     definition(
         "remind_cancel",
         CANCEL_DESCRIPTION,
@@ -635,7 +635,7 @@ pub fn remind_cancel_definition() -> ToolDefinition {
 }
 
 /// Schedules timer notifications into the session inbox.
-pub struct RemindTool {
+pub(crate) struct RemindTool {
     reminders: Arc<Reminders>,
 }
 
@@ -688,7 +688,7 @@ impl Tool for RemindTool {
 }
 
 /// Lists the session's outstanding timers.
-pub struct RemindStatusTool {
+pub(crate) struct RemindStatusTool {
     reminders: Arc<Reminders>,
 }
 
@@ -723,7 +723,7 @@ impl Tool for RemindStatusTool {
 }
 
 /// Cancels one of the session's outstanding timers.
-pub struct RemindCancelTool {
+pub(crate) struct RemindCancelTool {
     reminders: Arc<Reminders>,
 }
 

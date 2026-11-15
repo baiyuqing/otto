@@ -55,17 +55,13 @@ const LOCK_RETRY: Duration = Duration::from_millis(10);
 /// A file the store did not read: unparseable, failing validation or the
 /// content guard, or a record that lost a duplicate-key conflict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InvalidFile {
+pub(crate) struct InvalidFile {
     pub path: PathBuf,
     pub reason: String,
 }
 
 fn unavailable<E>(_: E) -> Error {
     Error::new(ErrorKind::Unavailable)
-}
-
-pub fn has_identity(root: &Path) -> bool {
-    root.join("identity.json").exists()
 }
 
 fn ensure_directory(path: &Path) -> Result<()> {
@@ -211,7 +207,7 @@ impl Snapshot {
             .find(|candidate| candidate.id == id && &candidate.proposed.scope == scope)
     }
 
-    pub fn is_invalid(&self, path: &Path) -> bool {
+    pub(crate) fn is_invalid(&self, path: &Path) -> bool {
         self.invalid.iter().any(|file| file.path == path)
     }
 }
@@ -281,7 +277,7 @@ impl FileStore {
     }
 
     /// The files the store skipped, ordered by path.
-    pub fn invalid_files(&self) -> Result<Vec<InvalidFile>> {
+    pub(crate) fn invalid_files(&self) -> Result<Vec<InvalidFile>> {
         Ok(self.snapshot()?.invalid)
     }
 

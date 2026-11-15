@@ -61,7 +61,7 @@ impl BashApprovals {
     }
 
     /// The command of `session_id`'s pending request `id`, granted or not.
-    pub fn pending_command(&self, session_id: &str, id: &str) -> Option<String> {
+    pub(crate) fn pending_command(&self, session_id: &str, id: &str) -> Option<String> {
         let state = self.state.lock().expect("bash approval mutex");
         state
             .requests
@@ -71,7 +71,7 @@ impl BashApprovals {
     }
 
     /// The canonical read path, or an empty string for an elevated command.
-    pub fn pending_read_path(&self, session_id: &str, id: &str) -> Option<String> {
+    pub(crate) fn pending_read_path(&self, session_id: &str, id: &str) -> Option<String> {
         self.state
             .lock()
             .expect("bash approval mutex")

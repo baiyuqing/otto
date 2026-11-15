@@ -39,7 +39,7 @@ impl TryFrom<ToolArgs> for Request {
     }
 }
 
-pub fn start_definition() -> ToolDefinition {
+pub(crate) fn start_definition() -> ToolDefinition {
     definition(
         TOOL_NAME,
         "Prepare a separately authorized delivery task in another admitted Git \

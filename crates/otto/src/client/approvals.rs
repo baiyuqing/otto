@@ -119,7 +119,7 @@ impl Client {
         })
     }
 
-    pub async fn approval_activity(
+    pub(crate) async fn approval_activity(
         &self,
         session: &str,
     ) -> Result<crate::approval::ApprovalActivity, Error> {
@@ -190,7 +190,7 @@ impl Client {
     /// `{"decision":"allow","always":true}`: allows the waiting command and
     /// excludes it from the sandbox. Returns the follow-up prompt the caller
     /// submits so the model retries the command.
-    pub async fn approve_always(
+    pub(crate) async fn approve_always(
         &self,
         session_id: &str,
         approval_id: &str,
@@ -209,7 +209,7 @@ impl Client {
         Ok(decode::<Decided>(response).await?.followup)
     }
 
-    pub async fn approval_message(
+    pub(crate) async fn approval_message(
         &self,
         session_id: &str,
         text: &str,
@@ -218,7 +218,7 @@ impl Client {
             .await
     }
 
-    pub async fn approval_message_with_channel(
+    pub(crate) async fn approval_message_with_channel(
         &self,
         session_id: &str,
         text: &str,
@@ -342,6 +342,7 @@ impl Client {
 
     /// `POST /v1/sessions/{id}/tasks/control`. `None` means the caller should
     /// route the message as an ordinary prompt.
+    #[cfg(test)]
     pub async fn control_message_with_channel(
         &self,
         session_id: &str,

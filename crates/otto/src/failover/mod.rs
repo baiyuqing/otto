@@ -30,7 +30,7 @@ use crate::tool::registry::CallGuard;
 /// Produces the lease currently backing a session, or `None` when the
 /// session is not lease-managed. Called once per tool call by
 /// [`CommitGuard`].
-pub type LeaseSource = Arc<dyn Fn() -> Option<Arc<dyn WriterOwnership>> + Send + Sync>;
+pub(crate) type LeaseSource = Arc<dyn Fn() -> Option<Arc<dyn WriterOwnership>> + Send + Sync>;
 
 /// Linux: `syncfs(2)` on the file system holding `path`. Other platforms:
 /// returns `Ok(())` without syncing; the commit rule applies on Linux only.
@@ -61,7 +61,7 @@ type SyncFn = fn(&Path) -> std::io::Result<()>;
 /// syncs the workspace to disk once the tool has finished, so a
 /// successfully returned result's effects are durable before it is
 /// appended to the session log.
-pub struct CommitGuard {
+pub(crate) struct CommitGuard {
     lease: LeaseSource,
     workspace: PathBuf,
     sync: SyncFn,

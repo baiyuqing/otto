@@ -97,7 +97,7 @@ impl Client {
         Ok(client)
     }
 
-    pub fn with_guard(mut self, guard: Arc<dyn ContentGuard>) -> Result<Self> {
+    pub(crate) fn with_guard(mut self, guard: Arc<dyn ContentGuard>) -> Result<Self> {
         self.guard = guard;
         self.guarded(&self.description)?;
         Ok(self)
@@ -114,7 +114,7 @@ impl Client {
     pub fn mode(&self) -> AuthorizationMode {
         self.mode
     }
-    pub fn is_closed(&self) -> bool {
+    pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
 

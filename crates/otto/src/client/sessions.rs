@@ -214,7 +214,7 @@ impl Client {
 
     /// `GET /v1/config/providers`: the configured models with their provider,
     /// provider type and thinking level, sorted by selector.
-    pub async fn model_summaries(&self) -> Result<Vec<crate::app::ModelSummary>, Error> {
+    pub(crate) async fn model_summaries(&self) -> Result<Vec<crate::app::ModelSummary>, Error> {
         #[derive(Deserialize)]
         struct Model {
             selector: String,
@@ -360,7 +360,7 @@ impl Client {
 
     /// `DELETE /v1/sessions/{id}/permanent` with `{"confirm": id}`: removes
     /// an idle session's files irreversibly.
-    pub async fn delete_session_permanently(&self, session_id: &str) -> Result<(), Error> {
+    pub(crate) async fn delete_session_permanently(&self, session_id: &str) -> Result<(), Error> {
         self.send(
             self.http
                 .delete(format!("{BASE}/v1/sessions/{session_id}/permanent"))

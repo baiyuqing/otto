@@ -209,7 +209,7 @@ impl Builder {
     }
 
     /// Whether a bash tool will actually be built.
-    pub fn bash_configured(&self) -> bool {
+    pub(crate) fn bash_configured(&self) -> bool {
         self.boundary_allows_dynamic(None) && self.planned_bash_available()
     }
 
@@ -221,7 +221,7 @@ impl Builder {
 
     /// A sandbox that reported bash available but left no executor behind is a
     /// runtime failure, not a usable one.
-    pub fn planned_sandbox_info(&self) -> SandboxInfo {
+    pub(crate) fn planned_sandbox_info(&self) -> SandboxInfo {
         if self.sandbox_info.bash_available && !self.planned_bash_available() {
             return SandboxInfo {
                 mode: SandboxMode::Unavailable,
@@ -236,7 +236,7 @@ impl Builder {
 
     /// A closed boundary disables bash and says only that the environment was
     /// rejected.
-    pub fn effective_sandbox_info(&self) -> SandboxInfo {
+    pub(crate) fn effective_sandbox_info(&self) -> SandboxInfo {
         if !self.boundary_allows_dynamic(None) {
             return SandboxInfo {
                 mode: SandboxMode::Unavailable,

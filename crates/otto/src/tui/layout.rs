@@ -9,22 +9,22 @@
 /// The smallest terminal ratatui's TUI will actually lay out. Below this,
 /// [`crate::tui::run`] shows the "terminal is too small" message instead of the
 /// normal view.
-pub const MIN_TERMINAL_WIDTH: u16 = 40;
-pub const MIN_TERMINAL_HEIGHT: u16 = 8;
+pub(crate) const MIN_TERMINAL_WIDTH: u16 = 40;
+pub(crate) const MIN_TERMINAL_HEIGHT: u16 = 8;
 
 /// The composer's inner height grows one row per wrapped input line up to
 /// this many rows, then stops growing and scrolls instead.
-pub const INPUT_BOX_THRESHOLD: u16 = 12;
+pub(crate) const INPUT_BOX_THRESHOLD: u16 = 12;
 
 /// Empty columns kept at each side of the normal TUI layout so transcript,
 /// footer, suggestions, and composer do not sit directly against the
 /// terminal edge.
-pub const SIDE_MARGIN: u16 = 1;
+pub(crate) const SIDE_MARGIN: u16 = 1;
 
 /// The status bar reports the fraction of the context window in use as one
 /// decimal place, rounded to the nearest tenth of a percent. The fraction of
 /// the context window in use, as the footer shows it.
-pub fn format_context_percentage(input_tokens: i64, context_window: i64) -> String {
+pub(crate) fn format_context_percentage(input_tokens: i64, context_window: i64) -> String {
     format_percentage(input_tokens, context_window)
 }
 
@@ -32,7 +32,7 @@ pub fn format_context_percentage(input_tokens: i64, context_window: i64) -> Stri
 /// percentage with one decimal place. `None` when the prompt total is not
 /// positive, because no rate exists then. The rate is the same weighted ratio
 /// `GET /v1/usage` reports as `cache_hit_rate`.
-pub fn format_cache_hit_rate(cached_input_tokens: i64, input_tokens: i64) -> Option<String> {
+pub(crate) fn format_cache_hit_rate(cached_input_tokens: i64, input_tokens: i64) -> Option<String> {
     (input_tokens > 0).then(|| format_percentage(cached_input_tokens, input_tokens))
 }
 
@@ -61,7 +61,7 @@ fn format_percentage(part: i64, whole: i64) -> String {
 /// ponytail: one rounding formatter, shared by `entries.rs`'s compaction line
 /// and the footer. It is cosmetic (a status line, not a money or security
 /// path). Upgrade path: add a truncating variant if a test pins different text.
-pub fn format_token_count(tokens: i64) -> String {
+pub(crate) fn format_token_count(tokens: i64) -> String {
     if tokens <= 0 {
         return "0".to_string();
     }
@@ -103,7 +103,7 @@ fn format_token_count_unit(
 /// The footer's workspace field is the directory's last path component, not its
 /// full path. Otto is macOS-only, so this works in `/`-separated paths rather
 /// than `std::path`'s platform-generic (and here, unneeded) separator handling.
-pub fn footer_workspace(workspace: &str) -> String {
+pub(crate) fn footer_workspace(workspace: &str) -> String {
     if workspace.is_empty() {
         return String::new();
     }
@@ -122,13 +122,13 @@ pub fn footer_workspace(workspace: &str) -> String {
 
 /// Escapes control characters other than `\n`/`\t` for text that may span
 /// multiple lines (transcript entries, tool output).
-pub fn escape_plain_text(text: &str) -> String {
+pub(crate) fn escape_plain_text(text: &str) -> String {
     escape_text_controls(text, true)
 }
 
 /// Escapes every control character, including `\n`/`\t`, for text that must
 /// render on one line (footer fields, status text).
-pub fn escape_single_line_text(text: &str) -> String {
+pub(crate) fn escape_single_line_text(text: &str) -> String {
     escape_text_controls(text, false)
 }
 

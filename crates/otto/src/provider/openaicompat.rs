@@ -167,6 +167,7 @@ impl Client {
 
     /// Fails closed: opaque caller HTTP clients cannot prove redirect safety.
     /// Migrate to `new_trusted` with an authorized endpoint and owned transport.
+    #[cfg(test)]
     pub fn with_http_client(base_url: &str, api_key: &str, http: reqwest::Client) -> Self {
         Self {
             api_key: api_key.to_string(),
@@ -209,6 +210,7 @@ impl Client {
     }
 
     /// Overrides the model-output idle bound; tests use a short one.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
         self.model_idle_timeout = timeout;
         self
@@ -217,7 +219,7 @@ impl Client {
     /// Rejects every request with `message` before anything is sent; used when
     /// the selected provider has no API key bound, so the process can still
     /// start and the user can bind a key or switch models.
-    pub fn with_missing_credential(mut self, message: &str) -> Self {
+    pub(crate) fn with_missing_credential(mut self, message: &str) -> Self {
         self.state = Err(message.to_string());
         self
     }

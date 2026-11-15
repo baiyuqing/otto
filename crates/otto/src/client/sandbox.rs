@@ -4,7 +4,7 @@ use super::*;
 
 /// The result of one `POST /v1/sessions/{id}/sandbox/changes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxChangeOutcome {
+pub(crate) struct SandboxChangeOutcome {
     /// The sandbox summary line after the reload (`SandboxInfo::summary`).
     pub sandbox_summary: String,
     /// The description of the change itself, such as `network allow`.
@@ -19,7 +19,7 @@ pub struct SandboxChangeOutcome {
 impl Client {
     /// `POST /v1/sessions/{id}/sandbox/changes`. `change` is
     /// `allow_read_path`, `network` or `exclude_command`.
-    pub async fn sandbox_change(
+    pub(crate) async fn sandbox_change(
         &self,
         session_id: &str,
         change: &str,

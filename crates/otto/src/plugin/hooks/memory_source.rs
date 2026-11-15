@@ -39,7 +39,7 @@ fn is_effectful(operation: &str) -> bool {
 
 impl Runtime {
     /// Starts the memory service of package `package_name` and reads its description.
-    pub async fn memory_source(
+    pub(crate) async fn memory_source(
         self: &Arc<Self>,
         snapshot: &crate::plugin::Snapshot,
         package_name: &str,
@@ -135,7 +135,7 @@ async fn run_command<Res: DeserializeOwned>(
     }
 }
 
-pub struct PluginMemoryService {
+pub(crate) struct PluginMemoryService {
     runtime: Arc<Runtime>,
     package: Package,
     memory_command: MemoryCommand,

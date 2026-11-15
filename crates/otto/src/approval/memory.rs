@@ -76,7 +76,7 @@ pub fn human_pending_candidate_page(
 }
 
 /// Returns the first `limit` actionable candidates across storage pages.
-pub fn human_pending_candidates(
+pub(crate) fn human_pending_candidates(
     memory: &crate::memory::Service,
     scopes: &[Scope],
     requests: &[Request],
@@ -102,7 +102,7 @@ pub fn human_pending_candidates(
 }
 
 /// Counts only candidates that are currently actionable in `/memory review`.
-pub fn human_pending_summary(
+pub(crate) fn human_pending_summary(
     memory: &crate::memory::Service,
     scopes: &[Scope],
     requests: &[Request],

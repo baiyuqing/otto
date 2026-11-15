@@ -70,7 +70,7 @@ impl Connection {
         Self::from_driver(driver.open(path, options)?, requirements)
     }
 
-    pub fn from_driver(
+    pub(crate) fn from_driver(
         inner: Box<dyn SqlConnection>,
         requirements: SqlRequirements,
     ) -> Result<Self> {
@@ -90,7 +90,7 @@ impl Connection {
         self.inner.busy_timeout(duration)
     }
 
-    pub fn pragma_update(&self, name: &str, value: impl std::fmt::Display) -> Result<()> {
+    pub(crate) fn pragma_update(&self, name: &str, value: impl std::fmt::Display) -> Result<()> {
         self.inner.pragma_update(name, &value.to_string())
     }
 
@@ -119,7 +119,7 @@ impl Connection {
         self.unchecked_transaction()
     }
 
-    pub fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
+    pub(crate) fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
         self.inner.begin()?;
         Ok(Transaction {
             connection: self,
@@ -231,7 +231,7 @@ impl Drop for Transaction<'_> {
     }
 }
 
-pub trait OptionalExtension<T> {
+pub(crate) trait OptionalExtension<T> {
     fn optional(self) -> Result<Option<T>>;
 }
 

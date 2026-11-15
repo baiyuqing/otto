@@ -20,9 +20,9 @@ use regex::Regex;
 use serde::Deserialize;
 use url::Url;
 
-pub const GOOGLE_KEY_ENV: &str = "GOOGLE_API_KEY";
-pub const GOOGLE_ENGINE_ENV: &str = "GOOGLE_SEARCH_ENGINE_ID";
-pub const BRAVE_KEY_ENV: &str = "BRAVE_API_KEY";
+pub(crate) const GOOGLE_KEY_ENV: &str = "GOOGLE_API_KEY";
+pub(crate) const GOOGLE_ENGINE_ENV: &str = "GOOGLE_SEARCH_ENGINE_ID";
+pub(crate) const BRAVE_KEY_ENV: &str = "BRAVE_API_KEY";
 
 const GOOGLE_ENDPOINT: &str = "https://www.googleapis.com/customsearch/v1";
 const BRAVE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";

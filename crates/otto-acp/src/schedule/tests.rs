@@ -100,17 +100,17 @@ async fn a_timed_out_delivery_leaves_no_pending_request() {
 }
 
 #[test]
-fn exact_delivery_metadata_is_validated_and_empty_is_authoritative() {
+fn delivery_destinations_are_validated_and_absent_means_none() {
     let params =
         |value| json!({"clientCapabilities":{"_meta":{"otto":{"scheduleDeliveryChats":value}}}});
     let platforms = vec!["telegram".into()];
     assert_eq!(
         delivery_chats(&params(json!(["telegram:a", "telegram:a"])), &platforms).unwrap(),
-        Some(vec![Origin::chat("telegram", "a").unwrap()])
+        vec![Origin::chat("telegram", "a").unwrap()]
     );
     assert_eq!(
         delivery_chats(&params(json!([])), &platforms).unwrap(),
-        Some(Vec::new())
+        Vec::new()
     );
     for value in [
         json!(null),
@@ -122,7 +122,7 @@ fn exact_delivery_metadata_is_validated_and_empty_is_authoritative() {
     ] {
         assert!(delivery_chats(&params(value), &platforms).is_err());
     }
-    assert_eq!(delivery_chats(&json!({}), &platforms).unwrap(), None);
+    assert!(delivery_chats(&json!({}), &platforms).unwrap().is_empty());
 }
 
 #[test]
@@ -141,12 +141,13 @@ fn delivery_platforms_keep_known_platforms_once() {
 }
 
 #[test]
-fn no_worker_without_platforms_or_store() {
+fn no_worker_without_destinations_or_store() {
     let (without_store, _frames) = connection(None);
     assert!(worker(&without_store, vec!["telegram".into()]).is_none());
     let store = Arc::new(Store::open_in_memory().unwrap());
     let (with_store, _frames) = connection(Some(store));
-    assert!(worker(&with_store, Vec::new()).is_none());
+    assert!(worker(&with_store, vec!["telegram".into()]).is_none());
+    declare_chat(&with_store);
     let attach = worker(&with_store, vec!["telegram".into()]).unwrap();
     assert!(attach.run.is_none() && attach.deliver.is_some());
 }
@@ -158,8 +159,10 @@ fn a_client_principal_gets_no_delivery_worker() {
         name: "test-client".into(),
     };
     let (client, _frames) = connection_as(principal, Some(store.clone()));
+    declare_chat(&client);
     assert!(worker(&client, vec!["telegram".into()]).is_none());
     let (owner, _frames) = connection(Some(store));
+    declare_chat(&owner);
     assert!(worker(&owner, vec!["telegram".into()]).is_some());
 }
 
@@ -270,11 +273,22 @@ fn due_text_item(store: &Store, origin: Origin) {
         .unwrap();
 }
 
+/// An `initialize` request that offers `platforms` and the chat
+/// `telegram:123` as the only destination.
 fn initialize(platforms: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "protocolVersion": 1,
-        "clientCapabilities": {"_meta": {"otto": {"scheduleDelivery": platforms}}},
+        "clientCapabilities": {"_meta": {"otto": {
+            "scheduleDelivery": platforms,
+            "scheduleDeliveryChats": ["telegram:123"],
+        }}},
     }})
+}
+
+/// Records `telegram:123` as the destination the client declared.
+fn declare_chat(connection: &Connection) {
+    *connection.client_capabilities.lock().unwrap() =
+        initialize(json!(["telegram"]))["params"].clone();
 }
 
 #[tokio::test]
@@ -323,7 +337,7 @@ async fn a_due_chat_item_is_delivered_after_initialize_declares_its_platform() {
 }
 
 #[tokio::test]
-async fn exact_clients_receive_only_their_chats_and_disconnect_releases_legacy_conflicts() {
+async fn clients_receive_only_their_declared_chats() {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let (mut b, b_handle) = start(
         Backend::Attach(super::super::attach::Relay::unreachable(Some(
@@ -361,42 +375,6 @@ async fn exact_clients_receive_only_their_chats_and_disconnect_releases_legacy_c
     b.close();
     a_handle.await.unwrap();
     b_handle.await.unwrap();
-    let (mut a, a_handle) = start(
-        Backend::Attach(super::super::attach::Relay::unreachable(Some(
-            store.clone(),
-        ))),
-        "/work",
-        |_| (),
-    );
-    let (mut b, b_handle) = start(
-        Backend::Attach(super::super::attach::Relay::unreachable(Some(
-            store.clone(),
-        ))),
-        "/work",
-        |_| (),
-    );
-    a.send(initialize(json!(["telegram"])));
-    a.recv_message().await;
-    b.send(initialize(json!(["telegram"])));
-    b.recv_message().await;
-    due_text_item(store.as_ref(), origin());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), a.output.recv())
-            .await
-            .is_err()
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), b.output.recv())
-            .await
-            .is_err()
-    );
-    b.close();
-    b_handle.await.unwrap();
-    let remaining = a.recv_message().await;
-    assert_eq!(remaining["params"]["chat"], "telegram:123");
-    a.send(json!({"jsonrpc":"2.0","id":remaining["id"],"result":{}}));
-    a.close();
-    a_handle.await.unwrap();
 }
 
 #[tokio::test]

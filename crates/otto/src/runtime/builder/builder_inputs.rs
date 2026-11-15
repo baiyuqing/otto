@@ -149,14 +149,6 @@ impl Builder {
             && let Some(runtime) = runtime
         {
             prompt.push_str(&subagent_model_guidance(&runtime.subagent_models));
-            if let Some(diagnostic) =
-                otto_core::config::resolve::subagent_model_diagnostic(&self.config, runtime)
-            {
-                prompt.push_str(&format!(
-                    "\n<subagent_model_diagnostic>\n{}\n</subagent_model_diagnostic>\n",
-                    diagnostic.reason
-                ));
-            }
         }
         boundary::boundary_redactor(
             &self.boundary_inputs(),

@@ -210,7 +210,7 @@ fn run_claims_respect_scope_workspace_kind_and_lease() {
             .unwrap()
             .is_none()
     );
-    let chats = Scope::Chats(vec!["telegram".into()]);
+    let chats = Scope::Origins(vec![origin()]);
     let claimed = store
         .claim_run(&chats, Some("/work"), now)
         .unwrap()

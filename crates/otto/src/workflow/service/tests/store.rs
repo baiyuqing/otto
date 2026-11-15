@@ -23,7 +23,7 @@ needs = ["first"]
         .create_run(
             "run-1",
             &definition,
-            "/workspace",
+            workspace(),
             "default",
             "openai-compatible",
             "model",

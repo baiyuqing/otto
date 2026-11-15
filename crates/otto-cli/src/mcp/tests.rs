@@ -225,7 +225,7 @@ fn writing_refuses_a_config_that_changed_since_it_was_read() {
     );
     let (path, _, original) = load_editable_config(&lookup).expect("load");
 
-    let concurrent = "default_profile = \"written by another otto\"\n";
+    let concurrent = "default_model = \"p/written by another otto\"\n";
     std::fs::write(&path, concurrent).expect("concurrent write");
 
     let error = write_edited_config(&path, &original, |text| {
@@ -274,9 +274,9 @@ async fn edits_keep_every_other_byte_of_the_file() {
     let directory = home.path().join(".config").join("otto");
     std::fs::create_dir_all(&directory).expect("config dir");
     let path = directory.join("config.toml");
-    let original = "# my config\ndefault_profile = \"a\"\n\n# \
+    let original = "# my config\ndefault_model = \"p/a\"\n\n# \
         servers\n[mcp.servers.docs]\ntransport = \"http\" # remote\nurl = \
-        \"https://mcp.example.com\"\n\n# profiles\n[profiles.a]\nprovider = \
+        \"https://mcp.example.com\"\n\n# providers\n[providers.a]\ntype = \
         \"chatgpt\"\n";
     std::fs::write(&path, original).expect("write config");
     let lookup = HashMap::from([(
@@ -323,7 +323,7 @@ async fn edits_keep_every_other_byte_of_the_file() {
     assert_eq!(code, 0, "stderr = {stderr}");
     assert_eq!(
         read(),
-        "# my config\ndefault_profile = \"a\"\n\n# servers\n\n# profiles\n[profiles.a]\nprovider = \"chatgpt\"\n"
+        "# my config\ndefault_model = \"p/a\"\n\n# servers\n\n# providers\n[providers.a]\ntype = \"chatgpt\"\n"
     );
 }
 

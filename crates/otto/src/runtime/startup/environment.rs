@@ -175,10 +175,9 @@ pub(super) fn load_config(
 /// "absent" from "empty" nowhere. The map also holds each provider's
 /// `api_key_env`, Claude workspace bindings and the `web_search` key names.
 pub fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String, String> {
-    const FIXED_KEYS: [&str; 7] = [
+    const FIXED_KEYS: [&str; 6] = [
         "HOME",
         "OTTO_PROVIDER",
-        "OTTO_PROFILE",
         "OTTO_MODEL",
         "OTTO_API_KEY",
         "OTTO_UI",

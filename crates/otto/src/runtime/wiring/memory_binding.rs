@@ -96,7 +96,7 @@ impl Builder {
             return None;
         }
         let backend = self.advice_backend(agent, model, usage);
-        Some(Arc::new(crate::memory::advice::Advisor::new_with_audit(
+        Some(Arc::new(crate::memory::advice::Advisor::new(
             backend,
             self.memory.advice_audit.clone(),
         )))

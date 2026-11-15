@@ -165,21 +165,6 @@ impl Client {
         }
     }
 
-    /// Fails closed: opaque caller HTTP clients cannot prove redirect safety.
-    /// Migrate to `new_trusted` with an authorized endpoint and owned transport.
-    #[cfg(test)]
-    pub fn with_http_client(base_url: &str, api_key: &str, http: reqwest::Client) -> Self {
-        Self {
-            api_key: api_key.to_string(),
-            state: {
-                let _ = (base_url, http);
-                Err("injected HTTP clients cannot establish redirect safety; use new or new_trusted".into())
-            },
-            model_idle_timeout: MODEL_IDLE_TIMEOUT,
-            prompt_cache_key_rejected: AtomicBool::new(false),
-        }
-    }
-
     /// Uses an independently authorized endpoint and an owned no-redirect client.
     pub fn new_trusted(
         endpoint: &otto_core::config::endpoint::TrustedEndpoint,

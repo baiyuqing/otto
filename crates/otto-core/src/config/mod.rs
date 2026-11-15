@@ -20,7 +20,6 @@ pub mod edit;
 pub mod endpoint;
 pub mod failover;
 pub mod layered;
-pub mod legacy_profiles;
 pub mod mcp;
 pub mod memory;
 pub mod model_limits;
@@ -43,7 +42,6 @@ use serde::{Deserialize, Serialize};
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
 pub use approval::ApprovalConfig;
 pub use failover::{Failover, FailoverRuntime, resolve_failover};
-pub use legacy_profiles::{LegacyProfile, convert_legacy_profiles};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemoryTurso, resolve_memory};
 pub use model_limits::ModelLimits;
@@ -102,9 +100,6 @@ pub struct File {
     /// The default model selector, `<provider>/<model_id>`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_model: String,
-    /// Deprecated input; cleared by [`convert_legacy_profiles`] once it names a profile.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub default_profile: String,
     #[serde(default)]
     pub ui: ui::Ui,
     #[serde(default)]
@@ -121,8 +116,6 @@ pub struct File {
     pub hooks: plugins::Hooks,
     #[serde(default)]
     pub agents: Agents,
-    #[serde(default, skip_serializing_if = "Experimental::is_default")]
-    pub experimental: Experimental,
     #[serde(default)]
     pub server: Server,
     #[serde(default)]
@@ -133,29 +126,8 @@ pub struct File {
     pub web: Web,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderEntry>,
-    /// Deprecated input; emptied by [`convert_legacy_profiles`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub profiles: BTreeMap<String, LegacyProfile>,
-    /// Selector of the model each deprecated profile was converted to.
-    #[serde(skip)]
-    pub legacy_profile_selectors: BTreeMap<String, ModelSelector>,
     #[serde(default)]
     pub projects: HashMap<String, projects::Project>,
-}
-
-/// Legacy `[experimental]` configuration, accepted for compatibility.
-/// New configuration uses `[skills].typesafe_skill_check`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Experimental {
-    pub typesafe_skill_check: Option<bool>,
-    #[serde(flatten)]
-    unknown: std::collections::BTreeMap<String, toml::Value>,
-}
-
-impl Experimental {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
 }
 
 /// Legacy `[web]` configuration, accepted for compatibility.
@@ -240,13 +212,9 @@ pub struct CompactionConfig {
 /// table.
 pub fn parse(text: &str) -> Result<File, ConfigError> {
     match toml::from_str::<File>(text) {
-        Ok(mut file) => {
-            let table: toml::Table =
-                toml::from_str(text).map_err(|err| ConfigError::new(err.to_string()))?;
-            legacy_profiles::reject_mixed_source(&table, "configuration")?;
+        Ok(file) => {
             file.approval.validate()?;
             file.validate_providers()?;
-            convert_legacy_profiles(&mut file)?;
             Ok(file)
         }
         Err(err) => {
@@ -318,9 +286,6 @@ fn go_quote(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod legacy_profiles_tests;
-
-#[cfg(test)]
 mod sample_config_tests;
 
 #[cfg(test)]
@@ -380,7 +345,6 @@ thinking = "high"
         assert_eq!(provider.type_, "openai-compatible");
         assert_eq!(provider.base_url, "http://localhost:8080/v1");
         assert_eq!(provider.models["test-model"].thinking, "high");
-        assert!(file.profiles.is_empty());
     }
 
     #[test]
@@ -556,28 +520,9 @@ api_key = "secret"
     }
 
     #[test]
-    fn experimental_absent_is_empty() {
-        let file = parse("").expect("parse");
-        assert_eq!(file.experimental.typesafe_skill_check, None);
-        assert_eq!(file.skills.typesafe_skill_check, None);
-    }
-
-    #[test]
     fn typesafe_skill_check_is_a_skills_setting() {
         let file = parse("[skills]\ntypesafe_skill_check = false\n").expect("parse");
         assert_eq!(file.skills.typesafe_skill_check, Some(false));
-    }
-
-    #[test]
-    fn experimental_unknown_key_parses() {
-        let file = parse(
-            r#"[experimental]
-typesafe_skill_check = true
-future_thing = "x"
-"#,
-        )
-        .expect("parse");
-        assert_eq!(file.experimental.typesafe_skill_check, Some(true));
     }
 }
 

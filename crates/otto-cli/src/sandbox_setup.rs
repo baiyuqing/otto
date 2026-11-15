@@ -404,7 +404,7 @@ mod tests {
     use std::io::Cursor;
     use tempfile::TempDir;
 
-    const PRESERVED: &str = "# preserved\n[profiles.demo]\nmodel = 'example'\n";
+    const PRESERVED: &str = "# preserved\n[providers.demo]\ntype = 'claude'\n";
 
     /// Drives the setup command through the process entry point so the dispatch
     /// in [`crate::run::run`] is covered too.

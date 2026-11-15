@@ -6,12 +6,11 @@
 //! process environment before calling in.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::time::Duration;
 
 use super::{
-    CompactionConfig, ConfigError, File, ModelSelector, ProviderConnection,
-    duration::parse_go_duration, model_limits::resolve_model_limits,
+    CompactionConfig, ConfigError, File, ModelSelector, duration::parse_go_duration,
+    model_limits::resolve_model_limits,
 };
 
 use compaction::{resolve_compaction, validate_thinking};
@@ -61,8 +60,6 @@ pub struct Overrides {
     /// when `provider` (deprecated `--provider`) pairs it.
     pub model: String,
     pub provider: String,
-    /// Deprecated `--profile NAME`.
-    pub legacy_profile: String,
     pub base_url: String,
     pub thinking: String,
     pub shell_timeout: Duration,
@@ -158,52 +155,14 @@ pub struct Runtime {
     pub progress: ProgressRuntime,
 }
 
-/// Explains connection-scoped child model fallback without exposing configured values.
-/// Call with the runtime resolved from `file`; an empty configured list is not a fallback.
-pub fn subagent_model_diagnostic(
-    file: &File,
-    runtime: &Runtime,
-) -> Option<super::layered::Diagnostic> {
-    let model_entry = file.model_entry(&runtime.model_selector)?;
-    if model_entry.legacy_subagent_models.is_empty() || !runtime.subagent_models.is_empty() {
-        return None;
-    }
-    let provider = file.provider_entry(&runtime.provider_name)?;
-    if same_connection(&provider.connection(&runtime.provider_name), runtime) {
-        return None;
-    }
-    Some(super::layered::Diagnostic {
-        key: "subagent_models".into(),
-        source: "runtime".into(),
-        reason: "Configured subagent_models are disabled because the provider connection \
-            changed. Child tasks inherit the active parent model. Select the \
-            original model/connection or configure subagent_models for the active \
-            connection; failed model requests are not automatically retried."
-            .into(),
-    })
-}
-
-/// Whether `runtime` uses the connection `configured` describes.
-fn same_connection(configured: &ProviderConnection, runtime: &Runtime) -> bool {
-    runtime.provider_type == configured.provider_type
-        && (runtime.provider_type == super::PROVIDER_CHATGPT
-            || (runtime.api_key_env == configured.api_key_env
-                && runtime.workspace_id_env == configured.workspace_id_env
-                && (runtime.provider_type != super::PROVIDER_CLAUDE
-                    || runtime.api_version == configured.api_version)
-                && normalize_base_url(&configured.base_url).ok().as_deref()
-                    == Some(runtime.base_url.as_str())))
-}
-
 fn env_value(env: &HashMap<String, String>, key: &str) -> String {
     env.get(key).cloned().unwrap_or_default()
 }
 
 /// Resolves `file`, `env`, `session`, and `overrides` into a [`Runtime`].
 ///
-/// Precedence for the model: `--model` (or deprecated `--profile`), then
-/// `OTTO_MODEL`, then the resumed `session`'s model, then deprecated
-/// `OTTO_PROFILE`, then `default_model`. The provider's connection fields come
+/// Precedence for the model: `--model`, then `OTTO_MODEL`, then the
+/// resumed `session`'s model, then `default_model`. The provider's connection fields come
 /// from its table; `overrides.base_url` and `overrides.thinking` replace the
 /// provider's endpoint and the model's thinking effort.
 pub fn resolve(
@@ -307,7 +266,6 @@ fn resolve_impl(
         // from the credential file, not a configured base_url or API key.
         base_url = String::new();
     }
-    validate_subagent_models(&selector, &model_entry.legacy_subagent_models)?;
 
     let mut shell_timeout = DEFAULT_SHELL_TIMEOUT;
     if !file.agent.shell_timeout.is_empty() {
@@ -380,7 +338,7 @@ fn resolve_impl(
         } else {
             String::new()
         };
-    let mut runtime = Runtime {
+    let runtime = Runtime {
         provider_name: selector.provider.clone(),
         model_selector: selector,
         endpoint: if base_url.is_empty() {
@@ -412,42 +370,10 @@ fn resolve_impl(
         resilience,
         progress,
     };
-    if same_connection(&configured, &runtime) {
-        runtime.subagent_models = model_entry.legacy_subagent_models.clone();
-    }
     if let Some(policy) = &file.policy {
         policy.runtime(&runtime)?;
     }
     Ok(runtime)
-}
-
-fn validate_subagent_models(
-    selector: &ModelSelector,
-    models: &[String],
-) -> Result<(), ConfigError> {
-    if models.len() > 16 {
-        return Err(ConfigError::new(format!(
-            "model \"{selector}\" subagent_models must contain at most 16 IDs"
-        )));
-    }
-    let mut seen = HashSet::new();
-    for model in models {
-        if model.trim() != model
-            || model.is_empty()
-            || model.len() > 256
-            || model.chars().any(char::is_control)
-        {
-            return Err(ConfigError::new(format!(
-                "model \"{selector}\" subagent_models contains an invalid model ID"
-            )));
-        }
-        if !seen.insert(model) {
-            return Err(ConfigError::new(format!(
-                "model \"{selector}\" subagent_models contains a duplicate model ID"
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// The API key bound by `api_key_env`, then the fallback variable; empty when

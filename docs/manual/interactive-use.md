@@ -516,9 +516,7 @@ Shared commands:
   model.`; both write `default_model` to the host configuration. When that
   write fails, the reply instead ends with `but the default model was not
   saved: <error>` (REPL) or `The default model was not saved: <error>` (TUI),
-  for example when the file still holds `[profiles]`, `default_profile` or
-  `approval.reviewer_profile` (error `legacy_profiles_config`; convert the
-  file first, see [migration](getting-started.md#migrating-from-profiles)).
+  for example when the configuration file cannot be written.
   The switch itself still applies to the running session.
   Changing the model or reasoning effort keeps the session's running
   sub-agents, pending notifications, timers and MCP servers; only the model

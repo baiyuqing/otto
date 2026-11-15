@@ -62,7 +62,6 @@ impl Merged {
         })?;
         let mut table: Table = toml::from_str(text)
             .map_err(|_| ConfigError::new(format!("invalid TOML in {source}")))?;
-        super::legacy_profiles::reject_mixed_source(&table, source)?;
         if layer.project() {
             let kept_providers = provider_merge::filter_project_providers(
                 &mut table,
@@ -227,12 +226,11 @@ impl Merged {
     }
 
     pub fn file(&self) -> Result<File, ConfigError> {
-        let mut file: File = Value::Table(self.values.clone())
+        let file: File = Value::Table(self.values.clone())
             .try_into()
             .map_err(|_| ConfigError::new("invalid merged configuration"))?;
         file.approval.validate()?;
         file.validate_providers()?;
-        super::convert_legacy_profiles(&mut file)?;
         Ok(file)
     }
 
@@ -352,13 +350,9 @@ fn filter(
 fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str> {
     let keys: Vec<&str> = p.iter().map(String::as_str).collect();
     let allowed = match keys.as_slice() {
-        ["default_profile"] | ["default_model"] => true,
+        ["default_model"] => true,
         ["ui", "mode"] => true,
         ["agent", ..] => true,
-        ["profiles", _, field] => matches!(
-            *field,
-            "model" | "thinking" | "context_window" | "compaction_window"
-        ),
         ["mcp", field] => matches!(
             *field,
             "enabled" | "call_timeout_secs" | "connect_timeout_secs"
@@ -390,8 +384,6 @@ fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str
             keys.as_slice(),
             ["ui"]
                 | ["agent", ..]
-                | ["profiles"]
-                | ["profiles", _]
                 | ["mcp"]
                 | ["mcp", "servers"]
                 | ["mcp", "servers", _]
@@ -468,7 +460,6 @@ impl ManagedPolicy {
                 "managed MCP commands must be absolute administrator-controlled paths",
             ));
         }
-        self.reject_legacy_force_keys()?;
         // Value's display is an inline table; validate by deserializing directly.
         let _: File = Value::Table(self.force.clone())
             .try_into()

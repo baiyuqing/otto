@@ -5,6 +5,8 @@ use super::*;
 use otto_core::operation::OperationControl;
 use tokio::sync::Notify;
 
+use crate::fixtures::shared_workspace as workspace;
+
 fn definition(source: &[u8]) -> Definition {
     let mut definition = parse_definition("flow", source, &|_| true).expect("definition");
     let names: HashSet<String> = definition

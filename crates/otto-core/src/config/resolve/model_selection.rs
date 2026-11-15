@@ -1,5 +1,5 @@
 //! Selection of the model a run uses: CLI, environment, resumed session,
-//! deprecated profile name and `default_model`, in that order.
+//! and `default_model`, in that order.
 
 use std::collections::HashMap;
 
@@ -19,13 +19,6 @@ fn selector_from(provider: &str, model: &str, flag: &str) -> Result<ModelSelecto
         )));
     }
     ModelSelector::parse(model)
-}
-
-fn legacy_profile_selector(file: &File, name: &str) -> Result<ModelSelector, ConfigError> {
-    file.legacy_profile_selectors
-        .get(name)
-        .cloned()
-        .ok_or_else(|| ConfigError::new(format!("profile \"{name}\" not found")))
 }
 
 /// The provider a run of a session recorded before selectors existed resumes
@@ -56,9 +49,6 @@ pub(super) fn select_model(
             "--provider requires --model: use --model <provider>/<model_id>",
         ));
     }
-    if !overrides.legacy_profile.is_empty() {
-        return legacy_profile_selector(file, &overrides.legacy_profile);
-    }
     let env_model = env_value(env, "OTTO_MODEL");
     let env_provider = env_value(env, "OTTO_PROVIDER");
     if !env_model.is_empty() {
@@ -78,16 +68,9 @@ pub(super) fn select_model(
             model_id: session.model.clone(),
         });
     }
-    let env_profile = env_value(env, "OTTO_PROFILE");
-    if !env_profile.is_empty() {
-        return legacy_profile_selector(file, &env_profile);
-    }
     if !file.default_model.is_empty() {
         return ModelSelector::parse(&file.default_model)
             .map_err(|error| ConfigError::new(format!("default_model: {error}")));
-    }
-    if !file.default_profile.is_empty() {
-        return legacy_profile_selector(file, &file.default_profile);
     }
     Err(ConfigError::new(
         "missing model: set default_model or pass --model <provider>/<model_id>",

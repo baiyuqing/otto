@@ -226,7 +226,7 @@ mod tests {
         std::fs::create_dir_all(config.parent().expect("parent")).expect("mkdir");
         std::fs::write(
             &config,
-            "# a comment worth keeping\ndefault_profile = \"x\"\n",
+            "# a comment worth keeping\ndefault_model = \"p/x\"\n",
         )
         .expect("write config");
         let canonical = std::fs::canonicalize(dir.path()).expect("canonical");
@@ -236,7 +236,7 @@ mod tests {
         assert!(stdout.contains("Trusted"), "{stdout}");
         let text = std::fs::read_to_string(&config).expect("read back");
         assert!(text.contains("# a comment worth keeping"), "{text}");
-        assert!(text.contains("default_profile = \"x\""), "{text}");
+        assert!(text.contains("default_model = \"p/x\""), "{text}");
         assert!(
             text.contains(&format!(
                 "[projects.\"{}\"]\ntrust_level = \"trusted\"",
@@ -257,7 +257,7 @@ mod tests {
         let home = TempDir::new().expect("home");
         let config = home.path().join(".config/otto/config.toml");
         std::fs::create_dir_all(config.parent().expect("parent")).expect("mkdir");
-        std::fs::write(&config, "default_profile = \"x\"\n").expect("write config");
+        std::fs::write(&config, "default_model = \"p/x\"\n").expect("write config");
         let before = std::fs::read_to_string(&config).expect("read");
 
         let missing = home.path().join("does-not-exist");
@@ -279,7 +279,7 @@ mod tests {
         let directory = TempDir::new().expect("dir");
         let trusted = TempDir::new().expect("trusted");
         let path = directory.path().join("config.toml");
-        let original = b"default_profile = \"x\"\n".to_vec();
+        let original = b"default_model = \"p/x\"\n".to_vec();
         std::fs::write(&path, &original).expect("write");
         let canonical = std::fs::canonicalize(trusted.path())
             .expect("canonical")
@@ -289,7 +289,7 @@ mod tests {
             .expect("compute")
             .expect("some update");
 
-        std::fs::write(&path, b"default_profile = \"changed by another otto\"\n").expect("write");
+        std::fs::write(&path, b"default_model = \"p/changed by another otto\"\n").expect("write");
 
         assert_eq!(
             otto::config::write_bytes(&path, &original, &updated),

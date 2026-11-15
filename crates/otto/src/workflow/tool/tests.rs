@@ -25,7 +25,12 @@ async fn invoke(tool: &dyn Tool, arguments: &str, operation: &str) -> ToolResult
 #[tokio::test]
 async fn strict_schemas_bounds_trusted_identity_and_no_session_guidance() {
     let (dir, catalog) = fixture();
-    let owner = controller(Arc::new(Store::open_in_memory()), catalog, "/w", dir.path());
+    let owner = controller(
+        Arc::new(Store::open_in_memory()),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let parent = Parent::new(Ok(owner.clone()), "source".into(), false);
     let tools = parent.tools();
     assert_eq!(tools.len(), 4);
@@ -99,7 +104,7 @@ async fn strict_schemas_bounds_trusted_identity_and_no_session_guidance() {
         Ok(controller(
             Arc::new(Store::open_in_memory()),
             crate::workflow::Catalog::default(),
-            "/w",
+            crate::fixtures::shared_workspace(),
             dir.path(),
         )),
         "source".into(),
@@ -131,7 +136,12 @@ async fn strict_schemas_bounds_trusted_identity_and_no_session_guidance() {
 async fn non_parent_service_guard_cannot_be_bypassed_by_direct_controller_call() {
     let (dir, catalog) = fixture();
     let store = Arc::new(Store::open_in_memory());
-    let owner = controller(store.clone(), catalog, "/w", dir.path());
+    let owner = controller(
+        store.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let result =
         crate::subagent::provenance::non_parent(owner.start("documentation-review", "scope")).await;
     assert!(
@@ -150,7 +160,10 @@ async fn non_parent_service_guard_cannot_be_bypassed_by_direct_controller_call()
     assert!(result.is_err());
     assert!(
         store
-            .list_runs("/w", &crate::workflow::ListQuery::all())
+            .list_runs(
+                crate::fixtures::shared_workspace(),
+                &crate::workflow::ListQuery::all()
+            )
             .unwrap()
             .is_empty()
     );
@@ -159,7 +172,12 @@ async fn non_parent_service_guard_cannot_be_bypassed_by_direct_controller_call()
 async fn fake_provider_conversation_discovers_inspects_starts_and_preserves_human_gate() {
     let (dir, catalog) = fixture();
     let store = Arc::new(Store::open_in_memory());
-    let owner = controller(store.clone(), catalog, "/w", dir.path());
+    let owner = controller(
+        store.clone(),
+        catalog,
+        crate::fixtures::shared_workspace(),
+        dir.path(),
+    );
     let source = session("source");
     let provider = FakeProvider::new();
     provider.add_route(
@@ -200,7 +218,9 @@ async fn fake_provider_conversation_discovers_inspects_starts_and_preserves_huma
         .await
         .unwrap();
     assert_eq!(provider.requests().len(), 4);
-    let runs = store.origin_runs("/w", "source").unwrap();
+    let runs = store
+        .origin_runs(crate::fixtures::shared_workspace(), "source")
+        .unwrap();
     assert_eq!(runs.len(), 1);
     let run = owner.wait(&runs[0]).await.unwrap();
     assert_eq!(run.status, RunStatus::Waiting);

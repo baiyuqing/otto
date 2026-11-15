@@ -1,9 +1,9 @@
 //! Persistent workspace ownership, independent of runtime processes and paths.
 //!
-//! The local marker travels with a workspace. Legacy session keys and memory
-//! scopes (including `sha256:<64 hex>` IDs) are adopted without rewriting
-//! state. A new marker's memory scope is `<dir name>-<12 hex>` of the path
-//! digest, or of the new UUID for a fork. Writes are serialized by a
+//! The local marker travels with a workspace. A directory without a marker
+//! gets a new identity: a random UUID, a random session key and the memory
+//! scope `<dir name>-<12 hex>` of the path digest (of the new UUID for a
+//! fork). A configured memory scope override is adopted once. Writes are serialized by a
 //! directory lock and atomically published through pinned, no-follow handles.
 //! Recorded paths identify historical transcripts, never execution authority.
 
@@ -141,7 +141,7 @@ fn read_at(dir: &fsops::Dir) -> Result<Option<Identity>, PiError> {
     Ok(Some(identity))
 }
 
-/// Read-only lookup; an absent marker retains legacy behavior.
+/// Read-only lookup; `None` when the workspace has no marker.
 pub fn read(workspace: &Path) -> Result<Option<Identity>, PiError> {
     let root = match fsops::open_dir_no_follow(workspace) {
         Ok(root) => root,
@@ -199,8 +199,9 @@ fn publish(
     .map_err(|error| io_error(error.source))
 }
 
-/// Initialize on startup, adopting existing state and retaining move history.
-/// A configured memory override is adopted once; later conflicts fail closed.
+/// Initialize on startup: keep the existing identity and its move history, or
+/// create a new one when the marker is absent. A configured memory override is
+/// adopted once; later conflicts fail closed.
 pub fn initialize(workspace: &Path, memory_override: &str) -> Result<Identity, PiError> {
     update(workspace, memory_override, false)
 }
@@ -232,11 +233,7 @@ fn update(workspace: &Path, memory_override: &str, fork: bool) -> Result<Identit
         identity.clone()
     } else {
         let id = uuid()?;
-        let session_key = if fork {
-            id.replace('-', "")
-        } else {
-            legacy_session_key(&path)
-        };
+        let session_key = id.replace('-', "");
         let memory_scope = if fork {
             named_workspace_id(&path, &session_key)
         } else if memory_override.is_empty() {
@@ -261,15 +258,13 @@ fn update(workspace: &Path, memory_override: &str, fork: bool) -> Result<Identit
     Ok(identity)
 }
 
-fn legacy_session_key(canonical: &str) -> String {
-    to_hex(&Sha256::digest(canonical.as_bytes()))[..16].to_owned()
-}
-
-/// Stable directory key with a read-only legacy fallback.
+/// Stable session directory key of a canonical workspace path. A workspace
+/// without a marker gets one, with a new identity.
 pub(crate) fn session_key(canonical: &str) -> Result<String, PiError> {
-    Ok(read(Path::new(canonical))?
-        .map(|i| i.session_key)
-        .unwrap_or_else(|| legacy_session_key(canonical)))
+    match read(Path::new(canonical))? {
+        Some(identity) => Ok(identity.session_key),
+        None => Ok(initialize(Path::new(canonical), "")?.session_key),
+    }
 }
 
 // Resolve surviving ancestors when an old directory no longer exists. This
@@ -374,13 +369,12 @@ mod tests {
     }
 
     #[test]
-    fn initialization_is_stable_adopts_legacy_keys_and_rejects_override_changes() {
+    fn initialization_is_stable_adopts_the_override_once_and_rejects_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = fs::canonicalize(dir.path()).unwrap();
         let path = path.to_str().unwrap();
-        let legacy = legacy_session_key(path);
         let identity = initialize(Path::new(path), "configured-memory").unwrap();
-        assert_eq!(identity.session_key, legacy);
+        assert_eq!(identity.session_key.len(), 32);
         assert_eq!(identity.memory_scope, "configured-memory");
         assert_eq!(
             initialize(Path::new(path), "configured-memory").unwrap(),
@@ -440,11 +434,14 @@ mod tests {
         );
         assert_ne!(forked.memory_scope, expected);
 
-        let legacy_dir = root.path().join("legacy");
-        fs::create_dir(&legacy_dir).unwrap();
-        let legacy = format!("sha256:{}", "ab".repeat(32));
-        initialize(&legacy_dir, &legacy).unwrap();
-        assert_eq!(initialize(&legacy_dir, "").unwrap().memory_scope, legacy);
+        let override_dir = root.path().join("override");
+        fs::create_dir(&override_dir).unwrap();
+        let override_scope = format!("sha256:{}", "ab".repeat(32));
+        initialize(&override_dir, &override_scope).unwrap();
+        assert_eq!(
+            initialize(&override_dir, "").unwrap().memory_scope,
+            override_scope
+        );
     }
 
     #[test]

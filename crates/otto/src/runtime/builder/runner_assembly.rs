@@ -77,14 +77,6 @@ impl Builder {
             tools.push(Box::new(tool));
         }
         let redactor = self.boundary_redactor(Some(runtime));
-        let model_diagnostic =
-            otto_core::config::resolve::subagent_model_diagnostic(&self.config, runtime)
-                .map(|diagnostic| redactor.redact_string(&diagnostic.reason));
-        if let Some(reason) = &model_diagnostic
-            && redactor.allows_dynamic_content()
-        {
-            let _ = writeln!(warnings, "warning: {reason}");
-        }
         let plugins =
             crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
         let extensions = self.plugin_runtime(&plugins, &redaction_values)?;
@@ -464,19 +456,11 @@ impl Builder {
             &endpoint_host,
             &runtime.model,
         );
-        let mut model_guidance = if subagents.is_some() {
+        let model_guidance = if subagents.is_some() {
             redactor.redact_string(&subagent_model_guidance(&runtime.subagent_models))
         } else {
             String::new()
         };
-        if subagents.is_some()
-            && redactor.allows_dynamic_content()
-            && let Some(reason) = model_diagnostic
-        {
-            model_guidance.push_str(&redactor.redact_string(&format!(
-                "\n<subagent_model_diagnostic>\n{reason}\n</subagent_model_diagnostic>\n"
-            )));
-        }
         let system_prompt = base_prompt.clone()
             + &model_guidance
             + &prompt_tail

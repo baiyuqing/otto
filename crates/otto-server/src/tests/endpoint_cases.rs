@@ -197,7 +197,7 @@ pub(super) fn workflow_test_controller(workspace: &str) -> Arc<otto::workflow::C
 
 #[tokio::test]
 async fn workflow_routes_start_and_report_a_durable_run() {
-    let controller = workflow_test_controller("/workspace");
+    let controller = workflow_test_controller(otto::fixtures::shared_workspace());
     let harness = Harness::with(HarnessOptions {
         workflows: Some(controller),
         ..HarnessOptions::default()
@@ -261,7 +261,7 @@ async fn workflow_routes_start_and_report_a_durable_run() {
 #[tokio::test]
 async fn workflow_routes_map_error_kinds_and_bound_the_run_page() {
     let harness = Harness::with(HarnessOptions {
-        workflows: Some(workflow_test_controller("/workspace")),
+        workflows: Some(workflow_test_controller(otto::fixtures::shared_workspace())),
         ..HarnessOptions::default()
     });
 
@@ -296,14 +296,12 @@ async fn workflow_routes_map_error_kinds_and_bound_the_run_page() {
 
 #[tokio::test]
 async fn workflow_routes_scope_runs_and_lists_by_workspace_query() {
+    let other = otto::fixtures::workspace_dir("other");
     let harness = Harness::with(HarnessOptions {
         workflows: Some(workflow_test_controller("/a")),
-        workflow_workspaces: HashMap::from([(
-            "/other".to_string(),
-            workflow_test_controller("/other"),
-        )]),
+        workflow_workspaces: HashMap::from([(other.clone(), workflow_test_controller(&other))]),
         workspaces: FakeWorkspaces {
-            admitted: vec!["/other".to_string()],
+            admitted: vec![other.clone()],
             ..FakeWorkspaces::default()
         },
         ..HarnessOptions::default()
@@ -312,7 +310,7 @@ async fn workflow_routes_scope_runs_and_lists_by_workspace_query() {
     let start = harness
         .send_with(
             "POST",
-            "/v1/workflows?workspace=/other",
+            &format!("/v1/workflows?workspace={other}"),
             Some(r#"{"name":"review","input":"request"}"#),
             &[("content-type", b"application/json")],
         )
@@ -333,7 +331,7 @@ async fn workflow_routes_scope_runs_and_lists_by_workspace_query() {
     );
 
     let list_other = harness
-        .send("GET", "/v1/workflows?workspace=/other", None)
+        .send("GET", &format!("/v1/workflows?workspace={other}"), None)
         .await;
     assert_eq!(list_other.status, StatusCode::OK, "{}", list_other.body);
     let runs = list_other.json()["runs"].as_array().expect("runs").clone();

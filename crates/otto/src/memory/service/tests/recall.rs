@@ -319,7 +319,7 @@ fn growing_a_standing_record_does_not_count_its_old_version() {
 }
 
 #[tokio::test]
-async fn legacy_over_budget_data_is_injected_oldest_first_and_counted_as_omitted() {
+async fn over_budget_data_is_injected_oldest_first_and_counted_as_omitted() {
     use crate::memory::files::testsupport::{at, sample_record};
     let (_directory, store) = open_temp();
     let store = Arc::new(store);
@@ -337,7 +337,7 @@ async fn legacy_over_budget_data_is_injected_oldest_first_and_counted_as_omitted
                 record,
                 expected_revision: None,
             })
-            .expect("legacy write");
+            .expect("write");
     }
     let workspace = Scope::new(NAMESPACE_WORKSPACE, "workspace-1");
     let binding = bind_both(&service, &workspace);

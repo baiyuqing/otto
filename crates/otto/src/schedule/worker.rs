@@ -130,30 +130,14 @@ impl Worker {
                 && let Scope::DeliveryClient(id) = &role.scope
             {
                 let mut ticker = tokio::time::interval(Duration::from_secs(15));
-                let mut previous = Vec::new();
                 loop {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => break,
-                        _ = ticker.tick() => match store.refresh_delivery_client(id, Utc::now()) {
-                            Ok(conflicts) => {
-                                if conflicts != previous {
-                                    if !conflicts.is_empty() {
-                                        telemetry.logger.warn(
-                                            "schedule_delivery_conflict",
-                                            &[
-                                                ("platforms", conflicts.join(",")),
-                                                (
-                                                    "reason",
-                                                    "multiple clients offer this platform; legacy delivery suspended".into(),
-                                                ),
-                                            ],
-                                        );
-                                    }
-                                    previous = conflicts;
-                                }
+                        _ = ticker.tick() => {
+                            if let Err(error) = store.refresh_delivery_client(id, Utc::now()) {
+                                telemetry.store_error("refresh_delivery_client", error);
                             }
-                            Err(error) => telemetry.store_error("refresh_delivery_client", error),
                         }
                     }
                 }
@@ -345,8 +329,8 @@ where
         }
         let now = Utc::now();
         let wait = match store.next_due(now) {
-            // Overdue but unclaimable rows belong to another scope or an
-            // ambiguous legacy destination; they must not drive a busy loop.
+            // Overdue but unclaimable rows belong to another scope; they must
+            // not drive a busy loop.
             Ok(Some(at)) if at > now => (at - now).clamp(TimeDelta::zero(), TimeDelta::MAX),
             _ => TimeDelta::MAX,
         }

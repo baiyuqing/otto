@@ -55,6 +55,28 @@ commit ledger; Git and release tags retain the full history. See the
   refused at load; use `command = ["otto", "acp", "--attach"]` to reach a
   running `otto serve`.
 
+- Configuration keys `[profiles.<name>]`, `default_profile`,
+  `approval.reviewer_profile` and `[experimental]`, the `--profile` option and
+  `OTTO_PROFILE`. A file that holds one of these keys fails to
+  load with an unknown-field error; use `[providers.<name>.models]`,
+  `default_model`, `approval.reviewer_model` and `[skills].typesafe_skill_check`.
+  `otto serve` no longer returns `409 legacy_profiles_config`.
+
+- Workspace identity no longer adopts the path-derived session key. A directory
+  without `.otto/workspace.json` gets a new random session key, so sessions
+  stored under the old path-derived key are not listed.
+
+- Usage databases created before the cache-breakdown columns are no longer
+  upgraded; recording usage in such a database fails.
+
+- Schedule databases at schema version 1 are no longer upgraded. A scheduled
+  delivery client must declare `scheduleDeliveryChats`; a client that declares
+  only `scheduleDelivery` platforms receives no deliveries.
+
+- Terminal UI: tool frames without an operation ID are ignored, and a
+  persisted task notification without `context_metadata.task_id` no longer
+  recovers the task ID from its header text.
+
 ### Fixed
 
 - Informational notices, including input delivery status, no longer split an

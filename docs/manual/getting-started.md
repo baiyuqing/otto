@@ -412,8 +412,7 @@ unknown provider name is an error.
 
 The model is chosen in this order: `--model`, `OTTO_MODEL`, the resumed
 session's model (only when neither of the two selected one), then
-`default_model`. The deprecated `--profile` ranks with `--model` and the
-deprecated `OTTO_PROFILE` ranks after the resumed session. `--provider` without
+`default_model`. `--provider` without
 `--model` is an error. A session recorded before selectors existed stores a
 provider type and model ID; it resumes on the provider of `default_model` when
 that provider has the same type, otherwise on the built-in provider of that
@@ -421,34 +420,19 @@ type. `--base-url` overrides the endpoint of the selected provider. Other
 stored values follow the source rules above. Select a model by its full
 selector rather than mixing provider, endpoint and credential overrides.
 
-### Migrating from `[profiles]`
+### Removed `[profiles]` keys
 
-Files that use `[profiles.<name>]`, `default_profile`,
-`approval.reviewer_profile`, `--profile` or `OTTO_PROFILE` still load. Otto
-converts each profile to a model of the built-in provider of its type, or, when
-its connection fields differ from the built-in defaults, to a provider shared by
-profiles with identical connection fields. Each converted file produces a
-startup diagnostic, also shown by `otto config explain`, that prints the
-equivalent new TOML. A file that mixes legacy and new tables is an error, as are
-two profiles that convert to the same selector with different settings. Otto
-does not rewrite the file.
-
-Use the equivalent TOML from `otto config explain` when updating an older
-file, and follow the current [provider/model format](#providers-and-models)
-for new configuration.
-
-A managed policy that forces `default_profile` or `profiles.*` fails to load
-with an error naming the replacement keys (`default_model`,
-`providers.<name>.<field>`, `providers.<name>.models."<id>".thinking`).
-Session history, usage records and workflows written earlier keep their stored
-`profile` field names and load without migration.
+`[profiles.<name>]`, `default_profile`, `approval.reviewer_profile`, `--profile`
+and `OTTO_PROFILE` are no longer read. A configuration file that still holds
+one of these keys fails to load with an unknown-field error, and `--profile` is
+an unknown option. Define models under `[providers.<name>.models]` and select
+one with `default_model`, `approval.reviewer_model`, `--model` or `OTTO_MODEL`.
+Session history, usage records and workflows keep their stored `profile` field
+names.
 
 Subagents normally use authenticated `list_models` discovery, falling back to
 the session model if discovery is unavailable or suitability unknown. Explicit
-user model choices and named-agent defaults take precedence. The optional,
-deprecated `subagent_models` list of a converted legacy profile overrides
-catalog selection; it is not required and is disabled by a change to its
-provider connection. See [`list_models`](safety-and-tools.md#list_models).
+user model choices and named-agent defaults take precedence. See [`list_models`](safety-and-tools.md#list_models).
 
 Deadlines use Go-duration strings; `0` disables an optional condition. Most
 end-to-end deadlines are disabled when omitted, except unattended chat/headless
@@ -522,9 +506,7 @@ or provider-mediated approval is offered.
 
 Library integrations should use `TrustedEndpoint::authorize` with policy from
 trusted application authority and each provider's `Client::new_trusted`.
-Legacy constructors allow official origins only. Injected `reqwest::Client`
-constructors fail closed because their redirect policy cannot be inspected;
-migrate to the owned, no-redirect transport. Library callers supplying policy
+`Client::new` allows official origins only. Library callers supplying policy
 are themselves trusted; never derive grants from model output or a URL override.
 
 Provider transports check every DNS answer before connecting. A result set with

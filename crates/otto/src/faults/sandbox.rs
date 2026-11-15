@@ -14,8 +14,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::{Fault, FaultPlan};
 use crate::sandbox::{Capabilities, Driver, DriverId, Error, ExitStatus, Request, Streams};
+use otto_faults::{Fault, FaultPlan};
 
 /// The sandbox operations a rule can select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

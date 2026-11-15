@@ -1,8 +1,8 @@
 use super::*;
 use crate::auth::Credentials;
-use crate::faults::http::{self as testserver, sse_response};
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
 use otto_core::provider::StreamEvent;
+use otto_faults::http::{self as testserver, sse_response};
 use tokio_util::sync::CancellationToken;
 
 mod auth_recovery;

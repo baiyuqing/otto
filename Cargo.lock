@@ -1722,6 +1722,7 @@ dependencies = [
  "nix",
  "otto",
  "otto-core",
+ "otto-faults",
  "otto-platform",
  "otto-storage",
  "regex",
@@ -1772,6 +1773,7 @@ dependencies = [
  "otto-client",
  "otto-core",
  "otto-eval",
+ "otto-faults",
  "otto-platform",
  "otto-server",
  "otto-storage",
@@ -1836,6 +1838,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "otto-faults"
+version = "0.5.0"
+dependencies = [
+ "libc",
+ "otto-platform",
+ "otto-storage",
+ "reqwest",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

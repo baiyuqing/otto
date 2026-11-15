@@ -12,7 +12,7 @@
 //! `Before(e)` returns `e` without calling the inner operation; `After(e)`
 //! calls it and then returns `e`, unless the inner operation failed, in which
 //! case its own error is returned. `Exit` and `ExitAfter` end the process
-//! with [`crate::faults::crash::exit`]. `Hang` and `Short*` have no meaning
+//! with [`crate::crash::exit`]. `Hang` and `Short*` have no meaning
 //! on this synchronous, non-byte boundary and panic: a plan that uses them is
 //! a test bug.
 //!

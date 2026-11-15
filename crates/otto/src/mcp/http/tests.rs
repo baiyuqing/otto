@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 
 use super::*;
-use crate::faults::http as testserver;
+use otto_faults::http as testserver;
 
 struct FakeBearer {
     bearer_result: Mutex<Result<String, CallError>>,

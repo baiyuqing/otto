@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use super::*;
-use crate::faults::publish::FaultyPublishOps;
-use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
 use crate::tool::testutil::{run, run_cancelled};
 use otto_core::mailbox::Inbox;
 use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
+use otto_faults::publish::FaultyPublishOps;
+use otto_faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
 
 fn publish_fault(step: PublishStep) -> (Arc<FaultPlan<PublishStep>>, Arc<dyn PublishOps>) {
     let plan = FaultPlan::new(vec![Rule::new(

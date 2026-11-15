@@ -194,7 +194,7 @@ mod tests {
 
     use super::*;
     use crate::auth::{MAX_CREDENTIAL_FILE_BYTES, expiry, go_time, load};
-    use crate::faults::http::{
+    use otto_faults::http::{
         self as testserver, json_response, redirect_response, status_response,
     };
 

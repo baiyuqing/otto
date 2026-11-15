@@ -1,8 +1,8 @@
 use super::*;
-use crate::faults::publish::FaultyPublishOps;
-use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
 use crate::tool::testutil::{run, workspace};
 use otto_core::model::{EffectCertainty, OperationDisposition};
+use otto_faults::publish::FaultyPublishOps;
+use otto_faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
 use otto_platform::fsops::PublishStep;
 
 mod diff;

@@ -293,7 +293,7 @@ pub(super) fn fork_failing_at(
         None,
         FORK_ID,
         None,
-        &crate::faults::publish::FaultyPublishOps::new(plan.clone()),
+        &otto_faults::publish::FaultyPublishOps::new(plan.clone()),
     )
     .map(|_| ())
     .map_err(|error| error.to_string());
@@ -329,7 +329,7 @@ fn a_fork_directory_sync_failure_is_reported_after_the_fork_is_in_place() {
 
 #[test]
 fn a_crash_after_the_fork_rename_leaves_a_complete_fork_and_no_temporary_file() {
-    use crate::faults::crash::{self, CRASH_EXIT, Role as Part};
+    use otto_faults::crash::{self, CRASH_EXIT, Role as Part};
     crash::run(crash::name_of(&|| {}), |part| match part {
         Part::Child(dir) => {
             let workspace = dir.join("workspace");
@@ -349,7 +349,7 @@ fn a_crash_after_the_fork_rename_leaves_a_complete_fork_and_no_temporary_file() 
                 None,
                 FORK_ID,
                 None,
-                &crate::faults::publish::FaultyPublishOps::new(plan),
+                &otto_faults::publish::FaultyPublishOps::new(plan),
             );
         }
         Part::Parent(dir, status) => {

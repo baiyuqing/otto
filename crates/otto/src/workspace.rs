@@ -315,8 +315,8 @@ mod tests {
             MAX_SCOPE_ID_BYTES
         ));
     }
-    use crate::faults::publish::FaultyPublishOps;
-    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+    use otto_faults::publish::FaultyPublishOps;
+    use otto_faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
     use otto_platform::fsops::PublishStep;
     use std::fs;
     use std::os::unix::fs::symlink;

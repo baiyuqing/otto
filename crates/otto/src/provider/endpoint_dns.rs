@@ -94,7 +94,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_dns_denies_mixed_answers_before_any_request_content() {
-        let target = crate::faults::http::spawn(|_| Vec::<u8>::new()).await;
+        let target = otto_faults::http::spawn(|_| Vec::<u8>::new()).await;
         for denied in [
             "169.254.169.254",
             "100.100.100.200",
@@ -132,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn fake_dns_allows_explicit_local_transport_without_fallback() {
         let target =
-            crate::faults::http::spawn(|_| crate::faults::http::status_response(200, "ok")).await;
+            otto_faults::http::spawn(|_| otto_faults::http::status_response(200, "ok")).await;
         let calls = Arc::new(AtomicUsize::new(0));
         let dns = resolver(
             vec![format!("127.0.0.1:{}", target.port()).parse().unwrap()],

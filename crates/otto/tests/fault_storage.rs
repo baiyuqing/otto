@@ -8,9 +8,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use otto::faults::sql::{FaultySqlDriver, SqlOp};
-use otto::faults::{Fault, FaultError, FaultPlan, Filter, Rule, SqlFault, Trigger};
 use otto::runtime::storage::SqlRepositories;
+use otto_faults::sql::{FaultySqlDriver, SqlOp};
+use otto_faults::{Fault, FaultError, FaultPlan, Filter, Rule, SqlFault, Trigger};
 use otto_storage::Connection;
 use otto_storage::drivers::sqlite::SqliteDriver;
 

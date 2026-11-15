@@ -312,7 +312,7 @@ async fn cancel_queued_task() {
 
 #[tokio::test]
 async fn chatgpt_stream_recovery_completes_child_and_persists_safe_attempt_facts() {
-    use crate::faults::http::{self, Script};
+    use otto_faults::http::{self, Script};
     const PARTIAL: &str = r#"{"type":"response.output_text.delta","delta":"abandoned answer long enough to be visible"}"#;
     const FINAL: &str = r#"{"type":"response.output_text.delta","delta":"recovered answer"}"#;
     const DONE: &str = r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;

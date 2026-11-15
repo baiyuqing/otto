@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn auto_startup_reviews_and_persists_requested_memory_without_a_human_card() {
-    use otto::faults::http;
+    use otto_faults::http;
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let reviews = Arc::new(AtomicUsize::new(0));

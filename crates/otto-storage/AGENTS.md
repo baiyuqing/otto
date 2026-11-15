@@ -13,8 +13,8 @@ The [repository rules](../../AGENTS.md) apply. Use the
 - Out of scope: domain schemas, SQL text and repositories. They stay in each
   domain module of `otto` as `sqlite.rs` or `sqlite/` files, and
   `crates/otto/tests/storage_boundary.rs` checks that only those files hold SQL
-  or import the driver. The fault-injecting driver `otto::faults::sql` stays in
-  `otto`.
+  or import the driver. The fault-injecting driver `otto_faults::sql` lives in
+  `otto-faults`.
 - Dependencies: third-party crates only (`rusqlite`, `libc`, `thiserror`,
   `tokio`); no workspace crate. This crate never imports `otto` or a domain
   concept. `rusqlite` is a dependency of this crate alone; `otto` does not

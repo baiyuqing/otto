@@ -9,14 +9,15 @@ publish.workspace = true
 workspace = true
 
 [features]
-# Test-only fault injection (`otto::faults`). Off in every shipped build; the
+# Test-only fault injection (`otto::faults`, and the `otto-faults` crate that
+# `fixtures` and the integration tests use). Off in every shipped build; the
 # integration tests turn it on through the self dev-dependency below.
-fault-injection = []
+fault-injection = ["dep:otto-faults"]
 # Test-only scaffolding (`otto::fixtures`): offline configuration, controllers
 # on temporary directories and the scripted provider. Off in every shipped
 # build; the tests of dependent crates turn it on through a dev-dependency.
 # It implies `fault-injection` because the scripted provider runs on
-# `otto::faults::http`.
+# `otto_faults::http`.
 test-support = ["fault-injection"]
 
 [dependencies]
@@ -27,6 +28,8 @@ tree-sitter-bash = "=0.25.1"
 otto-core.workspace = true
 otto-platform.workspace = true
 otto-storage.workspace = true
+# Test support; linked only through the `fault-injection` feature.
+otto-faults = { workspace = true, optional = true }
 mlua.workspace = true
 async-trait.workspace = true
 base64.workspace = true
@@ -55,6 +58,9 @@ tokio-util.workspace = true
 toml = { workspace = true, features = ["display"] }
 
 [dev-dependencies]
+# Fault doubles for the unit tests (the optional dependency above is off in a
+# plain `cargo test`).
+otto-faults.workspace = true
 # Gives the integration tests `otto::faults` and `otto::fixtures` without
 # compiling them into a default build.
 otto = { path = ".", features = ["fault-injection", "test-support"] }

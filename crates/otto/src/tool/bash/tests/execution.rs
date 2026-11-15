@@ -418,7 +418,7 @@ async fn it_runs_a_real_command_through_the_direct_driver() {
 #[tokio::test]
 async fn a_driver_launch_failure_is_not_started_and_runs_nothing() {
     use crate::faults::sandbox::{FaultyDriver, SandboxOp};
-    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+    use otto_faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
 
     let (_dir, workspace) = temp_workspace();
     let plan = FaultPlan::new(vec![Rule::new(

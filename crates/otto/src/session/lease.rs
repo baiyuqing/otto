@@ -31,6 +31,11 @@
 //! an explicit [`Lease::release`] call. Errors: [`AcquireError`] reports
 //! why acquisition failed; [`Lease::check`] reports whether the lease has
 //! since been lost, for a caller to test before trusting a write durable.
+//!
+//! Stalls: `Instant` keeps advancing while the process is stopped (SIGSTOP,
+//! a terminal suspend, a debugger). After a stop the 5`L`/6 renewal rule
+//! is therefore not applied at once; see `stall.rs` for how a stop is
+//! detected and what is checked instead.
 
 #![allow(unsafe_code)]
 
@@ -48,6 +53,7 @@ mod acquire;
 mod fence;
 mod heartbeat;
 mod keeper;
+mod stall;
 
 pub(crate) use acquire::*;
 pub(crate) use fence::new_keeper;
@@ -396,7 +402,9 @@ impl Clock for VirtualClock {
 
 /// A held session lease: one epoch, on one host, for one process.
 pub struct Lease {
-    _keeper: Arc<Keeper>,
+    /// The keeper whose watchdog schedule [`Lease::should_fence`] reads to
+    /// detect a process stall (see `stall.rs`).
+    keeper: Arc<Keeper>,
     epoch: u64,
     host: String,
     pid: u32,
@@ -486,7 +494,7 @@ impl Lease {
             let reason = self.lost_reason.lock().unwrap().clone().unwrap_or_default();
             return Err(format!("session lease lost: {reason}"));
         }
-        if let Some(reason) = self.should_fence() {
+        if let Some(reason) = self.should_fence(true) {
             return Err(format!("session lease lost: {reason}"));
         }
         Ok(())
@@ -587,30 +595,6 @@ impl Lease {
             }
         }
     }
-
-    /// `Some(reason)` when the `Keeper`'s watchdog should fence this
-    /// process: renewal has not succeeded in over 5`L`/6, or a successor
-    /// epoch has appeared.
-    fn should_fence(&self) -> Option<String> {
-        if self.released.load(Ordering::Acquire) {
-            return None;
-        }
-        if self.superseded.load(Ordering::Acquire) {
-            return Some(format!(
-                "a successor epoch was created while this process held epoch {}",
-                self.epoch
-            ));
-        }
-        let last = *self.last_renewal.lock().unwrap();
-        match last {
-            Some(instant) if instant.elapsed() > self.duration() * 5 / 6 => Some(format!(
-                "no successful heartbeat renewal for {:?}, over 5/6 of the {:?} lease",
-                instant.elapsed(),
-                self.duration()
-            )),
-            _ => None,
-        }
-    }
 }
 
 impl crate::session::WriterOwnership for Lease {
@@ -632,7 +616,7 @@ impl Lease {
     fn for_test_with_duration(dir_path: &Path, duration_secs: u64) -> Arc<Lease> {
         let dir = fsops::open_dir_no_follow(dir_path).expect("open test lease dir");
         let lease = Arc::new(Lease {
-            _keeper: Keeper::new_for_test(
+            keeper: Keeper::new_for_test(
                 Box::new(|| {}),
                 Arc::new(Children::new()),
                 Duration::from_millis(50),
@@ -681,5 +665,7 @@ impl Lease {
 
 #[cfg(test)]
 mod same_host_tests;
+#[cfg(test)]
+mod stall_tests;
 #[cfg(test)]
 mod tests;

@@ -115,7 +115,7 @@ impl std::fmt::Display for ReminderError {
 }
 /// What `remind_status` and `/timers` print for an empty registry, in the
 /// shape `agent_status` and `/tasks` use for theirs.
-pub(crate) const NO_TIMERS: &str = "no timers in this session";
+pub const NO_TIMERS: &str = "no timers in this session";
 
 const DESCRIPTION: &str = "Schedule a reminder that arrives later as a [timer] message and starts \
     a wake turn. Returns immediately; does not block. Timers are kept with \
@@ -544,7 +544,7 @@ fn delay_until(fire_at: DateTime<Utc>) -> Duration {
 
 /// One timer in the layout shared by `remind_status` and `/timers`: id, the
 /// wait until it fires (`due` once that time has passed), and the message.
-pub(crate) fn timer_line(item: &StoredReminder, now: DateTime<Utc>) -> String {
+pub fn timer_line(item: &StoredReminder, now: DateTime<Utc>) -> String {
     let remaining = item.fire_at - now;
     let when = if remaining <= TimeDelta::zero() {
         "due".to_string()

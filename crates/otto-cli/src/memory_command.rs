@@ -198,8 +198,9 @@ pub fn run_with_storage(
     };
     // The captured credentials ride in on `sandbox_secrets`, which the boundary
     // collects first.
-    let captured_auth =
-        otto::cli::login::capture_auth_credentials(&otto::auth::path_for_home(Path::new(&home)));
+    let captured_auth = otto_terminal::cli::login::capture_auth_credentials(
+        &otto::auth::path_for_home(Path::new(&home)),
+    );
     let mut environment = super::run::config_environment_for(&config_file, lookup);
     environment.insert("HOME".to_string(), home);
     let Ok(memory_config) = resolve_memory(&config_file, &environment) else {

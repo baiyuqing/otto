@@ -6,12 +6,13 @@ The [repository rules](../../AGENTS.md) apply. Use the
 
 - Scope: ACP v1 over stdio and TCP (`serve`) and the `--attach` relay to a
   running `otto serve` (`attach.rs`). Entry point: `src/lib.rs`.
-- Dependencies are one-way: `otto-core` <- `otto` <- `otto-server` <-
-  `otto-acp`. This crate imports `otto`, `otto-server` and `otto-core`. It
-  never imports `otto-cli`. Command-line parsing and process lifecycle belong
+- Dependencies are one-way: `otto-core` <- `otto` <- `otto-server`, and
+  `otto` <- `otto-client`, both <- `otto-acp`. This crate imports `otto`,
+  `otto-server`, `otto-client` and `otto-core`. It never imports `otto-cli`
+  or `otto-terminal`. Command-line parsing and process lifecycle belong
   in `otto-cli`.
 - Session lifecycle, approvals, task control and notices come from
-  `otto::app`; the attach relay talks to `otto serve` through `otto::client`.
+  `otto::app`; the attach relay talks to `otto serve` through `otto_client`.
   Do not reimplement them here.
 - Tests live beside the sources (`channel_tests.rs` and others). Run them with
   `cargo test -p otto-acp`. Scaffolding comes from `otto::fixtures` through

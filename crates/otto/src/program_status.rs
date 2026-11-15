@@ -111,7 +111,7 @@ impl Reporter {
         write_state(&mut inner, writer, state);
     }
 
-    pub(crate) fn report_stdout(&self, state: State) {
+    pub fn report_stdout(&self, state: State) {
         self.report(&mut io::stdout(), state);
     }
 
@@ -168,7 +168,7 @@ impl Reporter {
         }
     }
 
-    pub(crate) fn observe_wire_stdout(&self, event: &WireEvent) {
+    pub fn observe_wire_stdout(&self, event: &WireEvent) {
         self.observe_wire(&mut io::stdout(), event);
     }
 }

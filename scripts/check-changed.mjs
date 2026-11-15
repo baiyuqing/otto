@@ -12,7 +12,9 @@ const CRATE_ENTRY = /^crates\/[^/]+\/(?:Cargo\.toml|build\.rs|src\/lib\.rs|src\/
 const FIXTURES = /^crates\/otto\/src\/fixtures(?:\/|\.rs$)/;
 // Lib crates whose `src/<module>` paths map to a `--lib -- <module>::` filter;
 // their lib tests share one `cargo test --workspace --lib` invocation.
-const LIB_CRATES = ['otto', 'otto-server', 'otto-acp', 'otto-eval', 'otto-cli'];
+// `otto-client` is not listed: its tests sit in one `tests` module, so a module
+// filter would miss them, and any change there selects the full test run.
+const LIB_CRATES = ['otto', 'otto-terminal', 'otto-server', 'otto-acp', 'otto-eval', 'otto-cli'];
 const MODULE_PATH = new RegExp(`^crates/(?:${LIB_CRATES.join('|')})/src/([^/.]+)(?:/|\\.rs$)`);
 const TEST_PATH = new RegExp(`^crates/(?:${LIB_CRATES.join('|')})/tests/([^/]+)\\.rs$`);
 const LICENSE_INPUTS = /^(Cargo\.toml|Cargo\.lock|crates\/[^/]+\/Cargo\.toml|scripts\/license-check\.mjs)$/;

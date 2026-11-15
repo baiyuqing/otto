@@ -93,7 +93,7 @@ impl Notices {
 
 impl Controller {
     /// Takes the lines background operations has queued since the last call.
-    pub(crate) fn take_notices(&self) -> Vec<String> {
+    pub fn take_notices(&self) -> Vec<String> {
         self.notices.take()
     }
 
@@ -105,7 +105,7 @@ impl Controller {
     }
 
     /// Whether a scheduled delivery arrived since the last call.
-    pub(crate) fn take_bell(&self) -> bool {
+    pub fn take_bell(&self) -> bool {
         self.bell.swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 

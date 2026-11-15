@@ -49,8 +49,8 @@ test('check-fast runs the selector directly without a worktree lock utility', ()
 });
 
 test('two modules share one --lib step, no full test', () => {
-  const { steps, unchecked } = plan(['crates/otto/src/memory/store.rs', 'crates/otto/src/tui.rs', 'crates/otto/src/memory/x.rs']);
-  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- memory:: tui::']);
+  const { steps, unchecked } = plan(['crates/otto/src/memory/store.rs', 'crates/otto/src/app/mod.rs', 'crates/otto/src/memory/x.rs']);
+  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- app:: memory::']);
   assert.deepEqual(unchecked, []);
 });
 
@@ -73,6 +73,12 @@ test('modules of otto-eval map to --lib filters by module name', () => {
   const { steps } = plan(['crates/otto-eval/src/memory_eval_command/items.rs', 'crates/otto-eval/src/eval_command.rs']);
   assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- eval_command:: memory_eval_command::']);
   assert.ok(plan(['crates/otto-eval/src/lib.rs']).steps.includes(FULL));
+});
+
+test('modules of otto-terminal map to --lib filters and otto-client selects full tests', () => {
+  const { steps } = plan(['crates/otto-terminal/src/tui/app.rs', 'crates/otto-terminal/src/cli/repl.rs']);
+  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- cli:: tui::']);
+  assert.ok(plan(['crates/otto-client/src/sessions.rs']).steps.includes(FULL));
 });
 
 test('module and integration test steps run in that order', () => {
@@ -140,7 +146,7 @@ test('mixed change keeps the documented order', () => {
 test('every tests/*.rs file of the lib crates maps to --test <name>', () => {
   const crates = new URL('../crates/', import.meta.url);
   let seen = 0;
-  for (const crate of ['otto', 'otto-server', 'otto-acp', 'otto-eval', 'otto-cli']) {
+  for (const crate of ['otto', 'otto-terminal', 'otto-server', 'otto-acp', 'otto-eval', 'otto-cli']) {
     const dir = join(fileURLToPath(crates), crate, 'tests');
     let names;
     try {

@@ -1,0 +1,183 @@
+//! Sub-agent wake turn tests.
+
+use super::*;
+
+#[tokio::test]
+async fn a_notification_renders_during_a_one_shot_turn() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let tasks = Arc::new(Tasks::new());
+    tasks.notifications().push(Notification {
+        task_id: "t1".to_string(),
+        text: "[task-notification] task t1 (explorer) succeeded · 1s · 1 tool call\nall good"
+            .to_string(),
+        ..Notification::default()
+    });
+    let provider = ScriptedProvider::new(|_| Ok("ok".to_string()));
+    let controller = scripted_controller(
+        workspace.path(),
+        sessions.path(),
+        Arc::clone(&provider),
+        Arc::clone(&tasks),
+    );
+    let (mut repl, stdout, _stderr) = repl_buffers(&controller);
+
+    repl.run_once("go", &CancellationToken::new())
+        .await
+        .expect("run once");
+
+    assert!(
+        stdout.text().contains(
+            "\n[task-notification] task t1 (explorer) succeeded · 1s · 1 tool call\nall good\n"
+        ),
+        "{}",
+        stdout.text()
+    );
+}
+
+#[tokio::test]
+async fn the_loop_wakes_only_when_a_notification_is_pending() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let tasks = Arc::new(Tasks::new());
+    let provider = ScriptedProvider::new(|_| Ok("woke up".to_string()));
+    let controller = scripted_controller(
+        workspace.path(),
+        sessions.path(),
+        Arc::clone(&provider),
+        Arc::clone(&tasks),
+    );
+    let (mut repl, stdout, _stderr) = repl_buffers(&controller);
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    let cancel = CancellationToken::new();
+
+    let driver = async {
+        // A registry signal with nothing pending must not wake a turn.
+        tasks
+            .add(otto::subagent::tasks::Task::default(), None, None)
+            .expect("add");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            provider.calls(),
+            0,
+            "a wake turn ran before any notification was pending"
+        );
+        tasks.notifications().push(Notification {
+            task_id: "t1".to_string(),
+            text: "[task-notification] task t1 succeeded".to_string(),
+            ..Notification::default()
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), provider.wait_calls(1))
+            .await
+            .expect("the pending notification did not trigger a wake turn");
+        drop(sender);
+    };
+    let (result, ()) = tokio::join!(
+        repl.run(std::io::BufReader::new(Pipe(receiver)), &cancel),
+        driver
+    );
+
+    result.expect("run");
+    assert_eq!(
+        provider.roles(),
+        vec![Role::Context],
+        "want exactly one wake turn, whose last request message is the notification"
+    );
+    assert!(stdout.text().contains("\nwoke up"), "{}", stdout.text());
+}
+
+#[tokio::test]
+async fn a_one_shot_run_waits_for_a_running_task_and_then_wakes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let tasks = Arc::new(Tasks::new());
+    let added = tasks
+        .add(otto::subagent::tasks::Task::default(), None, None)
+        .expect("add");
+    tasks.mark_running(&added.id, chrono::Utc::now());
+    let child = Arc::clone(&tasks);
+    let id = added.id.clone();
+    let provider = ScriptedProvider::new(move |call| {
+        if call > 1 {
+            return Ok("reported".to_string());
+        }
+        let child = Arc::clone(&child);
+        let id = id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            // Pushed before the final update, as the sub-agent runner
+            // does: the wait unblocks on the update and the drain must
+            // then find the notification already pending.
+            child.notifications().push(Notification {
+                task_id: id.clone(),
+                text: format!("[task-notification] task {id} succeeded\nchild done"),
+                ..Notification::default()
+            });
+            child.finish(
+                &id,
+                otto::subagent::tasks::TaskStatus::Succeeded,
+                chrono::Utc::now(),
+                "child done",
+                "",
+            );
+        });
+        Ok("started".to_string())
+    });
+    let controller = scripted_controller(
+        workspace.path(),
+        sessions.path(),
+        Arc::clone(&provider),
+        Arc::clone(&tasks),
+    );
+    let (mut repl, stdout, _stderr) = repl_buffers(&controller);
+
+    repl.run_once("go", &CancellationToken::new())
+        .await
+        .expect("run once");
+
+    assert_eq!(
+        provider.roles(),
+        vec![Role::User, Role::Context],
+        "want the initial turn and one wake turn"
+    );
+    assert!(stdout.text().contains("reported"), "{}", stdout.text());
+}
+
+#[tokio::test]
+async fn a_one_shot_run_returns_the_wake_turns_error() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let tasks = Arc::new(Tasks::new());
+    let pushed = Arc::clone(&tasks);
+    let provider = ScriptedProvider::new(move |call| {
+        if call > 1 {
+            return Err("wake provider failed".to_string());
+        }
+        // Pushed inside the first turn, after the agent drained the
+        // inbox, so the notification is still pending when it returns.
+        pushed.notifications().push(Notification {
+            task_id: "t1".to_string(),
+            kind: Some(otto_core::agent::inbox::NotificationKind::TaskReport),
+            text: "progress".to_string(),
+            ..Notification::default()
+        });
+        Ok("ok".to_string())
+    });
+    let controller = scripted_controller(
+        workspace.path(),
+        sessions.path(),
+        Arc::clone(&provider),
+        Arc::clone(&tasks),
+    );
+    let (mut repl, _stdout, _stderr) = repl_buffers(&controller);
+
+    let error = repl
+        .run_once("inspect", &CancellationToken::new())
+        .await
+        .expect_err("the wake turn's error");
+
+    assert!(
+        error.to_string().contains("wake provider failed"),
+        "{error}"
+    );
+}

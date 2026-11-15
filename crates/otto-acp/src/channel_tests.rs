@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn task_control_errors_distinguish_old_serve_from_missing_session() {
-    let unsupported = task_control_error(otto::client::Error::Http {
+    let unsupported = task_control_error(otto_client::Error::Http {
         status: 404,
         code: String::new(),
         message: String::new(),
@@ -16,7 +16,7 @@ fn task_control_errors_distinguish_old_serve_from_missing_session() {
             .contains("upgrade and restart")
     );
 
-    let missing = task_control_error(otto::client::Error::Http {
+    let missing = task_control_error(otto_client::Error::Http {
         status: 404,
         code: "not_found".into(),
         message: "session not found".into(),

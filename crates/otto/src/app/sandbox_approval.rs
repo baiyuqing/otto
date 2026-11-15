@@ -106,7 +106,7 @@ impl Controller {
     }
 
     /// Applies an approved sandbox read grant or approves one elevated command.
-    pub(crate) async fn approve_tool(&self, id: &str) -> Result<String, String> {
+    pub async fn approve_tool(&self, id: &str) -> Result<String, String> {
         let _admission = self.begin_operation()?;
         let session_id = self.admitted_session_id()?;
         self.approve_tool_for_session(&session_id, id).await
@@ -135,7 +135,7 @@ impl Controller {
         Ok(read_grant_followup(id))
     }
 
-    pub(crate) fn deny_tool(&self, id: &str) -> Result<(), String> {
+    pub fn deny_tool(&self, id: &str) -> Result<(), String> {
         let _admission = self.begin_operation()?;
         let session_id = self.admitted_session_id()?;
         self.deny_tool_for_session(&session_id, id)
@@ -167,7 +167,7 @@ impl Controller {
     /// Excludes the exact pending command from the sandbox, then grants the
     /// pending command once. Nothing is written when
     /// `excluded_command_entry` refuses the command.
-    pub(crate) async fn approve_bash_always(&self, id: &str) -> Result<String, String> {
+    pub async fn approve_bash_always(&self, id: &str) -> Result<String, String> {
         let _admission = self.begin_operation()?;
         let session_id = self.admitted_session_id()?;
         self.approve_bash_always_for_session(&session_id, id).await

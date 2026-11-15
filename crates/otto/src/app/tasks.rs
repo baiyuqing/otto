@@ -139,7 +139,7 @@ fn wire(task: &crate::subagent::tasks::Task) -> Task {
 
 /// The registry record for one wire task, as a client of serve reads it.
 /// `prompt` and `context` are empty because the wire omits them.
-pub(crate) fn from_wire(task: Task) -> crate::subagent::tasks::Task {
+pub fn from_wire(task: Task) -> crate::subagent::tasks::Task {
     crate::subagent::tasks::Task {
         id: task.id,
         name: task.name,

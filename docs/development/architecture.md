@@ -8,23 +8,24 @@
   remain I/O-free: no filesystem, network, process, environment,
   stdio or wall-clock access. Provider-specific wire types stay in
   `openaicompat` and `openairesponses`, behind the neutral provider contract.
-- `otto` is a library. It owns native I/O, tools, sandboxing, storage,
-  authentication and the terminal UI. `app` owns shared use
-  cases; frontends adapt presentation and transport rather than
+- `otto` is a library. It owns native I/O, tools, sandboxing, storage and
+  authentication. `app` owns shared use cases; frontends adapt presentation and transport rather than
   reimplementing domain behavior.
-- `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio and attach
-  frontends) and `otto-cli` (the `otto` binary and composition root) are
-  separate packages. Dependencies are one-way:
-  `otto-core` <- `otto` <- `otto-server` <- `otto-acp` <- `otto-cli`. A crate
-  never imports one to its right. A one-line change in a frontend crate
-  rebuilds and retests only that crate and those to its right, not the `otto`
-  library test binary. `otto-eval` (the `otto eval` development evaluations)
-  imports `otto` and `otto-core` only; `otto-cli` links it only with its
-  `eval` feature, which is off by default.
+- `otto-client` (the HTTP client of `otto serve`), `otto-terminal` (the TUI
+  and the REPL), `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio
+  and attach frontends) and `otto-cli` (the `otto` binary and composition
+  root) are separate packages. Dependencies are one-way:
+  `otto-core` <- `otto` <- {`otto-client`, `otto-server`, `otto-eval`};
+  `otto-server` and `otto-client` <- `otto-acp`; `otto` and `otto-client` <-
+  `otto-terminal`; every crate <- `otto-cli`. A crate never imports one that
+  depends on it. `otto-server` does not import `otto-terminal`. A one-line
+  change in a frontend crate rebuilds and retests only that crate and the
+  crates that import it, not the `otto` library test binary. `otto-eval` (the
+  `otto eval` development evaluations) imports `otto` and `otto-core` only;
+  `otto-cli` links it only with its `eval` feature, which is off by default.
 - The `otto` public API is what the frontend crates need. Widening an item
   from `pub(crate)` to `pub` is how a frontend crate reaches it; new frontend
-  code goes into the frontend crates, not into `otto`. `cli::{login, repl,
-  repl_commands}` stay in `otto` because `tui` uses them.
+  code goes into the frontend crates, not into `otto`.
 - Test-only items that a dependent crate's tests need are public and gated
   `#[cfg(any(test, feature = "test-support"))]`, not `#[cfg(test)]`. Dependent
   crates enable `otto/test-support` in `[dev-dependencies]` and take
@@ -40,7 +41,8 @@
 Each top-level module of `crates/otto/src` belongs to one layer. A module
 imports only modules in its own layer or in a lower layer, and the imports
 between modules of one layer contain no cycle. `otto-core` is below every
-layer; the frontend crates are above it.
+layer; the frontend crates (`otto-client`, `otto-terminal`, `otto-server`,
+`otto-acp`, `otto-cli`) are above it and are not part of this table.
 
 | Layer | Modules | Owns |
 | --- | --- | --- |
@@ -50,7 +52,6 @@ layer; the frontend crates are above it.
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
 | assembly | `runtime` | Building one runnable agent from resolved configuration |
 | application | `app` | Session lifecycle shared by every frontend |
-| frontend | `cli`, `client`, `tui` | The frontends that stay in this crate |
 | test support | `fixtures`, `faults` | Compiled only for tests or the `fault-injection` feature; production code never imports them |
 
 `crates/otto/tests/layer_boundary.rs` holds this table and checks the

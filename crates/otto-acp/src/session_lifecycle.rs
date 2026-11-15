@@ -281,7 +281,7 @@ impl Connection {
                     () = stop.cancelled() => return,
                     result = relay.client.wake_replies(&id, 0) => match result {
                         Ok(initial) => Some(initial.last),
-                        Err(otto::client::Error::Http { status: 404, .. }) => None,
+                        Err(otto_client::Error::Http { status: 404, .. }) => None,
                         Err(failure) => {
                             relay.fail(failure);
                             return;
@@ -318,7 +318,7 @@ impl Connection {
                                     );
                                     replies_after = Some(page.last);
                                 }
-                                Err(otto::client::Error::Http { status: 404, .. }) => {
+                                Err(otto_client::Error::Http { status: 404, .. }) => {
                                     replies_after = None;
                                 }
                                 Err(failure) => {

@@ -273,7 +273,7 @@ impl Controller {
     /// archive leaves the session running and its timers must survive. It also
     /// runs before the swap, so a timer that fires between the two cannot write
     /// the sidecar back.
-    pub(crate) async fn archive_current_session(&self) -> Result<ArchiveResult, String> {
+    pub async fn archive_current_session(&self) -> Result<ArchiveResult, String> {
         let admission = self.begin_replacement()?;
         let (session, path, info) = {
             let state = self.lock();

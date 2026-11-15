@@ -62,7 +62,7 @@ impl SandboxChange {
 
     /// The sentence a frontend appends after saving an `excluded_commands`
     /// entry; `config_path` is the file that now holds it.
-    pub(crate) fn exclude_saved_note(&self, config_path: &str) -> String {
+    pub fn exclude_saved_note(&self, config_path: &str) -> String {
         format!(
             "Saved {} in {config_path} and reloaded immediately (existing \
                     entries are not duplicated). Matching simple commands run outside the \
@@ -88,7 +88,7 @@ pub(crate) struct Amendment {
 /// sandbox-build time so the frontend can show what the grant will actually
 /// cover, and so a path the profile would reject (one that does not exist, or
 /// is neither a directory nor a regular file) is refused before it is written.
-pub(crate) fn resolve_read_path(input: &str, home: &str) -> Result<String, String> {
+pub fn resolve_read_path(input: &str, home: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("a path is required".to_string());
@@ -113,7 +113,7 @@ pub(crate) fn resolve_read_path(input: &str, home: &str) -> Result<String, Strin
 
 /// The entry of `/sandbox exclude <entry>`: the rest of the line, trimmed,
 /// with one pair of matching single or double quotes removed.
-pub(crate) fn parse_exclude_entry(rest: &str) -> Result<String, String> {
+pub fn parse_exclude_entry(rest: &str) -> Result<String, String> {
     let trimmed = rest.trim();
     let entry = ['\'', '"']
         .iter()

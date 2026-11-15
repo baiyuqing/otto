@@ -110,7 +110,9 @@ pub(super) async fn run_subcommand(
             Ok(home) => home,
             Err(message) => return Some(fail(stderr, &message)),
         };
-        return Some(otto::cli::login::run_auth_command(args, stdout, stderr, &home, cancel).await);
+        return Some(
+            otto_terminal::cli::login::run_auth_command(args, stdout, stderr, &home, cancel).await,
+        );
     }
     if let Some(first) = args.first()
         && first == "setup"

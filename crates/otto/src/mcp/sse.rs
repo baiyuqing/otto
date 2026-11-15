@@ -6,7 +6,7 @@
 
 /// One SSE event as parsed from the stream.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SseEvent {
+pub struct SseEvent {
     /// The event name (from `event:` lines), if present.
     pub event: Option<String>,
     /// The accumulated data (from `data:` lines, joined by `\n`).
@@ -14,7 +14,7 @@ pub(crate) struct SseEvent {
 }
 
 /// Parses SSE format from byte chunks. Accumulates partial lines and emits events on empty lines.
-pub(crate) struct SseParser {
+pub struct SseParser {
     max_event_bytes: usize,
     buffer: Vec<u8>,
     event_name: Option<String>,

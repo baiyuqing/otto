@@ -1,5 +1,6 @@
 //! The renewal and watchdog threads for the leases of one repository.
 
+use super::stall::StallState;
 use super::*;
 
 /// Renews and watches the leases owned by one repository. Process fencing is
@@ -13,6 +14,8 @@ pub(crate) struct Keeper {
     /// shorten it so a small `L` does not have to wait out a full
     /// production tick to see renewal or fencing happen.
     pub(super) tick_interval: Duration,
+    /// The watchdog's schedule and the grace period; see `stall.rs`.
+    pub(super) stall: Mutex<StallState>,
 }
 
 impl Keeper {
@@ -25,6 +28,7 @@ impl Keeper {
             threads_started: Mutex::new(false),
             on_fence,
             tick_interval,
+            stall: Mutex::new(StallState::default()),
         })
     }
 
@@ -82,6 +86,9 @@ impl Keeper {
     }
 
     fn watchdog_loop(keeper: Weak<Keeper>) {
+        if let Some(keeper) = keeper.upgrade() {
+            keeper.record_watchdog_tick();
+        }
         loop {
             let Some(interval) = keeper.upgrade().map(|k| k.tick_interval) else {
                 return;
@@ -90,8 +97,9 @@ impl Keeper {
             let Some(keeper) = keeper.upgrade() else {
                 return;
             };
+            keeper.record_watchdog_tick();
             for lease in keeper.live_leases() {
-                if let Some(reason) = lease.should_fence() {
+                if let Some(reason) = lease.should_fence(false) {
                     keeper.fence(&lease, reason);
                 }
             }

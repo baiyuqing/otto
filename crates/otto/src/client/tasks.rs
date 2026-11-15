@@ -7,7 +7,7 @@ impl Client {
     pub async fn observer_snapshot(
         &self,
         session: &str,
-    ) -> Result<crate::app::tasks::ObserverSnapshot, Error> {
+    ) -> Result<crate::subagent::tasks::observed::ObserverSnapshot, Error> {
         let response = self
             .send(
                 self.http

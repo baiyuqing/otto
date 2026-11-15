@@ -19,7 +19,7 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   application (`app`), frontend. Import only the same or a lower layer, with
   no cycle inside a layer; move a needed item down instead of importing up.
   A new module gets a layer in the same PR. `tests/layer_boundary.rs`
-  enforces this; its `KNOWN_VIOLATIONS` list only shrinks.
+  enforces this.
 - The public API is what the frontend crates need: widen an item from
   `pub(crate)` to `pub` when one calls it, and put new frontend code into
   the frontend crates, not here.

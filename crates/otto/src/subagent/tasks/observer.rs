@@ -1,6 +1,6 @@
 //! Bounded projections of already-redacted child events. Never observes provider input.
+use super::observed::{ObserverEntry, ObserverEntryKind, ObserverTask};
 use super::*;
-use crate::app::tasks::{ObserverEntry, ObserverEntryKind, ObserverTask};
 use crate::subagent::record::TaskRow;
 use otto_core::agent::Event;
 use otto_core::model::{BlockType, Role};

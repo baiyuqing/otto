@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) mod bindings;
-use crate::app::tasks::{ObserverEntryKind, ObserverSnapshot};
+use crate::subagent::tasks::observed::{ObserverEntryKind, ObserverSnapshot};
 use ratatui::{
     Frame,
     layout::{Position, Rect},

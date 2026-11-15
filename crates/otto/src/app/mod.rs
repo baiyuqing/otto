@@ -17,7 +17,7 @@
 //! Errors: every failure is already-redacted text, matching
 //! [`Builder::redact_error`]. Callers that must distinguish a cause compare
 //! against the constants below, the way `otto_cli::run` already compares
-//! [`SESSION_OPERATION_UNAVAILABLE`].
+//! [`crate::runtime::SESSION_OPERATION_UNAVAILABLE`].
 
 /// Add read-only identity to pending transcript calls from durable facts.
 fn project_invocation_identity(
@@ -114,6 +114,7 @@ use otto_core::session::{ListResult, RuntimeMetadata, Session};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::runtime::SESSION_OPERATION_UNAVAILABLE;
 use crate::runtime::builder::{Builder, Runner, RuntimeInfo, SharedSession};
 use crate::sandbox::config_edit::{self as sandbox_config, SandboxChange};
 use crate::sandbox::info::SandboxInfo;
@@ -130,7 +131,6 @@ pub use wake::WakeOperation;
 pub const PERSISTENCE_DISABLED: &str = "session persistence is disabled";
 pub const MODEL_SWITCH_UNAVAILABLE: &str = "model switching is not available";
 pub const SANDBOX_RELOAD_UNAVAILABLE: &str = "sandbox reload is not available";
-pub const SESSION_OPERATION_UNAVAILABLE: &str = "session operation is unavailable";
 /// The server answers it with 409 `turn_active`.
 pub const PROMPT_ACTIVE: &str = "a prompt is already active";
 pub const NOTHING_TO_FORK: &str = "the session has no history to fork yet";

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use super::Controller;
-use super::tasks::{ObserverEntry, ObserverSnapshot, ObserverTask};
 use crate::subagent::record::{ListQuery, TaskRow};
+use crate::subagent::tasks::observed::{ObserverEntry, ObserverSnapshot, ObserverTask};
 use crate::subagent::tasks::observer::{MAX_TASKS, bounded};
 
 mod history;

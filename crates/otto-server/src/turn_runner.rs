@@ -42,7 +42,7 @@ impl Server {
                             None => std::future::pending::<()>().await,
                         }
                     } => {
-                        if let Some(view) = session.ctrl.tasks() { server.metrics.diff_tasks(&mut seen, &view.list()); }
+                        if let Some(view) = session.ctrl.tasks() { server.metrics.diff_tasks(&mut seen, &task_samples(&view.list())); }
                         server.status_changed.send_modify(|version| *version += 1);
                     }
                     changed = updates.changed() => {
@@ -50,7 +50,7 @@ impl Server {
                             return;
                         }
                         if let Some(view) = session.ctrl.tasks() {
-                            server.metrics.diff_tasks(&mut seen, &view.list());
+                            server.metrics.diff_tasks(&mut seen, &task_samples(&view.list()));
                         }
                         server.status_changed.send_modify(|version| *version += 1);
                     }
@@ -644,4 +644,21 @@ impl Server {
             session.turn_finished.notify_one();
         });
     }
+}
+
+fn task_samples(list: &[otto::app::Task]) -> Vec<otto::metrics::TaskSample> {
+    use otto::metrics::{TaskPhase, TaskSample};
+    list.iter()
+        .map(|task| TaskSample {
+            id: task.id.clone(),
+            status: task.status.as_str().to_string(),
+            phase: if task.status == otto::app::TaskStatus::Running {
+                TaskPhase::Running
+            } else if task.status.final_status() {
+                TaskPhase::Finished
+            } else {
+                TaskPhase::Pending
+            },
+        })
+        .collect()
 }

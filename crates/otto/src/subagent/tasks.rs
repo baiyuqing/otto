@@ -704,6 +704,7 @@ impl Tasks {
     }
 }
 
+pub mod observed;
 pub(crate) mod observer;
 mod progress;
 mod recovery;

@@ -407,7 +407,7 @@ pub(super) async fn set_session_model(
         // dynamic model, cannot switch; retrying the same request cannot help.
         Err(message)
             if message == app::MODEL_SWITCH_UNAVAILABLE
-                || message == app::SESSION_OPERATION_UNAVAILABLE =>
+                || message == otto::runtime::SESSION_OPERATION_UNAVAILABLE =>
         {
             error_response(StatusCode::CONFLICT, "model_switch_unavailable", &message)
         }
@@ -459,7 +459,7 @@ pub(super) async fn set_session_thinking(
         }
         Err(message)
             if message == app::MODEL_SWITCH_UNAVAILABLE
-                || message == app::SESSION_OPERATION_UNAVAILABLE =>
+                || message == otto::runtime::SESSION_OPERATION_UNAVAILABLE =>
         {
             error_response(StatusCode::CONFLICT, "model_switch_unavailable", &message)
         }

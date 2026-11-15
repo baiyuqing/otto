@@ -9,6 +9,7 @@
 //! composes this layer with the frontends.
 
 pub mod advice;
+pub mod approval_review;
 pub mod boundary;
 pub mod builder;
 #[cfg(test)]
@@ -27,3 +28,7 @@ pub mod wiring;
 pub mod workflow;
 pub mod workflow_notifications;
 pub mod workspace_context;
+
+/// Returned when a session operation cannot run in the current boundary or
+/// process; callers compare against it to tell this cause apart.
+pub const SESSION_OPERATION_UNAVAILABLE: &str = "session operation is unavailable";

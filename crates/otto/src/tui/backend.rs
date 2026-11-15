@@ -138,7 +138,7 @@ pub(crate) enum Reply {
     Context(ContextReport),
     SandboxPath(String),
     Agents(ListResult),
-    ObserverSnapshot(crate::app::tasks::ObserverSnapshot),
+    ObserverSnapshot(crate::subagent::tasks::observed::ObserverSnapshot),
     AgentDetail {
         row: TaskRow,
         history: Vec<Message>,

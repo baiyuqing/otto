@@ -81,43 +81,6 @@ pub struct Task {
     pub session_path: String,
 }
 
-/// A bounded read-only view of the current parent's children.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ObserverSnapshot {
-    pub tasks: Vec<ObserverTask>,
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ObserverTask {
-    pub row: crate::subagent::record::TaskRow,
-    pub entries: Vec<ObserverEntry>,
-    /// True when the source transcript/capture is unavailable, not merely truncated.
-    pub missing: bool,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ObserverEntry {
-    pub kind: ObserverEntryKind,
-    pub text: String,
-    pub tool_name: String,
-    pub tool_args: String,
-    pub tool_output: String,
-    pub tool_done: bool,
-    pub tool_error: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ObserverEntryKind {
-    Assistant,
-    Tool,
-    Error,
-    #[default]
-    System,
-}
-
 /// The read/control contract a frontend gets.
 ///
 /// Concurrency: an implementation is shared with every running task, so every

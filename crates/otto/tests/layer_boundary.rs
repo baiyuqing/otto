@@ -6,9 +6,7 @@
 //! a higher layer, a reference to a test-support module (`fixtures`,
 //! `faults`) from a non-test-support module, and a reference between two
 //! modules of the same layer that lie on a reference cycle in that layer.
-//! `KNOWN_VIOLATIONS` lists the violations that exist today. The test fails
-//! on a violation that is not listed and on a listed pair that no longer
-//! occurs, so the list can only shrink.
+//! Any violation fails the test.
 //!
 //! The scan covers non-test source: it skips out-of-line test files and
 //! items after `#[cfg(test)]`. See
@@ -63,14 +61,6 @@ const TEST_SUPPORT: &str = "test-support";
 
 /// The crate root file, which declares every module and is not a layer.
 const ROOT_FILES: &[&str] = &["lib.rs"];
-
-/// The `(from, to)` module pairs that violate the layer order today.
-const KNOWN_VIOLATIONS: &[(&str, &str)] = &[
-    ("approval", "runtime"),
-    ("metrics", "app"),
-    ("runtime", "app"),
-    ("subagent", "app"),
-];
 
 fn sources(path: &Path) -> Vec<PathBuf> {
     if path.is_file() {
@@ -334,48 +324,25 @@ fn modules_respect_the_layer_order() {
         }
     }
     let found = violations(&edges);
-    let known: BTreeSet<(String, String)> = KNOWN_VIOLATIONS
-        .iter()
-        .map(|(from, to)| (from.to_string(), to.to_string()))
-        .collect();
-
     let mut report = Vec::new();
     for (pair, sites) in &found {
-        if !known.contains(pair) {
-            let mut sites = sites.clone();
-            sites.dedup();
-            report.push(format!(
-                "new violation `{}` -> `{}` at {}",
-                pair.0,
-                pair.1,
-                sites.join(", ")
-            ));
-        }
+        let mut sites = sites.clone();
+        sites.dedup();
+        report.push(format!(
+            "violation `{}` -> `{}` at {}",
+            pair.0,
+            pair.1,
+            sites.join(", ")
+        ));
     }
     if !report.is_empty() {
         report.push(
             "move the type or contract down to the lower layer, or pass it in from the higher \
-             layer; do not extend KNOWN_VIOLATIONS"
+             layer"
                 .to_string(),
         );
     }
-    for pair in &known {
-        if !found.contains_key(pair) {
-            report.push(format!(
-                "`{}` -> `{}` no longer occurs; remove the fixed entry from KNOWN_VIOLATIONS",
-                pair.0, pair.1
-            ));
-        }
-    }
     assert!(report.is_empty(), "layer order:\n{}", report.join("\n"));
-}
-
-#[test]
-fn known_violations_are_sorted_and_unique() {
-    let mut sorted = KNOWN_VIOLATIONS.to_vec();
-    sorted.sort();
-    sorted.dedup();
-    assert_eq!(sorted, KNOWN_VIOLATIONS);
 }
 
 fn names(list: &[&str]) -> BTreeSet<String> {

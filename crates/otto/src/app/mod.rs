@@ -82,7 +82,7 @@ pub mod task_control;
 pub mod turn_queue;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
-pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
+pub(crate) const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 mod inspection;
 mod lifecycle;
 use lifecycle::State;
@@ -125,17 +125,18 @@ pub use channel::Channel;
 use crate::sandbox::control::SandboxControl;
 pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
 use otto_core::approval::ApprovalMode;
-pub use tasks::{Task, TaskStatus, TaskView};
+pub(crate) use tasks::TaskView;
+pub use tasks::{Task, TaskStatus};
 pub use wake::WakeOperation;
 
-pub const PERSISTENCE_DISABLED: &str = "session persistence is disabled";
+pub(crate) const PERSISTENCE_DISABLED: &str = "session persistence is disabled";
 pub const MODEL_SWITCH_UNAVAILABLE: &str = "model switching is not available";
-pub const SANDBOX_RELOAD_UNAVAILABLE: &str = "sandbox reload is not available";
+pub(crate) const SANDBOX_RELOAD_UNAVAILABLE: &str = "sandbox reload is not available";
 /// The server answers it with 409 `turn_active`.
 pub const PROMPT_ACTIVE: &str = "a prompt is already active";
 pub const NOTHING_TO_FORK: &str = "the session has no history to fork yet";
 pub const CLOSED: &str = "controller is closed";
-pub const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
+pub(crate) const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
 
 /// The deterministic result of submitting ordinary human text while a session
 /// may have an active turn. It never silently turns steering into a queued
@@ -154,7 +155,7 @@ pub enum ActiveInputAdmission {
 
 /// One configured model row a frontend can display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModelSummary {
+pub(crate) struct ModelSummary {
     /// `<provider>/<model_id>`.
     pub selector: String,
     pub provider: String,
@@ -237,7 +238,7 @@ pub struct ResumeResult {
 
 /// What `/permissions` (and its hidden alias `/auto`) asks to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionsChange {
+pub(crate) enum PermissionsChange {
     /// `manual`, `auto` or `yolo`: replaces policy and reviewer together.
     Preset(ApprovalMode),
     /// `policy ...` or `reviewer ...`: the new policy and reviewer pair.
@@ -247,12 +248,12 @@ pub enum PermissionsChange {
     ),
 }
 
-pub const PERMISSIONS_USAGE: &str =
+pub(crate) const PERMISSIONS_USAGE: &str =
     "usage: /permissions [manual|auto|yolo | policy on_request|never | reviewer user|auto_review]";
 
 /// Parses `/permissions` arguments; `Ok(None)` means show the report only.
 /// `on` and `off` are undocumented synonyms of `auto` and `manual`.
-pub fn parse_permissions_command(
+pub(crate) fn parse_permissions_command(
     args: &str,
     current: otto_core::approval::ApprovalSettings,
 ) -> Result<Option<PermissionsChange>, String> {
@@ -271,7 +272,7 @@ pub fn parse_permissions_command(
     }
 }
 
-pub fn format_permissions(settings: otto_core::approval::ApprovalSettings) -> String {
+pub(crate) fn format_permissions(settings: otto_core::approval::ApprovalSettings) -> String {
     use otto_core::approval::{ApprovalPolicy, ApprovalReviewer};
     let policy = match settings.policy {
         ApprovalPolicy::OnRequest => "on_request",
@@ -474,7 +475,7 @@ impl Controller {
     /// A content-free generation signal for successfully queued memory review
     /// candidates. Frontends still use their normal scoped commands to inspect
     /// or decide a candidate.
-    pub fn memory_review_available_changed(&self) -> watch::Receiver<u64> {
+    pub(crate) fn memory_review_available_changed(&self) -> watch::Receiver<u64> {
         self.builder.memory.service.review_available_changed()
     }
 
@@ -495,7 +496,7 @@ fn metadata_of(info: &RuntimeInfo) -> RuntimeMetadata {
 
 /// Absolute, then symlink-resolved, then lexically cleaned, falling back a step
 /// at a time.
-pub fn canonical_session_path(path: &str) -> String {
+pub(crate) fn canonical_session_path(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }

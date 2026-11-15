@@ -24,6 +24,7 @@ pub(super) fn is_reserved_task_name(name: &str) -> bool {
 /// has no matching name. Names that do not match are ignored. Pass the
 /// result as `starting_counter` to [`Tasks::with_recorder_from`] so a
 /// resumed session's task ids do not collide with a prior run's.
+#[cfg(test)]
 pub fn highest_task_counter(dir: &std::path::Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;

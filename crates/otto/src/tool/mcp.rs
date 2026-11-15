@@ -33,11 +33,11 @@ use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 use crate::mcp::{BearerSource, CallError, CallOutcome, ContentBlock, ToolInfo, ToolServer};
 
 /// Every registered MCP tool name starts with this.
-pub const NAME_PREFIX: &str = "mcp__";
+pub(crate) const NAME_PREFIX: &str = "mcp__";
 /// `otto_core::tool::safe_prompt_tool_name` rejects anything longer.
-pub const MAX_TOOL_NAME_BYTES: usize = 64;
+pub(crate) const MAX_TOOL_NAME_BYTES: usize = 64;
 /// The advertised description is cut to this many bytes, on a char boundary.
-pub const MAX_DESCRIPTION_BYTES: usize = 1024;
+pub(crate) const MAX_DESCRIPTION_BYTES: usize = 1024;
 
 /// The fallback schema for a tool that advertises no usable `inputSchema`.
 const FALLBACK_SCHEMA: &str = r#"{"type":"object"}"#;
@@ -46,7 +46,7 @@ const FALLBACK_SCHEMA: &str = r#"{"type":"object"}"#;
 /// `[A-Za-z0-9_-]` to `_`. Returns `None` when the result would exceed
 /// [`MAX_TOOL_NAME_BYTES`]; truncating is not attempted because two different
 /// tool names could then truncate to the same prefixed name.
-pub fn prefixed_name(server: &str, tool: &str) -> Option<String> {
+pub(crate) fn prefixed_name(server: &str, tool: &str) -> Option<String> {
     let sanitized: String = tool
         .bytes()
         .map(|byte| {
@@ -99,7 +99,7 @@ fn build_parameters(info: &ToolInfo) -> String {
 }
 
 /// One MCP tool, adapted to the `Tool` contract.
-pub struct McpTool {
+pub(crate) struct McpTool {
     server: Arc<dyn ToolServer>,
     name: String,
     remote_name: String,
@@ -148,7 +148,7 @@ impl McpTool {
     /// `crate::runtime::wiring`'s cross-server collision warning, which needs the
     /// remote name for its message even though the registered name is
     /// [`Self::name`]'s sanitized, server-prefixed form.
-    pub fn remote_name(&self) -> &str {
+    pub(crate) fn remote_name(&self) -> &str {
         &self.remote_name
     }
 
@@ -587,7 +587,7 @@ impl McpCallTool {
 /// Skips, with one warning each, a tool whose prefixed name would exceed
 /// [`MAX_TOOL_NAME_BYTES`], and both tools of a same-name collision after
 /// sanitizing.
-pub fn tools_for(
+pub(crate) fn tools_for(
     server: Arc<dyn ToolServer>,
     tools: &[ToolInfo],
     max_output_bytes: usize,

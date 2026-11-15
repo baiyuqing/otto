@@ -16,7 +16,7 @@ fn corrupt() -> Error {
 ///
 /// A wholly empty provenance stores as `{}` rather than the fully populated
 /// object [`encode_provenance`] emits.
-pub fn encode_proposed_record(record: &Record) -> Result<String> {
+pub(crate) fn encode_proposed_record(record: &Record) -> Result<String> {
     let source = if provenance_zero(&record.source) {
         "{}".to_string()
     } else {
@@ -116,7 +116,7 @@ fn decode_proposed_provenance(value: serde_json::Value) -> Result<Provenance> {
 
 /// Decodes a stored blob and refuses anything that is not its own canonical
 /// encoding, so a hand-edited row is corruption rather than silent input.
-pub fn decode_proposed_record(raw: &str) -> Result<Record> {
+pub(crate) fn decode_proposed_record(raw: &str) -> Result<Record> {
     if raw.is_empty() || raw.len() > MAX_PROPOSED_JSON_BYTES {
         return Err(corrupt());
     }

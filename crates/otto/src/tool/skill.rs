@@ -39,7 +39,7 @@ struct SkillArgs {
 }
 
 /// Loads a skill's instructions, or one file inside its directory.
-pub struct SkillTool {
+pub(crate) struct SkillTool {
     catalog: Catalog,
     max_output_bytes: usize,
 }

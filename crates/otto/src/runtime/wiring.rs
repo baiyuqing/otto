@@ -530,7 +530,7 @@ fn transport_label(transport: &McpTransport) -> &'static str {
 /// the same dynamically-redacting tools `connect_mcp` did), and the
 /// server-prefixed names of the tools that survived cross-server
 /// deduplication.
-pub struct ConnectedServer {
+pub(crate) struct ConnectedServer {
     server: Arc<dyn mcp::ToolServer>,
     tool_infos: Vec<mcp::ToolInfo>,
     secrets: Vec<String>,
@@ -547,7 +547,7 @@ pub struct ConnectedServer {
 /// `client.tools()`) and keeps only the names `connect_mcp` recorded as
 /// registered, so every set matches without repeating the cross-server
 /// warnings.
-pub fn mcp_adapter_tools(
+pub(crate) fn mcp_adapter_tools(
     connected: &[ConnectedServer],
     max_output: usize,
 ) -> Vec<Box<dyn Tool + Send + Sync>> {

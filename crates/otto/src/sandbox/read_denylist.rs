@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Denied paths relative to the home directory, in the order the profile
 /// renders them. Each entry is denied as a subtree whether it exists or not.
-pub const BUILT_IN_DENY_PATHS: &[&str] = &[
+pub(crate) const BUILT_IN_DENY_PATHS: &[&str] = &[
     // Credentials of tools and services.
     ".ssh",
     ".gnupg",
@@ -52,7 +52,7 @@ pub const BUILT_IN_DENY_PATHS: &[&str] = &[
 /// Every private sandbox state root under the user cache directory is named
 /// with this prefix. Every root is read-denied except the running session's
 /// own `tmp` and `cache` directories.
-pub const PRIVATE_ROOT_LEAF_PREFIX: &str = "otto-sandbox-";
+pub(crate) const PRIVATE_ROOT_LEAF_PREFIX: &str = "otto-sandbox-";
 
 /// The user cache directory relative to the home directory; it holds the
 /// private state roots.
@@ -89,7 +89,7 @@ impl ReadDenylist {
     }
 
     /// The user cache directory that holds the private state roots.
-    pub fn cache_base(&self) -> PathBuf {
+    pub(crate) fn cache_base(&self) -> PathBuf {
         PRIVATE_ROOT_CACHE_BASE
             .iter()
             .fold(self.home.clone(), |path, component| path.join(component))
@@ -97,7 +97,7 @@ impl ReadDenylist {
 
     /// `~/x` relative to the home directory, an absolute path as written, and
     /// `None` for anything else.
-    pub fn expand_entry(&self, entry: &str) -> Option<PathBuf> {
+    pub(crate) fn expand_entry(&self, entry: &str) -> Option<PathBuf> {
         if let Some(rest) = entry.strip_prefix("~/") {
             return Some(self.home.join(rest));
         }

@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub fn handle_key(
+    pub(crate) fn handle_key(
         &mut self,
         key: KeyEvent,
         backend: &Backend<'_>,
@@ -215,7 +215,7 @@ impl App {
     pub(crate) fn drain_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
     }
-    pub fn scroll_wheel(&mut self, up: bool) {
+    pub(crate) fn scroll_wheel(&mut self, up: bool) {
         if self.has_surface() {
             let view = self.active_view().unwrap();
             let geometry = self.geometry.borrow();
@@ -246,7 +246,7 @@ impl App {
             self.new_messages = false;
         }
     }
-    pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
+    pub(crate) fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
         let amount = match key.code {
             KeyCode::Up => 1,
             KeyCode::Down => 1,

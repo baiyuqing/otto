@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{Error, Result};
 
-pub type IoFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub(crate) type IoFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type Job<T> = Box<dyn for<'a> FnOnce(&'a mut T) -> IoFuture<'a, ()> + Send>;
 
 pub struct Worker<T: Send + 'static> {
@@ -127,7 +127,8 @@ impl<T: Send + 'static> Worker<T> {
             .map_err(|_| Error::CommitUnknown)?
     }
 
-    pub fn close_blocking(&self) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn close_blocking(&self) -> Result<()> {
         self.sender.lock().map_err(|_| Error::Unavailable)?.take();
         blocking(|| drain(&self.thread))
     }

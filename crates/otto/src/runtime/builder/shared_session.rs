@@ -87,14 +87,14 @@ impl SharedSession {
         self.0.transcript.rename(name)
     }
 
-    pub fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
+    pub(crate) fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
         self.0.transcript.update_thinking_level(thinking)
     }
 
     /// Appends a plain custom entry that is written when the session file is
     /// created (see [`SessionHandle::append_custom_when_created`]), or at once
     /// when the file already exists. A fresh lazy session gets no file here.
-    pub async fn append_custom_when_created(
+    pub(crate) async fn append_custom_when_created(
         &self,
         custom_type: &str,
         data: &str,
@@ -105,7 +105,7 @@ impl SharedSession {
             .await
     }
 
-    pub fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String> {
+    pub(crate) fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String> {
         self.0.transcript.update_runtime(runtime)
     }
 
@@ -156,7 +156,7 @@ impl SharedSession {
         self.0.transcript.lease()
     }
 
-    pub fn take_recovery(&self) -> Option<crate::session::Recovery> {
+    pub(crate) fn take_recovery(&self) -> Option<crate::session::Recovery> {
         self.0.transcript.take_recovery()
     }
 

@@ -18,7 +18,7 @@ use super::{CONTEXT_CANCELED, Tool};
 /// call before the tool runs; `after` can flag a call that ran but whose
 /// effects the caller should not trust. Both return operator-facing text
 /// on failure.
-pub trait CallGuard: Send + Sync {
+pub(crate) trait CallGuard: Send + Sync {
     fn before(&self) -> Result<(), String>;
     fn after(&self) -> Result<(), String>;
 }
@@ -54,7 +54,7 @@ impl Registry {
         })
     }
 
-    pub fn with_approval(
+    pub(crate) fn with_approval(
         self,
         service: Arc<crate::approval::Service>,
         scope: otto_core::approval::Scope,
@@ -62,7 +62,7 @@ impl Registry {
         self.with_approval_origin(service, scope, None)
     }
 
-    pub fn with_approval_origin(
+    pub(crate) fn with_approval_origin(
         mut self,
         service: Arc<crate::approval::Service>,
         scope: otto_core::approval::Scope,
@@ -72,7 +72,7 @@ impl Registry {
         self
     }
 
-    pub fn with_guard(mut self, guard: Arc<dyn CallGuard>) -> Self {
+    pub(crate) fn with_guard(mut self, guard: Arc<dyn CallGuard>) -> Self {
         self.guard = Some(guard);
         self
     }

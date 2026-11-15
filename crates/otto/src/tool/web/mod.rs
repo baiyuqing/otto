@@ -17,7 +17,7 @@ mod extract;
 mod policy;
 mod search;
 
-pub use search::{BRAVE_KEY_ENV, GOOGLE_ENGINE_ENV, GOOGLE_KEY_ENV};
+pub(crate) use search::{BRAVE_KEY_ENV, GOOGLE_ENGINE_ENV, GOOGLE_KEY_ENV};
 
 use std::sync::{Arc, OnceLock};
 
@@ -35,8 +35,8 @@ use super::{
     ApprovalSpec, CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result,
 };
 
-pub const FETCH_NAME: &str = "web_fetch";
-pub const SEARCH_NAME: &str = "web_search";
+pub(crate) const FETCH_NAME: &str = "web_fetch";
+pub(crate) const SEARCH_NAME: &str = "web_search";
 
 /// The default and the largest `count` of a search.
 const DEFAULT_RESULTS: usize = 8;
@@ -215,7 +215,7 @@ pub fn fetch_definition() -> ToolDefinition {
     )
 }
 
-pub struct WebFetch {
+pub(crate) struct WebFetch {
     shared: Shared,
 }
 
@@ -382,7 +382,7 @@ pub fn search_definition() -> ToolDefinition {
     )
 }
 
-pub struct WebSearch {
+pub(crate) struct WebSearch {
     shared: Shared,
     backend: search::Backend,
 }

@@ -65,7 +65,7 @@ impl FakeBackend {
     }
 
     /// A backend whose `ask` never returns.
-    pub fn hanging() -> Self {
+    pub(crate) fn hanging() -> Self {
         let mut backend = Self::new(Vec::new());
         backend.hang = true;
         backend

@@ -124,7 +124,7 @@ fn previous_text(workspace: &Workspace, path: &Path) -> Result<Option<String>, &
 }
 
 /// Writes a workspace file.
-pub struct WriteTool<'a> {
+pub(crate) struct WriteTool<'a> {
     workspace: Arc<Workspace>,
     publish: &'a dyn PublishOps,
 }

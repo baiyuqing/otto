@@ -18,7 +18,7 @@ impl Service {
             Ok(true)
         })
     }
-    pub fn supersede_unstarted(&self, expected: &Request) -> Result<Request> {
+    pub(crate) fn supersede_unstarted(&self, expected: &Request) -> Result<Request> {
         self.mutate(&expected.id, &expected.scope, |current| {
             if current == expected
                 && matches!(current.state, State::Pending | State::Approved)

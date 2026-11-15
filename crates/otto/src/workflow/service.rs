@@ -84,7 +84,7 @@ impl Controller {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_deadlines(
+    pub(crate) fn new_with_deadlines(
         store: Arc<dyn WorkflowStore>,
         catalog: Catalog,
         executor: Arc<dyn Executor>,
@@ -121,7 +121,7 @@ impl Controller {
         self.catalog.lookup(name).cloned().ok_or_else(|| Error::not_found("workflow not found; use workflow_list and restart the owner after editing definitions"))
     }
 
-    pub fn set_guard(&self, guard: Box<dyn Send>) {
+    pub(crate) fn set_guard(&self, guard: Box<dyn Send>) {
         *self
             .guard
             .lock()

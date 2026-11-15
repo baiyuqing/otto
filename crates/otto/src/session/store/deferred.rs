@@ -20,7 +20,7 @@ impl Store {
     /// Only plain custom types are accepted: `otto.operation` and `otto.plan`
     /// carry in-memory side effects and return an invalid-argument error.
     /// `data` must be valid JSON; a malformed value fails at this call.
-    pub fn append_custom_entry_when_created(
+    pub(crate) fn append_custom_entry_when_created(
         &self,
         custom_type: &str,
         data: &str,

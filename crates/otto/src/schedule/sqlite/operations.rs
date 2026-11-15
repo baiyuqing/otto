@@ -136,7 +136,7 @@ impl SqliteScheduleStore {
 
     /// Claims one due `waiting` prompt item for `scope` (and `workspace`, when
     /// given) for 15 min.
-    pub fn claim_run(
+    pub(crate) fn claim_run(
         &self,
         scope: &Scope,
         workspace: Option<&str>,
@@ -148,7 +148,7 @@ impl SqliteScheduleStore {
     /// Like [`Self::claim_run`], and skips items whose workspace `admit`
     /// rejects. The check runs inside the claim transaction, so a rejected
     /// item gets no lease and no attempt, and stays claimable by others.
-    pub fn claim_run_admitting(
+    pub(crate) fn claim_run_admitting(
         &self,
         scope: &Scope,
         workspace: Option<&str>,
@@ -330,7 +330,7 @@ impl SqliteScheduleStore {
     }
 
     /// `attempts + 1`, `next_try_at = now + backoff`, the claim released.
-    pub fn delivery_failed(
+    pub(crate) fn delivery_failed(
         &self,
         id: i64,
         due_at: DateTime<Utc>,
@@ -359,7 +359,7 @@ impl SqliteScheduleStore {
 
     /// The earliest instant at which an active row becomes claimable, for
     /// worker sleeps.
-    pub fn next_due(&self, _now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
+    pub(crate) fn next_due(&self, _now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
         self.read(|connection| {
             let earliest: Option<i64> = connection.query_row(
                 "SELECT MIN(MAX(next_try_at, claimed_until)) FROM items \
@@ -408,7 +408,7 @@ impl SqliteScheduleStore {
         })
     }
 
-    pub fn mark_appended(&self, item_id: i64, due_at: DateTime<Utc>) -> Result<()> {
+    pub(crate) fn mark_appended(&self, item_id: i64, due_at: DateTime<Utc>) -> Result<()> {
         self.write(|connection| {
             connection.execute(
                 "UPDATE deliveries SET appended = 1 WHERE item_id = ?1 AND due_at = ?2",

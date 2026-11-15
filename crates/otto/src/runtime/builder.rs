@@ -95,7 +95,7 @@ fn mark_build_trace(trace: &mut Option<BuildTrace>, label: &'static str) {
 
 /// Every failure here is already redacted text, so a `String` carries all a
 /// caller may show.
-pub type BuildError = String;
+pub(crate) type BuildError = String;
 
 /// Everything a frontend shows about the resolved runtime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -263,7 +263,7 @@ pub struct Runner {
 }
 
 /// The tool-less agent behind the session-model advice backend.
-pub type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
+pub(crate) type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 
 /// Everything the composition root builds once per process, independent of
 /// any one workspace: config, environment, provider-runtime inputs, auth,
@@ -469,7 +469,7 @@ impl Builder {
     /// workspace at runtime has no such fixed sequence to preserve and
     /// should have `for_workspace` resolve the workspace and `resolve_mcp`
     /// itself.
-    pub fn for_workspace(
+    pub(crate) fn for_workspace(
         shared: Arc<Shared>,
         workspace: Arc<Workspace>,
         workspace_path: String,
@@ -526,7 +526,7 @@ impl Builder {
 /// Environment for an explicit selection change or active-runtime rebuild.
 /// Drop runtime selectors so they cannot override the selection already chosen
 /// by the caller.
-pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
+pub(crate) fn resume_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
     environment
         .iter()
         .filter(|(key, _)| {

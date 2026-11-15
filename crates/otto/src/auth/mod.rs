@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 use crate::random::random_hex;
 
-pub const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
+pub(crate) const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
 
 /// Takes the cross-process lock that serializes credential mutations.
 ///
@@ -105,7 +105,7 @@ pub enum AuthError {
 /// is zero, and writes `Z` rather than `+00:00` for a zero offset. The
 /// credential file has to match byte for byte, so the format is written out
 /// here.
-pub mod go_time {
+pub(crate) mod go_time {
     use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Timelike};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -206,7 +206,7 @@ const EXPIRY_DELTA: chrono::TimeDelta = chrono::TimeDelta::seconds(10);
 impl Credentials {
     /// A non-empty access token that is not within [`EXPIRY_DELTA`] of
     /// expiring. A zero expiry never expires.
-    pub fn token_valid(&self, now: DateTime<FixedOffset>) -> bool {
+    pub(crate) fn token_valid(&self, now: DateTime<FixedOffset>) -> bool {
         if self.access_token.is_empty() {
             return false;
         }

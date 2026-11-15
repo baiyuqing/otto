@@ -11,7 +11,7 @@ use serde_json::{json, value::RawValue};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub struct RequestApproval {
+pub(crate) struct RequestApproval {
     pub service: Arc<Service>,
     pub scope: Scope,
     pub turn_origin: Option<Arc<crate::session::origin::TurnOrigin>>,
@@ -26,7 +26,7 @@ struct Args {
     #[serde(default)]
     subject_ref: Option<String>,
 }
-pub fn request_definition() -> ToolDefinition {
+pub(crate) fn request_definition() -> ToolDefinition {
     definition(
         "request_approval",
         "Request an actual user choice or approval checkpoint, or inspect a \

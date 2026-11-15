@@ -3,7 +3,7 @@
 use super::*;
 
 /// The notification and wait text for a final task.
-pub fn completion_text(task: &Task, max_output_bytes: usize) -> String {
+pub(crate) fn completion_text(task: &Task, max_output_bytes: usize) -> String {
     let name = agent_label(task);
     let duration = completion_duration(task);
     let calls = pluralize_tool_calls(task.tool_calls);
@@ -46,7 +46,7 @@ pub fn completion_text(task: &Task, max_output_bytes: usize) -> String {
 /// The label shown after a task id: the parenthesized definition name, such as
 /// `(default)` or `(explorer)`, prefixed by the task's name and a space when
 /// it has one, such as `lint-check (explorer)`.
-pub fn agent_label(task: &Task) -> String {
+pub(crate) fn agent_label(task: &Task) -> String {
     let label = definition_label(task);
     if task.name.is_empty() {
         label
@@ -57,7 +57,7 @@ pub fn agent_label(task: &Task) -> String {
 
 /// The parenthesized definition name alone. The status table uses it for its
 /// definition column, so a task name appears only once per line.
-pub fn definition_label(task: &Task) -> String {
+pub(crate) fn definition_label(task: &Task) -> String {
     if task.agent.is_empty() {
         "(default)".to_string()
     } else {

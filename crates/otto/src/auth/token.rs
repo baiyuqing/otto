@@ -42,7 +42,7 @@ impl TokenSource {
         Self::with_endpoint(Endpoint::production(), credentials, path, base)
     }
 
-    pub fn with_endpoint(
+    pub(crate) fn with_endpoint(
         endpoint: Endpoint,
         credentials: Credentials,
         path: PathBuf,
@@ -72,7 +72,7 @@ impl TokenSource {
     ///
     /// A concurrent caller that already rotated the token wins and its current
     /// credentials are returned without another refresh.
-    pub async fn refresh_rejected(
+    pub(crate) async fn refresh_rejected(
         &self,
         rejected_access_token: &str,
         cancel: &CancellationToken,

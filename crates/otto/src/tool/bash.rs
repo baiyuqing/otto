@@ -171,7 +171,7 @@ impl ExcludedCommands {
         }
     }
 
-    pub fn set_entries(&self, entries: Vec<String>) {
+    pub(crate) fn set_entries(&self, entries: Vec<String>) {
         *self.entries.write().expect("excluded commands lock") = entries;
     }
 
@@ -187,10 +187,10 @@ impl ExcludedCommands {
 /// describe which host path or setting was wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("invalid sandboxed bash configuration")]
-pub struct InvalidConfiguration;
+pub(crate) struct InvalidConfiguration;
 
 /// Executes a shell command in the sandbox.
-pub struct BashTool {
+pub(crate) struct BashTool {
     grant_control: Option<(PathBuf, Arc<dyn crate::sandbox::control::SandboxControl>)>,
     workspace_root: PathBuf,
     output_root: Arc<Root>,
@@ -332,7 +332,7 @@ impl BashTool {
     }
 
     /// Enables explicit, one-shot elevation for this session.
-    pub fn with_grant_control(
+    pub(crate) fn with_grant_control(
         mut self,
         path: PathBuf,
         control: Arc<dyn crate::sandbox::control::SandboxControl>,
@@ -341,7 +341,7 @@ impl BashTool {
         self
     }
 
-    pub fn with_approvals(
+    pub(crate) fn with_approvals(
         mut self,
         session_id: impl Into<String>,
         approvals: Arc<BashApprovals>,
@@ -351,7 +351,7 @@ impl BashTool {
     }
 
     /// Runs commands matching the excluded list outside the sandbox.
-    pub fn with_excluded_commands(mut self, excluded: Arc<ExcludedCommands>) -> Self {
+    pub(crate) fn with_excluded_commands(mut self, excluded: Arc<ExcludedCommands>) -> Self {
         self.excluded = Some(excluded);
         self
     }
@@ -427,7 +427,7 @@ pub fn bash_definition() -> ToolDefinition {
     )
 }
 
-pub fn bash_definition_with_approvals() -> ToolDefinition {
+pub(crate) fn bash_definition_with_approvals() -> ToolDefinition {
     definition(
         "bash",
         &describe(

@@ -42,7 +42,8 @@ impl Controller {
 
     /// None means the frontend should handle the input normally (no pending
     /// approval). A control conversation never grants an approval.
-    pub async fn approval_message(
+    #[cfg(test)]
+    pub(crate) async fn approval_message(
         &self,
         text: &str,
         cancel: &CancellationToken,
@@ -52,7 +53,8 @@ impl Controller {
 
     /// Handles one message in the restricted approval dialogue with trusted,
     /// transient channel guidance.
-    pub async fn approval_message_with_channel(
+    #[cfg(test)]
+    pub(crate) async fn approval_message_with_channel(
         &self,
         text: &str,
         channel: Option<Channel>,

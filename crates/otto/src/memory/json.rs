@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 /// to exponent form only below 1e-6 or at/above 1e21. Rust's `Display` already
 /// produces the shortest round-trip decimal and never uses an exponent, so the
 /// two agree once the exponent range is handled explicitly.
-pub fn encode_float(value: f64) -> String {
+pub(crate) fn encode_float(value: f64) -> String {
     let magnitude = value.abs();
     if magnitude != 0.0 && (magnitude < 1e-6 || magnitude >= 1e21) {
         return format!("{value:e}");
@@ -45,7 +45,7 @@ pub fn encode_string(value: &str, out: &mut String) {
 
 /// Encodes a `[]string`. A Go nil slice marshals as `null`, so callers that
 /// need `[]` pass an empty slice; this encoder always emits an array.
-pub fn encode_string_slice(values: &[String]) -> String {
+pub(crate) fn encode_string_slice(values: &[String]) -> String {
     let mut out = String::from("[");
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
@@ -59,7 +59,7 @@ pub fn encode_string_slice(values: &[String]) -> String {
 
 /// Encodes a `map[string]string`. Go sorts map keys when marshaling, which
 /// `BTreeMap` iteration already does.
-pub fn encode_string_map(values: &BTreeMap<String, String>) -> String {
+pub(crate) fn encode_string_map(values: &BTreeMap<String, String>) -> String {
     let mut out = String::from("{");
     for (index, (key, value)) in values.iter().enumerate() {
         if index > 0 {
@@ -71,17 +71,6 @@ pub fn encode_string_map(values: &BTreeMap<String, String>) -> String {
     }
     out.push('}');
     out
-}
-
-/// Decodes a JSON array of strings, rejecting trailing content. Returns `None`
-/// for anything that is not exactly one array of strings.
-pub fn decode_string_slice(raw: &str) -> Option<Vec<String>> {
-    serde_json::from_str::<Vec<String>>(raw).ok()
-}
-
-/// Decodes a JSON object of string values, rejecting trailing content.
-pub fn decode_string_map(raw: &str) -> Option<BTreeMap<String, String>> {
-    serde_json::from_str::<BTreeMap<String, String>>(raw).ok()
 }
 
 #[cfg(test)]
@@ -101,19 +90,11 @@ mod tests {
     }
 
     #[test]
-    fn map_keys_are_sorted_and_round_trip() {
+    fn map_keys_are_sorted() {
         let mut values = BTreeMap::new();
         values.insert("b".to_string(), "2".to_string());
         values.insert("a".to_string(), "1\"q".to_string());
         let encoded = encode_string_map(&values);
         assert_eq!(encoded, r#"{"a":"1\"q","b":"2"}"#);
-        assert_eq!(decode_string_map(&encoded).expect("decode"), values);
-    }
-
-    #[test]
-    fn decoding_rejects_wrong_shapes() {
-        assert!(decode_string_slice("[1]").is_none());
-        assert!(decode_string_slice("[] []").is_none());
-        assert!(decode_string_map(r#"{"a":1}"#).is_none());
     }
 }

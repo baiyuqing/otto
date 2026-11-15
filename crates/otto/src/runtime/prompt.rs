@@ -17,7 +17,7 @@ use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReas
 
 /// The delegation-policy element appended when the registry offers an `agent`
 /// tool. `can_list_models` says whether the registry also offers `list_models`.
-pub fn agent_guidance(
+pub(crate) fn agent_guidance(
     provider: &str,
     endpoint_host: &str,
     session_model: &str,
@@ -95,7 +95,7 @@ pub fn agent_guidance(
 }
 
 /// The optional deprecated, ordered model override offered only to a parent.
-pub fn subagent_model_guidance(models: &[String]) -> String {
+pub(crate) fn subagent_model_guidance(models: &[String]) -> String {
     if models.is_empty() {
         return String::new();
     }
@@ -128,7 +128,7 @@ pub fn subagent_model_guidance(models: &[String]) -> String {
 /// Builds the opening and static sections of the system prompt for
 /// `definitions` under `info`. Callers append dynamic sections and close the
 /// `<otto_system_prompt>` root element.
-pub fn system_prompt_for(
+pub(crate) fn system_prompt_for(
     definitions: &[ToolDefinition],
     info: SandboxInfo,
     provider: &str,

@@ -57,7 +57,7 @@ pub fn publish(service: &Service, workspace: &str, request: &ApprovalRequest) ->
     })
 }
 impl Controller {
-    pub fn attach_approvals(
+    pub(crate) fn attach_approvals(
         self: &Arc<Self>,
         service: &Arc<Service>,
     ) -> std::result::Result<(), String> {
@@ -93,7 +93,10 @@ impl Controller {
             .apply_available(&self.workspace)
             .map_err(|e| e.to_string())
     }
-    pub fn approval_request(&self, id: &str) -> std::result::Result<ApprovalRequest, super::Error> {
+    pub(crate) fn approval_request(
+        &self,
+        id: &str,
+    ) -> std::result::Result<ApprovalRequest, super::Error> {
         let request = self
             .store
             .request(id)?

@@ -12,8 +12,8 @@
 
 mod acp_approval;
 mod acp_process;
-pub mod acp_session;
-pub mod acp_transport;
+pub(crate) mod acp_session;
+pub(crate) mod acp_transport;
 pub mod definition;
 pub mod format;
 pub mod inherit;
@@ -30,7 +30,8 @@ pub mod sqlite;
 pub mod tasks;
 pub mod tools;
 
-pub use definition::{Catalog, Definition, WritePolicy, from_skill};
-pub use inherit::inherit_snapshot;
-pub use prompt::prompt_section;
-pub use tasks::{Task, TaskError, TaskStatus, Tasks};
+pub(crate) use definition::WritePolicy;
+pub use definition::{Catalog, Definition};
+pub(crate) use inherit::inherit_snapshot;
+pub(crate) use prompt::prompt_section;
+pub use tasks::{Task, TaskStatus, Tasks};

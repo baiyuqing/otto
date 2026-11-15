@@ -114,7 +114,7 @@ pub async fn close(builder: &Builder) {
     }
 }
 
-pub async fn shared_controller(
+pub(crate) async fn shared_controller(
     builder: &Builder,
     runtime: &Runtime,
     stderr: &mut (dyn Write + Send),

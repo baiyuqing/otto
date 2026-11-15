@@ -29,7 +29,7 @@ const MAX_USERINFO_INPUT_BYTES: usize = 16 << 10;
 /// returned forms. Values without a literal `@` are complete for this
 /// credential detector even when they are not usable proxy URLs, so a
 /// malformed but credential-free proxy setting stays usable.
-pub fn userinfo_forms(raw: &[u8]) -> (Vec<String>, bool) {
+pub(crate) fn userinfo_forms(raw: &[u8]) -> (Vec<String>, bool) {
     if raw.is_empty() || !raw.contains(&b'@') {
         return (Vec::new(), false);
     }

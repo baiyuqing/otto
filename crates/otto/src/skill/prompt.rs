@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use super::{Catalog, Skill};
 
 /// Caps the rendered prompt section.
-pub const MAX_LISTING_BYTES: usize = 8 << 10;
+pub(crate) const MAX_LISTING_BYTES: usize = 8 << 10;
 
 /// The number of description characters a truncated entry keeps.
 const SHORT_DESCRIPTION_CHARS: usize = 120;
@@ -70,7 +70,7 @@ const SKILLS_FOOTER: &str = "</available_skills>\n</skills>\n";
 /// listing fits [`MAX_LISTING_BYTES`], so a large catalog stays complete and
 /// one warning names the level it fell back to. Only a catalog too large even
 /// for bare names loses entries, and that warning names them.
-pub fn prompt_section(
+pub(crate) fn prompt_section(
     catalog: &Catalog,
     agent_callable: &BTreeSet<String>,
 ) -> (String, Vec<String>) {

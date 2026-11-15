@@ -3,7 +3,7 @@
 use super::*;
 
 impl App {
-    pub fn dispatch_line(
+    pub(crate) fn dispatch_line(
         &mut self,
         line: &str,
         _backend: &Backend<'_>,
@@ -218,7 +218,7 @@ impl App {
         }
         self.dispatch_line(&line, backend, cancel)
     }
-    pub fn insert_text(&mut self, value: &str) {
+    pub(crate) fn insert_text(&mut self, value: &str) {
         if let Some(surface) = self.surfaces.top_mut() {
             let view = surface.model.view();
             if matches!(surface.state.focus, interaction::Focus::Field(_)) {

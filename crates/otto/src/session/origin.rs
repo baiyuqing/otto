@@ -72,7 +72,7 @@ impl Origin {
         self.0.strip_prefix("chat:")?.split(':').next()
     }
 
-    pub fn is_chat(&self) -> bool {
+    pub(crate) fn is_chat(&self) -> bool {
         self.0.starts_with("chat:")
     }
 

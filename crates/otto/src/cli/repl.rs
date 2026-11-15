@@ -35,7 +35,7 @@ use render::*;
 use settings::*;
 
 /// The longest line the REPL accepts.
-pub const MAX_INPUT_BYTES: usize = 1 << 20;
+pub(crate) const MAX_INPUT_BYTES: usize = 1 << 20;
 
 /// The user prompt marker, shared with the terminal UI transcript (`tui::gutter`)
 /// so the two frontends cannot drift apart.

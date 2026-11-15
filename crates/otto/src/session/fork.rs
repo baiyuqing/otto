@@ -72,7 +72,7 @@ pub fn fork(
     fork_with_request(driver, source, before, new_id, None)
 }
 
-pub fn fork_with_request(
+pub(crate) fn fork_with_request(
     driver: &dyn FileDriver,
     source: &Path,
     before: Option<&str>,

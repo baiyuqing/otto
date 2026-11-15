@@ -56,7 +56,7 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
 
 /// The declared base safety of the built-in tool `name`, or `None` when the
 /// name is not a built-in.
-pub fn declared_safety(name: &str) -> Option<RetrySafety> {
+pub(crate) fn declared_safety(name: &str) -> Option<RetrySafety> {
     BASE_SAFETY
         .iter()
         .find(|(tool, _)| *tool == name)

@@ -51,7 +51,7 @@ struct GrepArgs {
 }
 
 /// Searches workspace file contents.
-pub struct GrepTool {
+pub(crate) struct GrepTool {
     workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }

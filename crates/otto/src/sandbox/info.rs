@@ -125,7 +125,7 @@ impl SandboxInfo {
     }
 
     /// The compact status a footer shows.
-    pub fn status_summary(&self) -> &'static str {
+    pub(crate) fn status_summary(&self) -> &'static str {
         match (self.mode, self.network, self.bash_available) {
             (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true) => "sb · write · net",
             (SandboxMode::Seatbelt, SandboxNetwork::Denied, true) => "sb · write · no-net",
@@ -134,7 +134,7 @@ impl SandboxInfo {
     }
 
     /// The machine-readable reason, empty unless the sandbox is unavailable.
-    pub fn reason_code(&self) -> &'static str {
+    pub(crate) fn reason_code(&self) -> &'static str {
         if self.mode != SandboxMode::Unavailable {
             return "";
         }

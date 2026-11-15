@@ -237,7 +237,7 @@ impl App {
             *generation = generation.wrapping_add(1);
         }
     }
-    pub fn refresh_info(&mut self, backend: &Backend<'_>) {
+    pub(crate) fn refresh_info(&mut self, backend: &Backend<'_>) {
         let info = backend.info();
         if (info.workspace.as_str(), info.session_id.as_str())
             != (self.info.workspace.as_str(), self.info.session_id.as_str())

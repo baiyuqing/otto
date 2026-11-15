@@ -70,7 +70,7 @@ pub enum McpLoginError {
 /// directory by [`auth::write_secret_file`]; loaded at runner start and on
 /// every [`TokenStore::bearer`] call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenFile {
+pub(crate) struct TokenFile {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expiry: Option<DateTime<FixedOffset>>,
@@ -91,7 +91,7 @@ pub fn token_path(home: &Path, server: &str) -> PathBuf {
 
 /// Loads the token file at `path`. `Ok(None)` when it does not exist; every
 /// other failure (oversized, malformed) is [`McpLoginError::Persistence`].
-pub fn load_token(path: &Path) -> Result<Option<TokenFile>, McpLoginError> {
+pub(crate) fn load_token(path: &Path) -> Result<Option<TokenFile>, McpLoginError> {
     let token_file_bytes = match std::fs::read(path) {
         Ok(token_file_bytes) => token_file_bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -232,8 +232,7 @@ fn map_callback_error(
 /// Reuses a discovered grant to fetch bearer tokens for one server. Loads
 /// its token file lazily: `new` does no I/O, and the first `bearer`,
 /// `refresh`, or `secrets` call reads the file into the cache.
-pub struct TokenStore {
-    server: String,
+pub(crate) struct TokenStore {
     path: PathBuf,
     http: Result<reqwest::Client, String>,
     cached: Mutex<Option<TokenFile>>,
@@ -247,19 +246,13 @@ pub struct TokenStore {
 }
 
 impl TokenStore {
-    pub fn new(server: String, path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self {
-            server,
             path,
             http: auth::oauth::http_client(),
             cached: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
         }
-    }
-
-    /// The configured server name this store was built for.
-    pub fn server(&self) -> &str {
-        &self.server
     }
 
     /// Reads the cached token, loading the file on first access.

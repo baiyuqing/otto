@@ -55,7 +55,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> Connection<R, W> {
     }
 
     /// Cancel an active session cooperatively and continue reading until it settles.
-    pub async fn request_with_cancel(
+    pub(crate) async fn request_with_cancel(
         &mut self,
         method: &str,
         params: Value,

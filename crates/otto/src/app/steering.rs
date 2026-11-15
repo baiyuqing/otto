@@ -61,7 +61,7 @@ impl Controller {
     /// [`Self::steer`] with the client's `input_id`: a retry while the
     /// guidance is queued returns the same message, and one after it was
     /// delivered fails with [`crate::runtime::task_control::DUPLICATE_INPUT`].
-    pub fn steer_input(
+    pub(crate) fn steer_input(
         &self,
         text: &str,
         input_id: Option<&str>,
@@ -120,23 +120,6 @@ impl Controller {
             .steering()
             .interrupt_step()
             .map_err(|_| InterruptRefusal::NoGuidance)
-    }
-
-    /// Deterministically admits ordinary human text while this session is
-    /// active. It never queues a later turn: callers explicitly choose that
-    /// separate operation after receiving [`ActiveInputAdmission::Idle`].
-    pub fn admit_active_input(&self, text: &str) -> Result<ActiveInputAdmission, String> {
-        self.admit_active_input_with(text, None)
-    }
-
-    /// [`Self::admit_active_input`] with the client's `input_id`; see
-    /// [`Self::steer_input`].
-    pub fn admit_active_input_with(
-        &self,
-        text: &str,
-        input_id: Option<&str>,
-    ) -> Result<ActiveInputAdmission, String> {
-        self.admit_active_input_with_provenance(text, input_id, None)
     }
 
     pub fn admit_active_input_with_provenance(

@@ -244,7 +244,7 @@ impl Runner {
     /// created, so editing `AGENT.md` cannot change a resumed run, while
     /// inheriting the caller's absolute deadline. The child's local task
     /// timeout may only shorten that budget.
-    pub async fn run_with_definition_control(
+    pub(crate) async fn run_with_definition_control(
         self: &Arc<Self>,
         request: StartRequest,
         transcript: Transcript,

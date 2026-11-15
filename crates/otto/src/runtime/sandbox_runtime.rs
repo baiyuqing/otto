@@ -95,7 +95,7 @@ pub struct SandboxRuntime {
 
 /// Why [`SandboxRuntime::reconfigure`] did not apply the new settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconfigureError {
+pub(crate) enum ReconfigureError {
     /// The new settings resolve to a different child environment or redaction
     /// set. Consumers hold the old environment by value, so it cannot change.
     EnvironmentChanged,
@@ -116,7 +116,7 @@ impl SandboxRuntime {
     /// runtime instead. The caller must hold off every command for the whole
     /// call; see [`SeatbeltDriver::reconfigure`].
     #[cfg(target_os = "macos")]
-    pub async fn reconfigure(
+    pub(crate) async fn reconfigure(
         &mut self,
         options: &OpenOptions,
         cancel: &CancellationToken,
@@ -134,7 +134,7 @@ impl SandboxRuntime {
 
     /// See the macOS definition above.
     #[cfg(not(target_os = "macos"))]
-    pub async fn reconfigure(
+    pub(crate) async fn reconfigure(
         &mut self,
         _options: &OpenOptions,
         _cancel: &CancellationToken,
@@ -566,7 +566,7 @@ fn finish(
 /// Incomplete redactions would leak secrets into command output, and a
 /// missing executor or environment leaves nothing to run. Startup and every
 /// later reload classify runtimes here so they agree on what "usable" means.
-pub fn normalize_sandbox_runtime(mut runtime: SandboxRuntime) -> SandboxRuntime {
+pub(crate) fn normalize_sandbox_runtime(mut runtime: SandboxRuntime) -> SandboxRuntime {
     let reason = if !runtime.redactions_complete {
         SandboxReason::EnvironmentRejected
     } else if runtime.info.bash_available
@@ -596,7 +596,7 @@ pub fn normalize_sandbox_runtime(mut runtime: SandboxRuntime) -> SandboxRuntime 
 
 /// The warning printed once at startup when the sandbox is not what the user
 /// would assume. A confined runtime prints nothing.
-pub fn sandbox_runtime_warning(info: &SandboxInfo) -> Option<String> {
+pub(crate) fn sandbox_runtime_warning(info: &SandboxInfo) -> Option<String> {
     match info.mode {
         SandboxMode::Unavailable => Some(format!(
             "warning: bash is unavailable because the configured sandbox could not be established (reason: {}); file tools remain available\n",

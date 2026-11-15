@@ -48,7 +48,7 @@ mod approvals;
 mod mcp;
 mod memory_review;
 mod sandbox;
-pub use sandbox::SandboxChangeOutcome;
+pub(crate) use sandbox::SandboxChangeOutcome;
 mod session_operations;
 mod sessions;
 mod tasks;

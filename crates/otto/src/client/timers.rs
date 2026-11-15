@@ -21,7 +21,7 @@ impl Client {
 
     /// `POST /v1/sessions/{id}/timers/{timer_id}/cancel`: the cancelled
     /// timer. Serve answers 404 for an unknown timer.
-    pub async fn cancel_timer(
+    pub(crate) async fn cancel_timer(
         &self,
         session_id: &str,
         timer_id: &str,

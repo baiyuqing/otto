@@ -134,7 +134,7 @@ impl Authorization {
     }
 }
 /// The same wrapper is used by parent and child MCP router tools.
-pub struct GuardedServer {
+pub(crate) struct GuardedServer {
     client: Arc<mcp::client::Client>,
     authorization: Authorization,
 }
@@ -283,7 +283,7 @@ impl Snapshot {
         }
         snapshot
     }
-    pub fn extend_skills(&self, catalog: &mut Catalog) -> Vec<String> {
+    pub(crate) fn extend_skills(&self, catalog: &mut Catalog) -> Vec<String> {
         let mut diagnostics = Vec::new();
         for (name, root, paths) in &self.skill_paths {
             diagnostics.extend(catalog.extend_plugin(name, root, paths));

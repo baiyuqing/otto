@@ -136,7 +136,7 @@ impl FileStore {
 
     /// Runs every check [`FileStore::propose`] runs before it writes: batch
     /// shape, proposal validation, duplicate ids, and the content guard.
-    pub fn check_proposals(&self, candidates: &[Candidate]) -> Result<()> {
+    pub(crate) fn check_proposals(&self, candidates: &[Candidate]) -> Result<()> {
         self.ensure_open()?;
         preflight_batch_shape(candidates)?;
         validate_proposal_batch(candidates)?;
@@ -229,7 +229,7 @@ impl FileStore {
     /// [`FileStore::review`] that also rejects an accept whose record would
     /// push the standing set over its token budget. A rejection leaves the
     /// candidate pending.
-    pub fn review_within_standing_budget(
+    pub(crate) fn review_within_standing_budget(
         &self,
         request: &StoreReviewRequest,
     ) -> Result<ReviewResult> {

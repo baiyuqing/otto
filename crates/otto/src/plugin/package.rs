@@ -9,8 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
-pub const MCP_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
+pub(crate) const PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+pub(crate) const MCP_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
 const MAX_JSON: u64 = 1 << 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

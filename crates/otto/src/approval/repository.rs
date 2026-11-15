@@ -84,7 +84,7 @@ pub trait ApprovalStore: Send + Sync {
 
 /// Nullable legacy metadata and review-status-only updates do not create a
 /// synthetic operation revision. A changed authority basis does.
-pub fn pending_basis_changed(expected: &Request, next: &Request) -> bool {
+pub(crate) fn pending_basis_changed(expected: &Request, next: &Request) -> bool {
     expected.state == otto_core::approval::State::Pending
         && next.state == otto_core::approval::State::Pending
         && expected

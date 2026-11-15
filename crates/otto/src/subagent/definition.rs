@@ -24,7 +24,7 @@ use crate::fsops::root::{self, Root};
 use crate::skill::frontmatter::{self, Fields};
 
 /// The largest `AGENT.md` this loader will read.
-pub const MAX_AGENT_FILE_BYTES: u64 = 64 << 20;
+pub(crate) const MAX_AGENT_FILE_BYTES: u64 = 64 << 20;
 const MAX_AGENT_NAME_LENGTH: usize = 64;
 const MAX_AGENT_DESCRIPTION_CHARS: usize = 1024;
 
@@ -180,7 +180,7 @@ impl Catalog {
     ///
     /// A skill whose body cannot be read is reported and registered nowhere,
     /// so the listing never marks a skill the `agent` tool could not run.
-    pub fn extend_from_skills(
+    pub(crate) fn extend_from_skills(
         &mut self,
         skills: &crate::skill::Catalog,
     ) -> (Vec<String>, BTreeSet<String>) {
@@ -461,7 +461,7 @@ mod tests;
 /// always `fresh`, because `inherit` would copy in exactly the context this
 /// mechanism exists to keep out, and `tools` stays `None`, which means "every
 /// child tool" and so cannot widen the set the runner already built.
-pub fn from_skill(skill: &crate::skill::Skill, body: String) -> Option<Definition> {
+pub(crate) fn from_skill(skill: &crate::skill::Skill, body: String) -> Option<Definition> {
     let contract = skill.contract.as_ref()?;
     Some(Definition {
         name: skill.name.clone(),

@@ -39,7 +39,7 @@ struct FindArgs {
 }
 
 /// Finds workspace files by glob.
-pub struct FindTool {
+pub(crate) struct FindTool {
     workspace: Arc<Workspace>,
     max_output_bytes: usize,
 }

@@ -252,44 +252,6 @@ fn no_session_input_events_live_only_in_the_handle() {
     assert!(restarted.input_submission_events().unwrap().is_empty());
 }
 
-#[test]
-fn restart_holds_local_guidance_but_preserves_http_and_acp_recovery() {
-    use otto_core::mailbox::{Inbox, Mailbox, Notification, NotificationKind};
-    use otto_core::model::{InputProvenance, InputTransport};
-    let inbox = Inbox::default();
-    for (id, provenance) in [
-        ("local", InputProvenance::local(InputSource::Tui)),
-        (
-            "http",
-            InputProvenance::remote(InputTransport::Http, Some(InputSource::Tui)),
-        ),
-        (
-            "acp",
-            InputProvenance::remote(InputTransport::Acp, Some(InputSource::Connector)),
-        ),
-    ] {
-        inbox
-            .enqueue(Notification {
-                kind: Some(NotificationKind::UserMessage),
-                id: id.into(),
-                scope: "lost-turn".into(),
-                text: "guidance".into(),
-                input_provenance: Some(provenance),
-                ..Default::default()
-            })
-            .unwrap();
-    }
-    otto::runtime::sidecar_mailbox::hold_local_input_recovery(
-        &inbox,
-        &std::collections::HashSet::from(["local".into()]),
-    );
-    let ids: Vec<_> = Mailbox::queued(&inbox)
-        .into_iter()
-        .map(|entry| entry.notification.id)
-        .collect();
-    assert_eq!(ids, vec!["http", "acp"]);
-}
-
 #[tokio::test]
 async fn active_enter_reaches_admission_and_delivers_original_id_and_source() {
     use otto::fixtures::subagent_doubles::{FakeProvider, assistant_text, match_any};

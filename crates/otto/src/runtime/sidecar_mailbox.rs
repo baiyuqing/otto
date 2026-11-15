@@ -44,7 +44,7 @@ pub(crate) fn recoverable_local_ids(
 /// Local TUI guidance surviving process loss is recoverable intent, not replay authority.
 /// Called only while constructing the mailbox, before producers receive it. The
 /// append-only session submission record retains its text and stable ID.
-pub fn hold_local_input_recovery(
+pub(crate) fn hold_local_input_recovery(
     journal: &dyn otto_core::mailbox::Mailbox,
     recoverable_ids: &std::collections::HashSet<String>,
 ) {
@@ -438,5 +438,40 @@ mod tests {
             offenders.is_empty(),
             "depend on otto_core::mailbox::Mailbox instead of Inbox in {offenders:?}"
         );
+    }
+
+    #[test]
+    fn restart_holds_local_guidance_but_preserves_http_and_acp_recovery() {
+        use otto_core::mailbox::{Inbox, Mailbox, Notification, NotificationKind};
+        use otto_core::model::{InputProvenance, InputSource, InputTransport};
+        let inbox = Inbox::default();
+        for (id, provenance) in [
+            ("local", InputProvenance::local(InputSource::Tui)),
+            (
+                "http",
+                InputProvenance::remote(InputTransport::Http, Some(InputSource::Tui)),
+            ),
+            (
+                "acp",
+                InputProvenance::remote(InputTransport::Acp, Some(InputSource::Connector)),
+            ),
+        ] {
+            inbox
+                .enqueue(Notification {
+                    kind: Some(NotificationKind::UserMessage),
+                    id: id.into(),
+                    scope: "lost-turn".into(),
+                    text: "guidance".into(),
+                    input_provenance: Some(provenance),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        hold_local_input_recovery(&inbox, &std::collections::HashSet::from(["local".into()]));
+        let ids: Vec<_> = Mailbox::queued(&inbox)
+            .into_iter()
+            .map(|entry| entry.notification.id)
+            .collect();
+        assert_eq!(ids, vec!["http", "acp"]);
     }
 }

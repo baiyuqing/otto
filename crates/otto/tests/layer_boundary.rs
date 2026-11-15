@@ -17,24 +17,6 @@ use std::path::{Path, PathBuf};
 
 /// The layers, lowest first, with the top-level modules of each.
 const LAYERS: &[(&str, &[&str])] = &[
-    (
-        "platform",
-        &[
-            "hex",
-            "deadline",
-            "retry",
-            "fsops",
-            "log",
-            "tls_provider",
-            "gourl",
-            "urlprivacy",
-            "process_identity",
-            "program_status",
-            "herdr",
-            "random",
-            "child_fence",
-        ],
-    ),
     ("persistence", &["storage", "workspace", "session", "usage"]),
     (
         "capability",
@@ -409,8 +391,8 @@ fn a_same_layer_cycle_is_a_violation_and_a_one_way_edge_is_not() {
         .collect();
     assert_eq!(violations(&cycle).len(), 2);
     let upward: BTreeMap<_, _> = [
-        edge("hex", "app"),
-        edge("app", "hex"),
+        edge("storage", "app"),
+        edge("app", "storage"),
         edge("app", "fixtures"),
     ]
     .into_iter()
@@ -420,7 +402,7 @@ fn a_same_layer_cycle_is_a_violation_and_a_one_way_edge_is_not() {
         keys,
         vec![
             ("app".to_string(), "fixtures".to_string()),
-            ("hex".to_string(), "app".to_string())
+            ("storage".to_string(), "app".to_string())
         ]
     );
 }

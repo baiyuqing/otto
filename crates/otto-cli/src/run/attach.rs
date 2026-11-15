@@ -34,7 +34,7 @@ pub(super) async fn run_attach(
             &socket,
             PathBuf::from(workspace_path),
             schedule,
-            Arc::new(otto::log::Logger::stderr()),
+            Arc::new(otto_platform::log::Logger::stderr()),
             stdin,
             stdout,
             stderr,

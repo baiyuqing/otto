@@ -7,7 +7,7 @@ use otto_core::session::{Header, PiError, Warning};
 
 use super::lease::new_keeper;
 use super::{ArchiveResult, Prepared, Store, prepared::archive_with_driver_and_keeper};
-use crate::fsops::files::FileDriver;
+use otto_platform::fsops::files::FileDriver;
 
 impl Store {
     pub fn create(root: impl AsRef<Path>, header: Header) -> Result<Self, PiError> {
@@ -17,7 +17,7 @@ impl Store {
     }
 
     pub fn create_lazy(root: impl AsRef<Path>, header: Header) -> Result<Self, PiError> {
-        Self::create_lazy_with_driver(root, header, Arc::new(crate::fsops::PosixDriver))
+        Self::create_lazy_with_driver(root, header, Arc::new(otto_platform::fsops::PosixDriver))
     }
 
     pub fn create_lazy_with_driver(
@@ -37,7 +37,7 @@ impl Store {
             parent,
             name,
             header,
-            Arc::new(crate::fsops::PosixDriver),
+            Arc::new(otto_platform::fsops::PosixDriver),
         )
     }
 
@@ -57,7 +57,11 @@ impl Store {
 
 impl Prepared {
     pub fn prepare(path: &Path, create_lease: Option<u64>) -> Result<Self, PiError> {
-        Self::prepare_with_driver(path, create_lease, Arc::new(crate::fsops::PosixDriver))
+        Self::prepare_with_driver(
+            path,
+            create_lease,
+            Arc::new(otto_platform::fsops::PosixDriver),
+        )
     }
 
     pub fn prepare_with_driver(
@@ -79,7 +83,7 @@ impl Prepared {
             workspace,
             path,
             create_lease,
-            Arc::new(crate::fsops::PosixDriver),
+            Arc::new(otto_platform::fsops::PosixDriver),
         )
     }
 
@@ -106,7 +110,7 @@ pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResul
         root,
         workspace,
         path,
-        Arc::new(crate::fsops::PosixDriver),
+        Arc::new(otto_platform::fsops::PosixDriver),
         new_keeper(),
     )
 }

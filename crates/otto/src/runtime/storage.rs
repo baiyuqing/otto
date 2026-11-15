@@ -105,7 +105,7 @@ impl Default for Storage {
                 crate::storage::drivers::sqlite::SqliteDriver,
             )),
             sessions: Arc::new(crate::session::PosixSessionRepository::new(
-                Arc::new(crate::fsops::PosixDriver),
+                Arc::new(otto_platform::fsops::PosixDriver),
                 crate::session::lease::new_keeper(),
             )),
         }

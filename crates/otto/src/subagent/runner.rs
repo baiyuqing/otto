@@ -67,12 +67,12 @@ use super::format::{comma_int, first_runes, one_line};
 use super::interrupted;
 use super::tasks::{REPORT_BUDGET, Task, TaskError, TaskStatus, Tasks};
 use super::{Catalog, Definition, WritePolicy, inherit_snapshot};
-use crate::deadline::round_to_seconds;
-use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::tool::registry::Registry;
 use crate::tool::result::{capped_text_result, decode_strict_json};
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
+use otto_platform::deadline::round_to_seconds;
+use otto_platform::deadline::{Control, Deadline};
 
 /// Body budget for parent-facing child summaries; full transcripts stay local.
 pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
@@ -277,7 +277,7 @@ pub struct StartRequest {
 /// Builds and runs sub-agent tasks for one session.
 pub struct Runner {
     reports: super::reports::Reports,
-    scratch_root: std::sync::OnceLock<crate::fsops::root::Root>,
+    scratch_root: std::sync::OnceLock<otto_platform::fsops::root::Root>,
     /// Owning session of the scratch and report directories.
     scratch_session_id: std::sync::OnceLock<String>,
     output_logs: std::sync::OnceLock<Arc<crate::tool::bash_output::Logs>>,
@@ -405,7 +405,11 @@ impl Runner {
         ))
     }
 
-    pub(crate) fn bind_scratch_root(&self, root: crate::fsops::root::Root, session_id: &str) {
+    pub(crate) fn bind_scratch_root(
+        &self,
+        root: otto_platform::fsops::root::Root,
+        session_id: &str,
+    ) {
         assert!(
             self.scratch_root.set(root).is_ok(),
             "scratch root already bound"

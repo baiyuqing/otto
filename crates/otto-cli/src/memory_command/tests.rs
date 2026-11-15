@@ -252,7 +252,7 @@ fn forget_removes_a_record_from_the_workspace_scope() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_path =
-        otto::fsops::canonical_directory(workspace.path()).expect("canonical workspace");
+        otto_platform::fsops::canonical_directory(workspace.path()).expect("canonical workspace");
     let config = memory_config(home.path());
 
     let runtime = runtime(home.path());

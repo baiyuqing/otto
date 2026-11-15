@@ -3,12 +3,12 @@ use super::{
     Installed, Service, digest,
     package::{self, Server},
 };
-use crate::hex::to_hex;
 use crate::{
     mcp::{self, CallError, CallOutcome, ToolServer},
     skill::Catalog,
 };
 use otto_core::config::{File, McpAuth, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
+use otto_platform::hex::to_hex;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -589,7 +589,7 @@ fn adapt_server(
             .unwrap_or("/usr/bin:/bin");
         let executable = std::env::split_paths(path)
             .find_map(|directory| {
-                crate::fsops::canonical_executable_file(
+                otto_platform::fsops::canonical_executable_file(
                     &Path::new(cwd).join(directory).join(&*command),
                 )
                 .ok()

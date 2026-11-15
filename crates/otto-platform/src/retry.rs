@@ -15,7 +15,7 @@ pub struct Policy {
 ///
 /// Callers can provide a deterministic implementation in tests. Values outside
 /// the requested range are clamped before they are used.
-pub(crate) trait JitterSource {
+pub trait JitterSource {
     fn full_jitter(&mut self, upper_bound: Duration) -> Duration;
 }
 
@@ -25,7 +25,7 @@ pub(crate) trait JitterSource {
 /// value takes precedence over exponential backoff and is capped by the
 /// policy. The returned delay always leaves at least `min_execution_budget`
 /// within `remaining_budget`.
-pub(crate) fn next_delay(
+pub fn next_delay(
     policy: Policy,
     attempt: u32,
     retry_after: Option<Duration>,
@@ -52,7 +52,7 @@ pub(crate) fn next_delay(
 /// Parses a `Retry-After` header value in its delta-seconds form: a
 /// non-negative integer after trimming whitespace. An HTTP-date or any other
 /// value is absent.
-pub(crate) fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
+pub fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 

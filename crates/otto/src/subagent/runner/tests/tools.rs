@@ -360,7 +360,7 @@ async fn plugin_argument_rewrites_obey_child_owned_path_policy() {
             package_environment: Default::default(),
             guard: None,
             secrets: Vec::new(),
-            logger: Arc::new(crate::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
         },
     )
     .unwrap();

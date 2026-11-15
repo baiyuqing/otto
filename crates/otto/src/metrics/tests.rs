@@ -232,7 +232,7 @@ fn process_resource_metrics_render_with_their_documented_names() {
 #[test]
 fn process_sample_failures_log_once_during_the_warning_interval() {
     let captured = CapturedLog(Arc::new(Mutex::new(Vec::new())));
-    let metrics = Metrics::with_logger(Arc::new(crate::log::Logger::new(Box::new(
+    let metrics = Metrics::with_logger(Arc::new(otto_platform::log::Logger::new(Box::new(
         captured.clone(),
     ))));
     let sample = process::Sample {

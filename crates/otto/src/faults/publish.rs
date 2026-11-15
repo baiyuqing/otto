@@ -1,5 +1,5 @@
 //! Fault decorator over [`PublishOps`], the system calls of
-//! [`crate::fsops::publish_file`].
+//! [`otto_platform::fsops::publish_file`].
 //!
 //! The plan's operation type is [`PublishStep`]; the subject of every step is
 //! the destination name (`Publish::name`), not the temporary name; for
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::files::{hang, run};
 use super::{Fault, FaultPlan, crash};
-use crate::fsops::{Dir, PosixPublish, Publish, PublishOps, PublishStep};
+use otto_platform::fsops::{Dir, PosixPublish, Publish, PublishOps, PublishStep};
 
 /// [`PosixPublish`] with a [`FaultPlan`] applied to each step.
 pub struct FaultyPublishOps {
@@ -86,7 +86,7 @@ mod tests {
 
     use super::*;
     use crate::faults::{FaultError, Rule, Trigger};
-    use crate::fsops::{PublishError, PublishMode, open_dir_no_follow, publish_file};
+    use otto_platform::fsops::{PublishError, PublishMode, open_dir_no_follow, publish_file};
 
     const EIO: Fault = Fault::Before(FaultError::Os(libc::EIO));
 

@@ -21,7 +21,7 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn cwd(&self) -> String {
-        otto::fsops::canonical_directory(self.workspace.path())
+        otto_platform::fsops::canonical_directory(self.workspace.path())
             .expect("canonical workspace")
             .to_string_lossy()
             .into_owned()

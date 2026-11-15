@@ -63,7 +63,7 @@ impl HttpTransport {
         bearer: Option<Arc<dyn BearerSource>>,
         request_timeout: Duration,
     ) -> Result<Self, CallError> {
-        let client = crate::tls_provider::http_client_builder()
+        let client = otto_platform::tls_provider::http_client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(request_timeout)
             .build()

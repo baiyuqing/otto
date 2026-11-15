@@ -6,8 +6,8 @@ use super::{
     },
     prepared::validate_listed_candidate_path,
 };
-use crate::fsops::{self, files::JournalFile};
 use otto_core::session::PiError;
+use otto_platform::fsops::{self, files::JournalFile};
 use std::{fs::Metadata, path::Path};
 
 pub(crate) fn delete_open_file(

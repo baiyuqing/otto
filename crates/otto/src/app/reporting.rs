@@ -11,7 +11,7 @@ impl Controller {
     /// nobody until the agent inside it reports, so Otto would be missing from
     /// the agent list — and unreachable through `herdr agent ...` — until the
     /// user sent a prompt.
-    pub fn install_herdr(&self, reporter: Arc<crate::herdr::Reporter>) {
+    pub fn install_herdr(&self, reporter: Arc<otto_platform::herdr::Reporter>) {
         reporter.ready(&self.herdr_session());
         *self
             .herdr
@@ -19,7 +19,7 @@ impl Controller {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reporter);
     }
 
-    pub(super) fn herdr_reporter(&self) -> Option<Arc<crate::herdr::Reporter>> {
+    pub(super) fn herdr_reporter(&self) -> Option<Arc<otto_platform::herdr::Reporter>> {
         self.herdr
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -28,14 +28,14 @@ impl Controller {
 
     /// What Herdr shows and restores for this session. Read without the
     /// [`Controller::info`] snapshot, which clones the transcript.
-    pub(super) fn herdr_session(&self) -> crate::herdr::SessionRef {
+    pub(super) fn herdr_session(&self) -> otto_platform::herdr::SessionRef {
         let state = self.lock();
         match state.current.as_ref() {
-            Some(current) => crate::herdr::SessionRef {
+            Some(current) => otto_platform::herdr::SessionRef {
                 id: current.session.header().id,
                 path: current.path(),
             },
-            None => crate::herdr::SessionRef {
+            None => otto_platform::herdr::SessionRef {
                 id: String::new(),
                 path: String::new(),
             },

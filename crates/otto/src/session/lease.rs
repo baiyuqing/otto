@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use crate::session::fsops;
 
 #[cfg(test)]
-use crate::child_fence::Children;
+use otto_platform::child_fence::Children;
 
 mod acquire;
 mod fence;
@@ -131,7 +131,7 @@ pub fn create_lease_dir(session_path: &Path, lease_seconds: u64) -> std::io::Res
     let tmp_path = parent.join(format!(
         "{}.tmp-{}",
         dir_name.to_string_lossy(),
-        crate::random::random_hex::<8>()?
+        otto_platform::random::random_hex::<8>()?
     ));
     std::fs::create_dir(&tmp_path)?;
 
@@ -626,7 +626,7 @@ impl Lease {
             host: "test-host".into(),
             pid: std::process::id(),
             machine: local_machine_id(),
-            started: crate::process_identity::current_process().1,
+            started: otto_platform::process_identity::current_process().1,
             duration_secs,
             dir,
             write_lock: Mutex::new(()),

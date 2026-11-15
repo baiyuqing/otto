@@ -68,16 +68,16 @@ impl App {
         }
     }
     pub(crate) fn enable_program_status(&mut self) {
-        let reporter = otto::program_status::Reporter::default();
-        reporter.report_stdout(otto::program_status::State::Idle);
+        let reporter = otto_platform::program_status::Reporter::default();
+        reporter.report_stdout(otto_platform::program_status::State::Idle);
         self.program_status = Some(reporter);
     }
     pub fn start_turn(&mut self) {
         self.invalidate_local_status();
-        self.report_program_status(otto::program_status::State::Working);
+        self.report_program_status(otto_platform::program_status::State::Working);
         self.start_operation("waiting for model");
     }
-    pub(crate) fn report_program_status(&self, state: otto::program_status::State) {
+    pub(crate) fn report_program_status(&self, state: otto_platform::program_status::State) {
         if let Some(reporter) = &self.program_status {
             reporter.report_stdout(state);
         }
@@ -94,7 +94,7 @@ impl App {
         self.busy_since = None;
         self.finish_steering();
     }
-    pub(crate) fn finish_turn(&mut self, completion: otto::program_status::Completion) {
+    pub(crate) fn finish_turn(&mut self, completion: otto_platform::program_status::Completion) {
         self.end_turn();
         self.report_program_status(completion.into());
     }

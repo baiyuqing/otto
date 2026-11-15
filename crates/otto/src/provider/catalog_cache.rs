@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::catalog::{MAX_BODY, ModelCatalog};
-use crate::hex::to_hex;
+use otto_platform::hex::to_hex;
 
 pub const TTL: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 

@@ -42,7 +42,8 @@ impl Children {
     /// A standalone registry, isolated from [`Children::global`]. A test
     /// `Keeper` uses its own instance so `kill_all` cannot reach a process
     /// group a concurrently running test registered on the global one.
-    pub(crate) fn new() -> Self {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         Children {
             state: Mutex::new(State::default()),
         }
@@ -76,7 +77,7 @@ impl Children {
 
     /// Sends `SIGKILL` to every registered pid or process group. Best-effort:
     /// an already-exited pid is skipped.
-    pub(crate) fn kill_all(&self) {
+    pub fn kill_all(&self) {
         let entries = self.state.lock().unwrap().entries.clone();
         for entry in entries {
             let target = if entry.process_group {

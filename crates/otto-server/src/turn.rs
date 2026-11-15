@@ -21,7 +21,7 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use otto::log::Logger;
+use otto_platform::log::Logger;
 
 use otto::metrics::{Metrics, ProviderOperationMetric};
 

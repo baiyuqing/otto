@@ -1,7 +1,7 @@
 //! Workflow definition catalog, parsing and validation.
 
 use super::*;
-use crate::hex::to_hex;
+use otto_platform::hex::to_hex;
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {

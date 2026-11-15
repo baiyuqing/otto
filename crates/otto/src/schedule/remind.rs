@@ -36,8 +36,8 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
-use crate::deadline::round_to_seconds;
-use crate::fsops::{self, PosixPublish, Publish, PublishMode, PublishOps, PublishStep};
+use otto_platform::deadline::round_to_seconds;
+use otto_platform::fsops::{self, PosixPublish, Publish, PublishMode, PublishOps, PublishStep};
 
 use crate::tool::result::decode_strict_json;
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result};

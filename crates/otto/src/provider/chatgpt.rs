@@ -151,7 +151,7 @@ struct Retry {
     retry_after: Option<Duration>,
 }
 
-const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
+const RETRY_POLICY: otto_platform::retry::Policy = otto_platform::retry::Policy {
     max_attempts: 7,
     base: Duration::from_secs(1),
     max: Duration::from_secs(30),
@@ -160,7 +160,7 @@ const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
 
 // Fixed exponential backoff; no new randomness dependency for six delays.
 struct Backoff;
-impl crate::retry::JitterSource for Backoff {
+impl otto_platform::retry::JitterSource for Backoff {
     fn full_jitter(&mut self, upper_bound: Duration) -> Duration {
         upper_bound
     }
@@ -441,7 +441,7 @@ impl Provider for Client {
                 if let Err(error) = check_running(control) {
                     return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
                 }
-                let Some(delay) = crate::retry::next_delay(
+                let Some(delay) = otto_platform::retry::next_delay(
                     RETRY_POLICY,
                     attempts,
                     retry.retry_after,
@@ -496,7 +496,7 @@ fn transient_http_retry(status: u16, headers: &reqwest::header::HeaderMap) -> Op
     let retry_after = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(crate::retry::parse_retry_after_seconds);
+        .and_then(otto_platform::retry::parse_retry_after_seconds);
     Some(Retry {
         reason,
         retry_after,

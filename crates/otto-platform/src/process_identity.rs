@@ -9,7 +9,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 /// Approval recovery requires evidence of a dead/replaced owner, not a guess
 /// from unavailable process telemetry.
 #[allow(unsafe_code)]
-pub(crate) fn process_matches(pid: i64, started: &str) -> Option<bool> {
+pub fn process_matches(pid: i64, started: &str) -> Option<bool> {
     let pid_u32 = u32::try_from(pid).ok()?;
     let recorded = DateTime::parse_from_rfc3339(started).ok()?;
     // A zombie has exited: it runs no code and holds no file open. It keeps
@@ -30,8 +30,8 @@ pub(crate) fn process_matches(pid: i64, started: &str) -> Option<bool> {
     }
 }
 
-/// The current process's pid and start time, for [`crate::subagent::record::TaskContext::pid`] and
-/// [`crate::subagent::record::TaskContext::process_started_at`].
+/// The current process's pid and start time, for `crate::subagent::record::TaskContext::pid` and
+/// `crate::subagent::record::TaskContext::process_started_at`.
 pub fn current_process() -> (i64, String) {
     let pid = std::process::id();
     // ponytail: when the platform cannot report a start time (see
@@ -47,7 +47,7 @@ pub fn current_process() -> (i64, String) {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn os_process_start_time(pid: u32) -> Option<DateTime<Utc>> {
+pub fn os_process_start_time(pid: u32) -> Option<DateTime<Utc>> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let written = unsafe {

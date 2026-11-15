@@ -1722,6 +1722,7 @@ dependencies = [
  "nix",
  "otto",
  "otto-core",
+ "otto-platform",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1731,7 +1732,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "toml",
  "tree-sitter",
@@ -1750,6 +1750,7 @@ dependencies = [
  "otto",
  "otto-client",
  "otto-core",
+ "otto-platform",
  "otto-server",
  "serde",
  "serde_json",
@@ -1771,6 +1772,7 @@ dependencies = [
  "otto-client",
  "otto-core",
  "otto-eval",
+ "otto-platform",
  "otto-server",
  "otto-terminal",
  "rcgen",
@@ -1792,6 +1794,7 @@ dependencies = [
  "chrono",
  "otto",
  "otto-core",
+ "otto-platform",
  "reqwest",
  "serde",
  "serde_json",
@@ -1835,6 +1838,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-platform"
+version = "0.5.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "libc",
+ "nix",
+ "otto-core",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+]
+
+[[package]]
 name = "otto-server"
 version = "0.5.0"
 dependencies = [
@@ -1846,6 +1867,7 @@ dependencies = [
  "nix",
  "otto",
  "otto-core",
+ "otto-platform",
  "rcgen",
  "serde",
  "serde_json",
@@ -1870,6 +1892,7 @@ dependencies = [
  "otto",
  "otto-client",
  "otto-core",
+ "otto-platform",
  "pulldown-cmark",
  "ratatui",
  "regex",

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use otto_core::model::{BlockType, Message, Role};
 
 use super::tasks::{Task, TaskStatus};
-use crate::deadline::round_to_seconds;
+use otto_platform::deadline::round_to_seconds;
 
 /// One task in the layout shared with `agent_status`: id, name, status,
 /// elapsed time, tool count, last tool (or the final token total) and a

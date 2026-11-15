@@ -69,7 +69,7 @@ const MAX_MODELS_BODY: usize = 8 << 20;
 /// transport failed, HTTP 429/503, and completed token-truncated tool JSON
 /// when a larger known output budget is available. A `Retry-After` value
 /// replaces the backoff delay and is capped at `retry_after_cap`.
-const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
+const RETRY_POLICY: otto_platform::retry::Policy = otto_platform::retry::Policy {
     max_attempts: 4,
     base: Duration::from_secs(1),
     max: Duration::from_secs(4),
@@ -87,7 +87,7 @@ const MODEL_IDLE_RETRY_REASON: &str = "model output idle timeout";
 
 // Fixed exponential backoff (1, 2, 4 s); no randomness dependency.
 struct Backoff;
-impl crate::retry::JitterSource for Backoff {
+impl otto_platform::retry::JitterSource for Backoff {
     fn full_jitter(&mut self, upper_bound: Duration) -> Duration {
         upper_bound
     }
@@ -489,7 +489,7 @@ impl Provider for Client {
                     }
                 };
                 failures += 1;
-                let Some(delay) = crate::retry::next_delay(
+                let Some(delay) = otto_platform::retry::next_delay(
                     RETRY_POLICY,
                     failures,
                     retry_after,

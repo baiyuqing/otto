@@ -12,7 +12,7 @@ pub(super) fn host(machine: &str) -> LocalHost {
     LocalHost {
         hostname: HOST.into(),
         machine: machine.into(),
-        process_matches: crate::process_identity::process_matches,
+        process_matches: otto_platform::process_identity::process_matches,
     }
 }
 
@@ -47,7 +47,7 @@ pub(super) fn dead_process() -> (u32, String) {
         .spawn()
         .unwrap();
     let pid = child.id();
-    let started = crate::process_identity::os_process_start_time(pid)
+    let started = otto_platform::process_identity::os_process_start_time(pid)
         .expect("start time of a live child")
         .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     child.kill().unwrap();
@@ -56,7 +56,7 @@ pub(super) fn dead_process() -> (u32, String) {
 }
 
 pub(super) fn own_process() -> (u32, String) {
-    let (pid, started) = crate::process_identity::current_process();
+    let (pid, started) = otto_platform::process_identity::current_process();
     (pid as u32, started)
 }
 
@@ -287,7 +287,7 @@ fn a_held_lease_writes_its_machine_id_and_start_time() {
     assert_eq!(heartbeat.machine, local_machine_id());
     assert_eq!(
         heartbeat.started,
-        crate::process_identity::current_process().1
+        otto_platform::process_identity::current_process().1
     );
     drop(lease);
 }

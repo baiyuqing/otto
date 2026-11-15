@@ -253,7 +253,7 @@ mod tests {
                     &[("code", code), ("state", &state)],
                 )
                 .unwrap();
-                let _ = crate::tls_provider::http_client()
+                let _ = otto_platform::tls_provider::http_client()
                     .get(callback)
                     .send()
                     .await;
@@ -387,7 +387,7 @@ mod tests {
                     .unwrap();
                 let callback = format!("{redirect}?{query}&state={state}");
                 tokio::spawn(async move {
-                    let _ = crate::tls_provider::http_client()
+                    let _ = otto_platform::tls_provider::http_client()
                         .get(&callback)
                         .send()
                         .await;
@@ -427,13 +427,13 @@ mod tests {
                 .unwrap();
             tokio::spawn(async move {
                 let base = redirect.trim_end_matches("/auth/callback").to_owned();
-                let noise = crate::tls_provider::http_client()
+                let noise = otto_platform::tls_provider::http_client()
                     .get(format!("{base}/favicon.ico"))
                     .send()
                     .await
                     .unwrap();
                 assert_eq!(noise.status(), 404);
-                let _ = crate::tls_provider::http_client()
+                let _ = otto_platform::tls_provider::http_client()
                     .get(format!("{redirect}?code=c&state={state}"))
                     .send()
                     .await;

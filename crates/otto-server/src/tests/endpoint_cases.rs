@@ -157,7 +157,7 @@ impl otto::workflow::Executor for TestWorkflowExecutor {
     async fn execute(
         &self,
         attempt: otto::workflow::Attempt,
-        _control: &otto::deadline::Control,
+        _control: &otto_platform::deadline::Control,
     ) -> Result<String, String> {
         Ok(format!("{} done", attempt.step_id))
     }

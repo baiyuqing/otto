@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 otto.workspace = true
 otto-core.workspace = true
+otto-platform.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 futures-util.workspace = true

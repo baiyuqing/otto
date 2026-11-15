@@ -22,7 +22,7 @@ impl<'a> Ui<'a> {
         self.rows.clear();
         self.last_row = None;
         self.app
-            .finish_turn(otto::program_status::Completion::Canceled);
+            .finish_turn(otto_platform::program_status::Completion::Canceled);
         self.app.connected = false;
         self.app.push_system(DISCONNECTED);
         self.transcript = self.transcript.wrapping_add(1);
@@ -172,7 +172,7 @@ impl<'a> Ui<'a> {
                 }
                 if self.followed.is_none() && self.compacting.is_none() && self.app.busy() {
                     self.app
-                        .finish_turn(otto::program_status::Completion::Failed);
+                        .finish_turn(otto_platform::program_status::Completion::Failed);
                 }
                 self.report("serve", error);
                 return;
@@ -227,7 +227,7 @@ impl<'a> Ui<'a> {
                     }
                 } else if self.followed.is_none() && self.compacting.is_none() {
                     self.app
-                        .finish_turn(otto::program_status::Completion::Canceled);
+                        .finish_turn(otto_platform::program_status::Completion::Canceled);
                 }
                 if cancel_after_send
                     && let Some(turn) = self

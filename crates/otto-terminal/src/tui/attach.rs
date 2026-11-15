@@ -288,7 +288,7 @@ pub async fn run_with_observer_bindings(
                     sink: Arc::new(ChannelSink(deliver_tx.clone())),
                 }),
                 // The terminal screen is owned by the TUI.
-                logger: Arc::new(otto::log::Logger::discard()),
+                logger: Arc::new(otto_platform::log::Logger::discard()),
                 metrics: None,
             }
             .run(worker_cancel.clone()),

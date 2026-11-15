@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use super::crash;
 use super::{Fault, FaultPlan};
-use crate::fsops::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
+use otto_platform::fsops::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 
 /// The file operations a rule can select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

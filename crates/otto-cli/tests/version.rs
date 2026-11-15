@@ -80,6 +80,7 @@ fn release_version_is_consistent_across_files() {
     for package in [
         "otto",
         "otto-core",
+        "otto-platform",
         "otto-client",
         "otto-terminal",
         "otto-server",

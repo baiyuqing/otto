@@ -449,7 +449,7 @@ fn managed_command_allowlist_uses_resolved_administrator_executable() {
     let path = f.package("example");
     f.mcp(&path, json!({"tools":{"type":"stdio","command":"sh"}}));
     f.install(&path);
-    let executable = crate::fsops::canonical_executable_file(Path::new("/bin/sh"))
+    let executable = otto_platform::fsops::canonical_executable_file(Path::new("/bin/sh"))
         .unwrap()
         .to_string_lossy()
         .into_owned();
@@ -564,7 +564,7 @@ async fn otto_commands_require_content_trust_and_revoke_without_reloading() {
         package_environment: Default::default(),
         guard: None,
         secrets: Vec::new(),
-        logger: Arc::new(crate::log::Logger::discard()),
+        logger: Arc::new(otto_platform::log::Logger::discard()),
     };
     let snapshot = Snapshot::load(f.home.path(), &File::default(), &f.env());
     let untrusted = hooks::Runtime::new(

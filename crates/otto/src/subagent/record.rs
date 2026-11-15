@@ -119,7 +119,7 @@ pub(crate) fn interrupted(pid: i64, process_started_at: &str) -> bool {
     let Ok(recorded) = DateTime::parse_from_rfc3339(process_started_at) else {
         return true;
     };
-    match crate::process_identity::os_process_start_time(pid) {
+    match otto_platform::process_identity::os_process_start_time(pid) {
         Some(actual) => actual != recorded.with_timezone(&Utc),
         None => true,
     }
@@ -130,9 +130,9 @@ pub use crate::subagent::sqlite::Store;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process_identity::current_process;
     use crate::storage::Connection;
     use crate::subagent::tasks::TaskStatus;
+    use otto_platform::process_identity::current_process;
 
     fn context() -> TaskContext {
         TaskContext {

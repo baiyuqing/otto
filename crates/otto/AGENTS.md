@@ -5,6 +5,10 @@ The [repository rules](../../AGENTS.md) apply. Start with the
 and [package contracts](../../docs/development/architecture.md#package-boundaries).
 
 - This crate is a library. It keeps the runtime, tools and `fixtures`. The
+  process-wide primitives (`fsops`, `log`, `retry`, `deadline`, `gourl`,
+  `urlprivacy` and the other platform modules) live in
+  [otto-platform](../otto-platform/AGENTS.md), which `otto` imports as
+  `otto_platform::...` and does not re-export. The
   `otto serve` client, the terminal UI, the HTTP server, the ACP frontends
   and the `otto` binary live in [otto-client](../otto-client/AGENTS.md),
   [otto-terminal](../otto-terminal/AGENTS.md),
@@ -16,7 +20,7 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   `app` owns shared lifecycle.
 - Top-level modules belong to the layers in
   [Layers inside `otto`](../../docs/development/architecture.md#layers-inside-otto):
-  platform, persistence, capability, orchestration, assembly (`runtime`),
+  persistence, capability, orchestration, assembly (`runtime`),
   application (`app`), frontend. Import only the same or a lower layer, with
   no cycle inside a layer; move a needed item down instead of importing up.
   A new module gets a layer in the same PR. `tests/layer_boundary.rs`
@@ -31,7 +35,7 @@ and [package contracts](../../docs/development/architecture.md#package-boundarie
   compare-and-swap writer. `tool/project_guard.rs` rechecks authorization at
   effects. Provider identity/credentials and security grants never come from
   project preference sources; each workspace resolves its own overlay.
-- Use `fsops` and workspace directory handles for confined/atomic operations.
+- Use `otto_platform::fsops` and workspace directory handles for confined/atomic operations.
   Keep native session storage append-only and Pi-compatible.
 - Memory callers use `memory::Service` for the built-in domain or
   `memory::client::Client` for the neutral service, not a store directly.

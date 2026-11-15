@@ -11,7 +11,7 @@ pub(super) struct LocalHost {
     pub(super) machine: String,
     /// `Some(true)`: the process with this pid and start time is running;
     /// `Some(false)`: it is not; `None`: unknown. See
-    /// [`crate::process_identity::process_matches`].
+    /// [`otto_platform::process_identity::process_matches`].
     pub(super) process_matches: fn(i64, &str) -> Option<bool>,
 }
 
@@ -20,7 +20,7 @@ impl LocalHost {
         LocalHost {
             hostname: local_hostname(),
             machine: local_machine_id(),
-            process_matches: crate::process_identity::process_matches,
+            process_matches: otto_platform::process_identity::process_matches,
         }
     }
 }
@@ -371,7 +371,7 @@ pub(super) fn move_aside_log(
     let complete_len = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     bytes.truncate(complete_len);
 
-    let suffix = crate::random::random_hex::<8>()?;
+    let suffix = otto_platform::random::random_hex::<8>()?;
     let temp_path = dir_path.join(format!("restore.tmp-{suffix}"));
     let write_result = (|| -> std::io::Result<()> {
         use std::io::Write;
@@ -414,7 +414,7 @@ pub(super) fn finish_acquire(
         host: local_hostname(),
         pid: std::process::id(),
         machine: local_machine_id(),
-        started: crate::process_identity::current_process().1,
+        started: otto_platform::process_identity::current_process().1,
         duration_secs: lease_seconds,
         dir,
         write_lock: Mutex::new(()),

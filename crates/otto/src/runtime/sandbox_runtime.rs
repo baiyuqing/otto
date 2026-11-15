@@ -21,7 +21,6 @@ use otto_core::config::sandbox::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::fsops::{canonical_directory, canonical_executable_file};
 use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::read_denylist::ReadDenylist;
 #[cfg(target_os = "macos")]
@@ -29,6 +28,7 @@ use crate::sandbox::seatbelt::{Options as SeatbeltOptions, SeatbeltDriver};
 use crate::sandbox::{
     Driver, DriverMode, Error, Executor, FilesystemMode, NetworkMode, Policy, Settings,
 };
+use otto_platform::fsops::{canonical_directory, canonical_executable_file};
 
 use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 

@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 otto.workspace = true
 otto-core.workspace = true
+otto-platform.workspace = true
 otto-server.workspace = true
 otto-client.workspace = true
 otto-terminal.workspace = true

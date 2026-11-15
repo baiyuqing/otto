@@ -107,7 +107,7 @@ impl MemoryFixture {
                 workspace,
                 guard: None,
                 secrets: Vec::new(),
-                logger: Arc::new(crate::log::Logger::discard()),
+                logger: Arc::new(otto_platform::log::Logger::discard()),
             },
         )
         .unwrap()

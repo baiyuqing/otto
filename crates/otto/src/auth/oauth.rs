@@ -10,7 +10,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::random::random_bytes;
+use otto_platform::random::random_bytes;
 
 /// OAuth "Sign in with ChatGPT" constants. These mirror the OpenAI Codex CLI
 /// public client. Verify against openai/codex (codex-rs/login) if the flow
@@ -85,7 +85,7 @@ pub(crate) fn authorize_url(
 /// The token endpoint client. Every redirect is refused so a 3xx from the token
 /// endpoint cannot move the client credentials to another origin.
 pub fn http_client() -> Result<reqwest::Client, String> {
-    crate::tls_provider::http_client_builder()
+    otto_platform::tls_provider::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "build oauth http client".to_owned())

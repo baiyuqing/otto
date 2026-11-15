@@ -28,6 +28,7 @@ struct Writer {
     limit: u64,
     dropped: u64,
     reopen: bool,
+    version: &'static str,
 }
 
 fn regular(file: File) -> io::Result<File> {
@@ -114,7 +115,7 @@ fn lock_new_owner(owner: &File) -> io::Result<()> {
 }
 
 impl Writer {
-    fn open(home: &Path) -> io::Result<Self> {
+    fn open(home: &Path, version: &'static str) -> io::Result<Self> {
         let home = fsops::open_dir_no_follow(&std::fs::canonicalize(home)?)?;
         match fsops::mkdir_at(&home, ".otto", 0o700) {
             Ok(()) => {}
@@ -149,6 +150,7 @@ impl Writer {
             limit: SEGMENT_BYTES,
             dropped: 0,
             reopen: false,
+            version,
         })
     }
     fn write(&mut self, mut record: Value) -> io::Result<()> {
@@ -156,7 +158,7 @@ impl Writer {
             json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         record["pid"] = json!(std::process::id());
         record["instance"] = json!(self.prefix);
-        record["version"] = json!(crate::VERSION);
+        record["version"] = json!(self.version);
         record["dropped_records"] = json!(self.dropped);
         let mut bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
         bytes.push(b'\n');
@@ -213,11 +215,9 @@ pub(super) struct Log {
     stop: mpsc::Sender<()>,
 }
 impl Log {
-    pub(super) fn open(home: &Path) -> io::Result<Arc<Self>> {
-        let mut writer = Writer::open(home)?;
-        writer.write(
-            json!({"event":"process_started","schema_version":1,"version":crate::VERSION}),
-        )?;
+    pub(super) fn open(home: &Path, version: &'static str) -> io::Result<Arc<Self>> {
+        let mut writer = Writer::open(home, version)?;
+        writer.write(json!({"event":"process_started","schema_version":1,"version":version}))?;
         let (stop, receiver) = mpsc::channel();
         let log = Arc::new(Self {
             writer: Mutex::new(writer),
@@ -586,8 +586,8 @@ mod tests {
     #[test]
     fn runtimes_have_separate_files_and_bounded_rotation() {
         let home = tempfile::tempdir().unwrap();
-        let mut a = Writer::open(home.path()).unwrap();
-        let mut b = Writer::open(home.path()).unwrap();
+        let mut a = Writer::open(home.path(), "test").unwrap();
+        let mut b = Writer::open(home.path(), "test").unwrap();
         assert_ne!(a.prefix, b.prefix);
         a.limit = 512;
         for n in 0..30 {
@@ -618,8 +618,8 @@ mod tests {
     #[test]
     fn retention_skips_active_families_and_unrelated_files() {
         let home = tempfile::tempdir().unwrap();
-        let a = Writer::open(home.path()).unwrap();
-        let b = Writer::open(home.path()).unwrap();
+        let a = Writer::open(home.path(), "test").unwrap();
+        let b = Writer::open(home.path(), "test").unwrap();
         let a_path = home
             .path()
             .join(".otto/logs")
@@ -635,7 +635,19 @@ mod tests {
         assert!(a_path.exists());
         assert!(b_path.exists());
         drop(a);
-        cleanup(&b.dir, future, Duration::ZERO);
+        // A test that spawns a process at the same time duplicates `a`'s
+        // descriptor into the child until `exec` (see
+        // `fsops::SESSION_LOCK_SPAWN_GRACE`), so the probe lock in `cleanup`
+        // can fail during that period. Production runs `cleanup` again later;
+        // the test repeats it for the same grace period.
+        let deadline = std::time::Instant::now() + fsops::SESSION_LOCK_SPAWN_GRACE;
+        loop {
+            cleanup(&b.dir, future, Duration::ZERO);
+            if !a_path.exists() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(!a_path.exists());
         assert!(b_path.exists());
         assert!(unrelated.exists());
@@ -644,7 +656,7 @@ mod tests {
     #[test]
     fn observations_keep_metadata_and_never_stream_or_error_bodies() {
         let home = tempfile::tempdir().unwrap();
-        let log = Log::open(home.path()).unwrap();
+        let log = Log::open(home.path(), "test").unwrap();
         let secret = "secret-abc";
         let scope = log.scope("session-a", "", Redactor::new(&[secret.into()]));
         let child = scope.for_task("t1").unwrap();
@@ -690,7 +702,7 @@ mod tests {
     #[test]
     fn abandonment_and_missing_usage_are_not_reported_as_zero_success() {
         let home = tempfile::tempdir().unwrap();
-        let log = Log::open(home.path()).unwrap();
+        let log = Log::open(home.path(), "test").unwrap();
         let scope = log.scope("session", "", Redactor::new(&[]));
         {
             let _pending = Observation::start(
@@ -759,7 +771,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::create_dir(home.path().join(".otto")).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join(".otto/logs")).unwrap();
-        assert!(Writer::open(home.path()).is_err());
+        assert!(Writer::open(home.path(), "test").is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 }

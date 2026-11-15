@@ -19,11 +19,11 @@ pub(crate) mod store;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use crate::fsops::clean_go_path;
 pub use fork::Forked;
 pub use fsops::workspace_key;
 pub use legacy::archive;
 pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
+pub(crate) use otto_platform::fsops::clean_go_path;
 pub use posix_repository::PosixSessionRepository;
 pub(crate) use prepared::ArchiveResult;
 pub use prepared::Prepared;

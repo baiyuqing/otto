@@ -16,7 +16,7 @@ use nix::sys::stat::Mode;
 
 use super::result::{CappedByteCollector, RedactedSink};
 use super::session_directory::{create_session_directory, session_directory_name};
-use crate::fsops::root::Root;
+use otto_platform::fsops::root::Root;
 
 pub(super) const PREVIEW_BYTES: usize = 4096;
 const DIRECTORY: &str = ".otto/tool-output";
@@ -144,7 +144,7 @@ impl Output {
             Err(error) => return Err(error),
         }
         let directory = create_session_directory(&output_directory, session_directory_name)?;
-        let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
+        let id = otto_platform::random::random_hex::<16>().map_err(io::Error::other)?;
         let path = format!("{DIRECTORY}/{session_directory_name}/{id}.log");
         let file = directory.open_file(
             Path::new(&format!("{id}.log")),

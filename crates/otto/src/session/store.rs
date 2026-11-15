@@ -49,8 +49,8 @@ use otto_core::session::{
 
 use crate::session::lease::{self, Keeper};
 
-use crate::fsops::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 use crate::session::fsops;
+use otto_platform::fsops::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 
 mod deferred;
 mod lifecycle;

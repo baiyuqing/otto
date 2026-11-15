@@ -81,7 +81,7 @@ impl Runtime {
                 explicit_config: false,
                 cwd: options.workspace.to_string_lossy().into_owned(),
                 overrides: Default::default(),
-                logger: Arc::new(crate::log::Logger::stderr()),
+                logger: Arc::new(otto_platform::log::Logger::stderr()),
             },
             &cancel,
             &mut std::io::stderr(),

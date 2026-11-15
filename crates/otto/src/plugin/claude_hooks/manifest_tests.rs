@@ -1,6 +1,6 @@
 use super::ClaudeHook;
 use super::manifest::{Discovered, discover, parse};
-use crate::fsops::root::Root;
+use otto_platform::fsops::root::Root;
 use serde_json::{Value, json};
 use std::fs;
 

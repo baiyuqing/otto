@@ -1,10 +1,10 @@
 //! Native discovery and executable trust. Never writes an effective configuration.
-use crate::hex::to_hex;
 use crate::workspace::confined::Workspace;
 use otto_core::config::{
     File,
     layered::{Layer, ManagedPolicy, Merged},
 };
+use otto_platform::hex::to_hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,7 +44,7 @@ pub(crate) fn policy_at(path: &Path) -> Result<Option<ManagedPolicy>, String> {
             return Err("managed policy must be administrator-owned and not user-writable".into());
         }
     }
-    let mut file = crate::fsops::open_no_follow(path, libc::O_RDONLY)
+    let mut file = otto_platform::fsops::open_no_follow(path, libc::O_RDONLY)
         .map_err(|_| "cannot read managed policy")?;
     let text = bounded_read(&mut file)?;
     toml::from_str(&text)
@@ -323,7 +323,7 @@ fn trust_path(home: &Path) -> PathBuf {
 
 fn grants(home: &Path) -> Result<(Vec<u8>, Grants), String> {
     let path = trust_path(home);
-    let mut file = match crate::fsops::open_no_follow(&path, libc::O_RDONLY) {
+    let mut file = match otto_platform::fsops::open_no_follow(&path, libc::O_RDONLY) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok((Vec::new(), Grants::default()));

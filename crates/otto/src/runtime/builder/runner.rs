@@ -551,7 +551,7 @@ impl Runner {
             system_prompt: String::new(),
             definitions,
             usage: None,
-            logger: Arc::new(crate::log::Logger::discard()),
+            logger: Arc::new(otto_platform::log::Logger::discard()),
             subagents: None,
             skills: Catalog::default(),
             discovered_skills: Catalog::default(),
@@ -616,7 +616,7 @@ fn lost_steering_notice(lost: &[otto_core::agent::steering::Message]) -> String 
 }
 
 pub(super) fn log_runtime_event(
-    logger: &crate::log::Logger,
+    logger: &otto_platform::log::Logger,
     session: &SharedSession,
     event: &Event,
 ) {

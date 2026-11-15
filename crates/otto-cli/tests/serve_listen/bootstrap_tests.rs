@@ -12,7 +12,7 @@ async fn empty_home_serves_config_and_requires_setup_before_sessions() {
         .environment
         .retain(|entry| !entry.starts_with(b"TEST_KEY="));
     let (base, token, handle) = spawn_bootstrap(&fixture).await;
-    let client = otto::tls_provider::http_client();
+    let client = otto_platform::tls_provider::http_client();
     let unauth = client
         .get(format!("{base}/v1/config/providers"))
         .send()

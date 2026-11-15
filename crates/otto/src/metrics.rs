@@ -163,7 +163,7 @@ struct State {
 #[derive(Debug)]
 pub struct Metrics {
     state: Mutex<State>,
-    logger: Arc<crate::log::Logger>,
+    logger: Arc<otto_platform::log::Logger>,
     last_process_sample_warning: Mutex<Option<Instant>>,
     /// Unix seconds when this registry was created.
     started_at: u64,
@@ -177,10 +177,10 @@ impl Default for Metrics {
 
 impl Metrics {
     pub fn new() -> Self {
-        Self::with_logger(Arc::new(crate::log::Logger::discard()))
+        Self::with_logger(Arc::new(otto_platform::log::Logger::discard()))
     }
 
-    pub fn with_logger(logger: Arc<crate::log::Logger>) -> Self {
+    pub fn with_logger(logger: Arc<otto_platform::log::Logger>) -> Self {
         Self {
             state: Mutex::new(State {
                 turn_duration: Some(Histogram::new(TURN_TOOL_BUCKETS)),

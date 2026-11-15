@@ -1,5 +1,4 @@
 //! Sandboxed lifecycle hooks and custom tools on installed, content-authorized packages.
-use crate::hex::to_hex;
 use crate::{
     sandbox::{CommandExecutor, Request, Streams},
     workspace::confined::Workspace,
@@ -9,6 +8,7 @@ use otto_core::{
     config::plugins::{Components, Hook},
     operation::OperationControl,
 };
+use otto_platform::hex::to_hex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -206,7 +206,7 @@ pub struct Execution {
     pub workspace: PathBuf,
     pub guard: Option<crate::tool::project_guard::Guard>,
     pub secrets: Vec<String>,
-    pub logger: Arc<crate::log::Logger>,
+    pub logger: Arc<otto_platform::log::Logger>,
 }
 impl Runtime {
     pub fn new(

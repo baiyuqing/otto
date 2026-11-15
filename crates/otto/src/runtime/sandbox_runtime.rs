@@ -245,8 +245,8 @@ impl SandboxRuntime {
 /// Converts resolved configuration into the native sandbox settings.
 ///
 /// The two types are field-for-field equivalents that cannot be shared:
-/// `otto-core` must build for wasm32 and so cannot depend on the crate that
-/// owns the executor.
+/// `otto-core` is below `otto` and so cannot depend on the crate that owns
+/// the executor.
 pub fn settings_from_config(resolved: &CoreSettings) -> Settings {
     Settings {
         driver: match resolved.driver {

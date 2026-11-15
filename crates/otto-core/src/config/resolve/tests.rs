@@ -66,8 +66,7 @@ fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn subagent_models_follow_only_the_configured_connection() {
     let mut selected = profile("chatgpt", "parent", "", "");
     selected.subagent_models = vec!["cheap".into(), "strong".into()];
@@ -106,8 +105,7 @@ fn subagent_models_follow_only_the_configured_connection() {
     assert!(runtime.subagent_models.is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn subagent_model_fallback_diagnostic_is_connection_specific_and_safe() {
     let mut selected = profile(
         "openai-compatible",
@@ -185,8 +183,7 @@ fn subagent_model_fallback_diagnostic_is_connection_specific_and_safe() {
     assert!(subagent_model_diagnostic(&no_list, &runtime).is_none());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn subagent_model_list_rejects_invalid_entries() {
     for models in [
         vec!["".into()],

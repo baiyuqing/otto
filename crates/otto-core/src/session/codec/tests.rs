@@ -1,8 +1,7 @@
 use super::*;
 use crate::session::pi::PiHeader;
 
-/// The seven checked-in Pi v3 fixtures, embedded so the decoder tests run on
-/// every target including wasm32.
+/// The seven checked-in Pi v3 fixtures, embedded so the decoder tests do not read files.
 pub(crate) const FIXTURES: &[(&str, &[u8])] = &[
     (
         "compacted.jsonl",
@@ -48,8 +47,7 @@ pub(crate) fn read_pi_fixture(name: &str) -> PiFile {
 
 macro_rules! test {
         ($name:ident, $body:block) => {
-            #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-            #[cfg_attr(not(target_arch = "wasm32"), test)]
+            #[test]
             fn $name() $body
         };
     }
@@ -576,7 +574,6 @@ fn assert_raw_json_fields(raw: &[u8], want: &[&str]) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn pi_v3_fixtures_are_exact_lf_delimited_json() {
     let directory =

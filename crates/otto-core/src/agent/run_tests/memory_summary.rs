@@ -163,8 +163,7 @@ async fn compacted_agent(follow_up: Vec<Turn>) -> (TestAgent, Arc<FakeMemory>, S
 // Fails at the line assertion if the checkpoint's references are not
 // intersected with the lifecycle, at the warning count if the warning repeats
 // per provider step (two steps here) or is missing.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_summary_that_used_a_retired_record_is_marked_and_warned_once() {
     let (agent, memory, id) = compacted_agent(vec![
         Turn::tool_call("c1", r#"{"value":1}"#),
@@ -189,8 +188,7 @@ async fn a_summary_that_used_a_retired_record_is_marked_and_warned_once() {
 // Fails at the instruction assertions if the retired record does not reach the
 // summary system prompt, at the details assertions if the union is not stored,
 // at the last assertion if the rebuilt summary is still reported as affected.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_compaction_rebuilds_the_summary_with_the_retraction_and_clears_the_marker() {
     let (agent, memory, first_id) = compacted_agent(vec![
         Turn::text("t1"),
@@ -227,8 +225,7 @@ async fn a_compaction_rebuilds_the_summary_with_the_retraction_and_clears_the_ma
 
 // Fails if a compaction without retired references adds the retraction block
 // to the summary request or records a retracted reference.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_compaction_without_retired_references_adds_no_instructions() {
     let (agent, _memory, _id) = compacted_agent(Vec::new()).await;
     let summary_requests = agent.provider().summary_requests();
@@ -243,8 +240,7 @@ async fn a_compaction_without_retired_references_adds_no_instructions() {
 // Fails at the first assertion if a checkpoint with unknown coverage gets no
 // line when a visible turn names a retired record, at the second if the
 // warning does not say the coverage is unknown.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_summary_with_unknown_coverage_is_marked_when_a_visible_turn_names_a_retired_record() {
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let agent = agent_over(
@@ -287,8 +283,7 @@ async fn a_summary_with_unknown_coverage_is_marked_when_a_visible_turn_names_a_r
 
 // Fails if a provider-managed compaction in force is not reported as an
 // untraceable summary when a visible turn names a retired record.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_remote_compaction_in_force_is_marked_with_unknown_coverage() {
     let memory = Arc::new(FakeMemory::with_records(vec![record_a()]));
     let provider = FakeProvider::new(vec![
@@ -323,8 +318,7 @@ async fn a_remote_compaction_in_force_is_marked_with_unknown_coverage() {
 // Fails if a lifecycle error during compaction is not reported as a memory
 // warning, aborts the compaction, adds the retraction block to the summary
 // request, or drops the previous checkpoint's retracted references.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_failing_lifecycle_during_compaction_warns_and_keeps_the_previous_retractions() {
     let memory = Arc::new(FakeMemory::failing_lifecycle(
         vec![record_a()],
@@ -375,8 +369,7 @@ async fn a_failing_lifecycle_during_compaction_warns_and_keeps_the_previous_retr
 }
 
 // Fails if an active record produces a summary line or a memory warning.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn no_retired_record_gives_no_summary_line_and_no_warning() {
     let (agent, _memory, _id) = compacted_agent(vec![Turn::text("ok")]).await;
     let events = run_turn(&agent, "next").await;

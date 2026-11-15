@@ -56,8 +56,7 @@ fn encode(request: &Request) -> String {
     serde_json::to_string(&build_request(request)).expect("request serializes")
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn compaction_items_wrap_messages_in_the_required_order() {
     let request = Request {
         model: "m".into(),
@@ -85,8 +84,7 @@ fn compaction_items_wrap_messages_in_the_required_order() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn empty_compaction_fields_are_omitted_exactly() {
     let item = WireItem {
         item_type: "compaction".into(),
@@ -101,8 +99,7 @@ fn empty_compaction_fields_are_omitted_exactly() {
 /// The Responses API requires every `function_call_output` item to carry an
 /// `output` field, even when the tool produced no text; dropping it yields
 /// HTTP 400 "Missing required parameter: 'input[N].output'".
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn empty_tool_result_keeps_the_output_field() {
     let request = Request {
         model: "gpt-5".into(),
@@ -125,8 +122,7 @@ fn empty_tool_result_keeps_the_output_field() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn empty_request_encodes_only_the_required_fields() {
     let request = Request {
         model: "m".into(),
@@ -138,8 +134,7 @@ fn empty_request_encodes_only_the_required_fields() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn full_request_encodes_every_field() {
     let request = Request {
         cache_key: String::new(),
@@ -200,8 +195,7 @@ fn full_request_encodes_every_field() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn assistant_message_without_text_emits_only_its_tool_calls() {
     let request = Request {
         model: "m".into(),
@@ -227,8 +221,7 @@ fn assistant_message_without_text_emits_only_its_tool_calls() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn context_messages_become_user_messages_and_tool_definitions_keep_null_parameters() {
     let request = Request {
         model: "m".into(),
@@ -255,8 +248,7 @@ fn context_messages_become_user_messages_and_tool_definitions_keep_null_paramete
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn user_images_become_response_content_parts() {
     let request = Request {
         model: "m".into(),
@@ -281,8 +273,7 @@ fn user_images_become_response_content_parts() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn non_tool_result_blocks_of_a_tool_message_are_dropped() {
     let request = Request {
         model: "m".into(),
@@ -299,8 +290,7 @@ fn non_tool_result_blocks_of_a_tool_message_are_dropped() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn finish_reason_covers_the_three_outcomes() {
     assert_eq!(
         finish_reason(true, "incomplete", "max_output_tokens"),
@@ -317,8 +307,7 @@ fn finish_reason_covers_the_three_outcomes() {
     assert_eq!(finish_reason(false, "completed", ""), FinishReason::Stop);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn serialized_request_size_is_the_encoded_byte_length() {
     let request = Request {
         model: "m".into(),
@@ -331,8 +320,7 @@ fn serialized_request_size_is_the_encoded_byte_length() {
     assert_eq!(serialized_request_size(&request).expect("size"), 54);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn events_tolerate_null_fields_and_missing_objects() {
     let event: WireEvent = serde_json::from_str(
             r#"{"type":"response.output_text.delta","delta":null,"item_id":null,"item":null,"response":null}"#,
@@ -345,8 +333,7 @@ fn events_tolerate_null_fields_and_missing_objects() {
     assert_eq!(event.response, None);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn cached_tokens_default_to_zero_without_a_breakdown() {
     let usage: WireUsage =
         serde_json::from_str(r#"{"input_tokens":5,"output_tokens":7}"#).expect("usage decodes");
@@ -365,8 +352,7 @@ fn cached_tokens_default_to_zero_without_a_breakdown() {
     assert!(explicit_zero.cached_tokens_present());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[test]
 fn valid_arguments_matches_json_validity() {
     assert!(valid_arguments("{}"));
     assert!(valid_arguments(r#"{"a":1}"#));

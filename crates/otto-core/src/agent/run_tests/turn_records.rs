@@ -22,8 +22,7 @@ impl TurnRecordingSession {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl Session for TurnRecordingSession {
     fn memory_references(&self) -> Vec<crate::session::TurnMemoryReferences> {
         self.inner.memory_references()
@@ -116,8 +115,7 @@ fn ended_outcome(record: &crate::session::TurnRecord) -> crate::session::TurnOut
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn every_turn_writes_a_start_and_a_matching_end() {
     use crate::session::{TurnOutcome, TurnTrigger};
     let provider = FakeProvider::new(vec![
@@ -198,8 +196,7 @@ async fn interrupted_session() -> TurnRecordingSession {
     session
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_wake_turn_after_an_interrupted_turn_is_its_recovery() {
     use crate::session::TurnTrigger;
     let inbox = Arc::new(Inbox::default());
@@ -229,8 +226,7 @@ async fn a_wake_turn_after_an_interrupted_turn_is_its_recovery() {
     assert_eq!(agent.session().interrupted_turn(), None);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_prompt_after_an_interrupted_turn_starts_a_new_chain() {
     use crate::session::TurnTrigger;
     let agent = Agent::new(
@@ -251,8 +247,7 @@ async fn a_prompt_after_an_interrupted_turn_starts_a_new_chain() {
 
 // -- input ids --------------------------------------------------------------
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_notification_already_in_the_transcript_is_acknowledged_without_a_second_message() {
     let session = MemorySession::new();
     let delivered = Message {
@@ -321,8 +316,7 @@ fn enqueue_skips_an_id_already_queued() {
     assert_eq!(inbox.len(), 1);
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_recovery_turn_delivers_the_interrupted_turns_steering_once() {
     let journal = Arc::new(Inbox::default());
     journal.push(Notification {
@@ -366,8 +360,7 @@ async fn a_recovery_turn_delivers_the_interrupted_turns_steering_once() {
     assert!(journal.is_empty());
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn the_next_input_id_marks_one_runs_user_message() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
@@ -401,8 +394,7 @@ async fn the_next_input_id_marks_one_runs_user_message() {
     assert!(agent.session().has_input("req-1"));
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn a_followup_step_message_carries_its_input_id() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("done")]),

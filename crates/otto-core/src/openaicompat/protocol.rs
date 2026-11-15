@@ -398,8 +398,7 @@ mod tests {
         serde_json::to_string(&build_request(request)).expect("request serializes")
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn empty_request_encodes_only_the_required_fields() {
         let request = Request {
             model: "m".into(),
@@ -411,8 +410,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn cache_key_is_sent_only_when_non_empty() {
         let keyed = Request {
             cache_key: "s1".into(),
@@ -424,8 +422,7 @@ mod tests {
         assert!(!body.contains("prompt_cache_key"), "{body}");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn full_request_encodes_every_field() {
         let request = Request {
             cache_key: String::new(),
@@ -488,8 +485,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn context_messages_become_user_messages_and_tool_definitions_keep_null_parameters() {
         let request = Request {
             model: "m".into(),
@@ -516,8 +512,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn user_images_become_chat_content_parts() {
         let request = Request {
             model: "m".into(),
@@ -542,8 +537,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn non_tool_result_blocks_of_a_tool_message_are_dropped() {
         let request = Request {
             model: "m".into(),
@@ -560,8 +554,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn finish_reason_maps_the_four_wire_values() {
         assert_eq!(finish_reason("stop"), FinishReason::Stop);
         assert_eq!(finish_reason("tool_calls"), FinishReason::ToolCalls);
@@ -570,8 +563,7 @@ mod tests {
         assert_eq!(finish_reason(""), FinishReason::Unknown);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn serialized_request_size_is_the_encoded_byte_length() {
         let request = Request {
             model: "m".into(),

@@ -139,7 +139,6 @@ mod tests {
         evaluate_rules(rules, "bash", "bash", Some(command))
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn allow_prefix_needs_complete_command_with_prefix_in_every_segment() {
         let allow = [prefix(RuleDecision::Allow)];
@@ -162,7 +161,6 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn deny_and_ask_prefix_match_any_segment_even_when_incomplete() {
         let incomplete = command(false, &[&["echo", "x"], &["git", "status", "origin"]]);
@@ -175,7 +173,6 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn precedence_is_order_independent() {
         let allow = prefix(RuleDecision::Allow);
@@ -195,7 +192,6 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
     fn identities_are_exact_and_invalid_rules_cannot_allow() {
         let mut rule = ApprovalRule {

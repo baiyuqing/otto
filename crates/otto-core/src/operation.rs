@@ -2,7 +2,7 @@
 //!
 //! The owner computes time and updates the state. Core consumers only observe
 //! a cancellation token, an optional remaining budget, and the typed reason an
-//! operation must stop, keeping this contract wasm-safe and free of clocks.
+//! operation must stop, keeping this contract free of clocks.
 
 use std::time::Duration;
 

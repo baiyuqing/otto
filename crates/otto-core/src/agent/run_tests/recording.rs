@@ -2,8 +2,7 @@
 
 use super::*;
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[tokio::test]
 async fn recording_masks_credentials_without_changing_tool_execution() {
     let candidate = "opaque-value-123";
     let arguments = format!(r#"{{"client_secret":"{candidate}","enabled":true}}"#);

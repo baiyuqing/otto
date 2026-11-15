@@ -4,7 +4,7 @@
 //! parses the same frames back, so both sides are built from one definition
 //! here instead of two that must be kept in step.
 //!
-//! Everything in this module is wasm-safe: no clock, filesystem, network or
+//! Everything in this module is I/O-free: no clock, filesystem, network or
 //! process access.
 
 pub mod events;

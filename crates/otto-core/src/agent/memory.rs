@@ -116,8 +116,7 @@ pub struct RecordLifecycle {
 }
 
 /// The long-term memory binding the agent consults once per turn.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 pub trait MemoryRecall {
     /// Returns the records that are relevant to `request`, or an error the
     /// agent reports as a warning.

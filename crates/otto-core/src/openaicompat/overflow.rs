@@ -267,8 +267,7 @@ impl<'de> Visitor<'de> for UniqueKeys {
 mod tests {
     use super::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn accepts_allowlisted_structured_evidence() {
         let cases: &[(&str, &str, &str)] = &[
             (
@@ -311,8 +310,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn accepts_only_narrow_messages() {
         let wide = "x".repeat(65);
         let gap_body = format!(r#"{{"message":"context window {wide} exceeded"}}"#);
@@ -375,8 +373,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn extracts_only_bounded_token_pairs() {
         let boundary = format!(
             "requested 130000 tokens{}maximum 128000; maximum context length",
@@ -439,8 +436,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_other_statuses() {
         let valid = br#"{"error":{"code":"context_length_exceeded"}}"#;
         for status in [200u16, 401, 429, 500] {
@@ -451,8 +447,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_malformed_and_duplicate_json() {
         let bodies = [
             r#"{"code":" context_length_exceeded "}"#,
@@ -470,8 +465,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn duplicate_key_check_walks_nested_values() {
         let unique = [
             r#"{"a":1,"b":{"a":2},"c":[{"a":3},{"a":4}]}"#,
@@ -496,16 +490,14 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn rejects_a_body_larger_than_the_cap() {
         let padding = "p".repeat(MAX_ERROR_BODY);
         let body = format!(r#"{{"code":"context_length_exceeded","pad":"{padding}"}}"#);
         assert!(classify_overflow(400, body.as_bytes()).is_none());
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[test]
     fn the_error_never_retains_the_provider_body() {
         const SECRET: &str = "body-secret-value";
         let body = format!(r#"{{"error":{{"message":"maximum context length; {SECRET}"}}}}"#);

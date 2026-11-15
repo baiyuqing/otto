@@ -80,7 +80,7 @@ fn review_archives_both_decisions_and_preserves_exact_lookup_and_history() {
 }
 
 #[test]
-fn opening_migrates_legacy_receipts_and_resumes_an_interrupted_archive() {
+fn opening_archives_decided_receipts_left_in_the_active_directory() {
     let (_directory, store) = open_temp();
     let scope = user(&store);
     store
@@ -93,7 +93,7 @@ fn opening_migrates_legacy_receipts_and_resumes_an_interrupted_archive() {
     let mut reject = accept(&scope, "rejected", "");
     reject.decision = ReviewDecision::Reject;
     store.review(&reject).unwrap();
-    // A legacy receipt exists only in the active directory.
+    // A decided receipt exists only in the active directory.
     fs::rename(
         store.path("candidates/archive", "accepted", "json"),
         store.path("candidates", "accepted", "json"),

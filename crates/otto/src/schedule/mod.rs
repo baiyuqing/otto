@@ -33,8 +33,6 @@ pub enum Scope {
     Any,
     Terminal,
     Web,
-    /// Chat platforms, as in [`Origin::chat_platform`].
-    Chats(Vec<String>),
     /// Explicit admitted destinations.
     Origins(Vec<Origin>),
     /// Resolved against live client registrations by the store before claiming.
@@ -49,9 +47,6 @@ impl Scope {
             Self::Web => origin.as_str() == "web",
             Self::Origins(origins) => origins.contains(origin),
             Self::DeliveryClient(_) => false,
-            Self::Chats(platforms) => origin
-                .chat_platform()
-                .is_some_and(|platform| platforms.iter().any(|p| p == platform)),
         }
     }
 }
@@ -107,15 +102,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scope_matches_by_origin_kind_and_platform() {
+    fn scope_matches_by_origin_kind_and_destination() {
         let tg = Origin::chat("telegram", "1").unwrap();
         assert!(Scope::Any.matches(&tg) && Scope::Any.matches(&Origin::web()));
         assert!(Scope::Terminal.matches(&Origin::terminal()));
         assert!(!Scope::Terminal.matches(&Origin::web()));
         assert!(Scope::Web.matches(&Origin::web()));
-        let chats = Scope::Chats(vec!["telegram".into()]);
+        let chats = Scope::Origins(vec![tg.clone()]);
         assert!(chats.matches(&tg));
-        assert!(!Scope::Chats(Vec::new()).matches(&tg));
+        assert!(!Scope::Origins(Vec::new()).matches(&tg));
         assert!(!chats.matches(&Origin::terminal()));
     }
 }

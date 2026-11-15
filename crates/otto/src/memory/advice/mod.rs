@@ -361,13 +361,8 @@ pub struct Advisor {
 }
 
 impl Advisor {
-    /// Compatibility constructor for callers using the current SQLite store.
-    pub fn new(backend: Box<dyn Backend>, audit: Option<Arc<dyn audit::AuditStore>>) -> Self {
-        Self::new_with_audit(backend, audit)
-    }
-
     /// Builds an advisor with an injected typed audit repository.
-    pub(crate) fn new_with_audit(
+    pub(crate) fn new(
         backend: Box<dyn Backend>,
         audit: Option<Arc<dyn audit::AuditStore>>,
     ) -> Self {

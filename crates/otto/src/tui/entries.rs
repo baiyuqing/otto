@@ -90,8 +90,7 @@ impl Entry {
 }
 
 /// Fold one tool frame by Otto operation identity, not provider ID or arguments.
-/// Legacy frames can only match pending provider calls; completed calls remain
-/// distinct because legacy streams do not carry a replay-safe invocation key.
+/// A frame without an operation id is ignored.
 #[cfg(test)]
 pub(crate) fn reduce_tool_event(
     entries: &mut Vec<Entry>,
@@ -107,23 +106,20 @@ pub(crate) fn reduce_tool_event_at(
     event: &otto_core::wire::events::WireEvent,
     now: Option<Instant>,
 ) {
-    let operation = (!event.operation_id.is_empty()).then_some(event.operation_id.as_str());
+    if event.operation_id.is_empty() {
+        return;
+    }
+    let operation = event.operation_id.as_str();
     let index = entries.iter().rposition(|e| {
-        e.kind == Some(EntryKind::Tool)
-            && match operation {
-                Some(op) => e.operation_id.as_deref() == Some(op),
-                None => !e.tool_done && e.tool_call_id == event.tool_call_id,
-            }
+        e.kind == Some(EntryKind::Tool) && e.operation_id.as_deref() == Some(operation)
     });
     let index = index.unwrap_or_else(|| {
         entries.push(Entry {
-            id: operation
-                .map(|op| format!("operation:{op}"))
-                .unwrap_or_else(|| format!("streaming-tool-{}", entries.len())),
+            id: format!("operation:{operation}"),
             kind: Some(EntryKind::Tool),
             tool_call_id: event.tool_call_id.clone(),
             tool_name: event.tool_name.clone(),
-            operation_id: operation.map(str::to_owned),
+            operation_id: Some(operation.to_owned()),
             ..Entry::default()
         });
         entries.len() - 1
@@ -390,18 +386,6 @@ fn notification_entry_text(task_id: &str, text: &str) -> String {
     kept.join("\n")
 }
 
-/// Recovers the task id from a legacy persisted notification header
-/// (`"[task-notification] task <id> ..."`). New messages carry the id in
-/// `context_metadata` and do not depend on notification wording.
-fn notification_task_id(text: &str) -> String {
-    const PREFIX: &str = "[task-notification] task ";
-    let header = text.split('\n').next().unwrap_or("");
-    let Some(rest) = header.strip_prefix(PREFIX) else {
-        return String::new();
-    };
-    rest.split(' ').next().unwrap_or("").to_string()
-}
-
 fn notification_entry_from_message(message: &Message, index: usize) -> Option<Entry> {
     if message.role != Role::Context
         || message.context_type != TASK_NOTIFICATION_CONTEXT_TYPE
@@ -420,7 +404,7 @@ fn notification_entry_from_message(message: &Message, index: usize) -> Option<En
         .as_ref()
         .map(|metadata| metadata.task_id.clone())
         .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| notification_task_id(&text));
+        .unwrap_or_default();
     Some(Entry {
         raw: notification_entry_text(&task_id, &text),
         ..Entry::new(id, EntryKind::System)

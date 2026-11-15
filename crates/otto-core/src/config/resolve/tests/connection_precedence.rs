@@ -86,7 +86,7 @@ fn model_id_may_contain_slashes() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn precedence_is_cli_then_environment_then_session_then_profile_env_then_default_model() {
+fn precedence_is_cli_then_environment_then_session_then_default_model() {
     let file = two_providers();
     let session = SessionDefaults {
         provider: "openai-compatible".into(),
@@ -252,71 +252,6 @@ fn cli_thinking_wins_over_model_thinking() {
     )
     .expect("resolve");
     assert_eq!(runtime.thinking, "max");
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn legacy_profile_flag_and_environment_select_converted_models() {
-    let file = file_with_profiles(
-        "configured",
-        &[
-            (
-                "configured",
-                profile(
-                    "openai-compatible",
-                    "config-model",
-                    "https://config.example/v1",
-                    "CONFIG_KEY",
-                ),
-            ),
-            (
-                "current",
-                profile(
-                    "openai-compatible",
-                    "current-model",
-                    "https://current.example/v1",
-                    "CURRENT_KEY",
-                ),
-            ),
-        ],
-    );
-    let env = env_map(&[
-        ("OTTO_PROFILE", "current"),
-        ("CURRENT_KEY", "secret"),
-        ("CONFIG_KEY", "c"),
-    ]);
-    let runtime = resolve(
-        &file,
-        &env,
-        &SessionDefaults::default(),
-        &Overrides::default(),
-    )
-    .expect("env");
-    assert_eq!(runtime.model, "current-model");
-    assert_eq!(runtime.base_url, "https://current.example/v1");
-    let runtime = resolve(
-        &file,
-        &env,
-        &SessionDefaults::default(),
-        &Overrides {
-            legacy_profile: "configured".into(),
-            ..Default::default()
-        },
-    )
-    .expect("flag");
-    assert_eq!(runtime.model, "config-model");
-    let error = resolve(
-        &file,
-        &env,
-        &SessionDefaults::default(),
-        &Overrides {
-            legacy_profile: "missing".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("profile \"missing\" not found"), "{error}");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

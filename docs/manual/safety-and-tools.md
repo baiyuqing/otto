@@ -557,8 +557,7 @@ must distinguish known metadata from its own suitability judgment and must not
 invent IDs or prices. Discovery is on demand, not a full catalog attached to
 every request: the parent calls once before ordinary delegation and reuses the
 result within the current connection, refreshing when that connection changes.
-Explicit user choices, named-agent defaults and the optional deprecated `subagent_models`
-override do not require catalog selection.
+Explicit user choices and named-agent defaults do not require catalog selection.
 
 ChatGPT catalog requests use a separately maintained Codex catalog compatibility
 version, not Otto's release version. Successful nonempty results are saved to
@@ -593,10 +592,8 @@ The parent normally uses [`list_models`](#list_models) to choose an adequate
 model, putting its short reason in the task description. Explicit user choices
 and named-agent defaults take precedence; unavailable/uncertain discovery falls
 back to the session model, not an invented ID. No manual list is required.
-Without an explicit call model, precedence is named-agent default, optional
-deprecated `subagent_models` first entry (legacy profiles only), then session
-model. Changing the provider connection disables that list; select the intended
-model or remove conflicting overrides and restart. Check rejected model IDs and
+Without an explicit call model, precedence is named-agent default, then
+session model. Check rejected model IDs and
 partial work before retrying: failed child work is not automatically repeated.
 
 `agent_status.model_source` is `explicit`, `definition`, `configured_first`,

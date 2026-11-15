@@ -57,7 +57,7 @@ fn execute(
         "explain" if words.is_empty() && scope.is_none() => {
             let mut public_env = HashMap::from([("HOME".to_string(), home.display().to_string())]);
             // Only selection inputs, never credential bindings or arbitrary environment values.
-            for key in ["OTTO_PROFILE", "OTTO_PROVIDER", "OTTO_MODEL"] {
+            for key in ["OTTO_PROVIDER", "OTTO_MODEL"] {
                 if let Some(value) = lookup.get(key) {
                     public_env.insert(key.to_string(), value.clone());
                 }
@@ -70,17 +70,12 @@ fn execute(
             )
             .ok()
             .map(|r| {
-                let diagnostics: Vec<_> =
-                    otto_core::config::resolve::subagent_model_diagnostic(&loaded.file, &r)
-                        .into_iter()
-                        .collect();
                 serde_json::json!({"model":r.model_selector.to_string(),
                     "provider":r.provider_name,
                     "provider_type":r.provider_type,
                     "model_id":r.model,
                     "thinking":r.thinking,
                     "subagent_models":r.subagent_models,
-                    "diagnostics":diagnostics,
                     "max_output_bytes":r.max_output_bytes,
                     "shell_timeout_seconds":r.shell_timeout.as_secs(),
                     "compaction":{"auto":r.compaction.auto,
@@ -277,7 +272,7 @@ mod tests {
         assert!(output.contains("redacted"));
     }
     #[test]
-    fn explain_reports_the_selected_model_without_credentials_or_legacy_values() {
+    fn explain_reports_the_selected_model_without_credentials_or_configured_values() {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let dir = home.path().join(".config/otto");
@@ -285,9 +280,9 @@ mod tests {
         std::fs::write(
             dir.join("config.toml"),
             concat!(
-                "default_profile='work'\n[profiles.work]\nprovider='openai-compatible'\n",
-                "model='parent'\nbase_url='https://example.test/v1'\n",
-                "api_key_env='PRIVATE_KEY'\nsubagent_models=['child']\n"
+                "default_model='work/parent'\n[providers.work]\ntype='openai-compatible'\n",
+                "base_url='https://example.test/v1'\napi_key_env='PRIVATE_KEY'\n",
+                "models.parent={}\n"
             ),
         )
         .unwrap();
@@ -317,9 +312,6 @@ mod tests {
         assert_eq!(runtime["model"], "chatgpt/other-model");
         assert_eq!(runtime["provider_type"], "chatgpt");
         assert_eq!(runtime["model_id"], "other-model");
-        // The explicit selector names a provider that has no legacy child models,
-        // so no fallback diagnostic is reported and no configured value is printed.
-        assert_eq!(runtime["diagnostics"], serde_json::json!([]));
         for private in [
             "PRIVATE_KEY",
             "example.test",

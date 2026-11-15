@@ -12,20 +12,10 @@ fn delivery_clients_claim_only_their_exact_destinations_across_store_handles() {
     let a = Origin::chat("telegram", "a").unwrap();
     let b = Origin::chat("telegram", "b").unwrap();
     first
-        .register_delivery_client(
-            "a",
-            &["telegram".into()],
-            Some(std::slice::from_ref(&a)),
-            now,
-        )
+        .register_delivery_client("a", std::slice::from_ref(&a), now)
         .unwrap();
     second
-        .register_delivery_client(
-            "b",
-            &["telegram".into()],
-            Some(std::slice::from_ref(&b)),
-            now,
-        )
+        .register_delivery_client("b", std::slice::from_ref(&b), now)
         .unwrap();
     for index in 0..201 {
         let mut unrelated = new_item(Kind::Text, "unrelated", now);
@@ -65,90 +55,40 @@ fn delivery_clients_claim_only_their_exact_destinations_across_store_handles() {
 }
 
 #[test]
-fn legacy_delivery_suspends_for_overlap_and_recovers_after_disconnect_or_expiry() {
+fn an_expired_or_unregistered_delivery_client_claims_nothing() {
     let store = Store::open_in_memory().unwrap();
     let now = now_ms();
     store
-        .register_delivery_client("legacy", &["telegram".into()], None, now)
-        .unwrap();
-    store
-        .register_delivery_client("other", &["telegram".into()], None, now)
+        .register_delivery_client("client", &[origin()], now)
         .unwrap();
     store
         .create(new_item(Kind::Text, "private", now), now)
         .unwrap();
-    let scope = Scope::DeliveryClient("legacy".into());
+    let scope = Scope::DeliveryClient("client".into());
+    let later = now + TimeDelta::seconds(91);
     assert!(
         store
-            .claim_deliveries(&scope, ANY_LEASE, 10, now)
+            .claim_deliveries(&scope, ANY_LEASE, 10, later)
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
-        store.refresh_delivery_client("legacy", now).unwrap(),
-        ["telegram"]
-    );
-    store.unregister_delivery_client("other").unwrap();
+    store.refresh_delivery_client("client", later).unwrap();
     assert_eq!(
         store
-            .claim_deliveries(&scope, ANY_LEASE, 10, now)
+            .claim_deliveries(&scope, ANY_LEASE, 10, later)
             .unwrap()
             .len(),
         1
     );
-    let exact = Origin::chat("telegram", "elsewhere").unwrap();
-    store
-        .register_delivery_client("exact", &["telegram".into()], Some(&[exact]), now)
-        .unwrap();
+    store.unregister_delivery_client("client").unwrap();
     store
         .create(new_item(Kind::Text, "next", now), now)
         .unwrap();
     assert!(
         store
-            .claim_deliveries(&scope, ANY_LEASE, 10, now)
-            .unwrap()
-            .is_empty()
-    );
-    let later = now + TimeDelta::seconds(91);
-    assert!(
-        store
-            .refresh_delivery_client("legacy", later)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !store
             .claim_deliveries(&scope, ANY_LEASE, 10, later)
             .unwrap()
             .is_empty()
-    );
-}
-
-#[test]
-fn version_one_schedule_migrates_without_losing_items() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("schedule.db");
-    let store = Store::open(&path).unwrap();
-    let now = now_ms();
-    let created = store
-        .create(new_item(Kind::Text, "keep", now), now)
-        .unwrap();
-    drop(store);
-    let raw = Connection::open(&path).unwrap();
-    raw.execute_batch("DROP TABLE delivery_clients").unwrap();
-    raw.pragma_update("user_version", 1).unwrap();
-    drop(raw);
-    let store = Store::open(&path).unwrap();
-    assert_eq!(item(&store, created.id).body, "keep");
-    store
-        .register_delivery_client("client", &["telegram".into()], None, now)
-        .unwrap();
-    assert_eq!(
-        store
-            .claim_deliveries(&Scope::DeliveryClient("client".into()), ANY_LEASE, 10, now)
-            .unwrap()
-            .len(),
-        1
     );
 }
 
@@ -173,7 +113,7 @@ fn claim_deliveries_honours_scope_and_limit() {
         claimed.iter().map(|i| i.body.as_str()).collect::<Vec<_>>(),
         ["web"]
     );
-    let chats = Scope::Chats(vec!["telegram".into()]);
+    let chats = Scope::Origins(vec![origin()]);
     assert_eq!(
         store
             .claim_deliveries(&chats, ANY_LEASE, 2, now)

@@ -54,7 +54,7 @@ CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(appended, delivered_
 CREATE TABLE IF NOT EXISTS delivery_clients (
     id TEXT PRIMARY KEY,
     platforms TEXT NOT NULL,
-    destinations TEXT,
+    destinations TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 ) STRICT;
 "#;
@@ -203,17 +203,19 @@ impl SqliteScheduleStore {
     pub fn register_delivery_client(
         &self,
         id: &str,
-        platforms: &[String],
-        destinations: Option<&[Origin]>,
+        destinations: &[Origin],
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let platforms = serde_json::to_string(platforms).map_err(|_| Error)?;
-        let destinations = destinations
-            .map(|origins| {
-                serde_json::to_string(&origins.iter().map(Origin::as_str).collect::<Vec<_>>())
-            })
-            .transpose()
-            .map_err(|_| Error)?;
+        let mut platforms: Vec<&str> = destinations
+            .iter()
+            .filter_map(Origin::chat_platform)
+            .collect();
+        platforms.sort_unstable();
+        platforms.dedup();
+        let platforms = serde_json::to_string(&platforms).map_err(|_| Error)?;
+        let destinations =
+            serde_json::to_string(&destinations.iter().map(Origin::as_str).collect::<Vec<_>>())
+                .map_err(|_| Error)?;
         self.write(|connection| {
             connection.execute("DELETE FROM delivery_clients WHERE expires_at < ?1", params![ms(now - RETENTION)])?;
             connection.execute("INSERT INTO delivery_clients (id, platforms, destinations, expires_at) VALUES (?1, ?2, ?3, ?4)",
@@ -222,17 +224,13 @@ impl SqliteScheduleStore {
         })
     }
 
-    pub(crate) fn refresh_delivery_client(
-        &self,
-        id: &str,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<String>> {
+    pub(crate) fn refresh_delivery_client(&self, id: &str, now: DateTime<Utc>) -> Result<()> {
         self.write(|connection| {
             connection.execute(
                 "UPDATE delivery_clients SET expires_at = ?2 WHERE id = ?1",
                 params![id, ms(now + TimeDelta::seconds(90))],
             )?;
-            delivery_scope(connection, id, now).map(|(_, conflicts)| conflicts)
+            Ok(())
         })
     }
 
@@ -270,7 +268,7 @@ pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
         .query_row("PRAGMA user_version", (), |row| row.get(0))
         .map_err(|_| Error)?;
     match version {
-        0 | 1 => {
+        0 => {
             let transaction = connection.unchecked_transaction().map_err(|_| Error)?;
             transaction.execute_batch(SCHEMA).map_err(|_| Error)?;
             transaction
@@ -314,51 +312,24 @@ fn current(
     Ok(get(connection, id)?.filter(|item| item.due_at == due_at && item.state == state))
 }
 
-/// Exact clients keep their destinations. A legacy platform is eligible only
-/// while this is the sole live connection offering that platform.
-fn delivery_scope(
-    connection: &Connection,
-    id: &str,
-    now: DateTime<Utc>,
-) -> Db<(Scope, Vec<String>)> {
-    let mut statement = connection.prepare(
-        "SELECT id, platforms, destinations FROM delivery_clients WHERE expires_at > ?1",
-    )?;
-    let rows = statement
-        .query_map(params![ms(now)], |row| {
-            Ok((
-                row.get::<String>(0)?,
-                row.get::<String>(1)?,
-                row.get::<Option<String>>(2)?,
-            ))
-        })?
-        .collect::<Db<Vec<_>>>()?;
+/// The destinations a live delivery client registered; none when the client
+/// is unknown or expired.
+fn delivery_scope(connection: &Connection, id: &str, now: DateTime<Utc>) -> Db<Scope> {
+    let destinations = connection
+        .prepare("SELECT destinations FROM delivery_clients WHERE id = ?1 AND expires_at > ?2")?
+        .query_map(params![id, ms(now)], |row| row.get::<String>(0))?
+        .collect::<Db<Vec<_>>>()?
+        .pop();
     let bad = || crate::storage::Error::ConversionFailure("bad delivery client".into());
-    let mut clients = Vec::new();
-    for (client, platforms, destinations) in rows {
-        let platforms: Vec<String> = serde_json::from_str(&platforms).map_err(|_| bad())?;
-        clients.push((client, platforms, destinations));
-    }
-    let Some((_, platforms, destinations)) = clients.iter().find(|(client, _, _)| client == id)
-    else {
-        return Ok((Scope::Origins(Vec::new()), Vec::new()));
+    let Some(destinations) = destinations else {
+        return Ok(Scope::Origins(Vec::new()));
     };
-    if let Some(destinations) = destinations {
-        let values: Vec<String> = serde_json::from_str(destinations).map_err(|_| bad())?;
-        let origins = values
-            .iter()
-            .map(|value| Origin::parse(value).map_err(|_| bad()))
-            .collect::<Db<Vec<_>>>()?;
-        return Ok((Scope::Origins(origins), Vec::new()));
-    }
-    let (allowed, conflicts): (Vec<_>, Vec<_>) = platforms.iter().cloned().partition(|platform| {
-        clients
-            .iter()
-            .filter(|(_, offers, _)| offers.contains(platform))
-            .count()
-            == 1
-    });
-    Ok((Scope::Chats(allowed), conflicts))
+    let values: Vec<String> = serde_json::from_str(&destinations).map_err(|_| bad())?;
+    let origins = values
+        .iter()
+        .map(|value| Origin::parse(value).map_err(|_| bad()))
+        .collect::<Db<Vec<_>>>()?;
+    Ok(Scope::Origins(origins))
 }
 
 fn make_ready(
@@ -391,16 +362,10 @@ fn advance(connection: &Connection, item: &Item, now: DateTime<Utc>, error: &str
 }
 
 impl ScheduleStore for SqliteScheduleStore {
-    fn register_delivery_client(
-        &self,
-        id: &str,
-        p: &[String],
-        d: Option<&[Origin]>,
-        n: DateTime<Utc>,
-    ) -> Result<()> {
-        SqliteScheduleStore::register_delivery_client(self, id, p, d, n)
+    fn register_delivery_client(&self, id: &str, d: &[Origin], n: DateTime<Utc>) -> Result<()> {
+        SqliteScheduleStore::register_delivery_client(self, id, d, n)
     }
-    fn refresh_delivery_client(&self, id: &str, n: DateTime<Utc>) -> Result<Vec<String>> {
+    fn refresh_delivery_client(&self, id: &str, n: DateTime<Utc>) -> Result<()> {
         SqliteScheduleStore::refresh_delivery_client(self, id, n)
     }
     fn unregister_delivery_client(&self, id: &str) -> Result<()> {

@@ -2,34 +2,55 @@ use super::*;
 
 mod server_bootstrap;
 use crate::agent::progress::{DEFAULT_CONSECUTIVE_FAILURES, DEFAULT_REPEATED_CALLS};
-use crate::config::{
-    Agent, CompactionConfig as Compaction, LegacyProfile, convert_legacy_profiles,
-};
+use crate::config::{Agent, CompactionConfig as Compaction, ModelEntry, ProviderEntry};
 
-fn profile(provider: &str, model: &str, base_url: &str, api_key_env: &str) -> LegacyProfile {
-    LegacyProfile {
+/// One fixture provider with one model.
+struct Fixture {
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key_env: String,
+    workspace_id_env: String,
+}
+
+fn profile(provider: &str, model: &str, base_url: &str, api_key_env: &str) -> Fixture {
+    Fixture {
         provider: provider.into(),
         model: model.into(),
         base_url: base_url.into(),
         api_key_env: api_key_env.into(),
-        ..Default::default()
+        workspace_id_env: String::new(),
     }
 }
 
-/// Builds a file from deprecated profile tables and converts them, so the tests
-/// below cover the conversion together with resolution.
-fn file_with_profiles(default_profile: &str, profiles: &[(&str, LegacyProfile)]) -> File {
-    let mut file = File {
-        default_profile: default_profile.into(),
-        profiles: profiles
-            .iter()
-            .map(|(name, p)| (name.to_string(), p.clone()))
-            .collect(),
-        ..Default::default()
-    };
-    convert_legacy_profiles(&mut file).expect("convert");
+/// Builds a file with one provider per fixture, named by the fixture's key and
+/// holding the fixture's model. `default_name` selects the default model.
+fn file_with_profiles(default_name: &str, fixtures: &[(&str, Fixture)]) -> File {
+    let mut file = File::default();
+    for (name, fixture) in fixtures {
+        let mut entry = ProviderEntry {
+            type_: fixture.provider.clone(),
+            base_url: fixture.base_url.clone(),
+            api_key_env: fixture.api_key_env.clone(),
+            workspace_id_env: fixture.workspace_id_env.clone(),
+            ..Default::default()
+        };
+        entry
+            .models
+            .insert(fixture.model.clone(), ModelEntry::default());
+        file.providers.insert(name.to_string(), entry);
+        if *name == default_name {
+            file.default_model = format!("{name}/{}", fixture.model);
+        }
+    }
     grant_fixture_endpoints(&mut file);
     file
+}
+
+/// The selector of the only model of the fixture provider `name`.
+fn selector_of(file: &File, name: &str) -> String {
+    let model = file.providers[name].models.keys().next().expect("model");
+    format!("{name}/{model}")
 }
 
 /// Sets the windows of the model that `compaction_test_file` configures.
@@ -64,153 +85,6 @@ fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn subagent_models_follow_only_the_configured_connection() {
-    let mut selected = profile("chatgpt", "parent", "", "");
-    selected.subagent_models = vec!["cheap".into(), "strong".into()];
-    let file = file_with_profiles("selected", &[("selected", selected)]);
-    let resolve_with = |overrides: Overrides| {
-        resolve_without_credentials(
-            &file,
-            &HashMap::new(),
-            &SessionDefaults::default(),
-            &overrides,
-        )
-        .expect("resolve")
-    };
-    assert_eq!(
-        resolve_with(Overrides::default()).subagent_models,
-        ["cheap", "strong"]
-    );
-    let mut selected = profile(
-        "openai-compatible",
-        "parent",
-        "https://example.com/v1",
-        "KEY",
-    );
-    selected.subagent_models = vec!["cheap".into()];
-    let file = file_with_profiles("selected", &[("selected", selected)]);
-    let runtime = resolve_without_credentials(
-        &file,
-        &HashMap::new(),
-        &SessionDefaults::default(),
-        &Overrides {
-            base_url: "https://other.example/v1".into(),
-            ..Overrides::default()
-        },
-    )
-    .expect("resolve");
-    assert!(runtime.subagent_models.is_empty());
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn subagent_model_fallback_diagnostic_is_connection_specific_and_safe() {
-    let mut selected = profile(
-        "openai-compatible",
-        "private-parent",
-        "https://private.example/v1",
-        "PRIVATE_KEY",
-    );
-    selected.subagent_models = vec!["private-child".into()];
-    let file = file_with_profiles("selected", &[("selected", selected)]);
-    let resolved = |overrides: Overrides| {
-        resolve_without_credentials(
-            &file,
-            &HashMap::new(),
-            &SessionDefaults::default(),
-            &overrides,
-        )
-        .unwrap()
-    };
-    let same = resolved(Overrides::default());
-    assert!(subagent_model_diagnostic(&file, &same).is_none());
-    let model_only = resolved(Overrides {
-        model: "selected/other-parent".into(),
-        ..Overrides::default()
-    });
-    assert!(subagent_model_diagnostic(&file, &model_only).is_none());
-    let normalized = resolved(Overrides {
-        base_url: "https://private.example/v1/".into(),
-        ..Overrides::default()
-    });
-    assert!(subagent_model_diagnostic(&file, &normalized).is_none());
-    let mut emptied = same.clone();
-    emptied.subagent_models.clear();
-    assert!(subagent_model_diagnostic(&file, &emptied).is_none());
-    for overrides in [Overrides {
-        base_url: "https://changed.example/v1".into(),
-        ..Overrides::default()
-    }] {
-        let runtime = resolved(overrides);
-        let diagnostic = subagent_model_diagnostic(&file, &runtime).expect("fallback diagnostic");
-        assert_eq!(diagnostic.key, "subagent_models");
-        assert_eq!(diagnostic.source, "runtime");
-        assert!(
-            diagnostic
-                .reason
-                .contains("inherit the active parent model")
-        );
-        assert!(diagnostic.reason.contains("configure subagent_models"));
-        assert!(diagnostic.reason.contains("not automatically retried"));
-        let displayed = format!(
-            "{} {} {}",
-            diagnostic.key, diagnostic.source, diagnostic.reason
-        );
-        for private in ["private", "PRIVATE_KEY", "changed.example", "selected"] {
-            assert!(!displayed.contains(private), "{displayed}");
-        }
-    }
-    let mut no_list = file.clone();
-    for entry in no_list
-        .providers
-        .values_mut()
-        .flat_map(|provider| provider.models.values_mut())
-    {
-        entry.legacy_subagent_models.clear();
-    }
-    let runtime = resolve_without_credentials(
-        &no_list,
-        &HashMap::new(),
-        &SessionDefaults::default(),
-        &Overrides {
-            model: "chatgpt/private-parent".into(),
-            ..Overrides::default()
-        },
-    )
-    .unwrap();
-    assert!(subagent_model_diagnostic(&no_list, &runtime).is_none());
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn subagent_model_list_rejects_invalid_entries() {
-    for models in [
-        vec!["".into()],
-        vec![" cheap".into()],
-        vec!["cheap".into(), "cheap".into()],
-        vec!["cheap".into(); 17],
-    ] {
-        let mut selected = profile("chatgpt", "parent", "", "");
-        selected.subagent_models = models;
-        let file = file_with_profiles("selected", &[("selected", selected)]);
-        let error = resolve_without_credentials(
-            &file,
-            &HashMap::new(),
-            &SessionDefaults::default(),
-            &Overrides::default(),
-        )
-        .expect_err("invalid list");
-        assert!(
-            error
-                .to_string()
-                .contains("model \"chatgpt/parent\" subagent_models"),
-            "{error}"
-        );
-    }
 }
 
 mod compaction_defaults;
@@ -251,11 +125,11 @@ fn claude_defaults_and_workspace_credentials_are_environment_only() {
 #[test]
 fn claude_workspace_binding_obeys_managed_credential_policy() {
     let text = r#"
-default_profile = "claude"
-[profiles.claude]
-provider = "claude"
-model = "fixture-claude"
+default_model = "work/fixture-claude"
+[providers.work]
+type = "claude"
 workspace_id_env = "WORKSPACE_ID"
+models."fixture-claude" = {}
 "#;
     let mut file = crate::config::parse(text).unwrap();
     file.policy = Some(crate::config::layered::ManagedPolicy {
@@ -274,25 +148,6 @@ workspace_id_env = "WORKSPACE_ID"
         error.to_string().contains("workspace credential binding"),
         "{error}"
     );
-}
-
-#[test]
-fn claude_default_connection_keeps_subagent_models_and_checks_workspace_binding() {
-    let mut selected = profile("claude", "fixture-claude", "", "");
-    selected.subagent_models = vec!["fixture-child".into()];
-    let file = file_with_profiles("selected", &[("selected", selected)]);
-    let runtime = resolve_without_credentials(
-        &file,
-        &HashMap::new(),
-        &SessionDefaults::default(),
-        &Overrides::default(),
-    )
-    .unwrap();
-    assert_eq!(runtime.subagent_models, ["fixture-child"]);
-    let mut changed = runtime.clone();
-    changed.subagent_models.clear();
-    changed.workspace_id_env = "OTHER_WORKSPACE".into();
-    assert!(subagent_model_diagnostic(&file, &changed).is_some());
 }
 
 // Existing resolver behavior fixtures have explicit test-authority grants.

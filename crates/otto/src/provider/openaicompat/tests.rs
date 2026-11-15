@@ -151,12 +151,9 @@ fn trusted_test_client(base_url: &str, api_key: &str) -> Client {
 }
 
 #[tokio::test]
-async fn endpoint_rejection_prevents_secret_body_network_and_injected_redirect_client() {
+async fn endpoint_rejection_prevents_secret_body_and_network() {
     let server = http::spawn(|_| Vec::<u8>::new()).await;
-    let clients = [
-        Client::new(&server.url, "fixture-secret"),
-        Client::with_http_client(&server.url, "fixture-secret", reqwest::Client::new()),
-    ];
+    let clients = [Client::new(&server.url, "fixture-secret")];
     for client in clients {
         let settlement = client
             .complete(&model_request(), &mut |_| {}, &CancellationToken::new())

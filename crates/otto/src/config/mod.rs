@@ -530,9 +530,7 @@ pub(crate) fn set_model_thinking_file(
 fn native_error(error: ModelChangeError) -> NativeConfigError {
     match error {
         ModelChangeError::Native(error) => error,
-        ModelChangeError::InUse(message) | ModelChangeError::LegacyProfiles(message) => {
-            ConfigError::new(message).into()
-        }
+        ModelChangeError::InUse(message) => ConfigError::new(message).into(),
     }
 }
 

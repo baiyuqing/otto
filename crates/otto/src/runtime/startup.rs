@@ -52,8 +52,8 @@ const ENVIRONMENT_SNAPSHOT_TOO_LARGE: &str = "process environment snapshot is to
 pub type EnvironmentLookup = HashMap<String, String>;
 
 /// Builds the automatic skill contract checker when skills and the check are
-/// enabled and `TYPESAFE_API_KEY` is non-empty. The check defaults to enabled;
-/// the legacy `[experimental]` setting remains a fallback for compatibility.
+/// enabled and `TYPESAFE_API_KEY` is non-empty. The check defaults to enabled
+/// and is set by `[skills].typesafe_skill_check`.
 /// A database open failure prints one warning here, before any UI starts, and
 /// leaves the checker off for the process; `TYPESAFE_API_KEY` never appears in
 /// that warning.
@@ -67,12 +67,7 @@ pub fn skill_checker(
     if config.skills.enabled == Some(false) {
         return None;
     }
-    if !config
-        .skills
-        .typesafe_skill_check
-        .or(config.experimental.typesafe_skill_check)
-        .unwrap_or(true)
-    {
+    if !config.skills.typesafe_skill_check.unwrap_or(true) {
         return None;
     }
     let api_key = environment

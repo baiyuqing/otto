@@ -81,45 +81,6 @@ async fn the_system_prompt_carries_the_workspace_context_and_hides_the_api_key()
 }
 
 #[tokio::test]
-async fn disabled_child_models_report_safe_warning_and_parent_context() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let mut shared = shared(dir.path());
-    Arc::get_mut(&mut shared).unwrap().config.providers.insert(
-        "default".into(),
-        otto_core::config::ProviderEntry {
-            type_: "openai-compatible".into(),
-            base_url: "https://configured.invalid/v1".into(),
-            models: std::collections::BTreeMap::from([(
-                "gpt-test".to_string(),
-                otto_core::config::ModelEntry {
-                    legacy_subagent_models: vec!["private-candidate".into()],
-                    ..Default::default()
-                },
-            )]),
-            ..Default::default()
-        },
-    );
-    let builder = builder_for(shared, dir.path());
-    let session = SharedSession::memory(Header::default());
-    let mut warnings = Vec::new();
-    let runner = builder
-        .build_runner_with_warnings(&session, &runtime(), &mut warnings)
-        .await
-        .expect("runner");
-    let warnings = String::from_utf8(warnings).unwrap();
-    assert!(warnings.contains("subagent_models"), "{warnings}");
-    assert!(
-        runner
-            .system_prompt()
-            .contains("<subagent_model_diagnostic>")
-    );
-    for private in ["configured.invalid", "private-candidate"] {
-        assert!(!warnings.contains(private), "{warnings}");
-        assert!(!runner.system_prompt().contains(private));
-    }
-}
-
-#[tokio::test]
 async fn configured_child_models_appear_only_in_the_parent_prompt() {
     let dir = tempfile::tempdir().expect("temp dir");
     let builder = builder(dir.path());

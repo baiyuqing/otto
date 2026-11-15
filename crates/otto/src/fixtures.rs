@@ -27,6 +27,24 @@ use crate::app::Controller;
 use crate::runtime::builder::{Builder, Shared, resolve_initial_runtime};
 use crate::sandbox::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
+/// An existing directory shared by the tests of one process. A workspace needs
+/// a directory because its identity marker is stored there.
+pub fn shared_workspace() -> &'static str {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().expect("shared workspace"))
+        .path()
+        .to_str()
+        .expect("utf-8 path")
+}
+
+/// An existing subdirectory `name` of the shared workspace directory, as a
+/// distinct workspace.
+pub fn workspace_dir(name: &str) -> String {
+    let path = std::path::Path::new(shared_workspace()).join(name);
+    std::fs::create_dir_all(&path).expect("workspace directory");
+    path.to_str().expect("utf-8 path").to_owned()
+}
+
 pub fn config() -> File {
     let mut providers = std::collections::BTreeMap::new();
     for (name, model, key_env) in [

@@ -280,16 +280,17 @@ Git so new clones and independently created Git worktrees get new identities.
 
 Stop Otto before moving the directory. Moving it with its marker keeps its
 session and memory ownership.
-On first initialization, Otto adopts the existing path-derived session key.
-The memory scope is a configured `[memory.workspace_ids]` override, or else the
-directory name followed by the first 12 hex digits of the SHA-256 of the
-canonical path, such as `otto-60ef11ccec92`. A marker written before this
-format holds `sha256:<64 hex>` and keeps it. Existing transcripts and memory
-records are not rewritten. Later conflicting memory overrides fail startup
-rather than silently switch to another scope.
+A directory without a marker gets a new identity on first initialization: a
+random UUID and a random 32-character session key, which names the directory
+under `~/.otto/sessions` that holds the workspace's sessions. The memory scope
+is a configured `[memory.workspace_ids]` override, or else the directory name
+followed by the first 12 hex digits of the SHA-256 of the canonical path, such
+as `otto-60ef11ccec92`. Sessions that an earlier release stored under a
+path-derived session key are not listed for a new identity. Later conflicting
+memory overrides fail startup rather than silently switch to another scope.
 
-Do not delete the marker casually: the next startup derives identity again and
-can lose lookup of earlier workspace memory. Preserve an existing scope using
+Do not delete the marker casually: the next startup creates a new identity with
+a new session key, so the workspace's earlier sessions are no longer listed. Preserve an existing scope using
 `[memory.workspace_ids]` before reinitialization; conflicting overrides fail
 rather than silently rebinding. Stop all affected processes before repairing
 identity or replacing a marker. This does not move the actual memory/session

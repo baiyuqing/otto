@@ -28,8 +28,6 @@ use otto_core::config::duration::parse_go_duration;
 pub struct CliOptions {
     pub config_path: String,
     pub cwd: String,
-    /// Deprecated `--profile NAME`.
-    pub profile: String,
     /// Deprecated `--provider NAME`, paired with a bare `--model ID`.
     pub provider: String,
     pub base_url: String,
@@ -72,11 +70,6 @@ impl CliOptions {
     /// One stderr line for each deprecated model flag that was written.
     pub fn deprecation_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
-        if !self.profile.is_empty() {
-            warnings.push(
-                "otto: --profile is deprecated; use --model <provider>/<model_id>\n".to_string(),
-            );
-        }
         if !self.provider.is_empty() && !self.model.is_empty() {
             warnings.push(
                 "otto: --provider is deprecated; use --model <provider>/<model_id>\n".to_string(),
@@ -163,7 +156,6 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
 
     options.config_path = set.string("config");
     options.cwd = set.string_or("cwd", ".");
-    options.profile = set.string("profile");
     options.provider = set.string("provider");
     options.base_url = set.string("base-url");
     options.model = set.string("model");
@@ -359,7 +351,6 @@ Options:
   --cwd PATH             workspace directory
   --model PROVIDER/ID    model selector, for example claude/<model_id>
   --base-url URL         provider base URL override
-  --profile NAME         deprecated: legacy profile name; use --model
   --provider NAME        deprecated: pairs with a bare --model ID; use --model PROVIDER/ID
   --thinking LEVEL       model thinking effort: low, medium, high, xhigh, or max
   --prompt PROMPT        run PROMPT (or @FILE) without interaction and exit
@@ -400,7 +391,6 @@ const DECLARED: &[(&str, Kind)] = &[
     ("V", Kind::Bool),
     ("config", Kind::Str),
     ("cwd", Kind::Str),
-    ("profile", Kind::Str),
     ("provider", Kind::Str),
     ("base-url", Kind::Str),
     ("model", Kind::Str),

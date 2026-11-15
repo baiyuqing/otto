@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    const PRESERVED: &str = "# preserved\n[profiles.demo]\nmodel = 'example'\n";
+    const PRESERVED: &str = "# preserved\n[providers.demo]\ntype = 'claude'\n";
 
     #[test]
     fn resolve_read_path_expands_home_and_rejects_what_the_profile_would() {
@@ -279,7 +279,7 @@ mod tests {
             text.contains(&format!("read_paths = ['{resolved}']")),
             "{text}"
         );
-        assert!(text.contains("[profiles.demo]"), "{text}");
+        assert!(text.contains("[providers.demo]"), "{text}");
         assert_eq!(text.matches(resolved.as_str()).count(), 1, "{text}");
     }
 

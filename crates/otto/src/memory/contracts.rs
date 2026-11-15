@@ -36,8 +36,8 @@ pub(crate) const MAX_QUERY_TERM_BYTES: usize = 256;
 /// set over this budget is rejected. Not configurable.
 pub(crate) const MAX_STANDING_TOKENS: usize = 2000;
 /// A row cap on the recall query for the standing set. Every record costs at
-/// least one token, so only legacy data written past [`MAX_STANDING_TOKENS`]
-/// can reach it, and [`StandingUsage::omitted`] counts what it cuts.
+/// least one token, so only record files that were added or edited outside the
+/// write path past [`MAX_STANDING_TOKENS`] can reach it, and [`StandingUsage::omitted`] counts what it cuts.
 pub(crate) const STANDING_ROW_GUARD: usize = 128;
 pub(crate) const MAX_RETRIEVAL_CANDIDATES: usize = 256;
 pub(crate) const MAX_REQUEST_SCOPES: usize = 16;

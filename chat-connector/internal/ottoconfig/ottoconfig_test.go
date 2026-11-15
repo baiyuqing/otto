@@ -30,30 +30,6 @@ thinking = "high"
 socket = ""
 `
 
-const legacySample = `
-default_profile = "luna"
-
-[profiles.luna]
-provider = "chatgpt"
-model = "gpt-5.6-luna"
-
-[profiles.claude]
-provider = "claude"
-base_url = "https://claude.proxy.example"
-model = "claude-x"
-
-[profiles.sonnet]
-provider = "claude"
-base_url = "https://api.anthropic.com"
-model = "claude-sonnet"
-
-[profiles.deepseek]
-provider = "openai-compatible"
-base_url = "https://api.deepseek.example/v1"
-api_key_env = "DEEPSEEK_API_KEY"
-model = "deepseek-v4-flash"
-`
-
 func write(t *testing.T, text string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
@@ -92,38 +68,6 @@ func TestReadParsesSortedSelectorsAndTheDefault(t *testing.T) {
 	last := snapshot.Models[3]
 	if last.Provider != "openrouter" || last.ModelID != "anthropic/claude-x" {
 		t.Errorf("selector split = %+v, want provider openrouter and model ID anthropic/claude-x", last)
-	}
-}
-
-func TestReadConvertsLegacyProfilesToSelectors(t *testing.T) {
-	t.Parallel()
-	snapshot, err := Read(write(t, legacySample))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Default != "chatgpt/gpt-5.6-luna" {
-		t.Errorf("default = %q, want the converted default_profile", snapshot.Default)
-	}
-	want := []string{
-		"chatgpt/gpt-5.6-luna",       // default connection: provider type
-		"claude-custom/claude-x",     // profile named claude with a custom base_url
-		"claude/claude-sonnet",       // explicit Anthropic defaults are still default
-		"deepseek/deepseek-v4-flash", // custom connection: profile name
-	}
-	if got := selectors(snapshot); !reflect.DeepEqual(got, want) {
-		t.Errorf("selectors = %v, want %v", got, want)
-	}
-}
-
-func TestReadRejectsAFileMixingLegacyAndModelKeys(t *testing.T) {
-	t.Parallel()
-	for name, text := range map[string]string{
-		"table":   "[profiles.a]\nprovider = \"chatgpt\"\nmodel = \"m\"\n\n[providers.chatgpt.models.\"m\"]\n",
-		"default": "default_profile = \"a\"\ndefault_model = \"chatgpt/m\"\n",
-	} {
-		if _, err := Read(write(t, text)); err == nil {
-			t.Errorf("%s: a file with legacy and new keys must be an error", name)
-		}
 	}
 }
 

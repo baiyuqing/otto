@@ -28,7 +28,7 @@ otto serve [--socket PATH] [--listen HOST:PORT]
 ```
 
 `serve` accepts the same startup flags as the interactive frontends
-(`--config`, `--cwd`, `--model`, `--base-url`, the deprecated `--profile` and
+(`--config`, `--cwd`, `--model`, `--base-url`, the deprecated
 `--provider`, `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
 `--socket` and `--listen`. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
 `--archive`, and `--no-session`.
@@ -511,7 +511,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/config/providers` | Return `{"default_model","providers":[...]}`. Each provider has `name`, `type`, `builtin`, the optional `base_url`, `api_key_env`, `api_version` and `workspace_id_env`, and `models`, a list of `{model_id, selector, default, thinking?, context_window?, compaction_window?}`. Built-in providers are always listed. API keys appear only as environment variable names. |
 | `GET /v1/config/providers/{name}` | Return one provider in the same shape; `404 provider_not_found`. |
 | `GET /v1/config/models?provider=<name>` | Query the provider's model catalog: `{"provider","models":[ids]}`. `501 models_unsupported` for `chatgpt`, `400 invalid_provider` for an unsupported provider type, `400 api_key_unavailable` when the key variable is unset, `404 provider_not_found`, `502 models_failed` when the endpoint request fails. |
-| `POST /v1/config/changes` | Prepare an approval-gated change to the user configuration. Body `{"kind":...}` with `set_default_model{model}`, `set_provider{provider,type,base_url?,api_key_env?,api_version?,workspace_id_env?}`, `set_provider_field{provider,field,value}`, `remove_provider{provider}`, `set_model{model,thinking?}`, `set_model_field{model,field:"thinking",value}` or `remove_model{model}`. Returns `{"id","expires_in_seconds","operation","target","field"?,"diff"}`; the preview holds no API-key values. `400 invalid_provider`, `invalid_field` or `invalid_change`; `409 model_in_use` when `default_model` or `approval.reviewer_model` selects the target; `409 legacy_profiles_config` while the host file still holds `profiles`, `default_profile` or `approval.reviewer_profile` (convert it first, see [migration](getting-started.md#migrating-from-profiles)). A prepared change is confirmed with `POST /v1/config/changes/{id}` (`404` unknown or used id, `409` configuration changed since the preview, `410` expired; a restart is required afterwards) or cancelled with `DELETE /v1/config/changes/{id}` (`204`). |
+| `POST /v1/config/changes` | Prepare an approval-gated change to the user configuration. Body `{"kind":...}` with `set_default_model{model}`, `set_provider{provider,type,base_url?,api_key_env?,api_version?,workspace_id_env?}`, `set_provider_field{provider,field,value}`, `remove_provider{provider}`, `set_model{model,thinking?}`, `set_model_field{model,field:"thinking",value}` or `remove_model{model}`. Returns `{"id","expires_in_seconds","operation","target","field"?,"diff"}`; the preview holds no API-key values. `400 invalid_provider`, `invalid_field` or `invalid_change`; `409 model_in_use` when `default_model` or `approval.reviewer_model` selects the target. A prepared change is confirmed with `POST /v1/config/changes/{id}` (`404` unknown or used id, `409` configuration changed since the preview, `410` expired; a restart is required afterwards) or cancelled with `DELETE /v1/config/changes/{id}` (`204`). |
 | `GET /v1/config/providers` | List providers with their model tables. API keys appear only as environment variable names, never as values. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/observer` | Read a bounded snapshot of the current parent's live and recorded children for the TUI observer. Returns `{tasks:[{row,entries,missing}],truncated}`; `truncated:true` indicates that only recent tasks are included. Entry tails are bounded and contain visible assistant text and tool activity, not reasoning. Uses ordinary session/workspace access checks, grants no task-control or approval authority, and requires no extra configuration. |
@@ -878,7 +878,7 @@ otto acp [--config PATH] [--cwd PATH] [--model PROVIDER/MODEL_ID] ...
 ```
 
 `acp` accepts `--config`, `--cwd`, `--model`, `--base-url`, `--thinking`,
-the deprecated `--profile` and `--provider`, `--sandbox`, `--shell-timeout`, and
+the deprecated `--provider`, `--sandbox`, `--shell-timeout`, and
 `--max-output-bytes`. It rejects `--ui`, `--prompt`, `--resume`,
 `--continue`, `--no-session`, `--archive`, and the `serve`-only flags;
 `--socket` is accepted only with `--attach`.
@@ -918,13 +918,9 @@ belong to an advertised platform. `otto-connect` supplies its admitted chats
 by default; an empty array disables chat delivery. Otto advertises this
 support as `agentCapabilities._meta.otto.scheduleDeliveryChats: true`.
 Claims are limited to these destinations before acquiring a delivery lease.
-Without the destination field, platform delivery works only while that
-connection is the sole live offer for the platform. Overlapping legacy offers
-remain pending and log `schedule_delivery_conflict`; no message body is sent
-to an ambiguous client. Disconnect removes the offer; a crashed connection's
+Without the destination field, or with an empty array, Otto delivers nothing
+to that connection. Disconnect removes the offer; a crashed connection's
 offer expires after 90 s, refreshed every 15 s independently of slow sends.
-The schedule database upgrades v1 to v2 without removing items. Restart Otto
-and its attach relays together when upgrading.
 
 Otto sends each eligible due item as the request
 `_otto/schedule/deliver` with params `{"chat": "telegram:123", "text": "..."}`
@@ -1368,7 +1364,7 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/queue <prompt>` | Queues an independent prompt without model routing. Starts immediately when idle, otherwise waits behind the task and any approval; acknowledges actual admission. |
 | `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](servers-and-connectors.md#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
-| `/model` | Answered by `otto-connect`: it posts the models from the local `~/.config/otto/config.toml` (`[providers.<name>.models]`, and converted legacy `[profiles]`), one line each as `provider/model_id`, plus one button per model. Choosing a button switches the conversation exactly as `/model <provider>/<model_id>` does. On a platform without buttons the same list is posted as text. It makes no model request. The list covers the user configuration only (a workspace's `.otto/config.toml` is not read), and it marks the configured `default_model`, not the session's current one. |
+| `/model` | Answered by `otto-connect`: it posts the models from the local `~/.config/otto/config.toml` (`[providers.<name>.models]`), one line each as `provider/model_id`, plus one button per model. Choosing a button switches the conversation exactly as `/model <provider>/<model_id>` does. On a platform without buttons the same list is posted as text. It makes no model request. The list covers the user configuration only (a workspace's `.otto/config.toml` is not read), and it marks the configured `default_model`, not the session's current one. |
 | `/model <provider>/<model_id>` | Sent to Otto as a prompt; `otto acp` rebuilds this session on the named model, replies "Switched to model …", and leaves the configuration file and every other session unchanged. It works whether the connector runs `otto acp` or `otto acp --attach`, uses no model request, and is therefore the way to move off a model whose quota is exhausted. An unknown selector answers with an error. |
 | `/allow` | Answers the pending permission request with Allow once. |
 | `/deny` | Answers the pending permission request with Deny. |
@@ -1441,8 +1437,7 @@ minutes, or `/config cancel <id>`. No raw TOML, arbitrary writes or credential
 values are accepted. Chat cannot create or edit providers: creating a provider
 or changing its `base_url`, `api_key_env`, `api_version` or `workspace_id_env`
 is host-only, so chat cannot change where server environment credentials are
-sent. A change is refused with `legacy_profiles_config` while the host file
-still uses `[profiles]`.
+sent.
 
 Restart `otto serve` after saving; existing sessions never silently switch.
 On failed previews search connector/server logs for `request_id`. Logs contain

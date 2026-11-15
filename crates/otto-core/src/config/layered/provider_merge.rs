@@ -153,19 +153,6 @@ pub(super) fn drop_connection_on_type_change(
 }
 
 impl ManagedPolicy {
-    /// Rejects `force` keys of the removed profile format so a forced value is never dropped.
-    pub(super) fn reject_legacy_force_keys(&self) -> Result<(), ConfigError> {
-        for key in ["default_profile", "profiles"] {
-            if self.force.contains_key(key) {
-                return Err(ConfigError::new(format!(
-                    "managed policy force.{key} is no longer supported; use force.default_model, \
-                     force.providers.<name>.<field> or force.providers.<name>.models.\"<id>\".thinking"
-                )));
-            }
-        }
-        Ok(())
-    }
-
     /// Checks the resolved model and provider against the forced `default_model`,
     /// `providers.<name>.<field>` and `providers.<name>.models."<id>".thinking`.
     pub(super) fn model_runtime(&self, runtime: &Runtime) -> Result<(), ConfigError> {

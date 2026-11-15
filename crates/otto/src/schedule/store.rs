@@ -108,11 +108,10 @@ pub trait ScheduleStore: Send + Sync {
     fn register_delivery_client(
         &self,
         id: &str,
-        platforms: &[String],
-        destinations: Option<&[Origin]>,
+        destinations: &[Origin],
         now: DateTime<Utc>,
     ) -> Result<()>;
-    fn refresh_delivery_client(&self, id: &str, now: DateTime<Utc>) -> Result<Vec<String>>;
+    fn refresh_delivery_client(&self, id: &str, now: DateTime<Utc>) -> Result<()>;
     fn unregister_delivery_client(&self, id: &str) -> Result<()>;
     fn notifier(&self) -> &Notify;
     fn create(&self, item: NewItem, now: DateTime<Utc>) -> std::result::Result<Item, CreateError>;

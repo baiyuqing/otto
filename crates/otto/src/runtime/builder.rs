@@ -529,12 +529,7 @@ impl Builder {
 pub(crate) fn resume_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
     environment
         .iter()
-        .filter(|(key, _)| {
-            !matches!(
-                key.as_str(),
-                "OTTO_PROVIDER" | "OTTO_PROFILE" | "OTTO_MODEL" | "OTTO_UI"
-            )
-        })
+        .filter(|(key, _)| !matches!(key.as_str(), "OTTO_PROVIDER" | "OTTO_MODEL" | "OTTO_UI"))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }

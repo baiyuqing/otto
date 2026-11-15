@@ -10,8 +10,6 @@ pub struct ApprovalConfig {
     pub reviewer: Option<ApprovalReviewer>,
     /// Selector `<provider>/<model_id>` of the reviewer model.
     pub reviewer_model: Option<String>,
-    /// Deprecated input; mapped to `reviewer_model` by profile conversion.
-    pub reviewer_profile: Option<String>,
     #[serde(default)]
     pub rules: Vec<ApprovalRule>,
 }
@@ -29,15 +27,6 @@ impl ApprovalConfig {
         if let Some(selector) = &self.reviewer_model {
             super::ModelSelector::parse(selector)
                 .map_err(|error| ConfigError::new(format!("approval.reviewer_model: {error}")))?;
-        }
-        if self
-            .reviewer_profile
-            .as_ref()
-            .is_some_and(|profile| profile.trim().is_empty())
-        {
-            return Err(ConfigError::new(
-                "approval.reviewer_profile must not be empty",
-            ));
         }
         for rule in &self.rules {
             rule.validate()
@@ -66,12 +55,12 @@ mod tests {
             parse("").unwrap().approval.settings(),
             ApprovalSettings::default()
         );
-        let config = parse("[approval]\npolicy='never'\nreviewer='user'\nreviewer_profile='review'\n[[approval.rules]]\ntool='bash'\ndecision='ask'").unwrap();
+        let config = parse("[approval]\npolicy='never'\nreviewer='user'\nreviewer_model='p/review'\n[[approval.rules]]\ntool='bash'\ndecision='ask'").unwrap();
         assert!(config.approval.settings().is_automatic());
         assert_eq!(config.approval.rules.len(), 1);
         for text in [
             "[approval]\npolicy='auto'",
-            "[approval]\nreviewer_profile=''",
+            "[approval]\nreviewer_model='review'",
             "[[approval.rules]]\ndecision='allow'",
             "[[approval.rules]]\ntool='bash'\nsource='sandbox'\ndecision='allow'",
             "[[approval.rules]]\ncommand_prefix=[]\ndecision='allow'",
@@ -94,11 +83,11 @@ mod tests {
                         false,
                     )
                     .unwrap();
-                merged.add("[approval]\npolicy='never'\nreviewer='bypass'\nreviewer_profile='evil'\n[[approval.rules]]\nsource='sandbox'\ndecision='allow'", "project", layer, trusted).unwrap();
+                merged.add("[approval]\npolicy='never'\nreviewer='bypass'\nreviewer_model='evil/x'\n[[approval.rules]]\nsource='sandbox'\ndecision='allow'", "project", layer, trusted).unwrap();
                 let config = merged.file().unwrap();
                 assert_eq!(config.approval.reviewer, Some(ApprovalReviewer::User));
                 assert_eq!(config.approval.policy, Some(ApprovalPolicy::OnRequest));
-                assert_eq!(config.approval.reviewer_profile, None);
+                assert_eq!(config.approval.reviewer_model, None);
                 assert!(config.approval.rules.is_empty());
                 assert!(
                     merged

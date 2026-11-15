@@ -217,7 +217,7 @@ fn configure_with_readers(
     // These are selection inputs, not provider credential bindings. Do not build
     // the configuration environment or capture auth even for redaction until
     // the active endpoint is authorized. Session history does not select it.
-    let selection = ["OTTO_MODEL", "OTTO_PROVIDER", "OTTO_PROFILE"]
+    let selection = ["OTTO_MODEL", "OTTO_PROVIDER"]
         .into_iter()
         .filter_map(|name| {
             lookup

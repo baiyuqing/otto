@@ -98,8 +98,9 @@ not as a memory backend. See the
 ## Workspace ownership
 
 `workspace` owns the versioned identity marker, initialized before session
-lookup, including serve startup. Read-only lookup derives the same keys when
-no marker exists; configured memory IDs are adopted once and conflicts fail.
+lookup, including serve startup. A directory without a marker gets a new
+identity with a random session key; configured memory IDs are adopted once and
+conflicts fail.
 
 Use pinned `fsops` descriptors, refuse symlinks, serialize changes with the
 workspace lock and publish complete markers atomically. Corruption fails

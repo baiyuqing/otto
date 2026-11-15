@@ -27,7 +27,6 @@ impl Builder {
         let overrides = Overrides {
             model: String::new(),
             provider: String::new(),
-            legacy_profile: String::new(),
             ..self.overrides.clone()
         };
         otto_core::config::resolve::resolve(
@@ -45,7 +44,6 @@ impl Builder {
         let overrides = Overrides {
             model: selector.to_string(),
             provider: String::new(),
-            legacy_profile: String::new(),
             base_url: String::new(),
             ..self.overrides.clone()
         };

@@ -1035,7 +1035,15 @@ lease in `<session-id>.lease/` beside the session file.
   renewal has not succeeded for 5/6 of `lease_seconds`, or another host has
   taken the session over, the process kills the processes its tools started
   and exits with status `75` without writing. Tool calls and log writes are
-  refused once the lease is lost.
+  refused once the lease is lost. After the process was stopped (`SIGSTOP`,
+  a terminal suspend, a debugger) and resumed, the 5/6 rule is not applied
+  at once: the process checks whether another host created a successor
+  epoch, and if none exists it renews the lease. It exits as above when a
+  successor epoch exists, or when renewal still has not succeeded 3 seconds
+  after the stop was noticed. During those 3 seconds a tool call or log
+  write is refused when the lease directory cannot be read. A
+  process whose renewal is blocked while it keeps running is not affected
+  by this and exits at 5/6 of `lease_seconds`.
 - On Linux, after each tool call of a lease-managed session Otto runs
   `syncfs(2)` on the workspace's file system before the result is written; a
   sync failure turns the result into an error. A call of a read-only tool

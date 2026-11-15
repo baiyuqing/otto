@@ -16,6 +16,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- A process that holds a session lease and was stopped for longer than 5/6 of
+  `lease_seconds` (`SIGSTOP`, a terminal suspend, a debugger) no longer exits
+  on resume when no other host took the session over. It checks for a
+  successor epoch and renews the heartbeat; it exits when a successor epoch
+  exists, or when renewal has not succeeded 3 seconds after the stop was
+  noticed. A renewal blocked in file I/O while the process runs still ends
+  the process at 5/6 of `lease_seconds`. See
+  [Continuing a session on another host](docs/manual/interactive-use.md#continuing-a-session-on-another-host).
 - Opening a lease-managed session whose holder stopped without releasing the
   lease no longer waits 7/6 of `lease_seconds` (35 s by default) when the
   holder was a process of the same host that no longer exists. Heartbeats and

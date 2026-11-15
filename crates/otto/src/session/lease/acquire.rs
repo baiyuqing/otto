@@ -330,7 +330,7 @@ pub(super) fn finish_acquire(
     acquired: Acquired,
 ) -> Result<(Arc<Lease>, Acquired), AcquireError> {
     let lease = Arc::new(Lease {
-        _keeper: Arc::clone(keeper),
+        keeper: Arc::clone(keeper),
         epoch,
         host: local_hostname(),
         pid: std::process::id(),

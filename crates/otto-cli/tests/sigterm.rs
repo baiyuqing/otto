@@ -28,8 +28,11 @@ fn configure(home: &Path, base_url: &str, failover: bool) {
     let config_dir = home.join(".config/otto");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     let mut text = binary_harness::model_config(base_url, "OTTO_API_KEY");
+    // Failover is on by default, so the case without a lease turns it off.
     if failover {
         text.push_str("\n[failover]\nenabled = true\nlease_seconds = 12\n");
+    } else {
+        text.push_str("\n[failover]\nenabled = false\n");
     }
     std::fs::write(config_dir.join("config.toml"), text).expect("write config");
 }
@@ -308,7 +311,7 @@ fn sigterm_migrates_a_lease_managed_session_and_a_later_resume_takes_over_immedi
     );
 }
 
-/// S9(c): with no `[failover]`, a `SIGTERM` has no lease to migrate and no
+/// S9(c): with `[failover] enabled = false`, a `SIGTERM` has no lease to migrate and no
 /// running `otto serve` to cancel cleanly, so `Terminate::on_signal` decides
 /// `Die` and the process is killed by the signal.
 #[test]

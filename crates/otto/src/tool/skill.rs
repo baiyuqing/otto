@@ -24,7 +24,7 @@ use super::result::capped_text_result;
 use super::result::decode_strict_json;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
 use crate::skill::{Catalog, Skill, list_files, load, too_large};
-use crate::workspace::confined::Workspace;
+use otto_session::workspace::confined::Workspace;
 
 /// The number of skill files named in a loaded skill's header.
 const MAX_SKILL_FILE_LISTING: usize = 50;

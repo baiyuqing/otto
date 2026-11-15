@@ -4,7 +4,7 @@ use super::*;
 #[derive(Debug)]
 struct RejectOnce(AtomicBool);
 
-impl crate::session::WriterOwnership for RejectOnce {
+impl otto_session::WriterOwnership for RejectOnce {
     fn check(&self) -> Result<(), String> {
         if self.0.swap(false, Ordering::SeqCst) {
             Err("injected failure before attempt write".into())
@@ -31,7 +31,7 @@ async fn resume_retries_same_child_after_attempt_append_fails_before_write() {
         interrupted::INTERRUPTED_STATUS,
     );
     // Add a real acknowledged attempt and its terminal boundary to the fixture.
-    let (store, _) = crate::session::Store::open(&path).unwrap();
+    let (store, _) = otto_session::Store::open(&path).unwrap();
     store
         .append_custom_entry(
             "otto.task_attempt",
@@ -88,7 +88,7 @@ async fn resume_retries_same_child_after_attempt_append_fails_before_write() {
 #[derive(Debug)]
 struct RejectWithUncertainTail(std::path::PathBuf);
 
-impl crate::session::WriterOwnership for RejectWithUncertainTail {
+impl otto_session::WriterOwnership for RejectWithUncertainTail {
     fn check(&self) -> Result<(), String> {
         use std::io::Write;
         // Deterministic changed-evidence simulation at the append boundary.

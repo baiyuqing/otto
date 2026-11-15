@@ -3,8 +3,8 @@
 //! and marks the child transcripts the notification describes as
 //! interrupted.
 //!
-//! `crate::session::Store::from_file` repairs dangling tool calls at open
-//! time and records what it did as a [`crate::session::Recovery`]; the
+//! `otto_session::Store::from_file` repairs dangling tool calls at open
+//! time and records what it did as a [`otto_session::Recovery`]; the
 //! parent's own sub-agent children are not part of that record, since they
 //! are separate transcripts, so this module re-derives their state with
 //! [`crate::subagent::interrupted::scan`]. [`notify`] is called once, from
@@ -21,9 +21,9 @@ use otto_core::agent::inbox::{Notification, NotificationKind};
 use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Role};
 
-use crate::session::lease;
-use crate::session::{Recovery, RecoveryCause, UnansweredCall};
 use crate::subagent::interrupted::{self, ChildRecord};
+use otto_session::lease;
+use otto_session::{Recovery, RecoveryCause, UnansweredCall};
 
 /// Truncation limits for the pieces of the recovery text that come from
 /// unbounded user or model input, so one runaway prompt or argument list
@@ -32,7 +32,7 @@ const CALL_ARGUMENTS_PREVIEW_BYTES: usize = 2048;
 const PROMPT_PREVIEW_BYTES: usize = 500;
 
 /// Reports the recovery `session` recorded (see
-/// `crate::session::Store::take_recovery`) to `inbox`, and marks every
+/// `otto_session::Store::take_recovery`) to `inbox`, and marks every
 /// interrupted child transcript under `children_dir` as interrupted. A
 /// no-op when there was no recovery, or when it left nothing to report: no
 /// dangling parent call, no interrupted child, and the parent's own
@@ -309,10 +309,10 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::lease;
     use otto_core::agent::inbox::Inbox;
     use otto_core::model::{Block, FinishReason};
     use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;
+    use otto_session::lease;
 
     fn takeover(repaired: Vec<UnansweredCall>) -> Recovery {
         Recovery {
@@ -498,7 +498,7 @@ mod tests {
     /// [`interrupted::scan`] reads.
     fn child_with_result(parent: &Path, task_id: &str, prompt: &str, status: Option<&str>) {
         let workspace = parent.parent().expect("dir");
-        let child = crate::session::Store::create_child_lazy(
+        let child = otto_session::Store::create_child_lazy(
             parent,
             &format!("{task_id}-child"),
             otto_core::session::Header {
@@ -630,7 +630,7 @@ mod tests {
         let workspace = root.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
 
-        let child = crate::session::Store::create_child_lazy(
+        let child = otto_session::Store::create_child_lazy(
             &parent_path,
             "t1-child",
             otto_core::session::Header {
@@ -660,7 +660,7 @@ mod tests {
             .expect("append task_spec");
         child.close().expect("close child");
 
-        let child_path = crate::session::Store::child_path(&parent_path, "t1-child");
+        let child_path = otto_session::Store::child_path(&parent_path, "t1-child");
         let original_mode = std::fs::metadata(&child_path)
             .expect("stat child")
             .permissions()

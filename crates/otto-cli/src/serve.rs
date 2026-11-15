@@ -23,20 +23,20 @@ use tokio_util::sync::CancellationToken;
 
 use otto::app::Controller;
 use otto::sandbox::control::SandboxControl;
-use otto::session::{self as sessionfs, MAX_LIST_SESSIONS};
 use otto_platform::log::Logger;
 use otto_server::listen::{AllowedHosts, Listener, listen_tcp, listen_unix};
 use otto_server::tls::{TlsListener, load_acceptor};
 use otto_server::{self, Factory, Info, Options, SESSION_NOT_FOUND, Server};
+use otto_session::{self as sessionfs, MAX_LIST_SESSIONS};
 
 use otto::runtime::builder::Builder;
 use otto::runtime::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use otto::runtime::startup::load_workspace;
 use otto::sandbox::info::SandboxInfo;
-use otto::workspace::admission::{
+use otto_platform::fsops::canonical_directory;
+use otto_session::workspace::admission::{
     Admission, admit_workspace, canonicalize_workspace_roots, trusted_projects,
 };
-use otto_platform::fsops::canonical_directory;
 
 mod delivery;
 mod factory;

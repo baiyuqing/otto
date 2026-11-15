@@ -55,7 +55,7 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
     let approvals = Arc::new(crate::approval::Service::in_memory().unwrap());
     owner.attach_approvals(&approvals).unwrap();
     let source = SharedSession::new(Arc::new(
-        crate::session::Store::create(
+        otto_session::Store::create(
             dir.path().join("sessions"),
             Header {
                 id: "0123456789abcdef0123456789abcdef".into(),
@@ -262,7 +262,7 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
         replacement_inbox.is_empty(),
         "/new must never redirect old-source events"
     );
-    let (reopened, warnings) = crate::session::Store::open(&path).unwrap();
+    let (reopened, warnings) = otto_session::Store::open(&path).unwrap();
     assert!(warnings.is_empty());
     let reopened = SharedSession::new(Arc::new(reopened));
     install_resources(&reopened);

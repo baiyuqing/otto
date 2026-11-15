@@ -366,7 +366,7 @@ impl Service {
     /// The origin changes delivery only; scope remains the authority boundary.
     pub(crate) fn create_with_origin(&self, proposal: Proposal, origin: &str) -> Result<Request> {
         if !origin.is_empty() {
-            crate::session::origin::Origin::parse(origin)
+            otto_session::origin::Origin::parse(origin)
                 .map_err(|_| Error::Invalid("invalid approval presentation origin"))?;
         }
         let now = Utc::now().timestamp();

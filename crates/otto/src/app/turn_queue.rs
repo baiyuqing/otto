@@ -21,7 +21,7 @@ use otto_core::mailbox::Mailbox;
 use serde::{Deserialize, Serialize};
 
 use super::Channel;
-use crate::session::origin::Origin;
+use otto_session::origin::Origin;
 
 /// The error text of a prompt whose durable copy could not be saved.
 pub const PROMPT_NOT_PERSISTED: &str = "the prompt could not be saved; nothing was queued";

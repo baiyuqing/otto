@@ -115,7 +115,7 @@ pub(super) async fn local(
                         .tasks_get(&parent, &id)?
                         .ok_or_else(|| "task not found".to_string())?;
                     let history = (!row.session_path.is_empty())
-                        .then(|| otto::session::Store::read_transcript(&row.session_path).ok())
+                        .then(|| otto_session::Store::read_transcript(&row.session_path).ok())
                         .flatten();
                     let missing = history.is_none();
                     Ok(Reply::AgentDetail {

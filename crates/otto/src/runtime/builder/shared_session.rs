@@ -144,7 +144,7 @@ impl SharedSession {
         &self,
         root: &Path,
         workspace: &str,
-    ) -> Result<crate::session::ArchiveResult, String> {
+    ) -> Result<otto_session::ArchiveResult, String> {
         self.0.transcript.archive(root, workspace)
     }
 
@@ -152,11 +152,11 @@ impl SharedSession {
         self.0.transcript.snapshot()
     }
 
-    pub fn lease(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+    pub fn lease(&self) -> Option<Arc<dyn otto_session::WriterOwnership>> {
         self.0.transcript.lease()
     }
 
-    pub(crate) fn take_recovery(&self) -> Option<crate::session::Recovery> {
+    pub(crate) fn take_recovery(&self) -> Option<otto_session::Recovery> {
         self.0.transcript.take_recovery()
     }
 

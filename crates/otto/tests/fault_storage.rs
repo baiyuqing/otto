@@ -139,7 +139,7 @@ fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 
 fn schedule(factory: &SqlRepositories, address: &str) -> Option<Handle> {
     use otto::schedule::{Kind, store::NewItem};
-    use otto::session::origin::Origin;
+    use otto_session::origin::Origin;
     let store = factory.schedule(Path::new(address)).ok()?;
     let listed = store.clone();
     let now = chrono::Utc::now();

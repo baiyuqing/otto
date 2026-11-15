@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use crate::session::SessionHandle;
+use otto_session::SessionHandle;
 
 #[derive(Default)]
 pub(crate) struct WriterRegistry {
@@ -49,8 +49,8 @@ pub fn holds_writer_ownership() -> bool {
 mod tests {
     use super::*;
     use crate::runtime::builder::MemoryHandle;
-    use crate::session::WriterOwnership;
     use otto_core::session::Header;
+    use otto_session::WriterOwnership;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Debug)]

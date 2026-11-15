@@ -407,7 +407,7 @@ async fn a_child_transcript_with_its_inherited_context_is_written_to_its_own_fil
         .join(format!("{}-child.jsonl", task.id));
     assert_eq!(done.status, TaskStatus::Succeeded, "{}", done.error);
     assert_eq!(done.session_path, want.to_string_lossy());
-    let texts: Vec<String> = crate::session::Store::read_transcript(&want)
+    let texts: Vec<String> = otto_session::Store::read_transcript(&want)
         .expect("read child")
         .iter()
         .map(Message::text)

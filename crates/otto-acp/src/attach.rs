@@ -41,9 +41,9 @@ use super::{
 };
 use otto::app::ApprovalDecision;
 use otto::app::Channel;
-use otto::session::origin::Origin;
 use otto_client::{Client, Error as ClientError};
 use otto_server::authorization::Principal;
+use otto_session::origin::Origin;
 
 const LOST: &str = "connection to otto serve lost";
 

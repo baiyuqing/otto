@@ -234,7 +234,7 @@ fn child_store(
         Some(plan) => Arc::new(FaultyFileDriver::new(Arc::new(PosixDriver), plan)),
         None => Arc::new(PosixDriver),
     };
-    let store = crate::session::Store::create_child_lazy_with_driver(
+    let store = otto_session::Store::create_child_lazy_with_driver(
         parent,
         &name,
         otto_core::session::Header {
@@ -248,7 +248,7 @@ fn child_store(
         driver,
     )
     .expect("child store");
-    let path = crate::session::Store::child_path(parent, &name);
+    let path = otto_session::Store::child_path(parent, &name);
     (Arc::new(store), path.to_string_lossy().into_owned())
 }
 
@@ -337,7 +337,7 @@ fn interrupted_fixture_with_capabilities(
     capabilities: Option<&[String]>,
 ) -> PathBuf {
     let name = format!("{task_id}-child");
-    let store = crate::session::Store::create_child_lazy(
+    let store = otto_session::Store::create_child_lazy(
         parent,
         &name,
         otto_core::session::Header {
@@ -400,7 +400,7 @@ fn interrupted_fixture_with_capabilities(
         .append_custom_entry(TASK_RESULT_CUSTOM_TYPE, &result)
         .expect("append task_result");
 
-    let path = crate::session::Store::child_path(parent, &name);
+    let path = otto_session::Store::child_path(parent, &name);
     store.close().expect("close");
     path
 }

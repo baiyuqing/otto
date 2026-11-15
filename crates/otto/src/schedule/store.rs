@@ -1,8 +1,8 @@
 //! Domain records and the typed schedule persistence port.
 
 use super::{Kind, Repeat, RunOutcome, Scope, State};
-use crate::session::origin::Origin;
 use chrono::{DateTime, NaiveTime, Utc};
+use otto_session::origin::Origin;
 use std::fmt;
 use tokio::sync::Notify;
 

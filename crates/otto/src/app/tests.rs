@@ -7,7 +7,7 @@ use crate::sandbox::info::SandboxNetwork;
 
 /// The `heartbeat` file layout `session::lease` writes, reproduced here
 /// to simulate a running holder without a live `Lease` of this process's
-/// own (see [`crate::session::tests`]'s test-safety note for the same
+/// own (see [`otto_session::tests`]'s test-safety note for the same
 /// pattern).
 fn lease_heartbeat_bytes(epoch: u64, host: &str, pid: u32, released: bool, seq: u64) -> Vec<u8> {
     let json = serde_json::json!({
@@ -31,7 +31,7 @@ fn lease_heartbeat_bytes(epoch: u64, host: &str, pid: u32, released: bool, seq: 
 /// lines.
 fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transcript, String) {
     let name = format!("{task_id}-child");
-    let store = crate::session::Store::create_child_lazy(
+    let store = otto_session::Store::create_child_lazy(
         parent,
         &name,
         otto_core::session::Header {
@@ -44,13 +44,13 @@ fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transc
         },
     )
     .expect("child store");
-    let path = crate::session::Store::child_path(parent, &name);
+    let path = otto_session::Store::child_path(parent, &name);
     (Arc::new(store), path.to_string_lossy().into_owned())
 }
 
 /// Reads a lease's fixed-size heartbeat file and reports whether its
 /// `released` field is `true`. Parses only that one field, matching
-/// [`crate::session::lease`]'s own doc comment on why the heartbeat is
+/// [`otto_session::lease`]'s own doc comment on why the heartbeat is
 /// read back in tests elsewhere in this crate.
 fn heartbeat_released(session_path: &str) -> bool {
     let heartbeat = Path::new(session_path)

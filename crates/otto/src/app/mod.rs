@@ -119,8 +119,8 @@ use crate::runtime::builder::{Builder, Runner, RuntimeInfo, SharedSession};
 use crate::sandbox::config_edit::{self as sandbox_config, SandboxChange};
 use crate::sandbox::info::SandboxInfo;
 use crate::schedule::remind::Reminders;
-use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
 pub use channel::Channel;
+use otto_session::{ArchiveResult, MAX_LIST_SESSIONS};
 
 use crate::sandbox::control::SandboxControl;
 pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
@@ -390,7 +390,7 @@ pub struct Controller {
 }
 
 /// Clears passive presentation routing when one logical user turn ends.
-pub(crate) struct PresentationOriginGuard(Arc<crate::session::origin::TurnOrigin>);
+pub(crate) struct PresentationOriginGuard(Arc<otto_session::origin::TurnOrigin>);
 
 impl Drop for PresentationOriginGuard {
     fn drop(&mut self) {
@@ -512,7 +512,7 @@ pub(crate) fn canonical_session_path(path: &str) -> String {
 }
 
 fn clean(path: &Path) -> String {
-    sessionfs::clean_go_path(&path.to_string_lossy())
+    otto_platform::fsops::clean_go_path(&path.to_string_lossy())
 }
 
 /// A controller whose builder carries bash approvals and a sandbox control,

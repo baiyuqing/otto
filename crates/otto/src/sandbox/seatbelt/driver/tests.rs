@@ -321,8 +321,8 @@ async fn workspace_git_metadata_is_read_only_but_git_workflows_work() {
     let Some(fixture) = fixture_with(true).await else {
         return;
     };
-    crate::workspace::initialize(&fixture.workspace, "").expect("workspace identity");
-    let marker = fixture.workspace.join(crate::workspace::MARKER);
+    otto_session::workspace::initialize(&fixture.workspace, "").expect("workspace identity");
+    let marker = fixture.workspace.join(otto_session::workspace::MARKER);
     let marker_before = std::fs::read(&marker).expect("read workspace identity");
     let config = fixture.workspace.join(".git/config");
     let before = std::fs::read(&config).expect("read .git/config");

@@ -23,6 +23,14 @@
   depends on no workspace crate. Domain schemas and repositories stay in the
   domain modules of `otto`. `otto` and the crates above it import it as
   `otto_storage::...`; `otto` does not re-export it.
+- `otto-session` holds session files and workspace identity: the JSONL session
+  `Store`, its writer lease, prepared sessions, listing, fork, archive and
+  delete, the `SessionRepository` contract with the POSIX implementation, the
+  `Origin` of a turn, and `workspace` (identity marker, move history, confined
+  `Workspace`, admission). It depends on `otto-core` and `otto-platform`
+  (tests also on `otto-faults`) and never on `otto`; its `test-support`
+  feature adds test accessors. `otto` and the crates above it import it as
+  `otto_session::...`; `otto` does not re-export it.
 - `otto-faults` is test support: the fault vocabulary (`FaultPlan`, `Fault`,
   `Rule`), the file, publish, SQL and crash doubles over `otto-platform` and
   `otto-storage`, and the scripted HTTP origin server. It depends on
@@ -37,7 +45,7 @@
   and the REPL), `otto-server` (HTTP serve frontend), `otto-acp` (ACP stdio
   and attach frontends) and `otto-cli` (the `otto` binary and composition
   root) are separate packages. Dependencies are one-way:
-  `otto-core` <- `otto-platform` <- `otto`, `otto-storage` <- `otto`,
+  `otto-core` <- `otto-platform` <- `otto-session` <- `otto`, `otto-storage` <- `otto`,
   `otto-platform` and `otto-storage` <- `otto-faults` <- `otto` (feature and tests only), and
   `otto` <- {`otto-client`, `otto-server`, `otto-eval`};
   `otto-server` and `otto-client` <- `otto-acp`; `otto` and `otto-client` <-
@@ -65,14 +73,14 @@
 Each top-level module of `crates/otto/src` belongs to one layer. A module
 imports only modules in its own layer or in a lower layer, and the imports
 between modules of one layer contain no cycle. `otto-core`, `otto-platform`,
-`otto-storage` and `otto-faults` are below every layer and are not part of this table; `otto`
-modules import them as `otto_platform::...` and `otto_storage::...`. The frontend crates (`otto-client`,
+`otto-storage`, `otto-session` and `otto-faults` are below every layer and are not part of this table; `otto`
+modules import them as `otto_platform::...`, `otto_storage::...` and `otto_session::...`. The frontend crates (`otto-client`,
 `otto-terminal`, `otto-server`, `otto-acp`, `otto-cli`) are above it and are
 not part of this table.
 
 | Layer | Modules | Owns |
 | --- | --- | --- |
-| persistence | `workspace`, `session`, `usage` | Workspace identity, the session store with its writer lease and the `Origin` of a turn, the usage store |
+| persistence | `usage` | The usage store |
 | capability | `auth`, `provider`, `typesafe`, `sandbox`, `config`, `tool`, `mcp`, `skill`, `memory`, `approval`, `decision` | What one agent turn uses: model access, the `Tool` trait and `Registry` with the file, Bash and web tools, sandboxed execution, memory, approval |
 | orchestration | `subagent`, `workflow`, `schedule`, `delivery`, `plugin`, `failover`, `metrics` | Features that combine capabilities across turns, sessions or processes |
 | assembly | `runtime` | Building one runnable agent from resolved configuration |
@@ -94,8 +102,8 @@ non-test source of every module. Rules:
   that feature's module and is registered by `runtime`. Inside the capability
   layer `tool` imports `sandbox`, `skill`, `config`, `approval`, `memory` and
   `mcp`; those modules do not import `tool`. A type they share with `tool`
-  lives in `tool` or in a lower module (`otto_platform::fsops`, `workspace`, `approval::shell`,
-  `session::origin`, `sandbox::info`).
+  lives in `tool` or in a lower module (`otto_platform::fsops`, `otto_session::workspace`, `approval::shell`,
+  `otto_session::origin`, `sandbox::info`).
 - A domain's repository implementation (SQLite or file) lives in the domain
   module. `otto-storage` provides the SQL layer and the SQLite driver.
 - Extracting a layer into its own crate happens only after its imports satisfy
@@ -124,7 +132,7 @@ not as a memory backend. See the
 
 ## Workspace ownership
 
-`workspace` owns the versioned identity marker, initialized before session
+`otto_session::workspace` owns the versioned identity marker, initialized before session
 lookup, including serve startup. A directory without a marker gets a new
 identity with a random session key; configured memory IDs are adopted once and
 conflicts fail.
@@ -145,7 +153,7 @@ guarantees; drivers implement I/O (the SQLite driver is in
 each domain's repository implementation (schema, SQL and row mappings) is in
 its domain module as `sqlite.rs` or `sqlite/` (for example
 `approval/sqlite.rs`, `usage/sqlite.rs`); `otto-storage` cannot import any `otto` module because it does not depend on `otto`.
-The session store (`session/`) is the POSIX counterpart.
+The session store (the `otto-session` crate) is the POSIX counterpart.
 `runtime/storage.rs` opens
 repositories at their local paths and injects domain-owned ports. Storage is
 local SQLite (bundled through `rusqlite`) and POSIX session files.

@@ -32,8 +32,6 @@ use otto_core::session::{CURRENT_VERSION, Header, RuntimeMetadata};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use otto::session;
-
 use super::flags::{CliOptions, ParseFailure, Parsed, parse_flags};
 use super::serve;
 use otto::app::{Controller, PROMPT_ACTIVE};

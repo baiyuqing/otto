@@ -15,8 +15,8 @@ fn children_of_an_in_memory_parent_stay_in_memory() {
 async fn a_child_store_refuses_to_append_after_the_parent_lease_is_lost() {
     let root = tempfile::tempdir().expect("root");
     let workspace = tempfile::tempdir().expect("workspace");
-    let lease = crate::session::lease::Lease::for_test(workspace.path());
-    let store = crate::session::Store::create(
+    let lease = otto_session::lease::Lease::for_test(workspace.path());
+    let store = otto_session::Store::create(
         root.path(),
         otto_core::session::Header {
             id: "parent".into(),
@@ -28,7 +28,7 @@ async fn a_child_store_refuses_to_append_after_the_parent_lease_is_lost() {
         },
     )
     .expect("parent");
-    store.set_lease_check(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>);
+    store.set_lease_check(Arc::clone(&lease) as Arc<dyn otto_session::WriterOwnership>);
     let build = child_sessions(
         SharedSession::new(Arc::new(store)),
         Arc::new(Default::default()),
@@ -57,7 +57,7 @@ async fn a_child_store_refuses_to_append_after_the_parent_lease_is_lost() {
 async fn children_of_a_session_file_are_written_beside_it() {
     let root = tempfile::tempdir().expect("root");
     let workspace = tempfile::tempdir().expect("workspace");
-    let store = crate::session::Store::create(
+    let store = otto_session::Store::create(
         root.path(),
         otto_core::session::Header {
             id: "parent".into(),
@@ -313,7 +313,7 @@ fn the_workspace_scope_is_derived_from_the_path_without_an_override() {
     let canonical = std::fs::canonicalize(directory.path()).expect("canonical");
     assert_eq!(
         scope.id,
-        crate::workspace::workspace_id(canonical.to_str().expect("utf-8"))
+        otto_session::workspace::workspace_id(canonical.to_str().expect("utf-8"))
     );
 }
 
@@ -472,7 +472,7 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
     let session_root = root.path().join("sessions");
     std::fs::create_dir_all(&session_root).expect("create session root");
 
-    let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+    let parent = otto_session::Store::create(&session_root, recovery_test_header(&workspace))
         .expect("create parent");
     parent
         .append_message(&recovery_dangling_call("call-1", "read"))
@@ -501,7 +501,7 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
 
     // An interrupted child transcript: `otto.task_spec` with no
     // `otto.task_result`.
-    let child = crate::session::Store::create_child_lazy(
+    let child = otto_session::Store::create_child_lazy(
         &parent_path,
         "t1-child",
         otto_core::session::Header {
@@ -534,8 +534,8 @@ fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_
 
     recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-    let (activated, _warnings) = crate::session::lease::without_acquire_wait(|| {
-        crate::session::Prepared::prepare(Path::new(&parent_path), None)
+    let (activated, _warnings) = otto_session::lease::without_acquire_wait(|| {
+        otto_session::Prepared::prepare(Path::new(&parent_path), None)
     })
     .expect("prepare takes over")
     .activate()
@@ -592,7 +592,7 @@ fn a_plain_reopen_after_process_loss_notifies_and_marks_children_interrupted() {
     let session_root = root.path().join("sessions");
     std::fs::create_dir_all(&session_root).expect("create session root");
 
-    let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+    let parent = otto_session::Store::create(&session_root, recovery_test_header(&workspace))
         .expect("create parent");
     parent
         .append_custom_entry(
@@ -609,7 +609,7 @@ fn a_plain_reopen_after_process_loss_notifies_and_marks_children_interrupted() {
         .append_message(&recovery_dangling_call("call-1", "bash"))
         .expect("append dangling call");
     let parent_path = parent.path();
-    let child = crate::session::Store::create_child_lazy(
+    let child = otto_session::Store::create_child_lazy(
         &parent_path,
         "t1-child",
         otto_core::session::Header {
@@ -644,7 +644,7 @@ fn a_plain_reopen_after_process_loss_notifies_and_marks_children_interrupted() {
     let children_dir = Path::new(&parent_path).with_extension("");
 
     let (activated, _warnings) =
-        crate::session::Store::open(Path::new(&parent_path)).expect("reopen");
+        otto_session::Store::open(Path::new(&parent_path)).expect("reopen");
     let session = SharedSession::new(Arc::new(activated));
     let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
     let resources = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
@@ -675,7 +675,7 @@ fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
     let session_root = root.path().join("sessions");
     std::fs::create_dir_all(&session_root).expect("create session root");
 
-    let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+    let parent = otto_session::Store::create(&session_root, recovery_test_header(&workspace))
         .expect("create parent");
     parent
         .append_message(&recovery_assistant_text("all done"))
@@ -685,8 +685,8 @@ fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
 
     recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-    let (activated, _warnings) = crate::session::lease::without_acquire_wait(|| {
-        crate::session::Prepared::prepare(Path::new(&parent_path), None)
+    let (activated, _warnings) = otto_session::lease::without_acquire_wait(|| {
+        otto_session::Prepared::prepare(Path::new(&parent_path), None)
     })
     .expect("prepare takes over")
     .activate()
@@ -698,7 +698,7 @@ fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
     // Re-open to get an un-taken `take_recovery()` back for the build,
     // since the sanity check above just consumed it.
     activated.close().expect("close");
-    let (activated, _warnings) = crate::session::Store::open(Path::new(&parent_path))
+    let (activated, _warnings) = otto_session::Store::open(Path::new(&parent_path))
         .expect("reopen without a lease dir race: no other holder exists");
 
     let session = SharedSession::new(Arc::new(activated));
@@ -717,7 +717,7 @@ fn a_second_build_subagents_for_the_same_store_pushes_nothing_more() {
     let session_root = root.path().join("sessions");
     std::fs::create_dir_all(&session_root).expect("create session root");
 
-    let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+    let parent = otto_session::Store::create(&session_root, recovery_test_header(&workspace))
         .expect("create parent");
     parent
         .append_message(&recovery_dangling_call("call-1", "read"))
@@ -727,8 +727,8 @@ fn a_second_build_subagents_for_the_same_store_pushes_nothing_more() {
 
     recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-    let (activated, _warnings) = crate::session::lease::without_acquire_wait(|| {
-        crate::session::Prepared::prepare(Path::new(&parent_path), None)
+    let (activated, _warnings) = otto_session::lease::without_acquire_wait(|| {
+        otto_session::Prepared::prepare(Path::new(&parent_path), None)
     })
     .expect("prepare takes over")
     .activate()

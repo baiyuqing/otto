@@ -36,8 +36,8 @@ impl Builder {
             warnings,
         );
         let output_logs = Arc::clone(resources.output_logs());
-        let schedule_origin = Arc::new(crate::session::origin::TurnOrigin::default());
-        let presentation_origin = Arc::new(crate::session::origin::TurnOrigin::default());
+        let schedule_origin = Arc::new(otto_session::origin::TurnOrigin::default());
+        let presentation_origin = Arc::new(otto_session::origin::TurnOrigin::default());
         let mut tools = self.builtin_file_tools(max_output);
         tools.push(Box::new(crate::tool::session_info::SessionInfo {
             session_id: session.header().id,

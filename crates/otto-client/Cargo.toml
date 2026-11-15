@@ -12,6 +12,7 @@ workspace = true
 otto.workspace = true
 otto-core.workspace = true
 otto-platform.workspace = true
+otto-session.workspace = true
 # The client can call an in-process axum `Router` instead of a socket.
 axum.workspace = true
 tower.workspace = true

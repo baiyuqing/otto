@@ -171,7 +171,8 @@ which also links `otto-faults`; `otto` and the frontend crates also list
 with `test-support` (`otto::fixtures`: offline configuration, controllers on
 temporary directories and the scripted provider server), for the integration
 tests. `otto-client`, `otto-terminal`, `otto-server`, `otto-acp` and `otto-cli` enable both features through
-a dev-dependency on `otto`. `crates/otto/tests/faults_boundary.rs` guards
+a dev-dependency on `otto`. The `test-support` feature of `otto` also enables the
+`test-support` feature of `otto-session` (`Lease::for_test`, `Store::hold_state_for_test`). `crates/otto/tests/faults_boundary.rs` guards
 production references in every crate (`otto::faults` and `otto_faults`) and
 forbids `otto::faults` from depending on frontend/runtime/provider/tool
 modules; Cargo enforces the same for `otto-faults`, which cannot import `otto`.
@@ -198,7 +199,7 @@ fault, not merely the returned error. Before/after faults are not interchangeabl
 | --- | --- |
 | HTTP/SSE | `otto_faults::http`: raw TCP loopback server with controlled chunks, barriers and disconnects |
 | SQL | `otto_faults::sql::FaultySqlDriver` (implements `otto_storage::SqlDriver`); repository `open_with_driver`; `tests/fault_storage.rs`; SQL layer and SQLite driver unit tests: `cargo test -p otto-storage` |
-| Session files | `otto_faults::files::FaultyFileDriver`; Store `*_with_driver`; `tests/fault_session.rs` |
+| Session files | `otto_faults::files::FaultyFileDriver`; Store `*_with_driver`; `crates/otto-session/tests/fault_session.rs` |
 | Atomic publish | `otto_faults::publish::FaultyPublishOps`; `otto_platform::fsops::publish_file` call-site unit tests |
 | Sandbox launch | `faults::sandbox::FaultyDriver`; Bash tests and sandbox conformance |
 | MCP | `faults::mcp::FaultyTransport`; client timeout/cancellation tests |

@@ -15,7 +15,7 @@ pub(super) fn child_store(
     task_id: &str,
 ) -> (otto::subagent::runner::Transcript, String) {
     let name = format!("{task_id}-child");
-    let store = otto::session::Store::create_child_lazy(
+    let store = otto_session::Store::create_child_lazy(
         parent,
         &name,
         otto_core::session::Header {
@@ -28,7 +28,7 @@ pub(super) fn child_store(
         },
     )
     .expect("child store");
-    let path = otto::session::Store::child_path(parent, &name);
+    let path = otto_session::Store::child_path(parent, &name);
     (Arc::new(store), path.to_string_lossy().into_owned())
 }
 

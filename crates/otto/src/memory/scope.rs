@@ -7,7 +7,7 @@
 //! `sha256:<64 hex>` ID keep it.
 
 use super::contracts::{Error, NAMESPACE_WORKSPACE, Result, Scope, invalid_request};
-use crate::workspace::{MAX_SCOPE_ID_BYTES, valid_opaque_id, workspace_id};
+use otto_session::workspace::{MAX_SCOPE_ID_BYTES, valid_opaque_id, workspace_id};
 
 /// `stable_override` wins when set. Otherwise the path is made absolute, its
 /// symlinks are resolved, and the ID is `workspace_id` of the result.
@@ -36,7 +36,7 @@ fn contains_path_control(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::named_workspace_id;
+    use otto_session::workspace::named_workspace_id;
     use sha2::{Digest, Sha256};
 
     #[test]

@@ -334,7 +334,7 @@ async fn observed(signal: &tokio::sync::Notify) {
 }
 #[derive(Debug)]
 struct Ownership(std::sync::atomic::AtomicBool);
-impl crate::session::WriterOwnership for Ownership {
+impl otto_session::WriterOwnership for Ownership {
     fn check(&self) -> Result<(), String> {
         if self.0.load(std::sync::atomic::Ordering::Acquire) {
             Err("ownership lost".into())

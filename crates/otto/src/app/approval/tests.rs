@@ -282,11 +282,11 @@ fn queue_wake(controller: &Controller) {
         });
 }
 
-fn origin_of(controller: &Controller) -> Option<crate::session::origin::Origin> {
+fn origin_of(controller: &Controller) -> Option<otto_session::origin::Origin> {
     controller.runner().unwrap().schedule_origin.get()
 }
 
-async fn turn(controller: &Controller, text: &str, origin: Option<crate::session::origin::Origin>) {
+async fn turn(controller: &Controller, text: &str, origin: Option<otto_session::origin::Origin>) {
     controller
         .run_with_channel(
             Step::Text(text),
@@ -312,7 +312,7 @@ fn scheduled_messages(controller: &Controller) -> Vec<Message> {
 /// A delivered, not yet appended row for `origin`, created by `session`.
 fn delivered_row(
     store: &crate::schedule::Store,
-    origin: crate::session::origin::Origin,
+    origin: otto_session::origin::Origin,
     session: &str,
     text: &str,
 ) -> crate::schedule::Delivery {

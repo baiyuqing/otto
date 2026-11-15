@@ -175,7 +175,7 @@ impl Controller {
     /// Writes a new session forked from the current one, stopping before the
     /// turn the user message `before` opens, or at the last turn boundary
     /// without `before`. The current session is unchanged and stays open.
-    pub fn fork_file(&self, before: Option<&str>) -> Result<crate::session::Forked, ForkFailure> {
+    pub fn fork_file(&self, before: Option<&str>) -> Result<otto_session::Forked, ForkFailure> {
         self.fork_file_with_id(before, None, None)
     }
 
@@ -184,7 +184,7 @@ impl Controller {
         before: Option<&str>,
         id: Option<&str>,
         request_id: Option<&str>,
-    ) -> Result<crate::session::Forked, ForkFailure> {
+    ) -> Result<otto_session::Forked, ForkFailure> {
         let path = {
             let state = self.lock();
             if state.is_closed() {

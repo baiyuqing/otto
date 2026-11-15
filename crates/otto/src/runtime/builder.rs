@@ -40,14 +40,14 @@ use crate::failover;
 use crate::provider::openaicompat::Client;
 use crate::runtime::verification;
 use crate::sandbox::CommandExecutor;
-pub use crate::session::SessionHandle;
-#[cfg(test)]
-use crate::session::Store;
 use crate::skill::Catalog;
 use crate::tool::registry::Registry;
 use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, write};
-use crate::workspace::confined::Workspace;
 use otto_platform::deadline::{Control, Deadline};
+pub use otto_session::SessionHandle;
+#[cfg(test)]
+use otto_session::Store;
+use otto_session::workspace::confined::Workspace;
 
 use super::boundary::{self, BoundaryInputs, FixedText};
 use super::prompt::{subagent_model_guidance, system_prompt_for};
@@ -119,7 +119,7 @@ pub struct RuntimeInfo {
 pub struct MemoryHandle {
     inner: MemorySession,
     state: Mutex<MemoryState>,
-    writer_ownership: Option<Arc<dyn crate::session::WriterOwnership>>,
+    writer_ownership: Option<Arc<dyn otto_session::WriterOwnership>>,
 }
 
 struct MemoryState {
@@ -256,10 +256,10 @@ pub struct Runner {
     connecting_mcp: Option<Arc<crate::mcp::Servers>>,
     pub(crate) task_control: Arc<crate::runtime::task_control::TaskControl>,
     /// The origin of the current user turn, read by the schedule tools.
-    pub(crate) schedule_origin: Arc<crate::session::origin::TurnOrigin>,
+    pub(crate) schedule_origin: Arc<otto_session::origin::TurnOrigin>,
     /// Exact passive-presentation origin for the current logical user turn.
     /// Unlike scheduling, a wake turn clears this instead of inheriting it.
-    pub(crate) presentation_origin: Arc<crate::session::origin::TurnOrigin>,
+    pub(crate) presentation_origin: Arc<otto_session::origin::TurnOrigin>,
 }
 
 /// The tool-less agent behind the session-model advice backend.
@@ -579,10 +579,10 @@ pub fn resolve_initial_runtime(
 
 /// A session may be resumed in its original directory or a recorded workspace move.
 pub fn validate_session_workspace(session_workspace: &str, workspace: &str) -> Result<(), String> {
-    if crate::workspace::read(Path::new(workspace))
+    if otto_session::workspace::read(Path::new(workspace))
         .map_err(|error| error.to_string())?
         .is_some()
-        && crate::workspace::owns_session(workspace, session_workspace)
+        && otto_session::workspace::owns_session(workspace, session_workspace)
             .map_err(|error| error.to_string())?
     {
         return Ok(());

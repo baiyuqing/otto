@@ -7,13 +7,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use otto::session::Store;
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role as MessageRole};
 use otto_core::session::Header;
 use otto_core::session::context::MAY_HAVE_RUN_TOOL_RESULT_TEXT;
 use otto_faults::crash::{self, CRASH_EXIT, Role};
 use otto_faults::files::{FaultyFileDriver, FileOp};
 use otto_faults::{Fault, FaultPlan, Filter, Rule, Trigger};
+use otto_session::Store;
 
 fn header(workspace: &Path) -> Header {
     Header {
@@ -321,7 +321,7 @@ fn a_crash_while_writing_the_session_header_leaves_no_session_file() {
             );
             assert!(journals(dir).is_empty(), "{:?}", journals(dir));
             let workspace = dir.join("workspace").to_string_lossy().into_owned();
-            let listed = otto::session::list(&dir.join("root"), &workspace, "", 10).expect("list");
+            let listed = otto_session::list(&dir.join("root"), &workspace, "", 10).expect("list");
             assert_eq!(listed.sessions.len(), 0);
             assert_eq!(listed.skipped, 0, "no unreadable session candidate");
         }

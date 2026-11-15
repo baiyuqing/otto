@@ -24,7 +24,7 @@ async fn session_info_main_runner_binds_actual_persisted_and_no_session_identity
             .push((builder.home.clone(), provider));
         let session = builder.create_session(&runtime()).unwrap();
         let expected_id = session.header().id;
-        assert!(crate::session::is_session_id(&expected_id));
+        assert!(otto_session::is_session_id(&expected_id));
         assert_eq!(session.session_id().as_deref(), Some(expected_id.as_str()));
         let runner = builder.build_runner(&session, &runtime()).await.unwrap();
         let cancel = CancellationToken::new();

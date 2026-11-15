@@ -8,7 +8,7 @@
 //! in `otto`.
 
 use super::*;
-use otto::session::lease::{Lease, create_lease_dir};
+use otto_session::lease::{Lease, create_lease_dir};
 
 /// A session path with a lease held by this process, renewed by its keeper.
 fn held_session(dir: &Path, lease_seconds: u64) -> (PathBuf, Arc<Lease>) {

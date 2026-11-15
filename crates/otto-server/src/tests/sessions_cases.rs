@@ -588,7 +588,7 @@ async fn session_create_retry_returns_the_original_after_restart() {
     let first = harness.send("POST", "/v1/sessions", Some(body)).await;
     assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
     let id = first.json()["id"].as_str().unwrap().to_string();
-    let file = otto::session::session_directory(
+    let file = otto_session::session_directory(
         std::path::Path::new(&harness.factory.builder.session_root),
         &harness.factory.builder.workspace_path,
     )
@@ -652,7 +652,7 @@ async fn create_retry_repairs_a_header_written_before_its_receipt() {
         model: "test-model".into(),
         created_at: chrono::Utc::now(),
     };
-    otto::session::Store::create(&harness.factory.builder.session_root, header)
+    otto_session::Store::create(&harness.factory.builder.session_root, header)
         .expect("header written")
         .close()
         .expect("close partial file");

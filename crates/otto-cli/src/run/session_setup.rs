@@ -56,14 +56,14 @@ pub(super) fn spawn_mcp_runner_swap(
 }
 
 pub(super) fn prepare_session_backend(
-    repository: &dyn session::SessionRepository,
+    repository: &dyn otto_session::SessionRepository,
     root: &Path,
     workspace: &str,
     reference: &str,
     create_lease: Option<u64>,
     listed: bool,
     stderr: &mut dyn Write,
-) -> Result<Box<dyn session::PreparedSession>, String> {
+) -> Result<Box<dyn otto_session::PreparedSession>, String> {
     // The query runs before the open, so the lease can change in between
     // (the holder releases, or another process takes over). That makes the
     // notice inaccurate; it does not change what the open does.
@@ -85,7 +85,7 @@ pub(super) fn prepare_session_backend(
 }
 
 /// The line printed before an open that waits for a lease holder.
-pub(super) fn lease_wait_notice(wait: &session::lease::LeaseWait) -> String {
+pub(super) fn lease_wait_notice(wait: &otto_session::lease::LeaseWait) -> String {
     format!(
         "waiting up to {} s for the session lease held by host {} pid {}",
         wait.seconds, wait.host, wait.pid
@@ -94,7 +94,7 @@ pub(super) fn lease_wait_notice(wait: &session::lease::LeaseWait) -> String {
 
 pub(super) async fn activate_initial_session(
     builder: &Builder,
-    prepared: Option<Box<dyn otto::session::PreparedSession>>,
+    prepared: Option<Box<dyn otto_session::PreparedSession>>,
     dynamic_content: bool,
     runtime: &Runtime,
 ) -> Result<(SharedSession, Vec<String>), String> {

@@ -1,7 +1,7 @@
 //! Permanent deletion resolves opaque native repository references, never host paths.
 use super::*;
-use otto::session::DeleteCandidate;
-use otto::session::SessionRepository;
+use otto_session::DeleteCandidate;
+use otto_session::SessionRepository;
 
 fn resolve<'a>(
     sessions: &'a [DeleteCandidate],

@@ -20,7 +20,7 @@ use super::search::{
     search_root_inside_git, validated_glob_segments, walk_dir_ignoring,
 };
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
-use crate::workspace::confined::Workspace;
+use otto_session::workspace::confined::Workspace;
 
 const DEFAULT_FIND_LIMIT: usize = 1000;
 const MAXIMUM_FIND_LIMIT: usize = 10000;

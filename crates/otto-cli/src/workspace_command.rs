@@ -17,8 +17,10 @@ pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i
     let result = match command {
         "status" => std::fs::canonicalize(cwd)
             .map_err(|error| error.to_string())
-            .and_then(|path| otto::workspace::read(&path).map_err(|error| error.to_string())),
-        "fork" => otto::workspace::fork(Path::new(cwd))
+            .and_then(|path| {
+                otto_session::workspace::read(&path).map_err(|error| error.to_string())
+            }),
+        "fork" => otto_session::workspace::fork(Path::new(cwd))
             .map(Some)
             .map_err(|error| error.to_string()),
         _ => {
@@ -77,7 +79,7 @@ mod tests {
             ),
             0
         );
-        assert!(dir.path().join(otto::workspace::MARKER).is_file());
+        assert!(dir.path().join(otto_session::workspace::MARKER).is_file());
         assert!(errors.is_empty());
         assert_eq!(run(&["bad".into()], &mut output, &mut errors), 2);
     }

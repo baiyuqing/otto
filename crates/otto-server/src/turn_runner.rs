@@ -250,7 +250,7 @@ impl Server {
         first: Step<'a>,
         trigger: &'static str,
         channel: Option<Channel>,
-        origin: Option<otto::session::origin::Origin>,
+        origin: Option<otto_session::origin::Origin>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         // Keep the full agent/review future out of the idle wake loop and
         // request-admission futures that only decide whether a turn can run.
@@ -435,7 +435,7 @@ impl Server {
         session: &Arc<OpenSession>,
         text: String,
         image: Option<Block>,
-        (channel, origin): (Option<Channel>, Option<otto::session::origin::Origin>),
+        (channel, origin): (Option<Channel>, Option<otto_session::origin::Origin>),
         queue: bool,
         request_id: &str,
         input_id: Option<String>,
@@ -458,7 +458,7 @@ impl Server {
         session: &Arc<OpenSession>,
         text: String,
         image: Option<Block>,
-        (channel, origin): (Option<Channel>, Option<otto::session::origin::Origin>),
+        (channel, origin): (Option<Channel>, Option<otto_session::origin::Origin>),
         queue: bool,
         request_id: &str,
         input_id: Option<String>,

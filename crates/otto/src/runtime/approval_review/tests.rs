@@ -88,7 +88,7 @@ fn context() -> ReviewContext {
 }
 
 async fn shell_request(root: &std::path::Path, command: &str) -> Request {
-    let workspace = crate::workspace::confined::Workspace::new(root).unwrap();
+    let workspace = otto_session::workspace::confined::Workspace::new(root).unwrap();
     let executor = std::sync::Arc::new(
         crate::sandbox::Executor::new(
             Arc::new(crate::sandbox::direct::DirectDriver::new()),

@@ -61,8 +61,8 @@ use otto::app::{
 };
 use otto::runtime::builder::Builder;
 use otto::sandbox::control::SandboxControl;
-use otto::session::origin::Origin;
-use otto::session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
+use otto_session::origin::Origin;
+use otto_session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
 
 use approval::request_permission;
 use local_session::*;

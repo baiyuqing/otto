@@ -2,7 +2,7 @@
 //! `list_models`. Feature tools (`remind`, `schedule`, sub-agents, workflows,
 //! delivery, task control) live in their feature modules.
 //!
-//! Every filesystem tool resolves paths through [`crate::workspace::confined::Workspace`], which
+//! Every filesystem tool resolves paths through [`otto_session::workspace::confined::Workspace`], which
 //! rejects escapes from the selected workspace after canonical-path and symlink
 //! validation, and every tool caps its output and reports failures in band as
 //! an error `ToolResult` rather than as a `Result`, because the text is fed
@@ -217,9 +217,9 @@ pub mod testutil {
         std::fs::write(path, contents).expect("test files are writable");
     }
 
-    pub fn workspace(root: &Path) -> std::sync::Arc<crate::workspace::confined::Workspace> {
+    pub fn workspace(root: &Path) -> std::sync::Arc<otto_session::workspace::confined::Workspace> {
         std::sync::Arc::new(
-            crate::workspace::confined::Workspace::new(root).expect("workspace should open"),
+            otto_session::workspace::confined::Workspace::new(root).expect("workspace should open"),
         )
     }
 }

@@ -5,11 +5,11 @@ use std::sync::Arc;
 use crate::approval::repository::ApprovalStore;
 use crate::memory::advice::audit::AuditStore;
 use crate::schedule::ScheduleStore;
-use crate::session::SessionRepository;
 use crate::skill::check_repository::CheckStore;
 use crate::subagent::record::TaskRepository;
 use crate::usage::repository::UsageRepository;
 use crate::workflow::WorkflowStore;
+use otto_session::SessionRepository;
 use otto_storage::{Connection, OpenOptions, OpenPolicy, SqlDriver};
 
 /// Opens the current repository schemas through one `SqlDriver`.
@@ -104,9 +104,9 @@ impl Default for Storage {
             repositories: SqlRepositories::new(Arc::new(
                 otto_storage::drivers::sqlite::SqliteDriver,
             )),
-            sessions: Arc::new(crate::session::PosixSessionRepository::new(
+            sessions: Arc::new(otto_session::PosixSessionRepository::new(
                 Arc::new(otto_platform::fsops::PosixDriver),
-                crate::session::lease::new_keeper(),
+                otto_session::lease::new_keeper(),
             )),
         }
     }

@@ -283,7 +283,7 @@ pub async fn run_with_extensions(
     let sandbox_settings = composed.sandbox_settings;
     let mut builder = composed.builder;
 
-    let mut prepared_initial: Option<Box<dyn session::PreparedSession>> = None;
+    let mut prepared_initial: Option<Box<dyn otto_session::PreparedSession>> = None;
     let mut metadata = None;
     if !session_path.is_empty() {
         let create_lease = match builder.create_lease() {

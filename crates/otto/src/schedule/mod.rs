@@ -2,11 +2,11 @@
 //! origin that created them, now or repeatedly.
 //!
 //! This module owns
-//! the origin scope (the origin value is [`crate::session::origin::Origin`]),
+//! the origin scope (the origin value is [`otto_session::origin::Origin`]),
 //! the time rules ([`time`]), the cross-process store ([`store`]), the three
 //! model tools ([`tools`]), the timer tools ([`remind`]) and the worker that
 //! runs prompts and delivers results ([`worker`]). Callers wire it in: the app
-//! layer sets [`crate::session::origin::TurnOrigin`], the composition roots
+//! layer sets [`otto_session::origin::TurnOrigin`], the composition roots
 //! build a [`worker::Worker`] with a [`worker::PromptRunner`] and a
 //! [`worker::Sink`].
 
@@ -18,7 +18,7 @@ pub mod tools;
 pub mod worker;
 
 pub use crate::schedule::sqlite::SqliteScheduleStore as Store;
-use crate::session::origin::Origin;
+use otto_session::origin::Origin;
 pub(crate) use store::CreateError;
 #[cfg(test)]
 pub(crate) use store::run_text;

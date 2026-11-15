@@ -5,6 +5,7 @@ members = [
     "crates/otto-platform",
     "crates/otto-storage",
     "crates/otto-faults",
+    "crates/otto-session",
     "crates/otto",
     "crates/otto-client",
     "crates/otto-terminal",
@@ -94,6 +95,7 @@ otto-core = { path = "crates/otto-core" }
 otto-platform = { path = "crates/otto-platform" }
 otto-storage = { path = "crates/otto-storage" }
 otto-faults = { path = "crates/otto-faults" }
+otto-session = { path = "crates/otto-session" }
 otto = { path = "crates/otto" }
 otto-client = { path = "crates/otto-client" }
 otto-terminal = { path = "crates/otto-terminal" }

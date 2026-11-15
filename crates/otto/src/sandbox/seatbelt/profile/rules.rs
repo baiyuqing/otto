@@ -95,7 +95,7 @@ fn protected_workspace_filters(workspace: &str) -> Vec<Filter> {
             Filter::Literal(path)
         }
     };
-    let mut filters: Vec<Filter> = crate::workspace::git_read_only::GIT_READ_ONLY
+    let mut filters: Vec<Filter> = otto_session::workspace::git_read_only::GIT_READ_ONLY
         .iter()
         .map(literal_or_subpath)
         .collect();
@@ -106,7 +106,7 @@ fn protected_workspace_filters(workspace: &str) -> Vec<Filter> {
         }
     }));
     filters.extend(
-        crate::workspace::READ_ONLY_PATHS
+        otto_session::workspace::READ_ONLY_PATHS
             .iter()
             .map(literal_or_subpath),
     );

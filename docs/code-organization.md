@@ -18,6 +18,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto-platform/` | Process-wide primitives with no domain knowledge: `hex`, `deadline`, `retry`, `fsops`, `log`, `tls_provider`, `gourl`, `urlprivacy`, `sse`, `program_status`, `herdr`, `random`, `child_fence`, `process_identity` | `src/lib.rs` |
 | `crates/otto-storage/` | The SQL layer over SQLite: connection, statement and transaction types, the `SqlDriver` trait and the SQLite driver (`drivers/sqlite`); no domain schema | `src/lib.rs` |
 | `crates/otto-faults/` | Test support: the fault vocabulary, file, publish, SQL and crash doubles and the scripted loopback HTTP server; never linked by a shipped build | `src/lib.rs` |
+| `crates/otto-session/` | Session files and workspace identity: the JSONL session store, its writer lease, prepared sessions, listing, fork, delete and archive, the POSIX `SessionRepository`, the `origin` of a turn, and the workspace identity marker, move history and admission (`workspace`); depends on `otto-core` and `otto-platform` | `src/lib.rs`, `src/workspace.rs` |
 | `crates/otto/` | Native runtime library: services, persistence, integrations, tools and sandbox | `src/lib.rs`, `src/runtime/`, `src/app/` |
 | `crates/otto-client/` | HTTP client of a running `otto serve`, used by the TUI `--attach` mode and by `otto-acp` | `src/lib.rs` (`otto_client::Client`) |
 | `crates/otto-terminal/` | Terminal frontend: the TUI (`tui/`) and the REPL, login and slash commands (`cli/`) | `src/lib.rs`, `src/tui/mod.rs`, `src/cli/repl.rs` |
@@ -29,12 +30,12 @@ guide rather than being copied into those instruction files.
 | `crates/otto-platform/src/fsops/` | Shared pinned filesystem descriptors and atomic operations (`posix.rs`), the `FileDriver` journal contract (`files.rs`), canonical directory and executable-file resolution (`canonical.rs`) | Native session and workspace callers |
 | `crates/otto-platform/src/child_fence.rs` | Process-wide registry of child processes killed when a session lease is lost or a panic aborts | `Children::global`, `Children::register` |
 | `crates/otto-platform/src/process_identity.rs` | Process id with start time, and the check that a recorded identity still names a live process | `current_process`, `process_matches` |
-| `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, and delivery | `initialize`, `read`, `fork`, `admission::admit_workspace` |
+| `crates/otto-session/src/workspace.rs` | Persistent workspace identity, move history and state ownership; `workspace/admission.rs` admits a workspace path for `otto serve`, and delivery | `initialize`, `read`, `fork`, `admission::admit_workspace` |
 | `docs/` | User manual, contributor contracts, and retained design decisions | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-serve-connect.sh` supervises `otto serve` and an `otto-connect` that reaches it through `otto acp --attach` | `Makefile` |
 
-The root Cargo workspace contains `otto-core`, `otto-platform`, `otto-storage`, `otto-faults`, `otto`, `otto-client`,
+The root Cargo workspace contains `otto-core`, `otto-platform`, `otto-storage`, `otto-faults`, `otto-session`, `otto`, `otto-client`,
 `otto-terminal`, `otto-server`, `otto-acp`, `otto-eval` and `otto-cli`.
 `chat-connector/` has its own build definition and is not a root workspace crate.
 
@@ -118,9 +119,9 @@ rechecks authorization at tool effects and requests cancellation on revocation.
 Six module names exist in both crates. In each pair `otto-core` holds the
 contract or format and `otto` holds the implementation:
 
-| Module | `otto-core` | `otto` |
+| Module | `otto-core` | `otto` and `otto-session` |
 | --- | --- | --- |
-| `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store`, `PosixSessionRepository` and the writer lease in `crates/otto/src/session/` (`store.rs`, `posix_repository.rs`, `lease.rs`) |
+| `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store`, `PosixSessionRepository` and the writer lease live in the `otto-session` crate (`src/store.rs`, `src/posix_repository.rs`, `src/lease.rs`) |
 | `config` | configuration schema, layered merge, provenance, managed constraints, resolution, `config::edit` | source discovery, executable trust, the compare-and-swap writer |
 | `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; file store in `memory/files/` |
 | `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; SQLite store in `approval/sqlite.rs` |
@@ -143,7 +144,7 @@ replacement: sub-agent registry, inbox, timers, bash output logs, MCP servers
 and workflow delivery worker). A `Runner` borrows these resources and never
 stops them; `SharedSession::close` and `close_resources` do. `runtime/startup.rs` holds the startup composition, from environment
 capture to the memory service, as phase functions; `otto_cli::run`, `otto serve`
-(`load_workspace`) call it. `workspace/admission.rs`
+(`load_workspace`) call it. `otto_session::workspace::admission`
 admits a workspace path for `otto serve` and delivery. `src/app/`
 exposes the shared application lifecycle used by frontends.
 
@@ -159,7 +160,9 @@ see [layers inside `otto`](development/architecture.md#layers-inside-otto).
 `crates/otto/tests/layer_boundary.rs` fails on an import that breaks the
 layer order. `crates/otto/tests/storage_boundary.rs` checks storage
 ownership, dependency direction, and that no `otto` source re-exports an
-`otto-core` item. `crates/otto/tests/faults_boundary.rs` keeps `faults` out
+`otto-core` item; `crates/otto-session/tests/storage_boundary.rs` checks the
+same for `otto-session` (no SQL, no storage import, no `otto-core`
+re-export, a constructor-only `legacy.rs`). `crates/otto/tests/faults_boundary.rs` keeps `faults` out
 of production code, and scans the `src` of every crate for `otto_faults`. See [package boundaries](development/architecture.md#package-boundaries).
 
 Integration tests that need no frontend stay in `crates/otto/tests/`:
@@ -237,7 +240,7 @@ The other modules group native responsibilities:
 - **User entry points:** the terminal frontend is `otto-terminal` (`tui/`, `cli/{login,repl,repl_commands}`); the binary, HTTP server, ACP frontends and the `otto serve` client are in `otto-cli`, `otto-server`, `otto-acp` and `otto-client`.
 - **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   the `otto-client` crate (the client for a running `otto serve`).
-- **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
+- **Local state and reliability:** `approval/` (shared authority and domain adapters), the `otto-session` crate (session files, writer lease, workspace identity), `config/`, `memory/`,
   `typesafe/`,
   `usage/`, `failover/` (lease and commit guard), `workflow/` (including `workflow/approval.rs`, its approval adapter), and `schedule/` (typed store port, tools, worker).
 - **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
@@ -301,7 +304,7 @@ The other modules group native responsibilities:
 
 Domain directories own typed repository ports and state semantics. Concrete
 schema, physical row mappings and SQL live in the domain module as `sqlite.rs`
-or `sqlite/` files; the session store lives in `session/`. The `otto-storage`
+or `sqlite/` files; the session store lives in the `otto-session` crate. The `otto-storage`
 crate holds the SQLite driver, the SQL layer (`sql.rs`, `worker.rs`) and the
 generic schema validation helper `schema_objects.rs`, and depends on no
 workspace crate. The POSIX file driver and the `FileDriver` contract
@@ -313,7 +316,7 @@ consumers. Backend packages retain their physical mappings and I/O.
 | --- | --- | --- |
 | Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `runtime/approval_review.rs`, `otto-core/src/approval/` | `approval/sqlite.rs`; `workflow/approval.rs` (workflow steps), `approval/model_change.rs` (model and provider changes) |
 | Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `memory/advice/sqlite.rs` (advice audit) |
-| Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `session/{store,prepared,list,fork,lease}.rs` |
+| Session transcripts | `otto-core/src/session/`, `otto-session/src/repository.rs` | `otto-session/src/{store,prepared,list,fork,lease}.rs` |
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `schedule/sqlite.rs`, `workflow/sqlite.rs` |
 | Tasks, skill checks | Their domain repository modules | `subagent/sqlite.rs`, `skill/sqlite.rs` |
 | Usage | `usage/{mod,repository}.rs` | `usage/sqlite.rs` |
@@ -337,7 +340,7 @@ to a feature lives in that feature's module and `runtime` registers it:
 `subagent/tools.rs`, `workflow/tool.rs`, `delivery/tool.rs`,
 `runtime/task_control/tools.rs` (`task_queue`, `task_steer`, `task_reply`) and
 `runtime/verification.rs` (`submit_verification`). Workspace path enforcement
-is `workspace/confined.rs` (`Workspace`) over the pinned directory handles in
+is `otto-session/src/workspace/confined.rs` (`Workspace`) over the pinned directory handles in
 `otto-platform/src/fsops/root.rs` and the Go-style path helpers in
 `otto-platform/src/fsops/gopath.rs`. The
 declared retry safety of every built-in tool is aggregated in

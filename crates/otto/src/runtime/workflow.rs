@@ -28,7 +28,7 @@ struct AgentExecutor {
 impl Executor for AgentExecutor {
     async fn execute(&self, attempt: Attempt, control: &Control) -> Result<String, String> {
         let store = Arc::new(
-            crate::session::Store::create(
+            otto_session::Store::create(
                 &attempt.transcript_root,
                 Header {
                     version: CURRENT_VERSION,
@@ -221,7 +221,7 @@ pub fn lock_workspace(home: &str, workspace: &str) -> Result<Flock<std::fs::File
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )
     .map_err(|_| "workflow runtime unavailable".to_string())?;
-    let key = crate::session::workspace_key(Path::new(workspace))
+    let key = otto_session::workspace_key(Path::new(workspace))
         .map_err(|_| "workflow runtime unavailable".to_string())?;
     let path = directory.join(format!("{key}.lock"));
     let file = OpenOptions::new()

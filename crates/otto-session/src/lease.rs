@@ -668,6 +668,8 @@ impl Lease {
 }
 
 #[cfg(test)]
+mod move_aside_tests;
+#[cfg(test)]
 mod same_host_tests;
 #[cfg(test)]
 mod stall_tests;

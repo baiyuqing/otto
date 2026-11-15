@@ -17,6 +17,8 @@ eval = ["dep:otto-eval"]
 [[bin]]
 name = "otto"
 path = "src/main.rs"
+# The library crate `otto` documents under the same name; the binary has no API to document.
+doc = false
 
 [dependencies]
 otto.workspace = true

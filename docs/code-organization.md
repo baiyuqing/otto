@@ -261,7 +261,7 @@ consumers. Backend packages retain their physical mappings and I/O.
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
-| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `approval/sqlite.rs`; `workflow/approval.rs` (workflow steps), `approval/model_change.rs` (model and provider changes) |
+| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `runtime/approval_review.rs`, `otto-core/src/approval/` | `approval/sqlite.rs`; `workflow/approval.rs` (workflow steps), `approval/model_change.rs` (model and provider changes) |
 | Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `memory/advice/sqlite.rs` (advice audit) |
 | Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `session/{store,prepared,list,fork,lease}.rs` |
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `schedule/sqlite.rs`, `workflow/sqlite.rs` |

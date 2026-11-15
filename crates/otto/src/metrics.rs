@@ -23,8 +23,6 @@ use otto_core::model::{
     Usage,
 };
 
-use crate::app::TaskStatus;
-
 const HTTP_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -73,6 +71,25 @@ pub struct SessionContext {
     pub context_input_tokens: i64,
     pub context_input_tokens_present: bool,
     pub context_input_tokens_pending: bool,
+}
+
+/// Where a task is in its lifecycle, as far as task metrics distinguish it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPhase {
+    /// Queued or otherwise not yet running and not finished.
+    Pending,
+    Running,
+    /// No further update can leave this status.
+    Finished,
+}
+
+/// One task as observed by [`Metrics::diff_tasks`].
+#[derive(Debug, Clone)]
+pub struct TaskSample {
+    pub id: String,
+    /// The status label recorded in `tasks_finished_total`.
+    pub status: String,
+    pub phase: TaskPhase,
 }
 
 pub struct ProviderOperationMetric<'a> {
@@ -359,31 +376,31 @@ impl Metrics {
         self.lock().stream_clients += delta;
     }
 
-    /// `seen` carries each task id's last-observed status; a task that is both
-    /// unseen and already final counts as one started and one finished, because
-    /// the update signal coalesces.
-    pub fn diff_tasks(&self, seen: &mut BTreeMap<String, TaskStatus>, list: &[crate::app::Task]) {
+    /// `seen` carries each task id's last-observed phase; a task that is both
+    /// unseen and already finished counts as one started and one finished,
+    /// because the update signal coalesces.
+    pub fn diff_tasks(&self, seen: &mut BTreeMap<String, TaskPhase>, list: &[TaskSample]) {
         let mut state = self.lock();
         for task in list {
             let previous = seen.get(&task.id).copied();
-            let was_running = previous == Some(TaskStatus::Running);
-            let was_final = previous.is_some_and(TaskStatus::final_status);
+            let was_running = previous == Some(TaskPhase::Running);
+            let was_final = previous == Some(TaskPhase::Finished);
 
             if previous.is_none() {
                 state.tasks_started += 1;
             }
-            if task.status == TaskStatus::Running && !was_running {
+            if task.phase == TaskPhase::Running && !was_running {
                 state.tasks_running += 1;
-            } else if was_running && task.status != TaskStatus::Running {
+            } else if was_running && task.phase != TaskPhase::Running {
                 state.tasks_running -= 1;
             }
-            if task.status.final_status() && !was_final {
+            if task.phase == TaskPhase::Finished && !was_final {
                 *state
                     .tasks_finished_total
-                    .entry(task.status.as_str().to_string())
+                    .entry(task.status.clone())
                     .or_default() += 1;
             }
-            seen.insert(task.id.clone(), task.status);
+            seen.insert(task.id.clone(), task.phase);
         }
     }
 

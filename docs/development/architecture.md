@@ -71,11 +71,6 @@ non-test source of every module. Rules:
 - A domain's repository implementation (SQLite or file) lives in the domain
   module. `storage` provides the drivers, the SQL layer and the capability
   contracts.
-- `KNOWN_VIOLATIONS` in the test lists the imports that broke these rules
-  when the table was introduced. A PR that fixes one removes its entry; the
-  test fails when an entry no longer occurs, so the list only shrinks. No
-  entry is added. Until the list is empty, the rule above about repository
-  placement describes the target state, not the current code.
 - Extracting a layer into its own crate happens only after its imports satisfy
   these rules; then the extraction moves files and changes no imports.
 

@@ -20,7 +20,6 @@ use otto_core::config::{
 use otto_core::session::RuntimeMetadata;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::SESSION_OPERATION_UNAVAILABLE;
 use crate::auth::{CapturedAuth, capture_auth_credentials};
 use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resolve_environment};
@@ -28,6 +27,7 @@ use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 
 use crate::workspace::confined::Workspace;
 
+use super::SESSION_OPERATION_UNAVAILABLE;
 use super::boundary::{self, BoundaryInputs};
 use super::builder::{Builder, Shared, resolve_initial_runtime};
 use super::sandbox_runtime::{

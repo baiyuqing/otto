@@ -530,7 +530,7 @@ impl Builder {
                 self.boundary_redactor(Some(&review_runtime)),
             );
             let provider: Arc<dyn crate::approval::reviewer::ReviewProvider> = Arc::new(
-                crate::approval::reviewer::SessionReviewer::new(review_agent)
+                crate::runtime::approval_review::SessionReviewer::new(review_agent)
                     .with_usage(self.usage_collector(session, &review_runtime)),
             );
             self.approvals

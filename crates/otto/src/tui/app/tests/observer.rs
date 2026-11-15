@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::tasks::ObserverSnapshot;
+use crate::subagent::tasks::observed::ObserverSnapshot;
 use crossterm::event::KeyModifiers;
 use ratatui::{Terminal, backend::TestBackend};
 

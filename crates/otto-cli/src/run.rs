@@ -36,8 +36,10 @@ use otto::session;
 
 use super::flags::{CliOptions, ParseFailure, Parsed, parse_flags};
 use super::serve;
-use otto::app::{Controller, PROMPT_ACTIVE, SESSION_OPERATION_UNAVAILABLE};
+use otto::app::{Controller, PROMPT_ACTIVE};
+
 use otto::cli::repl::{self, Repl};
+use otto::runtime::SESSION_OPERATION_UNAVAILABLE;
 use otto::runtime::boundary;
 use otto::runtime::builder::{Builder, SharedSession};
 use otto::runtime::startup::{

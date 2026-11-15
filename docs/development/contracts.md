@@ -50,7 +50,7 @@ workspace requests cannot borrow them.
   Allow requires a fully static list/pipeline with every segment matching;
   deny/ask may match any segment. Do not authorize a compound command using
   only its first executable, or confuse sandbox exclusion with effect approval.
-- `approval/reviewer.rs` owns an isolated `ReviewProvider` and immutable context.
+- `approval/reviewer.rs` owns the `ReviewProvider` contract and immutable `ReviewContext`; `runtime/approval_review.rs` implements it with an isolated agent.
   It assesses the exact operation against root user evidence and accepted
   instruction versions; generated child prompts/rationalizations are not
   authorization. It never executes operations or mutates approval storage.

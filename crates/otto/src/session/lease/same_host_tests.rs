@@ -4,11 +4,11 @@
 use super::tests::{FakeClock, no_op_keeper};
 use super::*;
 
-const MACHINE: &str = "0123456789abcdef0123456789abcdef";
-const HOST: &str = "this-host";
+pub(super) const MACHINE: &str = "0123456789abcdef0123456789abcdef";
+pub(super) const HOST: &str = "this-host";
 const WINDOW_SLEEPS: u32 = 7; // 7L/6 at L = 6 s
 
-fn host(machine: &str) -> LocalHost {
+pub(super) fn host(machine: &str) -> LocalHost {
     LocalHost {
         hostname: HOST.into(),
         machine: machine.into(),
@@ -18,7 +18,7 @@ fn host(machine: &str) -> LocalHost {
 
 /// A session with a log ending in an incomplete record and an epoch-1 holder
 /// described by `heartbeat`, which was never released.
-fn session_held_by(tmp: &Path, heartbeat: &HeartbeatRecord) -> PathBuf {
+pub(super) fn session_held_by(tmp: &Path, heartbeat: &HeartbeatRecord) -> PathBuf {
     let session_path = tmp.join("s.jsonl");
     create_lease_dir(&session_path, 6).unwrap();
     std::fs::write(&session_path, b"{\"a\":1}\n{\"a\":2, incomplete").unwrap();
@@ -28,7 +28,7 @@ fn session_held_by(tmp: &Path, heartbeat: &HeartbeatRecord) -> PathBuf {
     session_path
 }
 
-fn record(pid: u32, started: &str, machine: &str) -> HeartbeatRecord {
+pub(super) fn record(pid: u32, started: &str, machine: &str) -> HeartbeatRecord {
     HeartbeatRecord {
         epoch: 1,
         host: HOST.into(),
@@ -41,7 +41,7 @@ fn record(pid: u32, started: &str, machine: &str) -> HeartbeatRecord {
 }
 
 /// The pid and start time of a process that existed and has been reaped.
-fn dead_process() -> (u32, String) {
+pub(super) fn dead_process() -> (u32, String) {
     let mut child = std::process::Command::new("sleep")
         .arg("30")
         .spawn()
@@ -55,7 +55,7 @@ fn dead_process() -> (u32, String) {
     (pid, started)
 }
 
-fn own_process() -> (u32, String) {
+pub(super) fn own_process() -> (u32, String) {
     let (pid, started) = crate::process_identity::current_process();
     (pid as u32, started)
 }

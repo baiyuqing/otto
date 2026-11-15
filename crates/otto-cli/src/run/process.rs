@@ -303,6 +303,7 @@ pub async fn run_with_extensions(
             &session_path,
             create_lease,
             listed_session_path,
+            &mut *stderr,
         );
         let prepared = match prepared {
             Ok(prepared) => prepared,

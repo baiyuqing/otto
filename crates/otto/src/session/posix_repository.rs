@@ -7,7 +7,7 @@ use super::{
 use std::path::Path;
 use std::sync::Arc;
 
-use super::lease::Keeper;
+use super::lease::{Keeper, LeaseWait};
 use crate::fsops::files::FileDriver;
 use crate::session::{PreparedSession, SessionHandle, SessionRepository};
 use otto_core::session::{Header, ListResult, SessionInfo, Warning};
@@ -156,6 +156,16 @@ impl PosixSessionRepository {
 }
 
 impl SessionRepository for PosixSessionRepository {
+    /// `prepare` opens `reference` as given and `prepare_listed` validates it
+    /// as the cleaned absolute candidate path, which is the same file, so one
+    /// resolution serves both. An I/O error reads as no wait: `prepare`
+    /// reports the real error.
+    fn lease_wait(&self, reference: &str) -> Option<LeaseWait> {
+        crate::session::lease::pending_wait(Path::new(reference))
+            .ok()
+            .flatten()
+    }
+
     fn list_for_delete(
         &self,
         root: &Path,

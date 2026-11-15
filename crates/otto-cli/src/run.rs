@@ -163,4 +163,6 @@ pub async fn run(
 }
 
 #[cfg(test)]
+mod session_setup_tests;
+#[cfg(test)]
 mod tests;

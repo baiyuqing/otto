@@ -1,7 +1,7 @@
 //! End-to-end coverage of `otto acp --attach` through the built binary: a
 //! real `otto serve` on a Unix socket with a scripted provider, and one or
-//! more relays driven over pipes. docs/specs/2026-10-02-shared-session.md,
-//! "`otto acp --attach` forwards one ACP connection to `otto serve`".
+//! more relays driven over pipes. `otto acp --attach` forwards one ACP
+//! connection to `otto serve`.
 
 #![cfg(unix)]
 

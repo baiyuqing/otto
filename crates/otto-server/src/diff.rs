@@ -1,5 +1,5 @@
 //! `GET /v1/workspaces/diff`: a read-only view of a working directory's
-//! changes against `HEAD`. See `docs/specs/2026-09-26-workspace-diff-review.md`.
+//! changes against `HEAD`.
 //!
 //! Nothing here writes to the repository or the working tree: every git
 //! command below is a read (`rev-parse`, `diff`, `ls-files`), and

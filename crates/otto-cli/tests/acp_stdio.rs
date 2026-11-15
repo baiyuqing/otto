@@ -1,5 +1,4 @@
-//! End-to-end coverage of `otto acp` through the built binary over pipes:
-//! docs/specs/2026-10-02-acp-agent-server.md, "Tests".
+//! End-to-end coverage of `otto acp` through the built binary over pipes.
 
 #![cfg(unix)]
 

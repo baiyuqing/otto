@@ -1,8 +1,7 @@
 //! The `web_fetch` and `web_search` tools.
 //!
 //! They run inside the Otto process, so the `bash` sandbox does not confine
-//! them; [`policy`] is their boundary. Design and rationale:
-//! `docs/specs/2026-10-04-web-fetch.md`.
+//! them; [`policy`] is their boundary.
 //!
 //! Ownership: [`Runtime`] holds the HTTP client for one workspace's runners
 //! and is shared by every tool built from it. Calls are independent, and

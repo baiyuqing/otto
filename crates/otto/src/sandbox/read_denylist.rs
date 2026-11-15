@@ -6,7 +6,6 @@
 //! read_paths` entries are exceptions inside that set. The Seatbelt profile
 //! renders the list; the bash tool and `/sandbox allow` call
 //! [`ReadDenylist::covers`] to decide whether a read grant changes anything.
-//! The design record is `docs/specs/2026-11-01-sandbox-read-denylist.md`.
 
 use std::path::{Path, PathBuf};
 

@@ -1,6 +1,6 @@
 //! Model Context Protocol (MCP) client: tools exposed by external servers.
 //!
-//! Design: `docs/specs/2026-09-19-mcp-design.md`. This module owns the
+//! This module owns the
 //! JSON-RPC codec ([`jsonrpc`]), the two transports ([`stdio`], [`http`]),
 //! the OAuth 2.1 flow for HTTP servers ([`oauth`]), and the per-server
 //! [`client::Client`] that negotiates the protocol era and serves

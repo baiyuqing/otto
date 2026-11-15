@@ -2,8 +2,7 @@
 //!
 //! One [`app::Controller`] per session, a turn event buffer decoupled from the
 //! agent's synchronous emit callback ([`turn::Turn`]), Prometheus metrics
-//! ([`otto::metrics::Metrics`]), and structured request logging. See
-//! `docs/specs/2026-09-03-agent-server-design.md`.
+//! ([`otto::metrics::Metrics`]), and structured request logging.
 //!
 //! Concurrency: `sessions` is a plain `Mutex<HashMap>` held only for map
 //! operations. Each [`OpenSession`] has its own `Mutex` for admission,

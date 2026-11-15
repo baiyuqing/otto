@@ -220,7 +220,7 @@ impl Client {
     /// and without duplicates.
     ///
     /// One attempt with no retry: the caller is a tool the model can call
-    /// again. The body is read up to [`MAX_MODELS_BODY`] bytes and must be the
+    /// again. The body is read up to `MAX_MODELS_BODY` bytes and must be the
     /// OpenAI shape `{"data":[{"id":…}]}`. Error text is redacted the same way
     /// as `complete`'s.
     pub async fn list_models(

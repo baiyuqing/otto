@@ -11,7 +11,7 @@
 //!
 //! An entry is a [`Notification`] whose `id` is the prompt's input id, whose
 //! `task_id` is the serve turn id (empty for ACP), and whose `text` is the
-//! JSON-encoded [`Saved`] prompt. Images are never saved: a 10 MiB image
+//! JSON-encoded `Saved` prompt. Images are never saved: a 10 MiB image
 //! would be rewritten with every queue change.
 
 use std::sync::Arc;

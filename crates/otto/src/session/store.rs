@@ -102,7 +102,7 @@ pub(crate) fn unanswered_calls_from(pending: &[Block]) -> Vec<UnansweredCall> {
 /// again. At most one of the last two is non-empty.
 type RepairOutcome = (Vec<Warning>, Vec<UnansweredCall>, Vec<UnansweredCall>);
 
-/// Why [`Store::from_file`] recovered a session.
+/// Why `Store::from_file` recovered a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryCause {
     /// [`Prepared::activate`](super::prepared::Prepared::activate) took over
@@ -114,7 +114,7 @@ pub enum RecoveryCause {
     ProcessLost,
 }
 
-/// Recorded when [`Store::from_file`] opens a session the previous writer
+/// Recorded when `Store::from_file` opens a session the previous writer
 /// left mid-turn, or by taking over a lease epoch: the cause, the calls the
 /// store's dangling-tool-call repair gave synthetic results to, in the order
 /// they were repaired, and the interrupted turn, if one was recorded.
@@ -355,7 +355,7 @@ impl Store {
         })
     }
 
-    /// Takes the recovery record left by [`Store::from_file`] when this
+    /// Takes the recovery record left by `Store::from_file` when this
     /// store was opened from a session left mid-turn or by taking over
     /// another holder's lease epoch. `None` on every call after the first.
     /// The `otto.fork` record naming where this session was forked from.
@@ -575,7 +575,7 @@ impl Store {
     }
 
     /// Appends a `custom` entry with the given `customType` and pre-encoded
-    /// JSON `data`, unconditionally (unlike [`Store::update_runtime`], which
+    /// JSON `data`, unconditionally (unlike `Store::update_runtime`, which
     /// skips the write when nothing changed). The
     /// [`Session::append_custom`](otto_core::session::Session::append_custom)
     /// override for `Store` calls this.

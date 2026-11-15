@@ -1,4 +1,4 @@
-//! Precedence resolution: combines a parsed [`File`](super::File), an injected
+//! Precedence resolution: combines a parsed [`File`], an injected
 //! environment map, session defaults, and CLI overrides into a [`Runtime`].
 //!
 //! `env` is read here by key (never via `std::env::var`, which core cannot

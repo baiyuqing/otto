@@ -4,7 +4,7 @@
 //! `openat` and `O_NOFOLLOW`. No safe-wrapper crate covers the exclusive
 //! rename, `mkdirat`, or `fstatat(AT_SYMLINK_NOFOLLOW)`, so these are raw
 //! `libc` calls confined to this module. The exclusive rename is the one
-//! primitive whose spelling differs per platform; see [`rename_excl`].
+//! primitive whose spelling differs per platform; see `rename_excl`.
 //!
 //! Ownership: [`Dir`] owns a directory descriptor and closes it on drop.
 //! Concurrency: every function is a single syscall or a short sequence of them;

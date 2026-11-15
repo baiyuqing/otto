@@ -37,7 +37,7 @@ pub struct ClaudeHook {
     /// `sh` or `bash`; selects `/bin/sh -c` or `/bin/bash -c` for the shell form.
     #[serde(default = "default_shell", skip_serializing_if = "is_default_shell")]
     pub shell: String,
-    /// Declared or defaulted timeout, already clamped to [`MAX_TIMEOUT_SECONDS`].
+    /// Declared or defaulted timeout, already clamped to `MAX_TIMEOUT_SECONDS`.
     pub timeout_seconds: u64,
 }
 

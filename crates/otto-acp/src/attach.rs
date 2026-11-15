@@ -3,7 +3,7 @@
 //! The relay opens no session, runs no model or tool and reads no provider
 //! credentials; every session operation is an HTTP request on serve's Unix
 //! socket (see `otto::client`). It shares the transport, dispatcher, request
-//! parsing and update mapping with local `otto acp`; only [`Relay`] differs.
+//! parsing and update mapping with local `otto acp`; only `Relay` differs.
 //!
 //! Prompts: `session/prompt` posts a queued turn and reads that turn's SSE
 //! stream until `turn_end`. `session/cancel` reaches the prompt through the

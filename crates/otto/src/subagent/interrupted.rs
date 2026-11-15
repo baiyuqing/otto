@@ -4,7 +4,7 @@
 //! A sub-agent task is interrupted when its transcript has an `otto.task_spec`
 //! entry but no `otto.task_result` entry: the process that ran it stopped
 //! before the child reached a terminal status. [`scan`] never repairs or
-//! writes anything; [`mark_interrupted`] opens the transcript for writing,
+//! writes anything; `mark_interrupted` opens the transcript for writing,
 //! which repairs any dangling tool call the same way any other open does, and
 //! appends the terminal `otto.task_result` entry itself.
 
@@ -25,7 +25,7 @@ use super::runner::{
     TaskSpecDefinition,
 };
 
-/// The `otto.task_result` status [`mark_interrupted`] records.
+/// The `otto.task_result` status `mark_interrupted` records.
 pub const INTERRUPTED_STATUS: &str = "interrupted";
 
 /// One child transcript's state, read back from its `otto.task_spec` entry

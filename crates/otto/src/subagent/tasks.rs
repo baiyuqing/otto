@@ -3,7 +3,7 @@
 //! A [`Tasks`] registry tracks one record per delegated task, the cancellation
 //! token and history hook that belong to it, and the parent's notification
 //! inbox. It belongs to the session (see
-//! [`crate::runtime::session_resources`]), not to one runner: a profile switch
+//! `crate::runtime::session_resources`), not to one runner: a profile switch
 //! keeps it, and only the session's end calls [`Tasks::close`].
 //!
 //! Ownership: the registry owns its records. Every accessor returns a clone, so

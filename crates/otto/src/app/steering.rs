@@ -240,7 +240,7 @@ impl Controller {
 
     /// The current runner's timer registry, or `None` when the timer tools
     /// are not registered or the controller is closed. `/timers` lists it and
-    /// [`Self::archive_current_session`] clears it.
+    /// `Self::archive_current_session` clears it.
     pub fn reminders(&self) -> Option<Arc<Reminders>> {
         let state = self.lock();
         if state.is_closed() {

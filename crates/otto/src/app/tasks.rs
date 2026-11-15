@@ -96,7 +96,7 @@ pub trait TaskView: Send + Sync {
     fn history(&self, reference: &str) -> Option<Vec<Message>>;
 
     /// Requests cancellation. [`TASK_FINISHED`] when the task already
-    /// reached a final status, [`TASK_NOT_FOUND`] when the reference is
+    /// reached a final status, `TASK_NOT_FOUND` when the reference is
     /// unknown.
     fn cancel(&self, reference: &str) -> Result<(), String>;
 

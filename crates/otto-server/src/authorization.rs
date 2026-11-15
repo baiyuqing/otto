@@ -2,7 +2,7 @@
 //!
 //! Every request that reaches a `/v1/` handler carries a [`Principal`],
 //! attached by the token gate in `middleware::instrument` or by the router a
-//! transport was given ([`crate::Server::router_for`]). [`authorize_operation`]
+//! transport was given ([`crate::Server::router_for`]). `authorize_operation`
 //! runs after the token gate and before the handler's extractors, looks the
 //! request up in the [`OperationId`] registry and calls [`authorize`].
 //!

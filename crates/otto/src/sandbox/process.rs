@@ -4,10 +4,10 @@
 //! manager close, or leader exit starts cleanup, the group receives `SIGTERM`,
 //! gets a bounded grace period, and is then killed if it remains alive.
 //!
-//! Ownership: [`Manager`] owns the set of running children. A [`Manager`] is
+//! Ownership: `Manager` owns the set of running children. A `Manager` is
 //! shared behind `&self` and is safe to use from any task.
 //!
-//! Cancellation: cancelling the token passed to [`Manager::run_with_grace`] starts
+//! Cancellation: cancelling the token passed to `Manager::run_with_grace` starts
 //! cooperative cleanup and makes the call return [`Error::Cancelled`] if it
 //! wins the race with leader completion. The final child status is still
 //! reported.

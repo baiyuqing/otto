@@ -312,7 +312,7 @@ impl Server {
         }
     }
 
-    /// Runs [`Self::sweep_idle_sessions`] every [`SESSION_SWEEP_INTERVAL`] with
+    /// Runs `Self::sweep_idle_sessions` every `SESSION_SWEEP_INTERVAL` with
     /// this server's configured idle window and cap, until `cancel` is
     /// cancelled. `otto serve` starts one per process.
     pub fn start_session_sweeper(self: &Arc<Self>, cancel: CancellationToken) {

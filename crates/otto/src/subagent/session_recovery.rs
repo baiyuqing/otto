@@ -3,7 +3,7 @@
 //! and marks the child transcripts the notification describes as
 //! interrupted.
 //!
-//! [`crate::session::Store::from_file`] repairs dangling tool calls at open
+//! `crate::session::Store::from_file` repairs dangling tool calls at open
 //! time and records what it did as a [`crate::session::Recovery`]; the
 //! parent's own sub-agent children are not part of that record, since they
 //! are separate transcripts, so this module re-derives their state with
@@ -32,7 +32,7 @@ const CALL_ARGUMENTS_PREVIEW_BYTES: usize = 2048;
 const PROMPT_PREVIEW_BYTES: usize = 500;
 
 /// Reports the recovery `session` recorded (see
-/// [`crate::session::Store::take_recovery`]) to `inbox`, and marks every
+/// `crate::session::Store::take_recovery`) to `inbox`, and marks every
 /// interrupted child transcript under `children_dir` as interrupted. A
 /// no-op when there was no recovery, or when it left nothing to report: no
 /// dangling parent call, no interrupted child, and the parent's own

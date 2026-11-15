@@ -85,7 +85,7 @@ impl Store {
     }
 
     /// Closes the session file. Idempotent. Releases the lease this store
-    /// acquired (see [`Store::set_lease_check`] for a store that only
+    /// acquired (see `Store::set_lease_check` for a store that only
     /// checks a lease it does not own). The lease is released on every path,
     /// including when the file is missing or its sync fails, because
     /// `closed` stops `Drop` from releasing it; after a failed sync the

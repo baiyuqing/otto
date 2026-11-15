@@ -5,7 +5,7 @@
 //! codes.
 //!
 //! The composition root opens one process sandbox and hands it to a
-//! [`SandboxSwitch`], so `/sandbox reload`, `POST /v1/sandbox/reload` and the
+//! [`otto::runtime::sandbox_switch::SandboxSwitch`], so `/sandbox reload`, `POST /v1/sandbox/reload` and the
 //! TUI all re-point bash at a new runtime without restarting the process.
 //!
 //! `sandbox`, `memory`, `login`, `logout`, `setup` and `trust` dispatch before flag

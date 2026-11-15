@@ -202,7 +202,7 @@ pub struct Settings {
     #[serde(default)]
     pub read_paths: Vec<String>,
     /// Paths added to the built-in read denylist; see
-    /// [`read_denylist::BUILT_IN_DENY_PATHS`].
+    /// `read_denylist::BUILT_IN_DENY_PATHS`.
     #[serde(default)]
     pub deny_read_paths: Vec<String>,
     #[serde(default)]

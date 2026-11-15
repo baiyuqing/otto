@@ -54,7 +54,7 @@ impl Children {
         INSTANCE.get_or_init(|| Arc::new(Children::new()))
     }
 
-    /// Registers `pid` for [`Children::kill_all`]. When `process_group` is
+    /// Registers `pid` for `Children::kill_all`. When `process_group` is
     /// true, `pid` is also the id of the process group it leads (the caller
     /// must have started it with its own process group), and `kill_all`
     /// signals the group instead of the single process. Returns a guard
@@ -88,7 +88,7 @@ impl Children {
         }
     }
 
-    /// [`Children::kill_all`] for the panic hook. The hook runs on the
+    /// `Children::kill_all` for the panic hook. The hook runs on the
     /// panicking thread, which may already hold the registry mutex;
     /// `lock()` would then never return. This uses `try_lock`, signals and
     /// returns true when it got the lock (a poisoned lock is read anyway),

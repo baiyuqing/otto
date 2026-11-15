@@ -94,7 +94,7 @@ struct State {
 /// With a journal ([`Steering::set_journal`]), accepted guidance is also kept
 /// in a durable mailbox, scoped to the run's `otto.turn` id. Every way a run
 /// ends removes it again; only process loss leaves it, for the automatic
-/// resume of that same turn ([`Steering::begin_turn`]) to deliver.
+/// resume of that same turn (`Steering::begin_turn`) to deliver.
 #[derive(Default)]
 pub struct Steering {
     state: Mutex<State>,
@@ -255,7 +255,7 @@ impl Steering {
 
     /// Requests that the active run stop its current step and deliver the
     /// queued guidance inside the same turn. Cancels the registered step token
-    /// if one is registered; otherwise the next [`Run::arm`] cancels its token
+    /// if one is registered; otherwise the next `Run::arm` cancels its token
     /// at once. Returns the number of queued messages.
     pub fn interrupt_step(&self) -> Result<usize, InterruptError> {
         let mut state = self.lock();

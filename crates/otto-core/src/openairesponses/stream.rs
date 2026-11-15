@@ -40,11 +40,11 @@ pub enum StreamError {
     /// A `data:` payload was not valid event JSON.
     #[error("decode responses stream: {0}")]
     Decode(String),
-    /// One SSE field line exceeded [`MAX_SSE_LINE_BYTES`].
+    /// One SSE field line exceeded `MAX_SSE_LINE_BYTES`.
     #[error("responses stream line exceeds {limit} bytes")]
     LineTooLarge { limit: usize },
     /// One SSE event's accumulated `data:` fields exceeded
-    /// [`MAX_SSE_EVENT_BYTES`].
+    /// `MAX_SSE_EVENT_BYTES`.
     #[error("responses stream event exceeds {limit} bytes")]
     EventTooLarge { limit: usize },
     /// The backend sent a `response.failed` or an `error` event. The text is

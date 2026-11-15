@@ -5,7 +5,7 @@
 //! already-read text in place. The native crate's
 //! `otto::config` reads and writes the files, reads the environment, and calls
 //! back into this module for the schema and the resolution logic in
-//! [`resolve`].
+//! [`mod@resolve`].
 //!
 //! Ownership: every type here is owned data; nothing borrows from the input
 //! text after parsing.

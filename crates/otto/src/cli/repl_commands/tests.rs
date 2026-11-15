@@ -7,51 +7,7 @@ use tokio_util::sync::CancellationToken;
 mod mcp_commands;
 mod memory_history_commands;
 mod memory_lifecycle_commands;
-mod skill_commands;
 mod task_commands;
-
-fn standalone_service() -> (tempfile::TempDir, crate::memory::Service) {
-    let (directory, store) = crate::memory::files::testsupport::open_temp();
-    (
-        directory,
-        crate::memory::Service::from_store(
-            std::sync::Arc::new(store),
-            crate::memory::decide_default_policy,
-        ),
-    )
-}
-
-#[test]
-fn pending_candidates_show_the_advice_line_under_the_candidate() {
-    let (_directory, service) = standalone_service();
-    let scope = crate::memory::Scope::new(crate::memory::NAMESPACE_USER, "user-1");
-    let advised = crate::memory::advice::testing::candidate(&service, scope.clone(), true);
-
-    let text = render_pending_candidates(std::slice::from_ref(&advised));
-
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 3, "{text}");
-    assert!(
-        lines[1].starts_with(&format!("id={}", advised.id)),
-        "{text}"
-    );
-    assert_eq!(
-        lines[2],
-        format!("  {}", crate::memory::advice::testing::LINE)
-    );
-}
-
-#[test]
-fn pending_candidates_without_advice_render_exactly_one_line_each() {
-    let (_directory, service) = standalone_service();
-    let scope = crate::memory::Scope::new(crate::memory::NAMESPACE_USER, "user-1");
-    let plain = crate::memory::advice::testing::candidate(&service, scope, false);
-
-    let text = render_pending_candidates(std::slice::from_ref(&plain));
-
-    assert_eq!(text.lines().count(), 2, "{text}");
-    assert!(!text.contains("Advice"), "{text}");
-}
 
 #[derive(Clone, Default)]
 struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -141,33 +97,6 @@ fn remember_arguments_parse_flags_and_trailing_text() {
     assert_eq!(
         parse_remember_argument("just some text"),
         ("", "note", "", "just some text")
-    );
-}
-
-#[test]
-fn search_results_render_as_plain_text() {
-    assert_eq!(
-        render_search_result(&SearchResult::default()),
-        "no matching records"
-    );
-    let record = crate::memory::Record {
-        id: "rec-1".into(),
-        scope: Scope {
-            namespace: "workspace".into(),
-            id: "w1".into(),
-        },
-        kind: "preference".into(),
-        key: "editor".into(),
-        text: "uses vim".into(),
-        revision: 1,
-        ..crate::memory::Record::default()
-    };
-    assert_eq!(
-        render_search_result(&SearchResult {
-            records: vec![record],
-            ..SearchResult::default()
-        }),
-        "1 records:\nid=rec-1 scope=workspace/w1 kind=preference key=editor revision=1 text=uses vim"
     );
 }
 

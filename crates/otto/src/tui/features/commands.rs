@@ -565,7 +565,7 @@ impl Presenter for RequestPresenter {
         self.loaded = true;
         self.text = match reply {
             Reply::Operation { message, .. } => message,
-            Reply::Management(reply) => crate::cli::repl_commands::format_management_reply(&reply),
+            Reply::Management(reply) => crate::app::management::format_management_reply(&reply),
             Reply::AgentDetail {
                 row,
                 history,

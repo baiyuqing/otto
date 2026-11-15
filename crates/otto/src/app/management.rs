@@ -721,8 +721,10 @@ impl Controller {
 mod management_dispatch;
 mod management_error;
 mod memory_requests;
+mod reply_text;
 
 pub use management_error::{ManagementError, ManagementErrorKind};
+pub use reply_text::{format_management_reply, format_mcp_report};
 
 #[cfg(test)]
 mod lifecycle_tests;

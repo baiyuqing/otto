@@ -252,7 +252,7 @@ pub(crate) fn write_file_atomic(
         .open_parent(path, &refuse_git)
         .map_err(|error| before_rename(error.to_string()))?;
     let suffix =
-        crate::auth::random_hex::<8>().map_err(|error| before_rename(error.to_string()))?;
+        crate::random::random_hex::<8>().map_err(|error| before_rename(error.to_string()))?;
     let temp_name = format!(".otto-{suffix}");
     // The publish fsyncs the directory after the rename: `fsync` on the
     // temporary file covers the file's data and metadata but not the

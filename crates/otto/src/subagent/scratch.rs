@@ -30,7 +30,7 @@ impl Scratch {
             Err(error) => return Err(error),
         }
         let parent = create_session_directory(&output, session_directory_name)?;
-        let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
+        let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
         let name = format!("research-{id}");
         let directory = parent.create_new_child_directory(&name, Mode::S_IRWXU)?;
         Ok(Self {

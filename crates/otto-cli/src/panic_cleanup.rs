@@ -9,7 +9,7 @@
 //! `otto serve` socket file need no hook: the kernel releases them, and
 //! `server/listen.rs` removes a stale socket at the next start.
 
-use otto::failover::children::Children;
+use otto::child_fence::Children;
 
 /// Installs the panic hook when the build aborts on panic.
 ///

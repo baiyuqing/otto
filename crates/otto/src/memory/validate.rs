@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Datelike, Utc};
 
 use super::contracts::*;
+use crate::workspace::{MAX_SCOPE_ID_BYTES, valid_opaque_id};
 
 /// Timestamps default to this and validation rejects it, so an unset time can
 /// never reach the store.

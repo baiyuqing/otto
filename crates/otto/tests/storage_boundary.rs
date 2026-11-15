@@ -1,9 +1,12 @@
 //! Source guard for native storage ownership and dependency direction.
 //!
 //! Domain services own state semantics and import typed repository ports.
-//! Concrete drivers and repository adapters live under `storage/`; only domain
-//! `mod.rs` files may retain transitional constructors. Two named legacy
-//! facades may contain only a pure backend Store reexport. Non-test sources
+//! Concrete drivers and the remaining repository adapters live under
+//! `storage/`; a repository moved into its domain module is listed in
+//! `DOMAIN_REPOSITORIES` and may hold SQL and import the SQL layer and the
+//! SQLite driver. Only domain `mod.rs` files may retain transitional
+//! constructors. A named legacy facade may contain only a pure backend Store
+//! reexport. Non-test sources
 //! never reexport `otto_core`; each of its items has the single path
 //! `otto_core::...`.
 
@@ -12,6 +15,10 @@ use std::path::{Path, PathBuf};
 const DOMAIN_MODULES: &[&str] = &[
     "approval", "memory", "session", "schedule", "workflow", "skill", "usage", "subagent",
 ];
+/// Repository implementations that live in their domain module, relative to
+/// `src/`. Each holds the domain's SQL and opens its connection through the
+/// SQLite driver; no other file of a domain does.
+const DOMAIN_REPOSITORIES: &[&str] = &["usage/store.rs"];
 const FRONTENDS: &[&str] = &["cli", "tui", "acp", "server", "client"];
 const DOMAINS: &[&str] = &[
     "approval", "memory", "session", "schedule", "workflow", "skill", "usage", "subagent",
@@ -173,6 +180,13 @@ fn has_sql(source: &str) -> bool {
     })
 }
 
+fn is_domain_repository(path: &Path) -> bool {
+    path.strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+        .ok()
+        .and_then(|relative| relative.to_str())
+        .is_some_and(|relative| DOMAIN_REPOSITORIES.contains(&relative))
+}
+
 fn is_domain_mod(path: &Path) -> bool {
     path.file_name().and_then(|name| name.to_str()) == Some("mod.rs")
 }
@@ -279,13 +293,11 @@ fn session_legacy_violations(source: &str) -> Vec<String> {
         }
         rest = &rest[end..];
     }
-    let unsupported_backends = source.replace("crate::storage::backends::posix::session", "");
-    let unsupported_drivers = source.replace("crate::storage::drivers::posix::PosixDriver", "");
-    if unsupported_backends.contains("crate::storage::backends::") {
-        problems.push("session compatibility facade imports a non-session backend".into());
+    if source.contains("crate::storage::backends::") {
+        problems.push("session compatibility facade imports a storage backend".into());
     }
-    if unsupported_drivers.contains("crate::storage::drivers::") {
-        problems.push("session compatibility facade imports a non-POSIX driver".into());
+    if source.contains("crate::storage::drivers::") {
+        problems.push("session compatibility facade imports a storage driver".into());
     }
     for forbidden in [
         "crate::storage::Connection",
@@ -347,6 +359,14 @@ fn domain_violations(path: &Path, source: &str) -> Vec<String> {
         return session_legacy_violations(source);
     }
     let source = non_test(source);
+    if is_domain_repository(path) {
+        return ["rusqlite::", "libsql::"]
+            .iter()
+            .any(|token| source.contains(token))
+            .then(|| "storage SDK import".to_owned())
+            .into_iter()
+            .collect();
+    }
     let legacy_facade = is_pure_legacy_facade(path, &source);
     let source = without_line_comments(&source);
     let mut problems = Vec::new();
@@ -570,16 +590,33 @@ fn fixtures_prove_forbidden_edges_are_detected() {
         .is_empty()
     );
     let legacy_session = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/session/legacy.rs");
-    let allowed_constructor = "use crate::storage::backends::posix::session::Store;\nuse \
-        crate::storage::drivers::posix::PosixDriver;\nimpl Store { fn \
+    let allowed_constructor = "use super::Store;\nuse \
+        crate::fsops::PosixDriver;\nimpl Store { fn \
         create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }";
     assert!(domain_violations(&legacy_session, allowed_constructor).is_empty());
-    let service_call = "use crate::storage::backends::posix::session::Store;\nimpl Store { fn create_lazy() { Store::recover(\"scope\"); } }";
+    let service_call =
+        "use super::Store;\nimpl Store { fn create_lazy() { Store::recover(\"scope\"); } }";
     assert!(!domain_violations(&legacy_session, service_call).is_empty());
-    let mutating_constructor = "use crate::storage::backends::posix::session::Store;\nimpl Store { fn \
+    let mutating_constructor = "use super::Store;\nimpl Store { fn \
         create_lazy() { Self::create_lazy_with_driver_and_keeper(); } }\nconst \
         SQL: &str = \"UPDATE sessions SET status='closed'\";";
     assert!(!domain_violations(&legacy_session, mutating_constructor).is_empty());
+    let session_backend_import =
+        "use crate::storage::backends::sqlite::usage::Store;\nimpl Store { fn create_lazy() {} }";
+    assert!(!domain_violations(&legacy_session, session_backend_import).is_empty());
+    let usage_store = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/usage/store.rs");
+    let usage_sql = "use crate::storage::drivers::sqlite::SqliteDriver;\nconst SQL: &str = \"SELECT * FROM usage_events\";";
+    assert!(domain_violations(&usage_store, usage_sql).is_empty());
+    assert!(!domain_violations(&usage_store, "use rusqlite::Connection;").is_empty());
+    let usage_other = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/usage/mod.rs");
+    assert!(
+        domain_violations(
+            &usage_other,
+            "const SQL: &str = \"SELECT * FROM usage_events\";"
+        )
+        .len()
+            == 1
+    );
     let test_only_sql = "#[cfg(test)]\nmod tests { const SQL: &str = \"SELECT * FROM runs\"; }";
     assert!(domain_violations(service, test_only_sql).is_empty());
     assert!(!core_reexport_violations("pub use otto_core::approval::*;").is_empty());

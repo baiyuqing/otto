@@ -5,6 +5,7 @@
   "memory_scope": "otto-cli-69e7d756592d",
   "paths": [
     "/Users/user/Work/code/otto/.worktree/update-deps/crates/otto-cli",
-    "/Users/user/Work/code/otto/.worktree/sqlite-migration-test/crates/otto-cli"
+    "/Users/user/Work/code/otto/.worktree/sqlite-migration-test/crates/otto-cli",
+    "/Users/user/Work/code/otto/.worktree/layering/crates/otto-cli"
   ]
 }

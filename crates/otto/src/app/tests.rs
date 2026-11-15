@@ -5,7 +5,7 @@ use crate::fixtures::{FakeSandbox, builder, controller, initial_runtime, seatbel
 use crate::runtime::info::SandboxNetwork;
 use crate::runtime::sandbox_config::SandboxChange;
 
-/// The `heartbeat` file layout `failover::lease` writes, reproduced here
+/// The `heartbeat` file layout `session::lease` writes, reproduced here
 /// to simulate a running holder without a live `Lease` of this process's
 /// own (see [`crate::session::tests`]'s test-safety note for the same
 /// pattern).
@@ -50,7 +50,7 @@ fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transc
 
 /// Reads a lease's fixed-size heartbeat file and reports whether its
 /// `released` field is `true`. Parses only that one field, matching
-/// [`crate::failover::lease`]'s own doc comment on why the heartbeat is
+/// [`crate::session::lease`]'s own doc comment on why the heartbeat is
 /// read back in tests elsewhere in this crate.
 fn heartbeat_released(session_path: &str) -> bool {
     let heartbeat = Path::new(session_path)

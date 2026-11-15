@@ -6,7 +6,7 @@ use super::{
     },
     prepared::validate_listed_candidate_path,
 };
-use crate::{fsops, storage::files::JournalFile};
+use crate::fsops::{self, files::JournalFile};
 use otto_core::session::PiError;
 use std::{fs::Metadata, path::Path};
 

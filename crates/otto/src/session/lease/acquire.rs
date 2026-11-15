@@ -238,7 +238,7 @@ pub(super) fn move_aside_log(
     let complete_len = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     bytes.truncate(complete_len);
 
-    let suffix = crate::auth::random_hex::<8>()?;
+    let suffix = crate::random::random_hex::<8>()?;
     let temp_path = dir_path.join(format!("restore.tmp-{suffix}"));
     let write_result = (|| -> std::io::Result<()> {
         use std::io::Write;

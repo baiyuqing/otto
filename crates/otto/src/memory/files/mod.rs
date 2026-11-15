@@ -123,7 +123,7 @@ fn publish_path(path: &Path, content: &str) -> Result<()> {
     let (parent, name) = fsops::open_parent(path).map_err(unavailable)?;
     let temp_name = format!(
         ".{name}.{}.tmp",
-        crate::auth::random_hex::<8>().map_err(unavailable)?
+        crate::random::random_hex::<8>().map_err(unavailable)?
     );
     fsops::publish_file(
         &parent,

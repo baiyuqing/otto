@@ -30,7 +30,7 @@ use super::prepared::Prepared;
 use super::store::Store;
 use crate::faults::files::{FaultyFileDriver, FileOp};
 use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
-use crate::storage::drivers::posix::PosixDriver;
+use crate::fsops::PosixDriver;
 
 mod cache_usage;
 mod compaction_list;

@@ -21,7 +21,7 @@ use otto_core::agent::inbox::{Notification, NotificationKind};
 use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Role};
 
-use crate::failover::lease;
+use crate::session::lease;
 use crate::session::{Recovery, RecoveryCause, UnansweredCall};
 use crate::subagent::interrupted::{self, ChildRecord};
 
@@ -309,7 +309,7 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failover::lease;
+    use crate::session::lease;
     use otto_core::agent::inbox::Inbox;
     use otto_core::model::{Block, FinishReason};
     use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;

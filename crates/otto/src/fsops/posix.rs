@@ -480,17 +480,17 @@ pub fn read_directory_names(dir: &Dir, max_entries: usize) -> io::Result<Vec<Str
 #[derive(Debug, Default)]
 pub struct PosixDriver;
 
-impl crate::storage::files::FileDriver for PosixDriver {
-    fn open_root(&self, path: &Path) -> io::Result<Box<dyn crate::storage::files::FileRoot>> {
+impl super::files::FileDriver for PosixDriver {
+    fn open_root(&self, path: &Path) -> io::Result<Box<dyn super::files::FileRoot>> {
         Ok(Box::new(open_dir_no_follow(path)?))
     }
 }
 
-impl crate::storage::files::FileRoot for Dir {
+impl super::files::FileRoot for Dir {
     fn list_names(&self, max_entries: usize) -> io::Result<Vec<String>> {
         read_directory_names(self, max_entries)
     }
-    fn open_directory(&self, name: &str) -> io::Result<Box<dyn crate::storage::files::FileRoot>> {
+    fn open_directory(&self, name: &str) -> io::Result<Box<dyn super::files::FileRoot>> {
         Ok(Box::new(open_dir_at_no_follow(self, name)?))
     }
     fn create_directory(&self, name: &str) -> io::Result<()> {
@@ -499,9 +499,9 @@ impl crate::storage::files::FileRoot for Dir {
     fn open_journal(
         &self,
         name: &str,
-        mode: crate::storage::files::JournalOpen,
-    ) -> io::Result<Box<dyn crate::storage::files::JournalFile>> {
-        use crate::storage::files::JournalOpen;
+        mode: super::files::JournalOpen,
+    ) -> io::Result<Box<dyn super::files::JournalFile>> {
+        use super::files::JournalOpen;
         let file = match mode {
             JournalOpen::ReadOnly => {
                 open_at_no_follow(self, name, libc::O_RDONLY | libc::O_NONBLOCK)?
@@ -538,7 +538,7 @@ impl crate::storage::files::FileRoot for Dir {
     }
 }
 
-impl crate::storage::files::JournalFile for File {
+impl super::files::JournalFile for File {
     fn metadata(&self) -> io::Result<std::fs::Metadata> {
         File::metadata(self)
     }
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn file_driver_confines_journals_to_pinned_root() {
-        use crate::storage::files::{FileDriver, JournalOpen};
+        use crate::fsops::files::{FileDriver, JournalOpen};
         use std::io::{Read, Seek, SeekFrom, Write};
         let home = tempfile::tempdir().unwrap();
         let original = home.path().join("root");

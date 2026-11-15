@@ -95,10 +95,10 @@ struct Entry {
     cancellation_grace: Duration,
     termination: Mutex<Termination>,
     cleanup_changed: tokio::sync::Notify,
-    /// Keeps this process group registered with `failover::children::Children`
+    /// Keeps this process group registered with `child_fence::Children`
     /// for the entry's lifetime, so a lease watchdog's fence action can kill
     /// it independently of this manager's own lifecycle.
-    _fence_registration: crate::failover::children::Registration,
+    _fence_registration: crate::child_fence::Registration,
 }
 
 impl Entry {
@@ -330,8 +330,8 @@ impl Manager {
                 cancellation_grace,
                 termination: Mutex::new(Termination::default()),
                 cleanup_changed: tokio::sync::Notify::new(),
-                _fence_registration: crate::failover::children::Children::register(
-                    crate::failover::children::Children::global(),
+                _fence_registration: crate::child_fence::Children::register(
+                    crate::child_fence::Children::global(),
                     pid as i32,
                     true,
                 ),

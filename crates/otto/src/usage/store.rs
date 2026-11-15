@@ -6,13 +6,13 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use super::repository::UsageRepository;
+use super::{
+    Analysis, ApiOperationRecord, DailyPoint, Error, Result, Sink, Summary, UsageRecord, date_range,
+};
 use crate::storage::drivers::sqlite::SqliteDriver;
 use crate::storage::{Connection, params};
 use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
-use crate::usage::repository::UsageRepository;
-use crate::usage::{
-    Analysis, ApiOperationRecord, DailyPoint, Error, Result, Sink, Summary, UsageRecord, date_range,
-};
 use otto_core::model::Usage;
 
 pub(super) const SCHEMA: &str = r#"

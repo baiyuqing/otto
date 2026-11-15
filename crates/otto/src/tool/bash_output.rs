@@ -144,7 +144,7 @@ impl Output {
             Err(error) => return Err(error),
         }
         let directory = create_session_directory(&output_directory, session_directory_name)?;
-        let id = crate::auth::random_hex::<16>().map_err(io::Error::other)?;
+        let id = crate::random::random_hex::<16>().map_err(io::Error::other)?;
         let path = format!("{DIRECTORY}/{session_directory_name}/{id}.log");
         let file = directory.open_file(
             Path::new(&format!("{id}.log")),

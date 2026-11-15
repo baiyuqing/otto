@@ -21,7 +21,7 @@ async fn controller_with_failing_journal_sync(
 ) {
     use crate::faults::files::{FaultyFileDriver, FileOp};
     use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
-    use crate::storage::drivers::posix::PosixDriver;
+    use crate::fsops::PosixDriver;
 
     let builder = builder(workspace, sessions);
     let runtime = initial_runtime(&builder);

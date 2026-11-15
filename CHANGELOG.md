@@ -16,6 +16,13 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- Opening a lease-managed session that will wait 7/6 of `lease_seconds` for a
+  holder that stopped without releasing the lease now writes
+  `waiting up to <N> s for the session lease held by host <host> pid <pid>`
+  first: to standard error at startup, and to the process log of `otto acp`
+  and `otto serve` for a session opened later. A session opened later in the
+  TUI or REPL still waits without a notice. See
+  [Continuing a session on another host](docs/manual/interactive-use.md#continuing-a-session-on-another-host).
 - Session failover is on by default: `[failover] enabled` now defaults to
   `true`, so each session gets a `<session-id>.lease/` directory on its next
   write or open. `[failover] enabled = false` keeps sessions without a lease

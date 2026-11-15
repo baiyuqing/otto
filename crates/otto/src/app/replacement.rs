@@ -220,7 +220,25 @@ async fn open_current(
     let storage = Arc::clone(&builder.storage);
     let workspace = builder.workspace_path.clone();
     let blocking_path = path.to_path_buf();
+    let logger = Arc::clone(&builder.logger);
     let prepared = tokio::task::spawn_blocking(move || {
+        // Runs before the open, so the lease can change in between; that
+        // makes the log line inaccurate, not the open. Terminal frontends
+        // discard the logger, so this reaches stderr only for `otto acp`
+        // and `otto serve`.
+        if let Some(wait) = storage
+            .sessions()
+            .lease_wait(&blocking_path.to_string_lossy())
+        {
+            logger.warn(
+                "session_lease_wait",
+                &[
+                    ("seconds", wait.seconds.to_string()),
+                    ("host", wait.host),
+                    ("pid", wait.pid.to_string()),
+                ],
+            );
+        }
         storage.sessions().prepare_listed(
             &session_root,
             &workspace,

@@ -55,6 +55,7 @@ mod heartbeat;
 mod keeper;
 mod stall;
 
+pub use acquire::LeaseWait;
 pub(crate) use acquire::*;
 pub(crate) use fence::new_keeper;
 use heartbeat::*;
@@ -669,3 +670,5 @@ mod same_host_tests;
 mod stall_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wait_notice_tests;

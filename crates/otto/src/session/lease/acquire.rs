@@ -100,34 +100,11 @@ pub(super) fn acquire_with_mode(
         };
     }
 
-    let heartbeat = read_heartbeat(&dir)?;
-    // A missing heartbeat waits out the same liveness window as a live one,
-    // rather than being treated as an immediate takeover: the epoch marker
-    // this process just saw may belong to a concurrent acquirer that has
-    // not yet written its first heartbeat (`finish_acquire` writes the
-    // marker, then the heartbeat, as two separate steps). Waiting gives
-    // that heartbeat a chance to appear; only a marker whose heartbeat
-    // never appears within the window is treated as an abandoned epoch.
-    //
-    // A released heartbeat is only trusted when it belongs to the highest
-    // epoch marker: a released heartbeat behind a newer marker means a
-    // concurrent acquirer already created that marker but has not written
-    // its heartbeat yet, so waiting is needed here too, or two acquirers
-    // would both take over and append to the log concurrently.
-    let released = matches!(&heartbeat, Some(h) if h.released && h.epoch == highest);
-    // A holder of this host whose process no longer exists cannot renew, so
-    // the window would only repeat what the process table already shows.
-    // Both the machine id and the start time are required: the hostname
-    // alone can be shared by cloned machines, and a bare pid can be reused.
-    let dead_local_holder = matches!(&heartbeat, Some(h)
-        if !h.released
-            && h.epoch == highest
-            && h.host == host.hostname
-            && !h.machine.is_empty()
-            && h.machine == host.machine
-            && (host.process_matches)(i64::from(h.pid), &h.started) == Some(false));
-    let unreleased = !released;
-    let should_wait = unreleased && !dead_local_holder;
+    let WaitDecision {
+        heartbeat,
+        unreleased,
+        should_wait,
+    } = decide_wait(&dir, highest, host)?;
 
     let mut prior_holder = heartbeat.as_ref().map(|h| Holder {
         epoch: highest,
@@ -210,6 +187,108 @@ pub(super) fn acquire_with_mode(
         Err(e) if is_eexist(&e) => Err(AcquireError::Raced(next)),
         Err(e) => Err(AcquireError::Io(e)),
     }
+}
+
+/// What acquisition concluded from the heartbeat of the highest epoch.
+struct WaitDecision {
+    heartbeat: Option<HeartbeatRecord>,
+    /// The holder did not release the lease.
+    unreleased: bool,
+    /// The liveness window applies before taking over.
+    should_wait: bool,
+}
+
+/// The decision of [`acquire_with_mode`] whether to wait, shared with
+/// [`pending_wait`] so the notice and the wait cannot diverge. `highest` is
+/// the highest epoch marker, and is not zero. Only reads.
+fn decide_wait(dir: &fsops::Dir, highest: u64, host: &LocalHost) -> std::io::Result<WaitDecision> {
+    let heartbeat = read_heartbeat(dir)?;
+    // A missing heartbeat waits out the same liveness window as a live one,
+    // rather than being treated as an immediate takeover: the epoch marker
+    // this process just saw may belong to a concurrent acquirer that has
+    // not yet written its first heartbeat (`finish_acquire` writes the
+    // marker, then the heartbeat, as two separate steps). Waiting gives
+    // that heartbeat a chance to appear; only a marker whose heartbeat
+    // never appears within the window is treated as an abandoned epoch.
+    //
+    // A released heartbeat is only trusted when it belongs to the highest
+    // epoch marker: a released heartbeat behind a newer marker means a
+    // concurrent acquirer already created that marker but has not written
+    // its heartbeat yet, so waiting is needed here too, or two acquirers
+    // would both take over and append to the log concurrently.
+    let released = matches!(&heartbeat, Some(h) if h.released && h.epoch == highest);
+    // A holder of this host whose process no longer exists cannot renew, so
+    // the window would only repeat what the process table already shows.
+    // Both the machine id and the start time are required: the hostname
+    // alone can be shared by cloned machines, and a bare pid can be reused.
+    let dead_local_holder = matches!(&heartbeat, Some(h)
+        if !h.released
+            && h.epoch == highest
+            && h.host == host.hostname
+            && !h.machine.is_empty()
+            && h.machine == host.machine
+            && (host.process_matches)(i64::from(h.pid), &h.started) == Some(false));
+    let unreleased = !released;
+    let should_wait = unreleased && !dead_local_holder;
+    Ok(WaitDecision {
+        heartbeat,
+        unreleased,
+        should_wait,
+    })
+}
+
+/// A wait that [`acquire_with`] would enter before taking over a lease.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseWait {
+    /// The length of the wait, 7`L`/6 in whole seconds.
+    pub seconds: u64,
+    /// The host in the holder's heartbeat; `unknown` when it does not parse.
+    pub host: String,
+    /// The pid in the holder's heartbeat; `0` when it does not parse.
+    pub pid: u32,
+}
+
+/// The wait [`acquire_with`] would enter for `session_path` now, or `None`
+/// when it would not wait: there is no lease directory or no epoch marker,
+/// the holder released, or the same-host dead-holder rule applies. It reads
+/// the lease directory and never creates, writes or renames anything. The
+/// lease can change before the acquire that follows; the result then
+/// describes a wait that does not happen or misses one that does, which
+/// affects only the notice a caller prints, never the acquisition.
+pub(crate) fn pending_wait(session_path: &Path) -> std::io::Result<Option<LeaseWait>> {
+    pending_wait_with_host(session_path, &LocalHost::current())
+}
+
+pub(super) fn pending_wait_with_host(
+    session_path: &Path,
+    host: &LocalHost,
+) -> std::io::Result<Option<LeaseWait>> {
+    if !is_lease_managed(session_path)? {
+        return Ok(None);
+    }
+    let dir_path = lease_dir(session_path);
+    let dir = fsops::open_dir_no_follow(&dir_path)?;
+    let meta = read_lease_meta(&dir_path).map_err(|error| match error {
+        AcquireError::Io(error) => error,
+        other => std::io::Error::new(std::io::ErrorKind::InvalidData, other.to_string()),
+    })?;
+    let highest = highest_epoch(&dir_path)?;
+    if highest == 0 {
+        return Ok(None);
+    }
+    let decision = decide_wait(&dir, highest, host)?;
+    if !decision.should_wait {
+        return Ok(None);
+    }
+    let (host, pid) = match &decision.heartbeat {
+        Some(h) => (h.host.clone(), h.pid),
+        None => ("unknown".to_string(), 0),
+    };
+    Ok(Some(LeaseWait {
+        seconds: meta.lease_seconds * 7 / 6,
+        host,
+        pid,
+    }))
 }
 
 /// Finds the highest-numbered `fenced-<n>.jsonl` in `dir_path`, or `None` if

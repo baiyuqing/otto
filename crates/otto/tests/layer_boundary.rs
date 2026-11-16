@@ -180,7 +180,7 @@ fn module_references(
 }
 
 /// The top-level modules of `src/` mapped to their non-test source files.
-/// `x.rs` and `x/` are both module `x`.
+/// `x.rs` and `x/` are both module `x` when they contain non-test sources.
 fn module_files(src: &Path) -> BTreeMap<String, Vec<PathBuf>> {
     let mut modules: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for entry in std::fs::read_dir(src).expect("src is readable") {
@@ -189,10 +189,14 @@ fn module_files(src: &Path) -> BTreeMap<String, Vec<PathBuf>> {
         if ROOT_FILES.contains(&name.as_str()) || !(path.is_dir() || name.ends_with(".rs")) {
             continue;
         }
+        let files = sources(&path);
+        if files.is_empty() {
+            continue;
+        }
         modules
             .entry(name.trim_end_matches(".rs").to_string())
             .or_default()
-            .extend(sources(&path));
+            .extend(files);
     }
     modules
 }
@@ -365,6 +369,34 @@ fn the_scan_finds_paths_groups_and_super_imports() {
     let mut found = heads(false);
     found.sort_by_key(|(_, line)| *line);
     assert_eq!(found, below);
+}
+
+#[test]
+fn directories_without_production_sources_are_not_modules() {
+    let directory = tempfile::tempdir().unwrap();
+    let src = directory.path();
+    for name in [
+        "storage",
+        "tui",
+        ".claude",
+        "test_only/tests",
+        "unknown/nested",
+    ] {
+        std::fs::create_dir_all(src.join(name)).unwrap();
+    }
+    std::fs::write(src.join(".claude/settings.json"), "{}").unwrap();
+    std::fs::write(src.join("test_only/tests/example.rs"), "fn test() {}").unwrap();
+    std::fs::write(src.join("unknown/nested/module.rs"), "pub fn run() {}").unwrap();
+    std::fs::write(src.join("runtime.rs"), "pub fn run() {}").unwrap();
+    std::fs::write(src.join("lib.rs"), "mod runtime;").unwrap();
+
+    let files = module_files(src);
+    let modules = files.keys().cloned().collect();
+    assert_eq!(modules, names(&["runtime", "unknown"]));
+    assert_eq!(files["unknown"], vec![src.join("unknown/nested/module.rs")]);
+    assert!(table_problems(&modules).contains(
+        &"src/unknown is in no layer; add it to LAYERS in tests/layer_boundary.rs".to_string()
+    ));
 }
 
 #[test]

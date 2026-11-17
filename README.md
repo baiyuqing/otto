@@ -1,4 +1,4 @@
-# otto — a personal AI agent
+# otto — a personal AI agent for fun
 
 [简体中文](README.zh-CN.md) · [Documentation](docs/README.md) · [Changelog](CHANGELOG.md)
 

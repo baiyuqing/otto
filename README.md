@@ -16,6 +16,12 @@ and **ChatGPT** sign-in. Model requests go to the selected provider;
 “local-first” describes the runtime, session history and default memory storage,
 not a local model.
 
+## Architecture
+
+[![otto architecture: parallel frontend crates, five runtime layers and independent support packages](docs/architecture/otto-architecture.png?v=0a730279-axonometric-1)](docs/architecture/otto-architecture.svg)
+
+[Code organization](docs/code-organization.md) · [SVG](docs/architecture/otto-architecture.svg) · [Editable HTML](docs/architecture/otto-architecture.html)
+
 ## Install from source
 
 Install Rust through rustup (the repository pins the toolchain in

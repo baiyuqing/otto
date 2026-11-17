@@ -1,4 +1,4 @@
-# Otto — a local-first personal AI agent
+# otto — a personal AI agent
 
 [简体中文](README.zh-CN.md) · [Documentation](docs/README.md) · [Changelog](CHANGELOG.md)
 

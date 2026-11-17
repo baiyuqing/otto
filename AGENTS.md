@@ -68,6 +68,32 @@ Only `claude`, `openai-compatible` and `chatgpt` providers are supported.
 - Keep API keys and chat secrets in environment variables, never tracked files
   or logs; ChatGPT credentials come from `otto login`.
 
+## Privacy and machine-local data: mandatory before every commit
+
+- Never commit real machine-specific absolute paths or private directory names,
+  including in documentation, specifications, tests, logs or generated output.
+  Use repository-relative paths, `$HOME`, `<workspace>` or explicitly fictitious
+  paths such as `/Users/user/project`; never copy the actual checkout path.
+- Never commit local workspace identity/state, session transcripts, credential
+  files, privacy-audit exports or history-cleanup backups. Review generated
+  files before staging; an ignored path is not protection for an already
+  tracked file. Keep intentional runtime fixtures synthetic and minimal.
+- Never use real personal phone numbers, identity documents, private email
+  addresses or credentials as fixtures. Preserve intentional public project
+  attribution and Git author identity; do not silently rewrite them.
+- Before every commit and push, inspect the complete staged diff and any new
+  files for personal paths, private data and runtime artifacts. Run the shared
+  secret-scanning hook; also review privacy manually, since Gitleaks does not
+  establish that personal information is absent. Stop on uncertain findings
+  until they are verified as synthetic or explicitly approved for publication.
+- If private data has entered history, stop publishing it and report the scope
+  without repeating sensitive values. Deleting the latest copy is insufficient.
+  History rewriting and force-pushing require explicit owner authorization,
+  a local backup, narrowly scoped replacements, verification and an exact
+  old-ref lease. Never merge or push old history back into cleaned history.
+  Disclose remaining PR refs, caches, forks and backups; never claim complete
+  erasure from a branch-only cleanup. Restore temporary protections afterward.
+
 ## Local verification
 
 - There is no CI gate. Before committing Rust changes run `cargo fmt --all`

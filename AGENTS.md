@@ -68,6 +68,18 @@ Only `claude`, `openai-compatible` and `chatgpt` providers are supported.
 - Keep API keys and chat secrets in environment variables, never tracked files
   or logs; ChatGPT credentials come from `otto login`.
 
+## Commit identity and sign-off
+
+- Every commit must carry the committer's `Signed-off-by: Name <email>`
+  trailer. Use `git commit -s` (also when amending); verify the trailer before
+  pushing. Sign-off is an attestation, not a GPG/SSH cryptographic signature.
+- For this owner's commits, use `Yuqing Bai` and the owner's explicitly
+  configured canonical email as both author and committer; do not guess the
+  email or use tool identities such as `Claude` or `baiyuqing`. Other
+  contributors must retain their own identities and sign off for themselves.
+- Do not fabricate historical sign-offs. Rewriting historical identities
+  requires explicit owner authorization and must preserve unrelated identities.
+
 ## Privacy and machine-local data: mandatory before every commit
 
 - Never commit real machine-specific absolute paths or private directory names,

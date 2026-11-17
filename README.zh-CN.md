@@ -18,6 +18,12 @@ Otto 帮你研究、写作、规划、编程和处理日常任务。可从终端
 模型请求发送给所选服务；“本地优先”指运行时、会话历史和默认记忆存储在本地，
 不表示模型在本地运行。
 
+## 架构
+
+[![otto 架构：并列前端、运行时内部五层及独立支撑包](docs/architecture/otto-architecture.png?v=0a730279-axonometric-1)](docs/architecture/otto-architecture.svg)
+
+[代码组织（英文）](docs/code-organization.md) · [SVG 矢量图](docs/architecture/otto-architecture.svg) · [可编辑 HTML](docs/architecture/otto-architecture.html)
+
 ## 从源码安装
 
 通过 rustup 安装 Rust（版本由 [`rust-toolchain.toml`](rust-toolchain.toml) 锁定），

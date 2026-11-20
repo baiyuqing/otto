@@ -30,12 +30,20 @@ impl FileStore {
             if request.state == RecordState::Superseded {
                 check_replacement(snapshot, &current, &request.superseded_by)?;
             }
-            let desired = state_revision(
+            let mut desired = state_revision(
                 &current,
                 request.state,
                 &request.superseded_by,
                 &request.reason,
             )?;
+            if request.state == RecordState::NeedsReview
+                && !crate::memory::evidence::read(&desired.metadata)?.is_empty()
+            {
+                desired.metadata.insert(
+                    crate::memory::evidence::CONDITION_CHANGED.into(),
+                    "true".into(),
+                );
+            }
             self.write_lifecycle(snapshot, desired)
         })
     }
@@ -101,6 +109,14 @@ impl FileStore {
     /// a lifecycle write, so it is not checked.
     fn write_lifecycle(&self, snapshot: &Snapshot, desired: Record) -> Result<Record> {
         validate_record(&desired)?;
+        if desired.state == RecordState::Active {
+            if crate::memory::evidence::condition_changed(&desired) {
+                return Err(invalid_request(
+                    "changed applicability requires explicit rebinding",
+                ));
+            }
+            self.check_evidence(snapshot, &desired, None)?;
+        }
         guard_record(self.guard(), &desired)?;
         self.replace_record(snapshot, &desired, false)?;
         Ok(desired)

@@ -9,6 +9,16 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- Built-in memory evidence binds exact same-scope revisions or reported immutable
+  observation events, with provenance and applicability. Changed/retired evidence
+  marks dependent conclusions `needs_review` transitively; recovery requires
+  explicit rebinding, not upstream restoration. Model writes retain shared
+  approval; `/memory show`, `/memory bind` and `/memory condition-changed` provide
+  human inspection and recovery. Human keyed updates retain omitted evidence
+  and review markers; inactive retirement retains forgotten-source anchors, with
+  retirement validation before replacement publication. Arbitrary observations
+  are not monitored.
+
 - `otto acp --attach` serves memory review (`_otto/memory/pending` and
   `_otto/memory/review`) for the sessions it opened, through serve's session
   memory routes. A chat connector attached to `otto serve` shows memory review

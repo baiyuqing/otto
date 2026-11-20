@@ -193,6 +193,7 @@ pub(crate) fn validate_record(record: &Record) -> Result<()> {
     }
     validate_labels(&record.labels, true)?;
     validate_metadata(&record.metadata, true)?;
+    super::evidence::read(&record.metadata)?;
     validate_provenance(&record.source, true, true)?;
     if !valid_confidence(record.confidence) {
         return Err(invalid_record("record confidence"));
@@ -419,6 +420,7 @@ pub(crate) fn validate_proposed_record(record: &Record, action: CandidateAction)
     }
     validate_labels(&record.labels, true)?;
     validate_metadata(&record.metadata, true)?;
+    super::evidence::read(&record.metadata)?;
     if !valid_confidence(record.confidence) {
         return Err(invalid_record("proposed confidence"));
     }

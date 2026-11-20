@@ -131,6 +131,7 @@ pub(super) fn is_memory_request(request: &Request) -> bool {
             | Request::MemoryHistory { .. }
             | Request::MemoryDiff { .. }
             | Request::MemoryRestore { .. }
+            | Request::MemoryBind { .. }
             | Request::MemoryState { .. }
             | Request::MemoryVerify { .. }
             | Request::MemoryPropose { .. }
@@ -151,6 +152,7 @@ fn request_metadata(request: &Request) -> (&'static str, String) {
         MemoryHistory { .. } => "/memory history",
         MemoryDiff { .. } => "/memory diff",
         MemoryRestore { .. } => "/memory restore",
+        MemoryBind { .. } => "/memory bind",
         MemoryState { .. } => "/memory state",
         MemoryVerify { .. } => "/memory verify",
         MemoryPropose { .. } => "/memory propose",
@@ -162,6 +164,11 @@ fn request_metadata(request: &Request) -> (&'static str, String) {
         Remember {
             scope, kind, key, ..
         } => format!("scope={scope:?} kind={kind} key={key}"),
+        MemoryBind {
+            id,
+            expected_revision,
+            ..
+        } => format!("id={id}; expected_revision={expected_revision}"),
         MemoryShow { id }
         | MemoryForget { id, .. }
         | MemoryHistory { id }

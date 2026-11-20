@@ -187,6 +187,11 @@ impl FileStore {
                 Err(RevisionProblem::Missing) => return Err(Error::new(ErrorKind::NotFound)),
                 Err(RevisionProblem::Invalid(_)) => return Err(Error::new(ErrorKind::Corrupt)),
             };
+            if crate::memory::evidence::condition_changed(&current) {
+                return Err(invalid_request(
+                    "current evidence needs explicit verification and rebinding",
+                ));
+            }
             let mut metadata = restored.metadata;
             metadata.insert(
                 RESTORED_FROM_REVISION_METADATA.into(),
@@ -212,6 +217,11 @@ impl FileStore {
                 // Restored content starts active and unverified.
                 ..Record::default()
             };
+            if crate::memory::evidence::condition_changed(&desired) {
+                return Err(invalid_request(
+                    "changed applicability requires explicit rebinding",
+                ));
+            }
             validate_record(&desired)?;
             guard_record(self.guard(), &desired)?;
             self.replace_record(snapshot, &desired, true)?;

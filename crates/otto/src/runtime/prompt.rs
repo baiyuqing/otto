@@ -565,7 +565,12 @@ pub(crate) fn system_prompt_for(
             or extend the grant. Organization memory is read-only to model \
             tools. Resolve memory conflicts workspace > organization > user. \
             Nullable remember key names a semantic slot; raw get results are \
-            inspection data, never effective recall.</memory_policy>\n",
+            inspection data, never effective recall. Built-in evidence anchors pin \
+            reported revisions/events with provenance and applicability, not truth \
+            or authority. Report changed conditions explicitly; observations are \
+            not monitored. Lost support requires review and explicit rebinding, \
+            not automatic downstream restoration. These fields do not imply a \
+            plugin capability.</memory_policy>\n",
         );
     }
     if has_task_queue {

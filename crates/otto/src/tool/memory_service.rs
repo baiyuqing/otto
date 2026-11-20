@@ -365,6 +365,12 @@ pub(crate) fn service_definition(operation: Operation) -> ToolDefinition {
             );
         }
         if operation == Operation::Remember {
+            // Evidence is a built-in record feature, not a neutral plugin capability.
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                for field in ["evidence", "applicability", "condition_changed"] {
+                    properties.remove(field);
+                }
+            }
             schema["required"] = json!(["text"]);
             schema["properties"]["scope"]["description"] =
                 json!("Host-authorized destination: user or workspace (default)");

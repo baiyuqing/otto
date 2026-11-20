@@ -16,6 +16,73 @@ file store (`files`, the default) or a plugin package (`plugin:<package>`, see
 [plugin memory source](#plugin-memory-source)). `[memory] enabled = false`
 turns off memory for either source.
 
+### Evidence and applicability (built-in memory)
+
+Built-in memories can bind up to eight evidence anchors and human-readable
+applicability text. A record anchor pins an exact same-scope record ID and
+revision; an observation anchor records a session ID and immutable event ID.
+Each anchor declares `user`, `tool`, `external` or `model` provenance. Attribution
+is not authority or proof of truth. No evidence body is copied into the binding.
+Observation IDs are reported anchors, not independently verified event existence:
+Otto does not monitor arbitrary observations, websites or environment conditions.
+Report a changed condition explicitly rather than assuming automatic detection.
+
+The built-in `remember` tool accepts `evidence`, `applicability` and
+`condition_changed`. For example, after inspecting a source with `memory_search`:
+
+```json
+{"kind":"fact","text":"Use the documented endpoint while this deployment remains current","evidence":[{"type":"record","id":"source-record","revision":3,"provenance":"user"}],"applicability":"The deployment described in source revision 3 is still current"}
+```
+
+A model write still follows the existing shared approval path; a pending proposal
+is not a completed change. On updates, omitted evidence preserves the existing
+bindings and changed-condition markers, including ordinary human `/remember`
+keyed updates. Such updates cannot silently reactivate invalidated conclusions.
+Inactive lifecycle transitions retain old anchors even after their sources are
+forgotten; new bindings still require same-scope sources and must be cycle-free.
+Supply evidence and applicability explicitly to rebind; an explicit
+empty array removes the bindings. `condition_changed: true` requires `target_id`
+and `base_revision` and proposes the existing `needs_review` lifecycle action,
+preserving the target's content and anchors. Plugin grants and neutral plugin
+wire formats are unchanged; these fields are built-in-only.
+
+Updating, retiring, forgetting, expiring or reaching the review deadline of
+record evidence marks dependents `needs_review` transitively (A → B → C), with
+new revisions. Explicit applicability changes also invalidate dependents. This
+is checked under the store lock on the next built-in store operation, not by a
+background watcher. A temporary missing/unreadable source without a tombstone
+means validity is unknown; it does not itself invalidate the conclusion.
+
+Lost support is not proof the conclusion is false. Restoring an upstream memory
+does **not** restore its dependents. Evidence invalidation requires explicit
+verification and rebinding; `verify`, `state active` and history restore cannot
+bypass stale bindings or a changed-condition marker. Cycles and cross-scope
+record bindings are rejected. Recheck and rebind from upstream to downstream.
+
+Human management commands (compact JSON must contain no whitespace):
+
+```text
+/memory show conclusion-record
+/memory condition-changed conclusion-record deployment changed
+/memory bind conclusion-record 4 [{"type":"record","id":"source-record","revision":5,"provenance":"user"}] deployment and conclusion checked
+```
+
+`show` displays exact anchors, applicability and current state; `bind` uses the
+conclusion's expected revision to reject stale edits. A successful bind explicitly
+reactivates the conclusion with checked current sources; downstream conclusions
+remain under review until separately rebound. Use `[]` only after verifying that
+the conclusion no longer relies on the old evidence. For observation anchors use
+`{"type":"observation","session_id":"session-1","event_id":"event-1","provenance":"tool"}`;
+report applicability changes through the same commands. There is no observation
+lifecycle subscription or magical observation monitoring.
+
+This is enabled by default for the built-in backend. No new configuration,
+credentials, migration or separate install step is needed. Rebuild/reinstall
+Otto and restart running processes as described in the getting-started guide.
+Existing records without evidence retain their behavior; additive `evidence.*`
+metadata keeps the existing file schema readable. Existing metadata size limits
+still apply (512 bytes per value, 4 KiB total); shorten applicability if rejected.
+
 ### Memory files
 
 The source of truth is `~/.otto/memory/` (directory `0700`, files `0600`), not a

@@ -151,6 +151,18 @@ impl Tool for MemorySearchTool {
         let mut content = String::new();
         let mut ids = Vec::with_capacity(records.len());
         for record in &records {
+            let _ = writeln!(
+                content,
+                "applicability={} evidence={}",
+                record
+                    .metadata
+                    .get(crate::memory::evidence::APPLICABILITY)
+                    .map_or("", String::as_str),
+                serde_json::to_string(
+                    &crate::memory::evidence::read(&record.metadata).unwrap_or_default()
+                )
+                .unwrap_or_default()
+            );
             ids.push(record.id.as_str());
             let superseded_by = if record.superseded_by.is_empty() {
                 String::new()
@@ -237,6 +249,12 @@ struct RememberArgs {
     target_id: String,
     #[serde(default)]
     base_revision: u64,
+    #[serde(default)]
+    evidence: Option<Vec<crate::memory::evidence::Evidence>>,
+    #[serde(default)]
+    applicability: String,
+    #[serde(default)]
+    condition_changed: bool,
 }
 
 /// The schema advertised for `remember`.
@@ -246,7 +264,10 @@ pub fn remember_definition() -> ToolDefinition {
         "Propose a fact or preference to remember. Returns a version-bound \
             candidate and its state. Otto's approval authority reviews its content \
             and scope before applying it; AUTO uses original user evidence and \
-            MANUAL requires a person. Pending is not a completed memory change.",
+            MANUAL requires a person. Pending is not a completed memory change. \
+            Evidence pins exact same-scope revisions or reported immutable observation events \
+            (not monitored); omit to preserve bindings on update, or pass [] to remove. \
+            Applicability changes require review and explicit rebinding.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -263,7 +284,10 @@ pub fn remember_definition() -> ToolDefinition {
                 "confidence": {"type": "number", "description": "Confidence from 0 to 1"},
                 "reason": {"type": "string", "description": "Why this should be remembered"},
                 "target_id": {"type": "string", "description": "Existing record ID, from memory_search, when proposing an update"},
-                "base_revision": {"type": "integer", "description": "Revision of the record being updated, from memory_search"}
+                "base_revision": {"type": "integer", "description": "Revision of the record being updated, from memory_search"},
+                "evidence": crate::memory::evidence::schema(),
+                "applicability": {"type": "string", "maxLength": 512, "description": "Conditions supporting this conclusion; required with nonempty evidence; metadata byte limits apply"},
+                "condition_changed": {"type": "boolean", "description": "Explicit report that applicability changed; requires target_id and base_revision; marks it and dependents needs_review"}
             },
             "required": ["kind", "text"]
         }),
@@ -300,7 +324,9 @@ impl Tool for RememberTool {
                 ));
             }
         };
-        let action = if args.target_id.is_empty() {
+        let action = if args.condition_changed {
+            CandidateAction::NeedsReview
+        } else if args.target_id.is_empty() {
             CandidateAction::Create
         } else {
             CandidateAction::Update
@@ -312,7 +338,44 @@ impl Tool for RememberTool {
                 origin.as_str().to_owned(),
             );
         }
-        let request = ProposeRequest {
+        if args.condition_changed && (args.target_id.is_empty() || args.base_revision == 0) {
+            return error_result("condition_changed requires target_id and base_revision");
+        }
+        if !args.target_id.is_empty() && !args.condition_changed && args.evidence.is_none() {
+            let current = match self.service.get(&RecordRef {
+                scope: scope.clone(),
+                id: args.target_id.clone(),
+            }) {
+                Ok(current) => current,
+                Err(error) => return error_result(error),
+            };
+            if crate::memory::evidence::condition_changed(&current) {
+                return error_result(
+                    "evidence needs explicit verification and rebinding; supply evidence and applicability",
+                );
+            }
+            for (key, value) in current.metadata {
+                if key.starts_with("evidence.") {
+                    metadata.insert(key, value);
+                }
+            }
+        }
+        if args.evidence.is_some() || args.condition_changed || !args.applicability.is_empty() {
+            if args.evidence.is_none() && !args.condition_changed {
+                return error_result(
+                    "applicability changes require explicit evidence bindings (use [] to remove them)",
+                );
+            }
+            if let Err(error) = crate::memory::evidence::bind(
+                &mut metadata,
+                args.evidence.as_deref().unwrap_or_default(),
+                &args.applicability,
+                args.condition_changed,
+            ) {
+                return error_result(error);
+            }
+        }
+        let mut request = ProposeRequest {
             action,
             scope,
             kind: args.kind,
@@ -331,6 +394,21 @@ impl Tool for RememberTool {
             },
             ..ProposeRequest::default()
         };
+        if args.condition_changed {
+            // Lifecycle candidates carry only routing/provenance and a reason.
+            // Review applies NeedsReview to the existing target and retains its anchors.
+            if request.reason.is_empty() {
+                request.reason = request.text.clone();
+            }
+            request.kind.clear();
+            request.key.clear();
+            request.text.clear();
+            request.labels.clear();
+            request.confidence = 0.0;
+            request
+                .metadata
+                .retain(|key, _| key == crate::memory::PRESENTATION_ORIGIN_METADATA);
+        }
         let Some(advisor) = &self.advisor else {
             return proposal_result(self.service.propose(&request));
         };

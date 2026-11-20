@@ -7,8 +7,8 @@ use super::retrieve::record_cost;
 use super::{FileStore, Snapshot};
 use crate::memory::codec::{format_timestamp, parse_timestamp};
 use crate::memory::validate::{
-    validate_list_request, validate_record_key, validate_record_ref, validate_store_forget_request,
-    validate_upsert_request,
+    validate_list_request, validate_record, validate_record_key, validate_record_ref,
+    validate_store_forget_request, validate_upsert_request,
 };
 use crate::memory::{
     Error, ErrorKind, ForgetOutcome, GuardField, GuardInput, ListRequest, MAX_STANDING_TOKENS,
@@ -264,6 +264,11 @@ impl FileStore {
             None => self.write(|snapshot| {
                 let mut desired = input;
                 desired.revision = 1;
+                if crate::memory::evidence::condition_changed(&desired) {
+                    desired.state = RecordState::NeedsReview;
+                    desired.state_reason =
+                        "applicability condition changed; verify and rebind".into();
+                }
                 self.insert_new(snapshot, &desired, enforce_standing)
                     .map_err(|error| match error.kind {
                         ErrorKind::Conflict if error.conflict.is_none() => {
@@ -298,6 +303,25 @@ impl FileStore {
                 }
                 let mut desired = input;
                 desired.revision = existing.revision + 1;
+                // Ordinary updates omit the evidence namespace; only an explicit
+                // binding (including an empty one) may replace existing evidence.
+                if !desired
+                    .metadata
+                    .keys()
+                    .any(|key| key.starts_with("evidence."))
+                {
+                    for (key, value) in &existing.metadata {
+                        if key.starts_with("evidence.") {
+                            desired.metadata.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                if crate::memory::evidence::condition_changed(&desired) {
+                    desired.state = RecordState::NeedsReview;
+                    desired.state_reason =
+                        "applicability condition changed; verify and rebind".into();
+                }
+                validate_record(&desired)?;
                 self.replace_record(snapshot, &desired, enforce_standing)?;
                 Ok(desired)
             }),
@@ -381,13 +405,14 @@ impl FileStore {
     /// active record holds and, when asked, a standing-budget overrun. A
     /// retracted, superseded or needs-review record keeps its key without
     /// blocking a replacement, which is what a supersede or correct writes.
-    fn check_writable(
+    pub(super) fn check_writable(
         &self,
         snapshot: &Snapshot,
         record: &Record,
         enforce_standing: bool,
         retiring_id: Option<&str>,
     ) -> Result<()> {
+        self.check_evidence(snapshot, record, retiring_id)?;
         if !record.key.is_empty()
             && record.state == RecordState::Active
             && snapshot.records.iter().any(|other| {

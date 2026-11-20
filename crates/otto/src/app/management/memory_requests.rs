@@ -50,6 +50,37 @@ impl Controller {
                         .map_err(ManagementError::from)?,
                 ))
             }
+            MemoryBind {
+                id,
+                expected_revision,
+                evidence,
+                applicability,
+            } => {
+                let Some((service, user, workspace)) = self.memory_manager() else {
+                    return Err(ManagementError::unavailable());
+                };
+                let (_, current) = current_record(&service, [user, workspace], &id)?;
+                let mut metadata = current.metadata.clone();
+                memory::evidence::bind(&mut metadata, &evidence, &applicability, false)
+                    .map_err(ManagementError::from)?;
+                service
+                    .remember(&memory::RememberRequest {
+                        id: current.id,
+                        scope: current.scope,
+                        kind: current.kind,
+                        key: current.key,
+                        text: current.text,
+                        labels: current.labels,
+                        metadata,
+                        confidence: current.confidence,
+                        expires_at: current.expires_at,
+                        expected_revision: Some(expected_revision),
+                        source: current.source,
+                        review_at: current.review_at,
+                    })
+                    .map(Reply::Remembered)
+                    .map_err(ManagementError::from)
+            }
             MemoryState {
                 id,
                 state,

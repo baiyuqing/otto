@@ -5,9 +5,10 @@
 //! decided `candidates/archive/<id>.json`, `identity.json` and the `.lock` file.
 //! A person can read and edit record files; the next operation sees the edit.
 //!
-//! Writes take an exclusive `flock` on `.lock`, re-read the directory under
-//! it and publish each file with an atomic rename. Reads take no lock and
-//! tolerate a file that disappears between the directory listing and the read.
+//! Operations take an exclusive `flock` on `.lock`, re-read the directory
+//! and durably reconcile evidence invalidation before returning a snapshot.
+//! Writes publish each file with an atomic rename. A file that disappears
+//! during loading is tolerated, without treating it as evidence retirement.
 //!
 //! Normal snapshots load active files only; decided candidate receipts are
 //! read by ID or scanned only for an explicit history listing.
@@ -15,7 +16,12 @@
 mod candidate_archive;
 mod candidates;
 mod cursor;
+mod evidence;
 mod format;
+
+pub(crate) fn valid_evidence_id(id: &str) -> bool {
+    format::valid_file_id(id)
+}
 mod history;
 mod lifecycle;
 mod records;
@@ -263,7 +269,7 @@ impl FileStore {
             user_scope: Scope::new(crate::memory::NAMESPACE_USER, identity.user_scope_id),
             closed: AtomicBool::new(false),
         };
-        let snapshot = store.snapshot()?;
+        let snapshot = store.snapshot_raw()?;
         for tombstone in &snapshot.tombstones {
             remove_if_present(&store.path("records", &tombstone.id, "md"))?;
         }
@@ -316,8 +322,12 @@ impl FileStore {
     fn write<T>(&self, body: impl FnOnce(&Snapshot) -> Result<T>) -> Result<T> {
         self.ensure_open()?;
         let _lock = acquire(&self.root, self.busy_timeout)?;
-        let snapshot = self.snapshot()?;
-        body(&snapshot)
+        let mut snapshot = self.snapshot_raw()?;
+        self.reconcile_evidence(&mut snapshot)?;
+        let result = body(&snapshot)?;
+        let mut after = self.snapshot_raw()?;
+        self.reconcile_evidence(&mut after)?;
+        Ok(result)
     }
 
     fn put_record(&self, record: &Record) -> Result<()> {
@@ -355,6 +365,14 @@ impl FileStore {
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
+        self.ensure_open()?;
+        let _lock = acquire(&self.root, self.busy_timeout)?;
+        let mut snapshot = self.snapshot_raw()?;
+        self.reconcile_evidence(&mut snapshot)?;
+        Ok(snapshot)
+    }
+
+    fn snapshot_raw(&self) -> Result<Snapshot> {
         self.ensure_open()?;
         let mut invalid = Vec::new();
         let tombstones = self.read_entries("tombstones", "json", &parse_tombstone, &mut invalid)?;

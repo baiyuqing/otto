@@ -271,6 +271,18 @@ fn render_list_result(records: &[crate::memory::Record], next_cursor: &str) -> S
                 .unwrap_or_default(),
             record.text
         );
+        if let Some(applicability) = record.metadata.get(crate::memory::evidence::APPLICABILITY) {
+            let anchors = crate::memory::evidence::read(&record.metadata)
+                .and_then(|anchors| {
+                    serde_json::to_string(&anchors)
+                        .map_err(|_| crate::memory::invalid_request("invalid evidence"))
+                })
+                .unwrap_or_else(|_| "invalid evidence metadata".into());
+            let _ = writeln!(
+                content,
+                "  applicability={applicability} evidence={anchors}"
+            );
+        }
     }
     if !next_cursor.is_empty() {
         let _ = writeln!(content, "next_cursor={next_cursor}");

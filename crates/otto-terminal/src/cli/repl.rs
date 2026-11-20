@@ -79,6 +79,7 @@ const HELP: &str = concat!(
     "/memory history <id> | /memory diff <id> <from> [<to>] | /memory restore <id> <revision>\n",
     "/memory list [--state active|needs-review|superseded|retracted|all] [--kind K] [--label L] [--updated-after TIME|AGE] [--verified-after TIME|AGE] [--unverified] [--review-due]\n",
     "/memory state <id> active|needs-review|retracted [--reason TEXT] | /memory state <id> superseded <replacement-id> [--reason TEXT] | /memory verify <id> [--review-in AGE]\n",
+    "/memory bind <id> <expected-revision> <compact-evidence-json> <applicability> | /memory condition-changed <id> <reason>\n",
     "/remember [--scope user|workspace] [--kind K] [--key K] <text>\n",
     "\n",
     "Tasks\n",

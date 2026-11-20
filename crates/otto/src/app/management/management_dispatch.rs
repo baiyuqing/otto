@@ -47,6 +47,7 @@ impl Controller {
                     | MemoryRestore { .. }
                     | MemoryState { .. }
                     | MemoryVerify { .. }
+                    | MemoryBind { .. }
                     | MemoryPropose { .. }
                     | MemoryReviewList
                     | MemoryCandidatePage { .. }
@@ -75,6 +76,7 @@ impl Controller {
             | MemoryRestore { .. }
             | MemoryState { .. }
             | MemoryVerify { .. }
+            | MemoryBind { .. }
             | MemoryPropose { .. }
             | MemoryReviewList
             | MemoryCandidatePage { .. }

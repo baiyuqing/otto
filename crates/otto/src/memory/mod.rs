@@ -6,6 +6,7 @@ pub mod approval;
 pub mod client;
 pub mod codec;
 pub mod contracts;
+pub mod evidence;
 pub mod files;
 pub mod guard;
 pub mod history;

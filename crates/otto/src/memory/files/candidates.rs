@@ -333,7 +333,15 @@ impl FileStore {
                         if request.decided_at < target.created_at {
                             return Err(invalid_request("review decision time"));
                         }
-                        let desired = state_revision(target, state, "", &candidate.reason)?;
+                        let mut desired = state_revision(target, state, "", &candidate.reason)?;
+                        if state == RecordState::NeedsReview
+                            && !crate::memory::evidence::read(&desired.metadata)?.is_empty()
+                        {
+                            desired.metadata.insert(
+                                crate::memory::evidence::CONDITION_CHANGED.into(),
+                                "true".into(),
+                            );
+                        }
                         validate_record(&desired)?;
                         guard_record(self.guard(), &desired)?;
                         decided.result_revision = desired.revision;
@@ -426,6 +434,11 @@ impl FileStore {
             }
             guard_candidate(self.guard(), &decided)?;
 
+            // Validate retirement before publishing a replacement: a rejected
+            // target transition must not leave an unexpected replacement behind.
+            if let Some(retired) = &desired_target {
+                self.check_writable(snapshot, retired, false, None)?;
+            }
             if let Some(record) = &desired_record {
                 match candidate.action {
                     CandidateAction::Create => {

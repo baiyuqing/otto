@@ -112,6 +112,13 @@ pub enum Request {
         id: String,
         evidence: String,
     },
+    /// Human-authorized replacement of evidence bindings, at an exact revision.
+    MemoryBind {
+        id: String,
+        expected_revision: u64,
+        evidence: Vec<memory::evidence::Evidence>,
+        applicability: String,
+    },
     MemoryShow {
         id: String,
     },
@@ -232,6 +239,8 @@ impl Request {
                     /memory state <id> active|needs-review|retracted [--reason TEXT] | \
                     /memory state <id> superseded <replacement-id> [--reason TEXT] | \
                     /memory verify <id> [--review-in AGE] | \
+                    /memory bind <id> <expected-revision> <compact-evidence-json> <applicability> | \
+                    /memory condition-changed <id> <reason> | \
                     /memory propose <id> <evidence text> | \
                     /memory review <id> accept|reject"
             }
@@ -341,6 +350,23 @@ impl Request {
                         state,
                         superseded_by,
                         reason,
+                        expected_revision: None,
+                    }
+                }
+                ["bind", id, revision, json, words @ ..] if !words.is_empty() => {
+                    Request::MemoryBind {
+                        id: (*id).into(),
+                        expected_revision: revision.parse().map_err(|_| invalid())?,
+                        evidence: serde_json::from_str(json).map_err(|_| invalid())?,
+                        applicability: words.join(" "),
+                    }
+                }
+                ["condition-changed", id, words @ ..] if !words.is_empty() => {
+                    Request::MemoryState {
+                        id: (*id).into(),
+                        state: memory::RecordState::NeedsReview,
+                        superseded_by: String::new(),
+                        reason: words.join(" "),
                         expected_revision: None,
                     }
                 }
@@ -726,6 +752,8 @@ mod reply_text;
 pub use management_error::{ManagementError, ManagementErrorKind};
 pub use reply_text::{format_management_reply, format_mcp_report};
 
+#[cfg(test)]
+mod evidence_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Built-in dependency validation and durable, transitive invalidation.
 use std::collections::BTreeSet;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use super::{FileStore, Snapshot};
 use crate::memory::evidence::{self, Evidence};
@@ -72,29 +72,12 @@ impl FileStore {
     pub(super) fn reconcile_evidence(&self, snapshot: &mut Snapshot) -> Result<()> {
         loop {
             let mut changed = false;
+            let now = Utc::now();
             for index in 0..snapshot.records.len() {
                 let current = &snapshot.records[index];
-                if current.state != RecordState::Active {
-                    continue;
-                }
-                let mut invalid = evidence::condition_changed(current);
-                for anchor in evidence::read(&current.metadata)? {
-                    let Evidence::Record { id, revision, .. } = anchor else {
-                        continue;
-                    };
-                    if let Some(source) = snapshot.record(&current.scope, &id) {
-                        invalid |= source.revision != revision || !source.effective(Utc::now());
-                    } else if snapshot.tombstone(&current.scope, &id).is_some() {
-                        invalid = true;
-                    } else {
-                        // Absence alone may be a temporary read/parse failure.
-                        otto_platform::log::Logger::stderr().warn(
-                            "memory evidence source unavailable; dependency validity is unknown",
-                            &[],
-                        );
-                    }
-                }
-                if !invalid {
+                if current.state != RecordState::Active
+                    || !evidence_invalidated(snapshot, current, now)?
+                {
                     continue;
                 }
                 let mut desired = current.clone();
@@ -118,4 +101,41 @@ impl FileStore {
             }
         }
     }
+}
+
+/// True when any active record in `snapshot` must become `needs_review`, so a
+/// reader has to take the lock and reconcile.
+pub(super) fn needs_reconcile(snapshot: &Snapshot) -> Result<bool> {
+    let now = Utc::now();
+    for record in &snapshot.records {
+        if record.state == RecordState::Active && evidence_invalidated(snapshot, record, now)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `record` (an active record) must become `needs_review`: its
+/// condition-changed marker is set, or a record anchor's source has a
+/// different revision, is not effective at `now`, or is absent with a
+/// tombstone. An absent source without a tombstone only logs a warning.
+fn evidence_invalidated(snapshot: &Snapshot, record: &Record, now: DateTime<Utc>) -> Result<bool> {
+    let mut invalid = evidence::condition_changed(record);
+    for anchor in evidence::read(&record.metadata)? {
+        let Evidence::Record { id, revision, .. } = anchor else {
+            continue;
+        };
+        if let Some(source) = snapshot.record(&record.scope, &id) {
+            invalid |= source.revision != revision || !source.effective(now);
+        } else if snapshot.tombstone(&record.scope, &id).is_some() {
+            invalid = true;
+        } else {
+            // Absence alone may be a temporary read/parse failure.
+            otto_platform::log::Logger::stderr().warn(
+                "memory evidence source unavailable; dependency validity is unknown",
+                &[],
+            );
+        }
+    }
+    Ok(invalid)
 }

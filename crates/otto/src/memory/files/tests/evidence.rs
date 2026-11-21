@@ -1,3 +1,5 @@
+#[path = "evidence_lock_tests.rs"]
+mod lock_tests;
 #[path = "evidence_recovery_tests.rs"]
 mod recovery_tests;
 

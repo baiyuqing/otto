@@ -5,8 +5,10 @@
 //! decided `candidates/archive/<id>.json`, `identity.json` and the `.lock` file.
 //! A person can read and edit record files; the next operation sees the edit.
 //!
-//! Operations take an exclusive `flock` on `.lock`, re-read the directory
-//! and durably reconcile evidence invalidation before returning a snapshot.
+//! Writes take an exclusive `flock` on `.lock`, re-read the directory and
+//! durably reconcile evidence invalidation before and after the change. Reads take
+//! no lock unless the loaded snapshot holds an active record that its evidence
+//! invalidates; then they take the lock, re-read the directory and reconcile.
 //! Writes publish each file with an atomic rename. A file that disappears
 //! during loading is tolerated, without treating it as evidence retirement.
 //!
@@ -366,6 +368,10 @@ impl FileStore {
 
     fn snapshot(&self) -> Result<Snapshot> {
         self.ensure_open()?;
+        let snapshot = self.snapshot_raw()?;
+        if !evidence::needs_reconcile(&snapshot)? {
+            return Ok(snapshot);
+        }
         let _lock = acquire(&self.root, self.busy_timeout)?;
         let mut snapshot = self.snapshot_raw()?;
         self.reconcile_evidence(&mut snapshot)?;

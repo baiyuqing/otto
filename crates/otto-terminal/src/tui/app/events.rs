@@ -4,9 +4,7 @@ use super::*;
 
 impl App {
     pub(crate) fn apply_event(&mut self, event: &WireEvent) -> bool {
-        if let Some(reporter) = &self.program_status {
-            reporter.observe_wire_stdout(event);
-        }
+        self.program_status.observe(event);
         let phase = if event.event_type == "tool_call_started" {
             Some(format!("running {}", event.tool_name))
         } else {

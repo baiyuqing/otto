@@ -50,7 +50,7 @@ pub(super) fn drive_turn<B: Backend, T, E>(
             let redraw = tokio::select! {
                 result=&mut future=>{
                     while let Ok(event)=events.try_recv(){apply(app,&event);}
-                    let _ = terminal.draw(|frame| render::draw(frame, app));
+                    let _ = super::redraw(terminal, app);
                     return result;
                 }
                 Some(event)=events.recv()=>{
@@ -96,7 +96,7 @@ pub(super) fn drive_turn<B: Backend, T, E>(
                 frame_gate::Redraw::Immediate => true,
             };
             if draw {
-                let _ = terminal.draw(|frame| render::draw(frame, app));
+                let _ = super::redraw(terminal, app);
                 frame_gate.drew(now);
             }
         }

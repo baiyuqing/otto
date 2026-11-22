@@ -13,7 +13,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
 ) -> Result<(), ReplError> {
     let mut app = App::new(&Backend::Attach(remote));
     app.observer.bindings = bindings;
-    app.enable_program_status();
+    app.enable_program_status::<B>();
     app.driver = Some(super::super::backend::Driver::new(
         super::super::backend::Connection::Attach(Arc::clone(remote)),
     ));
@@ -226,8 +226,5 @@ pub(super) async fn run_loop<B: TerminalBackend>(
 }
 
 fn draw<B: TerminalBackend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), ReplError> {
-    terminal
-        .draw(|frame| render::draw(frame, app))
-        .map(|_| ())
-        .map_err(super::super::draw_error)
+    super::super::redraw(terminal, app)
 }

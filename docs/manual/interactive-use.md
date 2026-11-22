@@ -2,6 +2,32 @@
 
 Previous: [Getting started](getting-started.md) · [Documentation index](../README.md) · Next: [Safety and tools](safety-and-tools.md)
 
+## Rex terminal status
+
+The local TUI and `otto --attach` report their current state using the generic
+[Program Status Protocol (OSC 7501)](https://www.superlogical.com/rex/docs/build/program-status).
+Rex can use this to indicate work in progress, pending permission, completion or
+failure even when its tab is not focused. This does not add an approval channel:
+review and decide requests through Otto's existing approval UI.
+
+The integration is enabled by default in interactive TUI terminals. No Rex CLI,
+plugin, API credential or additional sandbox permission is required. Other
+terminals may ignore the protocol. Reports contain only fixed state fields and
+`app=otto`, not prompts, tool arguments, approval text or credentials. They are
+terminal control sequences, not conversation messages or server API events.
+
+To use it after upgrading, rebuild/install Otto using the
+[installation and upgrade instructions](../../README.md#install-from-source),
+then restart the terminal client, including an attached client. Existing
+processes do not acquire the new reporter without a restart. This integration
+does not cover the line REPL, headless runs, HTTP clients or ACP clients.
+
+If no status appears, check that the rebuilt TUI client is running in a terminal
+that supports OSC 7501 and that any terminal multiplexer forwards the sequence.
+Status presentation is controlled by the terminal; ordinary TUI operation and
+approval remain available without it. No extra permissions or relaxed sandbox
+settings are needed to recover.
+
 ## Copy session details
 
 `/session` opens the current session's details with **Copy Session ID** selected

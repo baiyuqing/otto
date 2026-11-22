@@ -1,5 +1,6 @@
 use super::*;
 
+mod program_status_tests;
 mod structured_approvals;
 mod transport_state;
 

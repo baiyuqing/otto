@@ -150,6 +150,7 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
         .arg("--cwd")
         .arg(workspace.path());
     let (mut master, mut child, shared) = binary_harness::job_control::spawn(attach);
+    wait_for_raw_bytes(&shared, b"\x1b]7501;state=idle:app=otto\x1b\\");
 
     wait_for_screen_text(&shared, "└");
     wait_for_raw_bytes(&shared, b"\x1b[?1049h");
@@ -178,6 +179,8 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
         .expect("type the prompt");
     wait_for_screen_text(&shared, &format!("❯ {PROMPT}"));
     wait_for_screen_text(&shared, REPLY);
+    wait_for_raw_bytes(&shared, b"\x1b]7501;state=working:app=otto\x1b\\");
+    wait_for_raw_bytes(&shared, b"\x1b]7501;state=done:app=otto\x1b\\");
     wait_for_raw_bytes(&shared, BUSY_TITLE.as_bytes());
     wait_for_screen_text_gone(&shared, BUSY_TITLE);
 
@@ -264,6 +267,18 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
     assert!(status.success(), "otto --attach exited with {status:?}");
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
     wait_for_raw_bytes(&shared, b"\x1b[?1002l");
+    {
+        let raw = shared.raw.lock().unwrap();
+        let prefix = b"\x1b]7501;";
+        let start = raw
+            .windows(prefix.len())
+            .rposition(|bytes| bytes == prefix)
+            .expect("program status record");
+        assert!(
+            raw[start..].starts_with(b"\x1b]7501;state=done:app=otto\x1b\\"),
+            "completion must survive terminal restoration"
+        );
+    }
     assert!(raw_contains(&shared, b"\x1b[?2004l"));
     drop(server);
 }

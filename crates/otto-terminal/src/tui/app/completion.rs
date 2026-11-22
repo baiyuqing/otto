@@ -235,6 +235,16 @@ impl App {
         }
     }
     pub(crate) fn sync_shared_approval(&mut self, requests: &[otto_core::approval::Request]) {
+        let pending = requests
+            .iter()
+            .filter(|request| {
+                request.is_human_pending()
+                    && request.scope.workspace == self.info.workspace
+                    && request.scope.session_id == self.info.session_id
+            })
+            .map(|request| request.id.clone())
+            .collect();
+        self.program_status.approvals(pending, self.busy());
         let present: HashSet<_> = requests
             .iter()
             .filter(|r| r.is_human_pending())

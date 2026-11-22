@@ -147,7 +147,7 @@ pub(crate) struct App {
     /// Approvals that arrived as events while a surface deferred them.
     deferred_approvals: Vec<features::Approval>,
     pub outgoing: Vec<Action>,
-    program_status: Option<otto_platform::program_status::Reporter>,
+    pub(super) program_status: super::program_status::Status,
 }
 impl Deref for App {
     type Target = Composer;
@@ -232,7 +232,7 @@ impl App {
             approval_snapshot: Vec::new(),
             deferred_approvals: Vec::new(),
             outgoing: Vec::new(),
-            program_status: None,
+            program_status: super::program_status::Status::default(),
         };
         app.refresh_tasks(backend);
         app

@@ -9,7 +9,7 @@ pub const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const WIDE_CONTINUATION: char = '\0';
 
 /// A minimal terminal screen, built only for the ANSI vocabulary ratatui's
-/// crossterm backend and Otto's OSC 7501 status reports can emit (see the
+/// crossterm backend and Otto's OSC title and status reports can emit (see the
 /// module doc). Fragmentation-tolerant: `feed` buffers an incomplete escape
 /// sequence or a multi-byte UTF-8 character split across two reads.
 pub struct Screen {
@@ -48,15 +48,17 @@ impl Screen {
                     return Ok(()); // wait for the rest of the escape sequence
                 }
                 if self.pending[1] == b']' {
-                    const PREFIX: &[u8] = b"\x1b]7501;";
-                    let compared = self.pending.len().min(PREFIX.len());
-                    if self.pending[..compared] != PREFIX[..compared] {
-                        return Err("unsupported OSC sequence".to_string());
-                    }
-                    if self.pending.len() < PREFIX.len() {
+                    let prefix = [b"\x1b]7501;".as_slice(), b"\x1b]2;"]
+                        .into_iter()
+                        .find(|prefix| {
+                            let compared = self.pending.len().min(prefix.len());
+                            self.pending[..compared] == prefix[..compared]
+                        })
+                        .ok_or_else(|| "unsupported OSC sequence".to_string())?;
+                    if self.pending.len() < prefix.len() {
                         return Ok(()); // wait for the complete OSC selector
                     }
-                    let mut end = PREFIX.len();
+                    let mut end = prefix.len();
                     loop {
                         let Some(&byte) = self.pending.get(end) else {
                             return Ok(()); // wait for BEL or ST
@@ -72,12 +74,12 @@ impl Screen {
                                     break;
                                 }
                                 Some(_) => {
-                                    return Err("unsupported control byte in OSC 7501".to_string());
+                                    return Err("unsupported control byte in OSC".to_string());
                                 }
                                 None => return Ok(()), // fragmented ST
                             },
                             0x00..=0x1f | 0x7f => {
-                                return Err("unsupported control byte in OSC 7501".to_string());
+                                return Err("unsupported control byte in OSC".to_string());
                             }
                             _ => end += 1,
                         }

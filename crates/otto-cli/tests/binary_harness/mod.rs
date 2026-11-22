@@ -9,6 +9,8 @@
 pub mod job_control;
 #[cfg(unix)]
 pub mod pty;
+#[cfg(unix)]
+pub mod rex_title;
 
 /// A displayed ACP tool call must close exactly once, including on failure.
 pub fn assert_terminal_tool_update(frames: &[serde_json::Value], id: &str, status: &str) {

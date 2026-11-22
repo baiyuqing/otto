@@ -56,6 +56,7 @@ async fn idle_draw_and_active_wheel_do_not_wait_for_session_storage() {
         &CancellationToken::new(),
         &backend,
     )
+    .await
     .unwrap();
     redraw(&mut terminal, &mut app).unwrap();
     assert_eq!(app.scroll, Some(bottom - 1));
@@ -97,6 +98,7 @@ async fn idle_draw_and_active_wheel_do_not_wait_for_session_storage() {
             &CancellationToken::new(),
             &backend,
         )
+        .await
         .unwrap();
     }
     assert_eq!(

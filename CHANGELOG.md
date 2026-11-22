@@ -9,6 +9,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- The local and attached TUIs can show `Otto` as a temporary Rex terminal
+  title, restoring the previous title on exit or suspend without renaming the tab.
+
 - `otto-core` can be used as a git dependency by other Rust projects: its
   dependencies use version ranges instead of exact pins, and the crate has
   package metadata, a README and an offline `scripted_agent` example. It is

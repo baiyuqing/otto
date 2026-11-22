@@ -59,6 +59,7 @@ use selection::{DragPhase, Selection};
 mod observer;
 mod operations;
 mod terminal_input;
+mod terminal_title;
 mod turns;
 use operations::*;
 pub use terminal_input::reset_terminal_input_modes_after_panic;
@@ -90,8 +91,10 @@ pub async fn run_with_observer_bindings(
         let _ = ratatui::try_restore();
         return Err(io_error(error));
     }
+    let title = terminal_title::TerminalTitle::enter().await;
     let mut keys = spawn_key_reader();
     let result = run_app(&mut terminal, controller, cancel, &mut keys, bindings).await;
+    drop(title);
     let _ = input.restore_terminal();
     let _ = ratatui::try_restore();
     result
@@ -253,7 +256,9 @@ async fn run_app<B: Backend>(
                 return Ok(());
             }
             IdleEvent::Input(Some(event)) => {
-                if let Some(action) = apply_input(&mut app, terminal, event, cancel, &backend)? {
+                if let Some(action) =
+                    apply_input(&mut app, terminal, event, cancel, &backend).await?
+                {
                     actions.push_back(action);
                 }
                 true
@@ -431,7 +436,7 @@ async fn drain_writes(app: &mut App) {
     }
 }
 
-fn apply_input<B: Backend>(
+async fn apply_input<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
     event: TuiEvent,
@@ -442,7 +447,7 @@ fn apply_input<B: Backend>(
         #[cfg(unix)]
         TuiEvent::Suspend(_reader_parked) => {
             app.program_status.suspend();
-            let result = job_control::suspend(terminal);
+            let result = job_control::suspend(terminal).await;
             app.program_status.resume();
             app.program_status.flush_stdout();
             result?;

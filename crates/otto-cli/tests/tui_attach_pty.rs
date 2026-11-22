@@ -149,6 +149,7 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
         .arg(&socket)
         .arg("--cwd")
         .arg(workspace.path());
+    binary_harness::rex_title::configure(&mut attach, home.path());
     let (mut master, mut child, shared) = binary_harness::job_control::spawn(attach);
     wait_for_raw_bytes(&shared, b"\x1b]7501;state=idle:app=otto\x1b\\");
 
@@ -171,6 +172,10 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
     wait_for_screen_text(&shared, "attach-draft");
     master.write_all(b"\x15").expect("clear test draft");
     binary_harness::job_control::suspend_resume(&mut master, &child, &shared, "attached-unsent");
+    binary_harness::rex_title::assert_transitions(
+        &shared,
+        &["Otto", "previous title", "Otto", "shell title", "Otto"],
+    );
 
     // No local echo: the `user_message` frame from serve puts the prompt on
     // screen, followed by the streamed reply.
@@ -265,6 +270,17 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
     master.write_all(b"/exit\r").expect("type /exit");
     let status = child.wait().expect("wait for otto --attach");
     assert!(status.success(), "otto --attach exited with {status:?}");
+    binary_harness::rex_title::assert_transitions(
+        &shared,
+        &[
+            "Otto",
+            "previous title",
+            "Otto",
+            "shell title",
+            "Otto",
+            "shell title",
+        ],
+    );
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
     wait_for_raw_bytes(&shared, b"\x1b[?1002l");
     {

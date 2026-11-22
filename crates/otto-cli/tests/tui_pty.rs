@@ -186,6 +186,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
         command.env("TMPDIR", tmpdir);
     }
+    binary_harness::rex_title::configure(&mut command, home.path());
     let (mut master, mut child, shared) = binary_harness::job_control::spawn(command);
 
     eprintln!("[tui_pty] waiting for startup marker {STARTUP_MARKER:?}");
@@ -203,6 +204,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         "any-motion reporting would wake the event loop on every pointer move"
     );
     binary_harness::job_control::suspend_resume(&mut master, &child, &shared, "local-draft");
+    binary_harness::rex_title::assert_transitions(&shared, &["Otto", "previous title", "Otto"]);
     eprintln!("[tui_pty] saw startup marker; typing prompt");
 
     master
@@ -305,6 +307,17 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     let status = child.wait().expect("wait for the child to exit");
     eprintln!("[tui_pty] child exited: {status:?}");
     assert!(status.success(), "otto --ui tui exited with {status:?}");
+    binary_harness::rex_title::assert_transitions(
+        &shared,
+        &[
+            "Otto",
+            "previous title",
+            "Otto",
+            "shell title",
+            "Otto",
+            "shell title",
+        ],
+    );
 
     // A clean terminal restore leaves the alternate screen and disables the
     // mouse reporting enabled at startup.

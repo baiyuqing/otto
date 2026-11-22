@@ -28,6 +28,21 @@ Status presentation is controlled by the terminal; ordinary TUI operation and
 approval remain available without it. No extra permissions or relaxed sandbox
 settings are needed to recover.
 
+## Rex tab title
+
+In an interactive Rex terminal, the local TUI and `otto --attach` temporarily
+set the current terminal pane's title to `Otto`. Otto saves the title each time
+it takes the foreground, including after a suspend. On exit or suspend, it
+restores the title saved for that foreground period.
+It does not rename the Rex tab or session. A forced kill may skip cleanup.
+
+This is automatic when Rex provides the current session and pane IDs and `rex`
+is on the terminal client's `PATH`. Otto reads the previous title from Rex with
+a short timeout; if it cannot read it, it leaves the title alone. Rebuild or
+upgrade Otto, then restart the terminal client to pick up the change. If the
+name still does not appear, check Rex's **Settings → Terminal → Titles → Prefer
+generated titles** and any manually assigned tab name, which can take precedence.
+
 ## Copy session details
 
 `/session` opens the current session's details with **Copy Session ID** selected

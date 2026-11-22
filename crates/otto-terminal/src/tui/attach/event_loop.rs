@@ -101,7 +101,7 @@ pub(super) async fn run_loop<B: TerminalBackend>(
                 return Ok(());
             }
             Ev::Input(Some(event)) => {
-                ui.on_input(terminal, event)?;
+                ui.on_input(terminal, event).await?;
                 frame_gate::Redraw::Immediate
             }
             Ev::Frame(result) => {

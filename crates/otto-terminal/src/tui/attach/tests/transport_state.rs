@@ -130,12 +130,13 @@ fn prompt(ui: &mut Ui<'_>, text: &str) {
     assert!(!ui.run_actions());
 }
 
-fn cancel(ui: &mut Ui<'_>) {
+async fn cancel(ui: &mut Ui<'_>) {
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
     ui.on_input(
         &mut terminal,
         TuiEvent::Key(crossterm::event::KeyCode::Esc.into()),
     )
+    .await
     .unwrap();
 }
 
@@ -254,8 +255,8 @@ async fn deferred_cancel_targets_accepted_turn_once_and_does_not_leak_to_next_se
     let mut ui = attached_ui(&remote, &cancellation).await;
     prompt(&mut ui, "first");
     server.send.reached(&mut ui).await;
-    cancel(&mut ui);
-    cancel(&mut ui);
+    cancel(&mut ui).await;
+    cancel(&mut ui).await;
     server.send.release.notify_one();
     settle(&mut ui).await;
     assert!(
@@ -263,7 +264,7 @@ async fn deferred_cancel_targets_accepted_turn_once_and_does_not_leak_to_next_se
         "send acceptance must produce owned cancel"
     );
     server.cancel.reached(&mut ui).await;
-    cancel(&mut ui);
+    cancel(&mut ui).await;
     server.cancel.release.notify_one();
     settle(&mut ui).await;
     assert_eq!(server.count("/cancel"), 1);
@@ -319,7 +320,7 @@ async fn exit_drain_settles_send_and_generated_cancel_before_returning() {
     let mut ui = attached_ui(&remote, &cancellation).await;
     prompt(&mut ui, "send before exit");
     server.send.reached(&mut ui).await;
-    cancel(&mut ui);
+    cancel(&mut ui).await;
     ui.actions.push_back(Action::Exit);
     assert!(ui.run_actions());
     {
@@ -404,8 +405,8 @@ async fn disconnected_exit_drain_cancels_accepted_send_once_without_reconnecting
     let mut ui = attached_ui(&remote, &cancellation).await;
     prompt(&mut ui, "send before connection loss");
     server.send.reached(&mut ui).await;
-    cancel(&mut ui);
-    cancel(&mut ui);
+    cancel(&mut ui).await;
+    cancel(&mut ui).await;
     ui.disconnect();
     ui.actions.push_back(Action::Exit);
     assert!(ui.run_actions());
@@ -456,7 +457,7 @@ async fn deferred_cancel_preserves_followed_turn_priority_over_newly_accepted_tu
     ui.adopt_stream(stream);
     prompt(&mut ui, "queued behind followed turn");
     server.send.reached(&mut ui).await;
-    cancel(&mut ui);
+    cancel(&mut ui).await;
     server.send.release.notify_one();
     settle(&mut ui).await;
     server.cancel.reached(&mut ui).await;

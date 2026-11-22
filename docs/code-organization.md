@@ -93,8 +93,9 @@ guards that check it.
 
 ### `crates/otto-core`: I/O-free contracts, formats and agent loop
 
-`crates/otto-core` contains no native runtime integration. Its principal
-modules are:
+`crates/otto-core` contains no native runtime integration; its
+[README](../crates/otto-core/README.md) describes use as a git dependency. Its
+principal modules are:
 
 - `approval`: frontend-neutral approval requests, choices and lifecycle values.
 - `model`: provider-neutral messages, blocks, validation, and usage types.

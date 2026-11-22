@@ -975,6 +975,8 @@ refuses late hooks; asynchronous shutdown awaits bounded cleanup.
 | --- | --- | --- |
 | `session_start` | Session metadata | `decision`, `reason`, `context`, `notice` |
 | `before_prompt` | `prompt`, `followup`, `has_image` | `decision`, `reason`, `context`, `notice` |
+| `before_provider_call` | `operation_id`, `model`, `system_prompt`, `messages` or `request_omitted`, `tools` | `decision`, `reason`, `context`, `system_prompt`, `edits`, `notice` |
+| `after_provider_call` | `operation_id`, `outcome`, `error`, `usage`, `duration_ms`, `attempts`, response `message` | `notice` |
 | `before_tool` | Identity/arguments above | `decision`, `reason`, `arguments`, `notice` |
 | `after_tool` | Identity/arguments, `content`, `is_error`, typed `outcome` | `content`, `notice` |
 | `before_compaction` | `reason`, `focus` | `decision`, `reason`, `context` retention hint, `notice` |
@@ -1016,6 +1018,53 @@ model context. Each message has `role` (`user`, `assistant`, `tool`,
 Image and reasoning blocks are omitted. When the complete input would exceed
 1 MiB, `turn` is replaced by `"turn_omitted":"size"` and the hook still runs.
 Child-agent turns have a non-null `session.parent_session_id`.
+
+#### Provider call events
+
+`before_provider_call` and `after_provider_call` run around each model request
+of the agent loop: once per step of the tool loop, and again for the retry
+that follows an automatic compaction after a context overflow. Compaction
+summary requests and other single-request completions do not run them. They
+accept no `matcher`. Claude Code format hooks do not receive them.
+
+`before_provider_call` data lists every request message in order with its
+`role`, a `context_type` when the message has one, and one entry per block, so
+`messages[i].blocks[j]` is block `j` of request message `i`. Text, tool call
+and tool result blocks have the shape shown for `turn_end`; other blocks, such
+as images and reasoning, appear as `{"type":"image"}` or
+`{"type":"reasoning"}` without content. When the input would exceed 1 MiB,
+`messages` is replaced by `"request_omitted":"size"`.
+
+The response can change the request:
+
+- `decision: deny` stops the turn with `reason`; no request is sent.
+- `context` is appended to this request's system prompt, labeled untrusted.
+- `system_prompt` replaces this request's system prompt.
+- `edits` is an array of `{"message": i, "block": j, "text": "..."}` that
+  replaces the text of a `text` block in a `user` message or of a
+  `tool_result` block. An edit fails the hook, and with it the turn, when the
+  indices are out of range, the block is in an assistant or context message
+  (input origin labels are context messages and cannot be changed), the block
+  is of another type, two edits name the same block, or `messages` was
+  omitted. Edits are checked together before any is applied. Assistant
+  messages are excluded because they are the model's own output and providers
+  can reject changed assistant text next to reasoning blocks.
+
+Message count, roles, block types, tool call IDs and `is_error` never change. The changes
+apply to this request only and are not written to the session messages; the
+next step builds its request from the session again and runs the hook again.
+The changed request then passes the same secret check as every model request,
+so text a hook adds cannot send a known secret. When anything changed, Otto
+appends one `otto.hook.provider_request` record holding the operation ID and
+only the changed values.
+
+`after_provider_call` runs after the request settles, on success and on error.
+`outcome` is `success` or `error`; `message` holds the response's text and tool
+call blocks, with reasoning as a content-free placeholder. The response text has
+already been streamed to the client, so this event cannot change it. A failing
+`after_provider_call` hook shows a warning and the turn continues. Each
+configured `before_provider_call` and `after_provider_call` hook runs
+synchronously and adds its run time to every step.
 
 Timeout is positive, at most 300 s, default 10 s; before hooks also consume the
 operation budget. Input cap 1 MiB, stdout/stderr 64 KiB. Known secrets are

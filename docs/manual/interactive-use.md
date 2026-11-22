@@ -6,14 +6,15 @@ Previous: [Getting started](getting-started.md) · [Documentation index](../READ
 
 The local TUI and `otto --attach` report their current state using the generic
 [Program Status Protocol (OSC 7501)](https://www.superlogical.com/rex/docs/build/program-status).
-Rex can use this to indicate work in progress, pending permission, completion or
-failure even when its tab is not focused. This does not add an approval channel:
-review and decide requests through Otto's existing approval UI.
+Rex and [Herdr App / Core](#herdr-app--core) can use it to indicate work in
+progress, pending permission, completion or failure. Status reporting does not
+add an approval channel: review and decide requests through Otto's existing
+approval UI.
 
-The integration is enabled by default in interactive TUI terminals. No Rex CLI,
-plugin, API credential or additional sandbox permission is required. Other
-terminals may ignore the protocol. Reports contain only fixed state fields and
-`app=otto`, not prompts, tool arguments, approval text or credentials. They are
+Status reporting is enabled by default in interactive TUI terminals and needs
+no plugin, API credential or additional sandbox permission. Terminals that do
+not support the protocol can ignore it. Reports contain only fixed state fields
+and `app=otto`, not prompts, tool arguments, approval text or credentials. They are
 terminal control sequences, not conversation messages or server API events.
 
 To use it after upgrading, rebuild/install Otto using the
@@ -480,10 +481,14 @@ was running when the connection was lost keeps running in serve.
 
 ### Herdr
 
-[Herdr](https://herdr.dev) is a terminal workspace manager for coding agents.
-When Herdr starts Otto in a pane, Otto reports its own lifecycle over the socket
-Herdr injects through the environment, so the pane appears as an agent named
-`otto` with the states Herdr's bundled agents have:
+Herdr TUI and Herdr App / Core use different integrations and do not share
+terminal sessions.
+
+#### Herdr TUI
+
+When Otto starts in a [Herdr TUI](https://github.com/herdrdev/herdr) pane, it
+reports its lifecycle over the socket Herdr exposes in the environment. The
+pane appears with the agent label `otto` and these states:
 
 | Otto | Herdr state | What it means |
 | --- | --- | --- |
@@ -510,6 +515,27 @@ Herdr injects through the environment, so the pane appears as an agent named
 - The TUI uses the terminal's alternate screen, so `herdr agent read` sees only
   the current viewport. Ask Otto to write a long answer to a file when you need
   all of it.
+
+#### Herdr App / Core
+
+Start `otto` or `otto --attach` in a terminal managed by the Herdr App or
+[herdr-core](https://herdr.dev/core/). With the Core CLI, for example:
+
+```sh
+hc run --bg --name otto otto
+hc get otto --json
+hc attach otto
+```
+
+Core reads Otto's [OSC 7501 status](#rex-terminal-status) from the terminal,
+without the Herdr TUI socket integration. For `otto --attach`,
+the client in that terminal reports the state, not `otto serve`. If status is
+missing, check that the terminal is managed by Core and restart the Otto TUI
+client with an updated build.
+
+Attach to the terminal and use Otto's approval UI to review or decide a request.
+The status report does not carry approval details, grant permissions, or give
+Core the session file and resume command that Otto sends to Herdr TUI.
 
 ## Slash commands
 
@@ -1235,8 +1261,8 @@ authorization review or provider-managed context. This differs from
 `parent_message` and `capability_update` use their own presentation without that
 generic decoration.
 
-The storage sanitizer also recognizes `otto.hook.arguments` and
-`otto.hook.result` audit payload names. This is a recording policy, not a
+The storage sanitizer also recognizes `otto.hook.arguments`,
+`otto.hook.result` and `otto.hook.provider_request` audit payload names. This is a recording policy, not a
 promise that every installed runtime emits these records, and not a model
 visibility rule.
 

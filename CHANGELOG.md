@@ -13,6 +13,14 @@ commit ledger; Git and release tags retain the full history. See the
   `/model`. Existing defaults and custom settings are preserved; the official
   DeepSeek integration uses the OpenAI-compatible API with thinking disabled.
 
+- Plugin and standalone hooks can run on two new events around each model
+  request of the agent loop. `before_provider_call` receives the request and
+  can deny it, append context, replace the system prompt or replace the text
+  of user text blocks and tool results; the changes apply to that request only, pass the existing
+  secret check and are recorded as `otto.hook.provider_request`.
+  `after_provider_call` receives the outcome and usage and can only show a
+  notice. See [provider call events](docs/manual/memory-and-extensions.md#provider-call-events).
+
 - The local and attached TUIs can show `Otto` as a temporary Rex terminal
   title, restoring the previous title on exit or suspend without renaming the tab.
 

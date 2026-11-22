@@ -12,8 +12,22 @@ pub struct Response {
     pub context: Option<String>,
     pub arguments: Option<Value>,
     pub content: Option<String>,
+    /// `before_provider_call` only: replaces the system prompt of that one request.
+    pub system_prompt: Option<String>,
+    /// `before_provider_call` only: replacements of request text blocks.
+    pub edits: Option<Vec<Edit>>,
     /// Text shown to the user as a notification; never sent to the model.
     pub notice: Option<String>,
+}
+
+/// One `before_provider_call` replacement: the new `text` of block `block` of
+/// request message `message`. Indices refer to the `messages` of the hook input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Edit {
+    pub message: usize,
+    pub block: usize,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +45,14 @@ pub trait Hooks: Send + Sync {
         data: Value,
         control: &dyn OperationControl,
     ) -> Result<Response, String>;
+
+    /// Whether `run` would run at least one hook for `event`. The agent skips
+    /// building an event payload when this is false. The default `true` is
+    /// always correct; an implementation returns false only for an event no
+    /// configured hook receives.
+    fn handles(&self, _event: &str) -> bool {
+        true
+    }
 }
 
 #[derive(Default)]
@@ -137,6 +159,16 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
             Some(hooks) => hooks.run(event, hook_payload, control).await,
             None => Ok(Response::default()),
         }
+    }
+
+    /// Whether `event` reaches a configured hook, so its payload is worth building.
+    pub(super) fn hook_handles(&self, event: &str) -> bool {
+        self.redactor.allows_dynamic_content()
+            && self
+                .options
+                .hooks
+                .as_ref()
+                .is_some_and(|hooks| hooks.handles(event))
     }
 
     pub(super) fn hook_error(

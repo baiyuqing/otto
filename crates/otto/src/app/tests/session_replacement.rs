@@ -185,10 +185,13 @@ async fn switching_model_switches_provider_and_model() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
-    assert_eq!(
-        controller.models(),
-        vec!["alpha/gpt-alpha", "beta/gpt-beta"]
-    );
+    // The effective list is the configured models plus the built-in presets.
+    let mut expected =
+        crate::config::configured_model_selectors(&otto_core::config::File::default());
+    expected.extend(["alpha/gpt-alpha".to_string(), "beta/gpt-beta".to_string()]);
+    expected.sort();
+    expected.dedup();
+    assert_eq!(controller.models(), expected);
 
     let before = controller.info();
 

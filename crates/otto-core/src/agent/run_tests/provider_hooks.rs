@@ -345,7 +345,10 @@ async fn the_audit_record_holds_only_changed_values_and_is_absent_without_change
         .expect("run");
     let records = provider_request_records(agent.session());
     assert_eq!(records.len(), 1);
-    let keys: Vec<&String> = records[0].as_object().expect("object").keys().collect();
+    // Compare the key set: serde_json orders keys by insertion when another
+    // crate of the build enables its `preserve_order` feature.
+    let mut keys: Vec<&String> = records[0].as_object().expect("object").keys().collect();
+    keys.sort();
     assert_eq!(keys, ["context", "operation_id", "version"]);
 }
 

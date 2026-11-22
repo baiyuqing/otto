@@ -203,6 +203,22 @@ configured model review and the artifact checks still run. Saving a model
 configuration change still requires a restart.
 Read-path requests explicitly disclose persistence; commands remain sandboxed.
 
+## Safe credential handling
+
+Otto's default system prompt instructs the model not to ask users to paste
+passwords, API keys or tokens into chat. It should prefer code that reads and
+uses credentials at runtime from environment variables, credential stores or
+authorized configuration sources, without returning their values to model
+context. Sanity checks should report only configuration status, check results
+and sanitized diagnostics. Missing credentials should lead to local setup or a
+secure authentication flow, not a request to paste secrets into chat.
+
+The guidance also forbids credential-bearing output, environment dumps, entire
+credential-file dumps and debug logging that could expose secrets, and calls for
+safe error handling and respect for access controls. This is model guidance, not
+an access-control mechanism or a guarantee of compliance. Redaction remains a
+fallback, not the primary safeguard.
+
 ## Provider egress secret and PII guard
 
 Sandboxing controls what an agent can access; it does not by itself control what

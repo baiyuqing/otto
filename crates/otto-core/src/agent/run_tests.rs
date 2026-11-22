@@ -33,6 +33,7 @@ use super::{Agent, AgentError, CompactionSettings, Event, Options};
 #[derive(Default)]
 struct CapturingDiagnostics {
     models: Arc<Mutex<Vec<String>>>,
+    stalls: Arc<Mutex<Vec<String>>>,
 }
 
 impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
@@ -46,6 +47,15 @@ impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
     ) -> Arc<dyn crate::diagnostics::Observer> {
         self.models.lock().expect("diagnostics").push(model.into());
         Arc::new(crate::diagnostics::Noop)
+    }
+
+    fn turn_stalled(&self, stall: &crate::agent::progress::Stall) {
+        self.stalls.lock().expect("diagnostics").push(format!(
+            "{} {} {}",
+            stall.kind.as_str(),
+            stall.tool,
+            stall.count
+        ));
     }
 }
 

@@ -779,7 +779,7 @@ backend is involved.
 `otto_session_context_window_tokens{session_id,provider,model}`,
 `otto_session_context_input_tokens{session_id,provider,model}`,
 `otto_session_context_input_tokens_pending{session_id,provider,model}`,
-`otto_turns_total{status}`, `otto_turns_active`, `otto_turn_duration_seconds`,
+`otto_turns_total{status}`, `otto_turn_stops_total{reason}`, `otto_turns_active`, `otto_turn_duration_seconds`,
 `otto_tool_calls_total{tool,status}`, `otto_tool_call_duration_seconds{tool}`,
 `otto_provider_tokens_total{kind}`, `otto_event_stream_clients`,
 `otto_tasks_started_total`, `otto_tasks_finished_total{status}`,

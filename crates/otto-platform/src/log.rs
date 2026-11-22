@@ -8,6 +8,7 @@ mod diagnostics;
 /// Swap for `tracing` if any other crate needs structured logs.
 pub struct Logger {
     diagnostics: OnceLock<Arc<diagnostics::Log>>,
+    stops: Arc<StopListener>,
     sink: Mutex<Box<dyn std::io::Write + Send>>,
 }
 
@@ -17,7 +18,24 @@ impl std::fmt::Debug for Logger {
     }
 }
 
+/// Receives every turn stop reported through a diagnostics scope of one
+/// [`Logger`]. The cell is shared with the scopes, so a listener registered
+/// after a scope was created is still called.
+pub(crate) type StopListener =
+    OnceLock<Arc<dyn Fn(otto_core::diagnostics::TurnStop) + Send + Sync>>;
+
 impl Logger {
+    /// Registers the process-wide turn-stop listener. The first registration
+    /// wins; a later one is ignored. The listener is called only for turns
+    /// that have a diagnostics scope, so it does not fire when the diagnostic
+    /// file could not be opened.
+    pub fn on_turn_stop(
+        &self,
+        listener: Arc<dyn Fn(otto_core::diagnostics::TurnStop) + Send + Sync>,
+    ) {
+        let _ = self.stops.set(listener);
+    }
+
     pub fn stderr() -> Self {
         Self::new(Box::new(std::io::stderr()))
     }
@@ -31,6 +49,7 @@ impl Logger {
     pub fn new(sink: Box<dyn std::io::Write + Send>) -> Self {
         Self {
             diagnostics: OnceLock::new(),
+            stops: Arc::default(),
             sink: Mutex::new(sink),
         }
     }
@@ -57,7 +76,7 @@ impl Logger {
     ) -> Option<Arc<dyn otto_core::diagnostics::Diagnostics>> {
         self.diagnostics
             .get()
-            .map(|log| log.scope(session, task, redactor))
+            .map(|log| log.scope(session, task, redactor, Arc::clone(&self.stops)))
     }
 
     pub fn info(&self, message: &str, fields: &[(&str, String)]) {

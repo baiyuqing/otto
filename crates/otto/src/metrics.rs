@@ -18,6 +18,7 @@ mod process;
 
 const PROCESS_SAMPLE_WARNING_INTERVAL: Duration = Duration::from_secs(300);
 
+use otto_core::diagnostics::TurnStop;
 use otto_core::model::{
     EffectCertainty, OperationDisposition, OperationId, OperationOutcome, OperationStopReason,
     Usage,
@@ -135,6 +136,7 @@ struct State {
     sessions_evicted_total: u64,
 
     turns_total: BTreeMap<String, u64>,
+    turn_stops_total: BTreeMap<String, u64>,
     turn_duration: Option<Histogram>,
 
     tool_calls_total: BTreeMap<ToolKey, u64>,
@@ -306,6 +308,15 @@ impl Metrics {
         if let Some(histogram) = state.turn_duration.as_mut() {
             histogram.observe(elapsed.as_secs_f64());
         }
+    }
+
+    /// One turn stopped by a limit; see [`TurnStop`].
+    pub fn turn_stopped(&self, reason: TurnStop) {
+        *self
+            .lock()
+            .turn_stops_total
+            .entry(reason.as_str().to_string())
+            .or_default() += 1;
     }
 
     pub fn tool_call(&self, tool: &str, is_error: bool, elapsed: Duration) {
@@ -484,6 +495,13 @@ impl Metrics {
             "status",
             "Total turns by terminal status.",
             &state.turns_total,
+        );
+        write_counter_by_label(
+            &mut out,
+            "otto_turn_stops_total",
+            "reason",
+            "Total turns stopped by a limit, by reason.",
+            &state.turn_stops_total,
         );
         write_gauge(
             &mut out,

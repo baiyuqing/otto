@@ -77,6 +77,23 @@ pub struct Finish {
     pub error_class: Option<ErrorClass>,
 }
 
+/// Why a turn was stopped by a limit rather than ending on its own. A new
+/// limit adds a variant here and its label value in [`TurnStop::as_str`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TurnStop {
+    /// The progress guard stopped the turn; see [`crate::agent::progress`].
+    NoProgress(crate::agent::progress::StallKind),
+}
+
+impl TurnStop {
+    /// The stable name used as the `reason` metric label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoProgress(kind) => kind.as_str(),
+        }
+    }
+}
+
 /// IDs and tool names are metadata; the host still validates/redacts them.
 pub trait Diagnostics: Send + Sync {
     fn start(
@@ -90,6 +107,9 @@ pub trait Diagnostics: Send + Sync {
     fn for_task(&self, _task_id: &str) -> Option<Arc<dyn Diagnostics>> {
         None
     }
+    /// A turn was stopped because it made no progress. Only the stall's
+    /// kind, tool name and count are passed; arguments and results never are.
+    fn turn_stalled(&self, _stall: &crate::agent::progress::Stall) {}
 }
 
 /// All arguments are typed metadata. HTTP adapters may report headers and byte

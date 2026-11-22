@@ -324,6 +324,16 @@ impl Server {
                 .expect("approval domain registry");
         }
         let logger = options.logger.unwrap_or_else(|| Arc::new(Logger::stderr()));
+        let metrics = Arc::new(Metrics::with_logger(Arc::clone(&logger)));
+        // Every turn of this process, main or child, reports its stops
+        // through a diagnostics scope of this logger. The weak reference keeps
+        // the logger and the registry from owning each other.
+        let counting = Arc::downgrade(&metrics);
+        logger.on_turn_stop(Arc::new(move |stop| {
+            if let Some(metrics) = counting.upgrade() {
+                metrics.turn_stopped(stop);
+            }
+        }));
         Arc::new(Self {
             factory: options.factory,
             info: options.info,
@@ -331,7 +341,7 @@ impl Server {
             approvals,
             token: options.token,
             remote_listener: options.remote_listener,
-            metrics: Arc::new(Metrics::with_logger(Arc::clone(&logger))),
+            metrics,
             log: logger,
             sessions: Mutex::new(HashMap::new()),
             open_gate: tokio::sync::Mutex::new(()),

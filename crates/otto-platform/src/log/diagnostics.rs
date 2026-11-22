@@ -271,9 +271,11 @@ impl Log {
         session: &str,
         task: &str,
         redactor: Redactor,
+        stops: Arc<super::StopListener>,
     ) -> Arc<dyn Diagnostics> {
         let redactor = Arc::new(redactor);
         Arc::new(Scope {
+            stops,
             log: self.clone(),
             session: safe(session, &redactor),
             task: safe(task, &redactor),
@@ -296,6 +298,7 @@ fn safe(text: &str, redactor: &Redactor) -> String {
         .collect()
 }
 struct Scope {
+    stops: Arc<super::StopListener>,
     log: Arc<Log>,
     session: String,
     task: String,
@@ -347,8 +350,21 @@ impl Diagnostics for Scope {
         }
         span
     }
+    fn turn_stalled(&self, stall: &otto_core::agent::progress::Stall) {
+        let mut record = json!({"schema_version":1, "event":"turn_stalled",
+            "session_id":self.session, "kind":stall.kind.as_str(),
+            "tool":safe(&stall.tool, &self.redactor), "count":stall.count});
+        if !self.task.is_empty() {
+            record["task_id"] = json!(self.task);
+        }
+        self.log.write(record);
+        if let Some(listener) = self.stops.get() {
+            listener(otto_core::diagnostics::TurnStop::NoProgress(stall.kind));
+        }
+    }
     fn for_task(&self, task: &str) -> Option<Arc<dyn Diagnostics>> {
         Some(Arc::new(Self {
+            stops: self.stops.clone(),
             log: self.log.clone(),
             session: self.session.clone(),
             task: safe(task, &self.redactor),
@@ -547,6 +563,9 @@ impl Drop for Span {
 }
 
 #[cfg(test)]
+mod stall_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use otto_core::diagnostics::Observation;
@@ -658,7 +677,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let log = Log::open(home.path(), "test").unwrap();
         let secret = "secret-abc";
-        let scope = log.scope("session-a", "", Redactor::new(&[secret.into()]));
+        let redactor = Redactor::new(&[secret.into()]);
+        let scope = log.scope("session-a", "", redactor, Default::default());
         let child = scope.for_task("t1").unwrap();
         let mut observation = Observation::start(
             Some(&child),
@@ -703,7 +723,7 @@ mod tests {
     fn abandonment_and_missing_usage_are_not_reported_as_zero_success() {
         let home = tempfile::tempdir().unwrap();
         let log = Log::open(home.path(), "test").unwrap();
-        let scope = log.scope("session", "", Redactor::new(&[]));
+        let scope = log.scope("session", "", Redactor::new(&[]), Default::default());
         {
             let _pending = Observation::start(
                 Some(&scope),

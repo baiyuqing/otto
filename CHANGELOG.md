@@ -9,6 +9,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- Built-in context limits recognize OpenAI `gpt-6.2-sol` and `gpt-6.2-astra`
+  (1,050,000 context, 922,000 hard input, 128,000 output tokens), retaining
+  the conservative 272,000-token working window. The provider guide shows
+  how to add them to the model picker and explains the Responses requirement
+  for tool calling; existing defaults and account access are unchanged.
+
 - Default system-prompt guidance keeps credential values out of chat and model
   context: prefer runtime credential reads, code-based sanity checks and
   sanitized diagnostics; guide local authentication setup instead of requesting

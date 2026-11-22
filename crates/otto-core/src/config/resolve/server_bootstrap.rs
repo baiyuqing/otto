@@ -43,6 +43,7 @@ pub fn resolve_server_bootstrap(
         compaction: resolve_compaction(&file.agent.compaction, &Default::default(), "")?,
         resilience: resolve_resilience(&file.agent)?,
         progress: resolve_progress(&file.agent)?,
+        budget: super::budget::resolve_budget(&file.agent.budget)?,
         ..Runtime::default()
     })
 }

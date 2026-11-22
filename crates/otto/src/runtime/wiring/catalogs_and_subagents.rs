@@ -193,6 +193,7 @@ impl Builder {
                     repeated_calls: runtime.progress.repeated_calls,
                     consecutive_failures: runtime.progress.consecutive_failures,
                 },
+                budget: runtime.budget,
                 provider_timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
                 task_timeout: runtime.resilience.deadlines.subagent_timeout,

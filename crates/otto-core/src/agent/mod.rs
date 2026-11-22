@@ -24,6 +24,7 @@ use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
+pub mod budget;
 mod capabilities;
 pub mod compaction;
 pub mod compaction_select;
@@ -84,6 +85,7 @@ use crate::session::turn::{
 use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 
 use crate::mailbox::{InMemoryMailbox, Mailbox};
+use budget::{BudgetPolicy, TurnBudget};
 use memory::{DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_TOKEN_BUDGET, MemoryRecall};
 use overflow::{
     AUTOMATIC_COMPACTION_ATTEMPT_USED_MESSAGE, AUTOMATIC_COMPACTION_HARD_FAILURE_MESSAGE,
@@ -129,6 +131,9 @@ pub struct Options {
     /// The limits that stop a turn making no progress. Every turn uses one,
     /// including each sub-agent's.
     pub progress: ProgressPolicy,
+    /// The token and step limits of one turn. Every turn has its own budget
+    /// under this policy, including each sub-agent's.
+    pub budget: BudgetPolicy,
     /// The long-term memory binding consulted once per turn, if any.
     pub memory: Option<Arc<dyn MemoryRecall + Send + Sync>>,
     /// How many records one recall may return.
@@ -170,6 +175,7 @@ impl Default for Options {
             request_sizer: None,
             compaction: CompactionSettings::default(),
             progress: ProgressPolicy::default(),
+            budget: BudgetPolicy::default(),
             memory: None,
             memory_recall_limit: DEFAULT_RECALL_LIMIT,
             memory_recall_token_budget: DEFAULT_RECALL_TOKEN_BUDGET,
@@ -199,6 +205,9 @@ pub struct Agent<P, T, S> {
     /// run, used or not. See [`Agent::set_next_input_id`].
     next_input_id: std::sync::Mutex<Option<String>>,
     next_input_provenance: std::sync::Mutex<Option<crate::model::InputProvenance>>,
+    /// The budget of the turn in progress; see [`budget`]. Replaced when a
+    /// turn or a manual compaction starts.
+    budget: std::sync::Mutex<TurnBudget>,
 }
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
@@ -262,6 +271,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             hook_turn_messages: std::sync::Mutex::new(None),
             next_input_id: std::sync::Mutex::new(None),
             next_input_provenance: std::sync::Mutex::new(None),
+            budget: std::sync::Mutex::new(TurnBudget::default()),
             last_memory_context: std::sync::Mutex::default(),
         }
     }

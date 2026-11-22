@@ -404,6 +404,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // Calls a session takeover left without a result come first: nothing
         // may be appended between an assistant message and its tool results.
         let system_context = self.redactor.redact_string(system_context);
+        self.reset_budget();
         let mut state = RunDispatchState {
             progress: ProgressGuard::new(self.options.progress),
             ..RunDispatchState::default()
@@ -523,6 +524,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
 
         loop {
+            // Every tool call of the previous batch has its result by now, so
+            // the transcript is well-formed when a limit ends the turn here.
+            if let Err(exceeded) = self.admit_step() {
+                return Err(self.stop_budget(emit, exceeded));
+            }
             state.yield_after_batch = false;
             state.batch_has_errors = false;
             let step = StepControl::new(control);

@@ -143,6 +143,9 @@ pub struct OptionsTemplate {
     /// The parent's progress limits. A child inherits them, so a stuck child
     /// stops on the same rule as the parent's own loop.
     pub progress: ProgressPolicy,
+    /// The parent's budget policy. Each child turn starts its own budget under
+    /// it; nothing is shared with the parent's turn.
+    pub budget: otto_core::agent::budget::BudgetPolicy,
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
     pub provider_timeout: Option<Duration>,
     pub cancellation_grace: Duration,
@@ -166,6 +169,7 @@ impl Default for OptionsTemplate {
             thinking: String::new(),
             compaction: CompactionSettings::default(),
             progress: ProgressPolicy::default(),
+            budget: otto_core::agent::budget::BudgetPolicy::default(),
             request_sizer: None,
             provider_timeout: None,
             cancellation_grace: Duration::from_secs(5),

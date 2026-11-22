@@ -403,6 +403,7 @@ impl Runner {
             request_sizer: template.request_sizer.clone(),
             compaction: template.compaction,
             progress: template.progress,
+            budget: template.budget,
             // A child gets no memory binding, no registry of its own, and a
             // private inbox: it can neither recall, delegate, nor observe the
             // parent's notifications, but the parent can send messages into

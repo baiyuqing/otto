@@ -149,6 +149,23 @@ fn turn_stops_are_labelled_by_reason() {
 }
 
 #[test]
+fn budget_stops_use_the_budget_labels() {
+    use otto_core::agent::budget::BudgetKind;
+    use otto_core::diagnostics::TurnStop;
+    let metrics = Metrics::new();
+    metrics.turn_stopped(TurnStop::Budget(BudgetKind::Tokens));
+    metrics.turn_stopped(TurnStop::Budget(BudgetKind::Steps));
+    metrics.turn_stopped(TurnStop::Budget(BudgetKind::Steps));
+    assert_lines(
+        &metrics.render(),
+        &[
+            r#"otto_turn_stops_total{reason="budget_tokens"} 1"#,
+            r#"otto_turn_stops_total{reason="budget_steps"} 2"#,
+        ],
+    );
+}
+
+#[test]
 fn tool_calls_are_labelled_by_tool_and_status() {
     let metrics = Metrics::new();
     metrics.tool_call("read", false, millis(50));

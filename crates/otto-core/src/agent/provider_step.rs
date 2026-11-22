@@ -92,6 +92,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         }
 
+        self.admit_tokens()?;
         let (response, visible_output, error) = self
             .complete_normal_provider_attempt(request, state, emit, control)
             .await;
@@ -125,6 +126,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 vec![original_overflow.to_string()],
             ));
         }
+        self.admit_tokens()?;
         let (response, _, error) = self
             .complete_normal_provider_attempt(retry_request, state, emit, control)
             .await;
@@ -174,6 +176,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
                 if let Some(cancellation) = automatic_cancellation(false, &error) {
                     return Err(cancellation);
+                }
+                // A budget stop is final; it is not a compaction failure that
+                // the turn can continue past.
+                if matches!(error, AgentError::BudgetExceeded(_)) {
+                    return Err(error);
                 }
                 if estimate >= hard_trigger {
                     return Err(automatic_dispatch_error(
@@ -229,6 +236,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
         if let Some(cancellation) = automatic_cancellation(false, &compaction_error) {
             return Err(cancellation);
+        }
+        if matches!(compaction_error, AgentError::BudgetExceeded(_)) {
+            return Err(compaction_error);
         }
         Err(automatic_dispatch_error(
             OVERFLOW_COMPACTION_FAILURE_MESSAGE,
@@ -534,6 +544,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .await
         };
         diagnostic.provider_finished(&outcome);
+        if let Ok(response) = &outcome.result {
+            self.charge_budget(response.message.usage);
+        }
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
@@ -675,6 +688,58 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             diagnostics.turn_stalled(&stall);
         }
         self.fail(emit, AgentError::NoProgress(stall))
+    }
+
+    /// Reports a reached budget limit to the diagnostics hook and returns the
+    /// error. This is the only place a budget stop becomes an error, so each
+    /// stopped turn is reported once and before redaction can replace the
+    /// error. The caller ends the turn with [`Self::fail`], directly or by
+    /// returning the error to the turn loop.
+    pub(super) fn report_budget(&self, exceeded: super::budget::Exceeded) -> AgentError {
+        if let Some(diagnostics) = self.options.diagnostics.as_ref() {
+            diagnostics.turn_budget_exceeded(&exceeded);
+        }
+        AgentError::BudgetExceeded(exceeded)
+    }
+
+    /// Ends a turn at a budget limit; the counterpart of `stop_stalled`.
+    pub(super) fn stop_budget(
+        &self,
+        emit: EventSink<'_>,
+        exceeded: super::budget::Exceeded,
+    ) -> AgentError {
+        let error = self.report_budget(exceeded);
+        self.fail(emit, error)
+    }
+
+    fn with_budget<R>(&self, f: impl FnOnce(&mut super::budget::TurnBudget) -> R) -> R {
+        f(&mut self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+
+    /// Starts a new budget for a turn or a manual compaction.
+    pub(super) fn reset_budget(&self) {
+        self.with_budget(|budget| *budget = super::budget::TurnBudget::new(self.options.budget));
+    }
+
+    /// Charges the usage of one provider response, as soon as it is known.
+    pub(super) fn charge_budget(&self, usage: Option<Usage>) {
+        self.with_budget(|budget| budget.charge(usage));
+    }
+
+    /// Admits the next ordinary provider call and counts it as a step.
+    pub(super) fn admit_step(&self) -> Result<(), super::budget::Exceeded> {
+        self.with_budget(|budget| budget.admit_step())
+    }
+
+    /// Refuses a request that would consume tokens once the token limit is
+    /// reached. Used before a retry after overflow and before each
+    /// compaction request.
+    pub(super) fn admit_tokens(&self) -> Result<(), AgentError> {
+        self.with_budget(|budget| budget.admit_tokens())
+            .map_err(|exceeded| self.report_budget(exceeded))
     }
 
     /// Returns a copy of `message` with every text-bearing field redacted.

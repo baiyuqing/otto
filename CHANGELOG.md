@@ -7,6 +7,17 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Changed defaults
+
+- Every turn now has a hard budget of 4,200,000 tokens and 54 model calls
+  (`[agent.budget].max_tokens` and `max_steps`); the defaults are twice the 99th
+  percentile of 150 local turns. A turn that reaches a limit ends with a
+  `budget exceeded:` error that names the key, and the session continues with the
+  next prompt. A turn that used to run longer now stops; raise a limit, or set it
+  to `0` to disable it. Each sub-agent and workflow-step turn has its own budget.
+  Stops are logged as `turn_budget_exceeded` and counted by `otto serve` in
+  `otto_turn_stops_total`. See [Turn budget](docs/manual/limits.md#turn-budget).
+
 ### Breaking changes
 
 - A config file that contains `[agent].max_turns` or a `[web]` table (including

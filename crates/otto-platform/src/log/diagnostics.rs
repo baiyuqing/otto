@@ -351,16 +351,10 @@ impl Diagnostics for Scope {
         span
     }
     fn turn_stalled(&self, stall: &otto_core::agent::progress::Stall) {
-        let mut record = json!({"schema_version":1, "event":"turn_stalled",
-            "session_id":self.session, "kind":stall.kind.as_str(),
-            "tool":safe(&stall.tool, &self.redactor), "count":stall.count});
-        if !self.task.is_empty() {
-            record["task_id"] = json!(self.task);
-        }
-        self.log.write(record);
-        if let Some(listener) = self.stops.get() {
-            listener(otto_core::diagnostics::TurnStop::NoProgress(stall.kind));
-        }
+        self.record_stall(stall);
+    }
+    fn turn_budget_exceeded(&self, exceeded: &otto_core::agent::budget::Exceeded) {
+        self.record_budget_exceeded(exceeded);
     }
     fn for_task(&self, task: &str) -> Option<Arc<dyn Diagnostics>> {
         Some(Arc::new(Self {
@@ -561,6 +555,11 @@ impl Drop for Span {
         self.abandoned();
     }
 }
+
+mod stops;
+
+#[cfg(test)]
+mod budget_tests;
 
 #[cfg(test)]
 mod stall_tests;

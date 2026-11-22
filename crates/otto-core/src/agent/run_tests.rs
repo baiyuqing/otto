@@ -34,6 +34,7 @@ use super::{Agent, AgentError, CompactionSettings, Event, Options};
 struct CapturingDiagnostics {
     models: Arc<Mutex<Vec<String>>>,
     stalls: Arc<Mutex<Vec<String>>>,
+    budget_stops: Arc<Mutex<Vec<String>>>,
 }
 
 impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
@@ -47,6 +48,15 @@ impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
     ) -> Arc<dyn crate::diagnostics::Observer> {
         self.models.lock().expect("diagnostics").push(model.into());
         Arc::new(crate::diagnostics::Noop)
+    }
+
+    fn turn_budget_exceeded(&self, exceeded: &crate::agent::budget::Exceeded) {
+        self.budget_stops.lock().expect("diagnostics").push(format!(
+            "{} {} {}",
+            exceeded.kind.as_str(),
+            exceeded.limit,
+            exceeded.used
+        ));
     }
 
     fn turn_stalled(&self, stall: &crate::agent::progress::Stall) {
@@ -80,6 +90,7 @@ mod recording;
 mod redaction;
 mod redaction_feedback;
 mod step_interrupt;
+mod turn_budget;
 mod turn_end_turn;
 mod turn_records;
 mod yield_provider_calls;
@@ -219,6 +230,18 @@ impl Turn {
             events: Vec::new(),
             outcome: Err(ProviderError::Other(message.into())),
         }
+    }
+
+    /// Sets the usage the scripted response reports.
+    fn with_usage(mut self, input_tokens: i64, output_tokens: i64) -> Self {
+        if let Ok(response) = &mut self.outcome {
+            response.message.usage = Some(Usage {
+                input_tokens,
+                output_tokens,
+                ..Usage::default()
+            });
+        }
+        self
     }
 
     fn with_events(mut self, events: Vec<StreamEvent>) -> Self {

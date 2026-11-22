@@ -20,6 +20,8 @@ Restart long-lived processes (`otto serve`, chat connectors) after changing them
 | `[agent].max_output_bytes` | Text returned by one tool call | `51200` | uses the default | The text is cut and ends with `[truncated: <n> bytes omitted]` |
 | `[agent].no_progress_repeats` | Identical consecutive tool calls, or unchanged cycles of 2-8 calls | `8` | disables this condition | The turn ends with a `no progress:` error |
 | `[agent].no_progress_failures` | Consecutive failed tool results | `12` | disables this condition | The turn ends with a `no progress:` error |
+| `[agent.budget].max_tokens` | Tokens one turn uses: input plus output over every model response, compaction responses included | `4200000` | disables this limit | The turn ends with a `budget exceeded:` error; the session continues |
+| `[agent.budget].max_steps` | Model calls one turn makes, not counting compaction requests | `54` | disables this limit | The turn ends with a `budget exceeded:` error; the session continues |
 | `[agents].max_parallel` | Concurrent sub-agent tasks; concurrent workflow steps | `4` | rejected at load | Further tasks or steps wait in a queue |
 | Scheduled run limit (built in) | One scheduled run | `10m` | not configurable | The run is cancelled and recorded as failed |
 | Workflow step count (built in) | Steps in one workflow definition | 32 | not configurable | The definition is rejected |
@@ -157,6 +159,83 @@ The counter exists only in `otto serve`; the terminal UI, `otto --prompt` and th
 schedule worker write the log record but expose no metric. If the diagnostic file
 cannot be opened at startup, Otto prints a warning and neither the record nor the
 counter is produced.
+
+## Turn budget
+
+`[agent.budget]` bounds how much model work one turn may use. Both limits are on
+by default and apply to every turn.
+
+| Key | Counts | Unit | Default |
+| --- | --- | --- | --- |
+| `max_tokens` | `input_tokens + output_tokens` of every model response in the turn. Input tokens already include cached input. Responses to automatic compaction requests and to the requests of a split-turn summary count too. | tokens | `4200000` |
+| `max_steps` | Ordinary model calls in the turn: one for each pass of the agent loop, including the call after each tool batch. Compaction requests are not steps. A retry after a context overflow is the same step. | calls | `54` |
+
+Both defaults are twice the 99th percentile of 150 local turns (2,096,868
+tokens and 27 steps). `0` disables the limit it is set on; `0` for both
+disables the budget. Values must be between 0 and 1000000000000 for
+`max_tokens` and between 0 and 1000000 for `max_steps`; a negative or larger
+value fails at load with an error that names the key.
+
+### When the check runs
+
+- Otto adds the tokens of a response to the turn's total as soon as the response
+  arrives. The usage that a provider omits counts as 0.
+- Before each ordinary model call, Otto stops the turn if the calls already made
+  equal `max_steps` or the tokens used are at least `max_tokens`. With
+  `max_steps = N`, at most N calls are made.
+- Before a compaction request and before the retry that follows an overflow
+  compaction, Otto stops the turn if the tokens used are at least `max_tokens`,
+  so a summary request cannot add usage after the limit was reached.
+- A call is never interrupted while it streams. The turn can therefore use more
+  than `max_tokens`, by at most the tokens of the one response that crossed the
+  limit. The tool calls of that response still run, and each has its result in
+  the transcript; the next model call is not made.
+
+### What you see
+
+The turn ends as failed with one of these errors; the text names the key to
+change:
+
+```text
+budget exceeded: 4200311 of 4200000 tokens used in this turn ([agent.budget].max_tokens)
+budget exceeded: 54 of 54 provider steps used in this turn ([agent.budget].max_steps)
+```
+
+The session stays usable. The next prompt starts with a new budget, and you can
+ask the model to continue.
+
+In this release every turn has its own budget. A sub-agent turn and a workflow
+step turn each start with the full limits from your configuration; their usage is
+not added to the turn that started them, and theirs is not subtracted from it. A
+manual `/compact` also starts with a new budget.
+
+### Logs and metrics
+
+Each stopped turn writes one `turn_budget_exceeded` record to the diagnostic file
+(see [Logs, metrics, and request correlation](servers-and-connectors.md#logs-metrics-and-request-correlation))
+with `session_id`, `task_id` (present only for a sub-agent or workflow step
+turn), `limit` (`tokens` or `steps`), `limit_value` and `used`. It contains no
+message or tool content. Find it with
+`rg turn_budget_exceeded ~/.otto/logs/diagnostic-*.jsonl*`.
+
+`otto serve` counts these stops in `otto_turn_stops_total{reason}` with
+`reason="budget_tokens"` or `reason="budget_steps"`, next to the no-progress
+reasons. The metric exists only in `otto serve`; the terminal UI, `otto --prompt`
+and the schedule worker write the log record only.
+
+### Raising or disabling a limit
+
+Set the key in `config.toml` and restart long-lived processes:
+
+```toml
+[agent.budget]
+max_tokens = 8000000   # raise
+max_steps = 0          # no step limit
+```
+
+Raise a limit for work that legitimately needs many model calls, such as a large
+refactoring. Disable both only for turns that are bounded another way, for
+example by `unattended_turn_timeout` and by your own review of the output.
 
 ## Removed keys
 

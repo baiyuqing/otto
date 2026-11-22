@@ -16,6 +16,13 @@ async fn attached_wire_frames_upsert_structured_approval_and_keep_literal_shell_
         "decision":null, "application":"not_started", "application_error":""
     }))
     .unwrap();
+    // Inspect only the terminal protocol, never user-controlled request details.
+    let mut reports = Vec::new();
+    ui.app.program_status.flush(&mut reports);
+    reports.clear();
+    ui.app.start_turn();
+    ui.app.program_status.flush(&mut reports);
+    reports.clear();
     for state in [
         otto_core::approval::State::Pending,
         otto_core::approval::State::Approved,
@@ -29,6 +36,14 @@ async fn attached_wire_frames_upsert_structured_approval_and_keep_literal_shell_
         })
         .unwrap();
         ui.on_frame(Ok(Some(serde_json::from_str(&wire).unwrap())));
+        ui.app.program_status.flush(&mut reports);
+        let expected = if state == otto_core::approval::State::Pending {
+            b"\x1b]7501;state=blocked:kind=permission:app=otto\x1b\\".as_slice()
+        } else {
+            b"\x1b]7501;state=working:app=otto\x1b\\".as_slice()
+        };
+        assert_eq!(reports, expected);
+        reports.clear();
     }
     assert_eq!(ui.app.entries.len(), 1);
     assert_eq!(ui.transcript, 2);

@@ -67,20 +67,21 @@ impl App {
             *generation = generation.wrapping_add(1);
         }
     }
-    pub(crate) fn enable_program_status(&mut self) {
-        let reporter = otto_platform::program_status::Reporter::default();
-        reporter.report_stdout(otto_platform::program_status::State::Idle);
-        self.program_status = Some(reporter);
+    pub(crate) fn enable_program_status<B: ratatui::backend::Backend>(&mut self) {
+        // TestBackend and other headless backends never emit terminal control bytes.
+        if std::any::type_name::<B>()
+            == std::any::type_name::<ratatui::backend::CrosstermBackend<std::io::Stdout>>()
+        {
+            self.program_status.enable();
+        }
     }
     pub fn start_turn(&mut self) {
         self.invalidate_local_status();
         self.report_program_status(otto_platform::program_status::State::Working);
         self.start_operation("waiting for model");
     }
-    pub(crate) fn report_program_status(&self, state: otto_platform::program_status::State) {
-        if let Some(reporter) = &self.program_status {
-            reporter.report_stdout(state);
-        }
+    pub(crate) fn report_program_status(&mut self, state: otto_platform::program_status::State) {
+        self.program_status.set(state);
     }
     pub(crate) fn start_operation(&mut self, phase: &str) {
         let now = Instant::now();
@@ -96,7 +97,7 @@ impl App {
     }
     pub(crate) fn finish_turn(&mut self, completion: otto_platform::program_status::Completion) {
         self.end_turn();
-        self.report_program_status(completion.into());
+        self.program_status.finish(completion);
     }
 
     /// A turn end is the last moment tracked guidance can be resolved. Guidance
@@ -158,6 +159,10 @@ impl App {
             }
         }
         let same_session = old == (info.workspace.clone(), info.session_id.clone());
+        if !same_session {
+            self.program_status
+                .set(otto_platform::program_status::State::Idle);
+        }
         if same_session
             && self.scroll.is_some()
             && entries

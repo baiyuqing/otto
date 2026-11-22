@@ -21,8 +21,8 @@ impl<'a> Ui<'a> {
         self.compacting = None;
         self.rows.clear();
         self.last_row = None;
-        self.app
-            .finish_turn(otto_platform::program_status::Completion::Canceled);
+        self.app.end_turn();
+        self.app.program_status.abandon();
         self.app.connected = false;
         self.app.push_system(DISCONNECTED);
         self.transcript = self.transcript.wrapping_add(1);

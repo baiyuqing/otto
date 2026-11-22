@@ -9,6 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- Local and attached TUIs report fixed, privacy-preserving program status using
+  OSC 7501, enabling Rex to display work, permission waits and turn outcomes.
+  Enabled by default for interactive terminals, without a Rex dependency or
+  new approval channel; restart the rebuilt terminal client after upgrading.
+
 - Built-in context limits recognize OpenAI `gpt-6.2-sol` and `gpt-6.2-astra`
   (1,050,000 context, 922,000 hard input, 128,000 output tokens), retaining
   the conservative 272,000-token working window. The provider guide shows

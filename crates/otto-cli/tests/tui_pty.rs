@@ -197,6 +197,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     wait_for_raw_bytes(&shared, b"\x1b[?1000h");
     wait_for_raw_bytes(&shared, b"\x1b[?1002h");
     wait_for_raw_bytes(&shared, b"\x1b[?2004h");
+    wait_for_raw_bytes(&shared, b"\x1b]7501;state=idle:app=otto\x1b\\");
     assert!(
         !raw_contains(&shared, b"\x1b[?1003h"),
         "any-motion reporting would wake the event loop on every pointer move"
@@ -209,6 +210,8 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         .expect("type the prompt");
     eprintln!("[tui_pty] waiting for reply {REPLY:?}");
     wait_for_screen_text(&shared, REPLY);
+    wait_for_raw_bytes(&shared, b"\x1b]7501;state=working:app=otto\x1b\\");
+    wait_for_raw_bytes(&shared, b"\x1b]7501;state=done:app=otto\x1b\\");
     eprintln!("[tui_pty] saw reply; waiting for the turn to finish (busy title to clear)");
     // The reply text lands on screen mid-turn (the streaming sink redraws on
     // every event), while the composer still shows a busy title. Enter
@@ -307,6 +310,18 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     // mouse reporting enabled at startup.
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
     wait_for_raw_bytes(&shared, b"\x1b[?1002l");
+    {
+        let raw = shared.raw.lock().unwrap();
+        let prefix = b"\x1b]7501;";
+        let start = raw
+            .windows(prefix.len())
+            .rposition(|bytes| bytes == prefix)
+            .expect("program status record");
+        assert!(
+            raw[start..].starts_with(b"\x1b]7501;state=done:app=otto\x1b\\"),
+            "completion must survive terminal restoration"
+        );
+    }
     wait_for_raw_bytes(&shared, b"\x1b[?1000l");
     wait_for_raw_bytes(&shared, b"\x1b[?2004l");
     eprintln!("[tui_pty] saw alt-screen exit sequence");

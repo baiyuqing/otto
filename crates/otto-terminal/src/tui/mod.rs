@@ -25,6 +25,7 @@ mod interaction;
 mod job_control;
 mod layout;
 mod markdown;
+mod program_status;
 mod render;
 #[cfg(test)]
 mod scroll_tests;
@@ -130,6 +131,7 @@ fn apply_selection<B: Backend>(
     let copying = phase == DragPhase::End && app.selection.is_some();
 
     let mut text = None;
+    app.program_status.flush_stdout();
     terminal
         .draw(|frame| {
             render::draw(frame, app);
@@ -161,6 +163,7 @@ enum IdleEvent {
 
 /// Draws only the current UI snapshot. Backend reads run independently.
 fn redraw<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), ReplError> {
+    app.program_status.flush_stdout();
     terminal
         .draw(|frame| render::draw(frame, app))
         .map(|_| ())
@@ -177,7 +180,7 @@ async fn run_app<B: Backend>(
     let backend = app::Backend::Local(controller);
     let mut app = App::new(&backend);
     app.observer.bindings = bindings;
-    app.enable_program_status();
+    app.enable_program_status::<B>();
     app.driver = Some(backend::Driver::new(backend::Connection::Local(
         Arc::clone(controller),
     )));
@@ -438,7 +441,11 @@ fn apply_input<B: Backend>(
     match event {
         #[cfg(unix)]
         TuiEvent::Suspend(_reader_parked) => {
-            job_control::suspend(terminal)?;
+            app.program_status.suspend();
+            let result = job_control::suspend(terminal);
+            app.program_status.resume();
+            app.program_status.flush_stdout();
+            result?;
             Ok(None)
         }
         TuiEvent::Key(key) => {

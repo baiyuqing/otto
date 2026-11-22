@@ -279,14 +279,26 @@ struct ScriptedProvider {
     /// turn, `Context` for a wake turn's delivered notification.
     roles: Mutex<Vec<Role>>,
     calls: tokio::sync::watch::Sender<usize>,
+    /// The input tokens every response reports; 0 reports no usage.
+    usage_tokens: i64,
 }
 
 impl ScriptedProvider {
     fn new(reply: impl Fn(usize) -> Result<String, String> + Send + Sync + 'static) -> Arc<Self> {
+        Self::with_usage(reply, 0)
+    }
+
+    /// Like [`Self::new`], with every response reporting `usage_tokens` input
+    /// tokens.
+    fn with_usage(
+        reply: impl Fn(usize) -> Result<String, String> + Send + Sync + 'static,
+        usage_tokens: i64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             reply: Box::new(reply),
             roles: Mutex::new(Vec::new()),
             calls: tokio::sync::watch::channel(0).0,
+            usage_tokens,
         })
     }
 
@@ -344,6 +356,10 @@ impl Provider for ScriptedProvider {
                 message: Message {
                     role: Role::Assistant,
                     finish_reason: Some(FinishReason::Stop),
+                    usage: (self.usage_tokens > 0).then(|| otto_core::model::Usage {
+                        input_tokens: self.usage_tokens,
+                        ..otto_core::model::Usage::default()
+                    }),
                     blocks: vec![Block {
                         block_type: BlockType::Text,
                         text,

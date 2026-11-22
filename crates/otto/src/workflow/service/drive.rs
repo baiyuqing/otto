@@ -51,6 +51,7 @@ impl Controller {
                 continue;
             }
 
+            let budget = self.run_budget(run_id);
             let mut attempts = JoinSet::new();
             for step in agents {
                 let permit = Arc::clone(&self.semaphore)
@@ -94,6 +95,7 @@ impl Controller {
                     session_id,
                     transcript_root: attempt_root.to_string_lossy().into_owned(),
                     transcript_path,
+                    budget: budget.clone(),
                 };
                 let executor = Arc::clone(&self.executor);
                 let parent_cancel = cancel.clone();

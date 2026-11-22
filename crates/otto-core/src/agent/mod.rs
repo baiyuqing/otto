@@ -85,7 +85,7 @@ use crate::session::turn::{
 use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 
 use crate::mailbox::{InMemoryMailbox, Mailbox};
-use budget::{BudgetPolicy, TurnBudget};
+use budget::{BudgetPolicy, BudgetScope, TurnBudget};
 use memory::{DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_TOKEN_BUDGET, MemoryRecall};
 use overflow::{
     AUTOMATIC_COMPACTION_ATTEMPT_USED_MESSAGE, AUTOMATIC_COMPACTION_HARD_FAILURE_MESSAGE,
@@ -131,8 +131,9 @@ pub struct Options {
     /// The limits that stop a turn making no progress. Every turn uses one,
     /// including each sub-agent's.
     pub progress: ProgressPolicy,
-    /// The token and step limits of one turn. Every turn has its own budget
-    /// under this policy, including each sub-agent's.
+    /// The limits of a run that asks for [`BudgetScope::Fresh`] through the
+    /// `run*` methods without a scope and of a manual compaction. A run with
+    /// [`BudgetScope::Shared`] uses the policy of its root.
     pub budget: BudgetPolicy,
     /// The long-term memory binding consulted once per turn, if any.
     pub memory: Option<Arc<dyn MemoryRecall + Send + Sync>>,
@@ -205,8 +206,8 @@ pub struct Agent<P, T, S> {
     /// run, used or not. See [`Agent::set_next_input_id`].
     next_input_id: std::sync::Mutex<Option<String>>,
     next_input_provenance: std::sync::Mutex<Option<crate::model::InputProvenance>>,
-    /// The budget of the turn in progress; see [`budget`]. Replaced when a
-    /// turn or a manual compaction starts.
+    /// The budget of the run in progress; see [`budget`]. Replaced from the
+    /// run's [`BudgetScope`] when a run or a manual compaction starts.
     budget: std::sync::Mutex<TurnBudget>,
 }
 
@@ -256,6 +257,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         {
             redactor = Redactor::with_completeness(&[], false);
         }
+        let initial_budget = BudgetScope::Fresh(options.budget).into_turn();
         if !redactor.allows_dynamic_content() {
             options.provider_name = String::new();
             options.model = String::new();
@@ -271,7 +273,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             hook_turn_messages: std::sync::Mutex::new(None),
             next_input_id: std::sync::Mutex::new(None),
             next_input_provenance: std::sync::Mutex::new(None),
-            budget: std::sync::Mutex::new(TurnBudget::default()),
+            budget: std::sync::Mutex::new(initial_budget),
             last_memory_context: std::sync::Mutex::default(),
         }
     }

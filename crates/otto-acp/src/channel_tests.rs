@@ -168,6 +168,47 @@ async fn idle_wake_checks_do_not_signal_slot_release() {
 }
 
 #[tokio::test]
+async fn a_wake_withheld_by_the_token_budget_does_not_signal_slot_release() {
+    // A claim that ends without a turn releases the slot, and the release wakes
+    // the wake loop, which asks again: a busy loop. With the tokens used up the
+    // check must come before the claim.
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller = otto::fixtures::controller(workspace.path(), sessions.path()).await;
+    let session = Session {
+        controller: Arc::new(controller),
+        prompt: Arc::new(PromptSlot::default()),
+    };
+    let tasks = session.controller.subagent_tasks().expect("task registry");
+    session
+        .controller
+        .current_runner()
+        .expect("runner")
+        .exhaust_root_budget();
+    tasks
+        .notifications()
+        .push(otto_core::agent::inbox::Notification {
+            text: "[task] finished".into(),
+            ..Default::default()
+        });
+    let released = session.prompt.released.subscribe();
+    let stop = CancellationToken::new();
+
+    for _ in 0..3 {
+        assert!(!wake_turn(&session, &stop).await, "no turn, so no failure");
+        assert!(
+            !released.has_changed().unwrap(),
+            "a withheld wake must not release the slot"
+        );
+    }
+    assert_eq!(tasks.notifications().len(), 1, "the notification waits");
+    assert!(
+        session.prompt.begin(&stop).is_some(),
+        "the slot stayed free for a prompt"
+    );
+}
+
+#[tokio::test]
 async fn a_prompt_is_admitted_when_the_wake_turn_ends_between_begin_and_wait() {
     let slot = PromptSlot::default();
     let parent = CancellationToken::new();

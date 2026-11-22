@@ -8,7 +8,7 @@ impl Runner {
     /// name, an invalid context, or `inherit` with no parent session is
     /// rejected before any task is created.
     pub async fn start(self: &Arc<Self>, request: StartRequest) -> Result<Task, StartError> {
-        self.start_resolved_with_deadline(request, None, None, None)
+        self.start_resolved_with_deadline(request, None, None, None, self.session_root())
             .await
     }
 
@@ -18,6 +18,7 @@ impl Runner {
         transcript: Option<Transcript>,
         inline_definition: Option<Definition>,
         parent_deadline: Option<Deadline>,
+        budget: otto_core::agent::budget::RootBudget,
     ) -> Result<Task, StartError> {
         let now = self.now();
         let description = truncate_with_ellipsis(request.description.trim(), MAX_DESCRIPTION_CHARS);
@@ -129,6 +130,7 @@ impl Runner {
             transcript.map(|transcript| (transcript, String::new())),
             None,
             self.task_deadline(parent_deadline),
+            budget,
         )
         .await
     }
@@ -236,6 +238,7 @@ impl Runner {
             Some((transcript, record.path.to_string_lossy().into_owned())),
             Some((record.task_id.clone(), record.attempt_id.clone())),
             self.task_deadline(None),
+            self.session_root(),
         )
         .await
     }
@@ -243,13 +246,15 @@ impl Runner {
     /// Runs using a definition snapshot captured when a durable workflow was
     /// created, so editing `AGENT.md` cannot change a resumed run, while
     /// inheriting the caller's absolute deadline. The child's local task
-    /// timeout may only shorten that budget.
+    /// timeout may only shorten that budget. The child shares the tokens of
+    /// `budget`, the root of the workflow run.
     pub(crate) async fn run_with_definition_control(
         self: &Arc<Self>,
         request: StartRequest,
         transcript: Transcript,
         definition: Definition,
         control: &Control,
+        budget: otto_core::agent::budget::RootBudget,
     ) -> Result<Task, String> {
         self.run_resolved(
             request,
@@ -257,6 +262,7 @@ impl Runner {
             Some(definition),
             control.cancellation_token(),
             Some(control.deadline()),
+            budget,
         )
         .await
     }
@@ -268,9 +274,16 @@ impl Runner {
         definition: Option<Definition>,
         cancel: &CancellationToken,
         parent_deadline: Option<Deadline>,
+        budget: otto_core::agent::budget::RootBudget,
     ) -> Result<Task, String> {
         let task = self
-            .start_resolved_with_deadline(request, Some(transcript), definition, parent_deadline)
+            .start_resolved_with_deadline(
+                request,
+                Some(transcript),
+                definition,
+                parent_deadline,
+                budget,
+            )
             .await
             .map_err(|error| error.to_string())?;
         let id = task.id.clone();

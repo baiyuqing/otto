@@ -75,6 +75,7 @@ needs = ["first"]
         2,
         DeadlinePolicy::default(),
         Arc::new(Logger::new(Box::new(CapturedLog(Arc::clone(&bytes))))),
+        Default::default(),
     );
     let run = controller
         .start("flow", "secret input")

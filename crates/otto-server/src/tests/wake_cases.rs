@@ -262,6 +262,68 @@ async fn a_notification_landing_as_a_user_turn_ends_starts_one_wake_turn() {
     assert_eq!(harness.provider.roles(), vec![Role::User, Role::Context]);
 }
 
+/// More than the default `max_tokens` of 4,200,000, so the first turn's one
+/// response uses the root's tokens up.
+const OVER_THE_DEFAULT_TOKEN_LIMIT: i64 = 5_000_000;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_withheld_by_the_token_budget_waits_for_the_next_user_turn() {
+    let tasks = Arc::new(otto::subagent::tasks::Tasks::new());
+    let pusher = Arc::clone(&tasks);
+    let harness = Harness::with(HarnessOptions {
+        script: Script {
+            deltas: vec!["ok".to_string()],
+            usage: Some(Usage {
+                input_tokens: OVER_THE_DEFAULT_TOKEN_LIMIT,
+                ..Usage::default()
+            }),
+            // Lands during the turn's only provider call, so it is pending
+            // when the turn ends and the wake loop checks.
+            on_call: Some(Box::new(move |call| {
+                if call == 1 {
+                    pusher.notifications().push(notification());
+                }
+            })),
+            ..Script::default()
+        },
+        tasks: Some(Arc::clone(&tasks)),
+        ..HarnessOptions::default()
+    });
+    let id = harness.create().await;
+    let path = format!("/v1/sessions/{id}/turns");
+
+    let reply = harness
+        .send("POST", &path, Some(r#"{"text":"hi","stream":false}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    // The end-of-turn check refused the wake; it stays refused and quiet.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(harness.provider.roles(), vec![Role::User], "no wake turn");
+    assert_eq!(tasks.notifications().len(), 1, "the notification waits");
+    let status = tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.send("GET", &format!("/v1/sessions/{id}"), None),
+    )
+    .await
+    .expect("the server stays responsive");
+    assert_eq!(status.status, StatusCode::OK, "{}", status.body);
+
+    // The next user input starts a new root and delivers the notification.
+    let reply = harness
+        .send("POST", &path, Some(r#"{"text":"again","stream":false}"#))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(tasks.notifications().is_empty(), "delivered with the input");
+    let history = harness.server.lookup(&id).expect("session").ctrl.history();
+    assert!(
+        history
+            .iter()
+            .any(|message| message.role == Role::Context && message.text().contains("done")),
+        "the notification is in the transcript"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn closing_the_server_ends_the_wake_loop() {
     let (harness, _tasks) = wake_harness(Script::default());

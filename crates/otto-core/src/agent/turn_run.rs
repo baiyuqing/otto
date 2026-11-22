@@ -81,6 +81,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .await
     }
 
+    /// Runs one turn under a fresh budget of [`Options::budget`] for this run
+    /// alone. A caller that has a controller turn uses
+    /// [`Self::run_with_budget`].
     pub async fn run_with_image_system_context_control(
         &self,
         user_text: &str,
@@ -89,7 +92,31 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<(), AgentError> {
+        self.run_with_budget(
+            BudgetScope::Fresh(self.options.budget),
+            user_text,
+            image,
+            system_context,
+            emit,
+            control,
+        )
+        .await
+    }
+
+    /// Runs one turn under the budget `scope` names: a shared turn budget
+    /// continues its token total and step count, so a controller turn that
+    /// issues several runs (an approval continuation) is bounded as one.
+    pub async fn run_with_budget(
+        &self,
+        scope: BudgetScope,
+        user_text: &str,
+        image: Option<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
         self.run_with_image_system_context_control_kind(
+            scope,
             user_text,
             image,
             system_context,
@@ -101,7 +128,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     }
 
     /// Runs one agent-originated follow-up, recording its request as context
-    /// rather than as a user message.
+    /// rather than as a user message, under a fresh budget of
+    /// [`Options::budget`] for this run alone.
     pub async fn run_followup_with_system_context_control(
         &self,
         text: &str,
@@ -109,7 +137,28 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<(), AgentError> {
+        self.run_followup_with_budget(
+            BudgetScope::Fresh(self.options.budget),
+            text,
+            system_context,
+            emit,
+            control,
+        )
+        .await
+    }
+
+    /// Runs one agent-originated follow-up, recording its request as context
+    /// rather than as a user message, under the budget `scope` names.
+    pub async fn run_followup_with_budget(
+        &self,
+        scope: BudgetScope,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
         self.run_with_image_system_context_control_kind(
+            scope,
             text,
             None,
             system_context,
@@ -120,8 +169,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_with_image_system_context_control_kind(
         &self,
+        scope: BudgetScope,
         user_text: &str,
         image: Option<Block>,
         system_context: &str,
@@ -129,6 +180,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
         followup: bool,
     ) -> Result<(), AgentError> {
+        self.begin_budget(scope);
         if self.redactor.allows_dynamic_content() {
             self.preflight_ordinary_turn(user_text, image.as_ref(), system_context, followup)?;
         }
@@ -404,7 +456,6 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // Calls a session takeover left without a result come first: nothing
         // may be appended between an assistant message and its tool results.
         let system_context = self.redactor.redact_string(system_context);
-        self.reset_budget();
         let mut state = RunDispatchState {
             progress: ProgressGuard::new(self.options.progress),
             ..RunDispatchState::default()

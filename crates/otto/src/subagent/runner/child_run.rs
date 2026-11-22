@@ -22,6 +22,7 @@ impl Runner {
         transcript: Option<(Transcript, String)>,
         resume_id: Option<(String, String)>,
         deadline: Deadline,
+        budget: otto_core::agent::budget::RootBudget,
     ) -> Result<Task, StartError> {
         let fresh_session_id = match transcript
             .as_ref()
@@ -440,6 +441,7 @@ impl Runner {
                     cancel,
                     task_id,
                     prompt,
+                    budget,
                     child,
                     transcript,
                     snapshot,
@@ -467,6 +469,7 @@ impl Runner {
             cancel,
             task_id,
             prompt,
+            budget,
             child,
             transcript,
             snapshot,
@@ -525,8 +528,20 @@ impl Runner {
                 progress.handle(event);
             };
             let sink: EventSink<'_> = &mut handle;
+            // One step count for the whole child task, including the runs that
+            // deliver parent messages; the tokens belong to the root.
+            let turn = budget.new_turn();
             let run = async {
-                let mut outcome = child.run_with_control(&prompt, &mut *sink, &control).await;
+                let mut outcome = child
+                    .run_with_budget(
+                        BudgetScope::Shared(turn.clone()),
+                        &prompt,
+                        None,
+                        "",
+                        &mut *sink,
+                        &control,
+                    )
+                    .await;
                 // A parent message queued while the last provider call was in
                 // flight is not delivered by that turn; an empty-text run
                 // delivers whatever is still queued.
@@ -535,7 +550,16 @@ impl Runner {
                     && control.stop_reason().is_none()
                     && !cancel.is_cancelled()
                 {
-                    outcome = child.run_with_control("", &mut *sink, &control).await;
+                    outcome = child
+                        .run_with_budget(
+                            BudgetScope::Shared(turn.clone()),
+                            "",
+                            None,
+                            "",
+                            &mut *sink,
+                            &control,
+                        )
+                        .await;
                 }
                 outcome
             };

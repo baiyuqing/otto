@@ -31,7 +31,13 @@ async fn strict_schemas_bounds_trusted_identity_and_no_session_guidance() {
         crate::fixtures::shared_workspace(),
         dir.path(),
     );
-    let parent = Parent::new(Ok(owner.clone()), "source".into(), false);
+    let parent = Parent::new(
+        Ok(owner.clone()),
+        "source".into(),
+        false,
+        Default::default(),
+        Default::default(),
+    );
     let tools = parent.tools();
     assert_eq!(tools.len(), 4);
     for tool in &tools {
@@ -109,6 +115,8 @@ async fn strict_schemas_bounds_trusted_identity_and_no_session_guidance() {
         )),
         "source".into(),
         false,
+        Default::default(),
+        Default::default(),
     );
     let missing_tools = missing.tools();
     let arguments = RawValue::from_string(r#"{"name":"removed","input":"scope"}"#.into()).unwrap();
@@ -155,6 +163,7 @@ async fn non_parent_service_guard_cannot_be_bypassed_by_direct_controller_call()
         "scope",
         "forged",
         "op",
+        otto_core::agent::budget::RootBudget::new("root", Default::default()),
     ))
     .await;
     assert!(result.is_err());
@@ -202,7 +211,13 @@ async fn fake_provider_conversation_discovers_inspects_starts_and_preserves_huma
             ),
         ],
     );
-    let parent = Parent::new(Ok(owner.clone()), source.header().id.clone(), true);
+    let parent = Parent::new(
+        Ok(owner.clone()),
+        source.header().id.clone(),
+        true,
+        Default::default(),
+        Default::default(),
+    );
     let runner = crate::runtime::builder::Runner::scripted_with_tools(
         source.clone(),
         provider.clone(),
@@ -241,7 +256,13 @@ async fn fake_provider_conversation_discovers_inspects_starts_and_preserves_huma
 }
 #[test]
 fn policy_is_conditional_and_contains_six_schema_correct_examples() {
-    let parent = Parent::new(Err("not needed".into()), "source".into(), false);
+    let parent = Parent::new(
+        Err("not needed".into()),
+        "source".into(),
+        false,
+        Default::default(),
+        Default::default(),
+    );
     let definitions = parent
         .tools()
         .iter()

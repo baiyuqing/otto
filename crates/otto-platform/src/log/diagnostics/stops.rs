@@ -1,5 +1,6 @@
-//! The records a stopped turn writes: `turn_stalled` and
-//! `turn_budget_exceeded`. Both hold identifiers, names and counts only.
+//! The records a stopped turn writes: `turn_stalled`, `turn_budget_exceeded`
+//! and `turn_budget_wake_skipped`. They hold identifiers, names and counts
+//! only.
 
 use otto_core::diagnostics::TurnStop;
 use serde_json::{Value, json};
@@ -13,14 +14,28 @@ impl Scope {
         self.turn_stop("turn_stalled", fields, TurnStop::NoProgress(stall.kind));
     }
 
-    pub(super) fn record_budget_exceeded(&self, exceeded: &otto_core::agent::budget::Exceeded) {
+    pub(super) fn record_budget_exceeded(
+        &self,
+        exceeded: &otto_core::agent::budget::Exceeded,
+        budget_id: &str,
+    ) {
         let fields = json!({"limit":exceeded.kind.as_str(),
-            "limit_value":exceeded.limit.get(), "used":exceeded.used});
+            "limit_value":exceeded.limit.get(), "used":exceeded.used,
+            "budget_id":safe(budget_id, &self.redactor)});
         self.turn_stop(
             "turn_budget_exceeded",
             fields,
             TurnStop::Budget(exceeded.kind),
         );
+    }
+
+    /// A wake turn was not started because the root budget has no tokens
+    /// left. No process-wide listener is called: no turn ran.
+    pub(super) fn record_budget_wake_skipped(&self, budget_id: &str, pending: usize) {
+        self.log.write(json!({"schema_version":1,
+            "event":"turn_budget_wake_skipped", "session_id":self.session,
+            "budget_id":safe(budget_id, &self.redactor),
+            "pending_notifications":pending}));
     }
 
     /// Writes one record with the session (and task) ids and calls the

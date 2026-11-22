@@ -161,6 +161,7 @@ impl Executor for GateExecutor {
     }
 }
 
+mod budget;
 mod controller;
 mod definitions;
 mod recovery;

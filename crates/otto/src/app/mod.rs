@@ -106,6 +106,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
+use otto_core::agent::budget::{BudgetScope, TurnBudget, WakeGate};
 use otto_core::agent::inbox::NotificationKind;
 use otto_core::agent::{AgentError, CompactionResult, EventSink};
 use otto_core::config::resolve::Runtime;
@@ -125,6 +126,7 @@ use otto_session::{ArchiveResult, MAX_LIST_SESSIONS};
 use crate::sandbox::control::SandboxControl;
 pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
 use otto_core::approval::ApprovalMode;
+pub use steering::WithheldWake;
 pub(crate) use tasks::TaskView;
 pub use tasks::{Task, TaskStatus};
 pub use wake::WakeOperation;

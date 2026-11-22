@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use otto_core::agent::budget::SessionBudgetCell;
 use otto_core::agent::inbox::Inbox;
 
 use super::builder::SharedSession;
@@ -44,6 +45,10 @@ pub(crate) struct SessionResources {
     reminders: Option<Arc<Reminders>>,
     /// Retention for bash output files; shared by the parent and its children.
     output_logs: Arc<Logs>,
+    /// The session's most recent root turn budget. Held here, not by a
+    /// runner, so a runner rebuilt for a model switch keeps it. In memory
+    /// only: a new process starts with no root.
+    budget: Arc<SessionBudgetCell>,
     /// Connected once, by the first runner build that connects MCP.
     mcp: tokio::sync::OnceCell<SessionMcp>,
     /// The workflow lifecycle delivery worker of the latest runner build.
@@ -66,6 +71,10 @@ impl SessionResources {
 
     pub(crate) fn output_logs(&self) -> &Arc<Logs> {
         &self.output_logs
+    }
+
+    pub(crate) fn budget(&self) -> &Arc<SessionBudgetCell> {
+        &self.budget
     }
 
     pub(crate) fn mcp(&self) -> Option<&SessionMcp> {
@@ -162,6 +171,7 @@ impl SessionResources {
             tasks,
             reminders,
             output_logs: Arc::new(Logs::for_session(session_id)),
+            budget: Arc::default(),
             mcp: tokio::sync::OnceCell::new(),
             workflow_binding: Mutex::new(None),
             closed: AtomicBool::new(false),

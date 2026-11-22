@@ -35,3 +35,11 @@ pub use definition::{Catalog, Definition};
 pub(crate) use inherit::inherit_snapshot;
 pub(crate) use prompt::prompt_section;
 pub use tasks::{Task, TaskStatus, Tasks};
+
+/// A new identifier for a root budget, empty when randomness is unavailable.
+/// It only correlates the log records of one root.
+pub(crate) fn new_budget_id() -> String {
+    otto_platform::random::random_id()
+        .map(|random| format!("bud_{random}"))
+        .unwrap_or_default()
+}

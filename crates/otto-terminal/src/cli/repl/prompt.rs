@@ -89,7 +89,20 @@ impl<'a> Repl<'a> {
                 }
             }
             if !self.wake(cancel).await? {
-                return Ok(());
+                // A wake that was not claimed is either nothing pending or
+                // notifications the used-up token budget withholds. A one-shot
+                // run has no next input to deliver them with, so it ends with
+                // an error instead of exiting as if everything was delivered.
+                return match self.controller.withheld_wake() {
+                    None => Ok(()),
+                    Some(withheld) => {
+                        let _ = writeln!(self.stderr, "{withheld}");
+                        Err(Error::Turn {
+                            fatal: false,
+                            message: withheld.to_string(),
+                        })
+                    }
+                };
             }
         }
     }

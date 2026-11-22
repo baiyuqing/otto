@@ -35,6 +35,7 @@ struct CapturingDiagnostics {
     models: Arc<Mutex<Vec<String>>>,
     stalls: Arc<Mutex<Vec<String>>>,
     budget_stops: Arc<Mutex<Vec<String>>>,
+    budget_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
@@ -50,13 +51,17 @@ impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
         Arc::new(crate::diagnostics::Noop)
     }
 
-    fn turn_budget_exceeded(&self, exceeded: &crate::agent::budget::Exceeded) {
+    fn turn_budget_exceeded(&self, exceeded: &crate::agent::budget::Exceeded, budget_id: &str) {
         self.budget_stops.lock().expect("diagnostics").push(format!(
             "{} {} {}",
             exceeded.kind.as_str(),
             exceeded.limit,
             exceeded.used
         ));
+        self.budget_ids
+            .lock()
+            .expect("diagnostics")
+            .push(budget_id.to_owned());
     }
 
     fn turn_stalled(&self, stall: &crate::agent::progress::Stall) {

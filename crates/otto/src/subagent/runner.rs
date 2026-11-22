@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use otto_core::agent::budget::BudgetScope;
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
 use otto_core::agent::progress::ProgressPolicy;
 use otto_core::agent::redactor::Redactor;
@@ -143,8 +144,8 @@ pub struct OptionsTemplate {
     /// The parent's progress limits. A child inherits them, so a stuck child
     /// stops on the same rule as the parent's own loop.
     pub progress: ProgressPolicy,
-    /// The parent's budget policy. Each child turn starts its own budget under
-    /// it; nothing is shared with the parent's turn.
+    /// The parent's budget policy. A child shares the token budget of the root
+    /// turn that started it and counts its own steps under this policy.
     pub budget: otto_core::agent::budget::BudgetPolicy,
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
     pub provider_timeout: Option<Duration>,
@@ -251,6 +252,9 @@ pub struct Config {
     /// `agent_send` messages it has not read survive a restart and reach it
     /// when it is resumed. `None` keeps child mailboxes in memory.
     pub child_mailbox: Option<ChildMailbox>,
+    /// The session's root budget. A child captures the root current when it
+    /// starts and every turn of that child charges its tokens.
+    pub budget: Arc<otto_core::agent::budget::SessionBudgetCell>,
 }
 
 /// One delegation request.
@@ -294,6 +298,8 @@ struct ChildRun {
     cancel: CancellationToken,
     task_id: String,
     prompt: String,
+    /// The tokens this child shares with the root turn that started it.
+    budget: otto_core::agent::budget::RootBudget,
     child: Agent<SharedProvider, ChildTools, SharedTranscript>,
     transcript: Transcript,
     snapshot: Vec<Message>,
@@ -465,6 +471,13 @@ impl Runner {
     /// The report-text cap in force.
     pub fn max_output_bytes(&self) -> usize {
         self.config.max_output_bytes
+    }
+
+    /// The root budget a child started now shares: the session's current root.
+    fn session_root(&self) -> otto_core::agent::budget::RootBudget {
+        self.config
+            .budget
+            .current_root(super::new_budget_id, self.config.template.budget)
     }
 
     pub(crate) fn activity(&self, task: &Task) -> &'static str {

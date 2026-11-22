@@ -406,6 +406,8 @@ impl Builder {
                     controller,
                     session.header().id.clone(),
                     !self.no_session,
+                    Arc::clone(resources.budget()),
+                    runtime.budget,
                 );
                 tools.extend(parent.tools());
             }
@@ -685,6 +687,8 @@ impl Builder {
             memory_proposals,
             schedule_origin,
             presentation_origin,
+            budget: Arc::clone(resources.budget()),
+            budget_policy: runtime.budget,
         };
         if include_parent_tools && extensions.has_hooks() && runner.allows_dynamic_content() {
             if hook_state.claim_start() {

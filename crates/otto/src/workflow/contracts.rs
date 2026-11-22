@@ -249,6 +249,9 @@ pub struct Attempt {
     pub session_id: String,
     pub transcript_root: String,
     pub transcript_path: String,
+    /// The tokens this attempt shares with every other attempt of the run and
+    /// with the root turn that started the run. In memory only.
+    pub budget: otto_core::agent::budget::RootBudget,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

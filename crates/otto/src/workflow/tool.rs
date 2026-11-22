@@ -39,17 +39,25 @@ pub(crate) struct Parent {
     controller: Result<Arc<Controller>, String>,
     session: String,
     durable: bool,
+    /// The session's root budget cell. A started run captures the root current
+    /// at the `workflow_start` call and every step attempt charges it.
+    budget: Arc<otto_core::agent::budget::SessionBudgetCell>,
+    policy: otto_core::agent::budget::BudgetPolicy,
 }
 impl Parent {
     pub fn new(
         controller: Result<Arc<Controller>, String>,
         session: String,
         durable: bool,
+        budget: Arc<otto_core::agent::budget::SessionBudgetCell>,
+        policy: otto_core::agent::budget::BudgetPolicy,
     ) -> Arc<Self> {
         Arc::new(Self {
             controller,
             session,
             durable,
+            budget,
+            policy,
         })
     }
     pub fn tools(self: &Arc<Self>) -> Vec<Box<dyn Tool + Send + Sync>> {
@@ -292,6 +300,9 @@ impl WorkflowTool {
                         &args.input,
                         &self.parent.session,
                         call.operation_id.as_str(),
+                        self.parent
+                            .budget
+                            .current_root(crate::subagent::new_budget_id, self.parent.policy),
                     )
                     .await
                     .map_err(|e| e.to_string())?;

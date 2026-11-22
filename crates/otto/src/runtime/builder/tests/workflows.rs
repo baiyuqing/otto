@@ -110,7 +110,13 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
     tokio::time::timeout(Duration::from_secs(2), old_binding.join())
         .await
         .unwrap();
-    let parent = crate::workflow::tool::Parent::new(Ok(owner.clone()), source_id.clone(), true);
+    let parent = crate::workflow::tool::Parent::new(
+        Ok(owner.clone()),
+        source_id.clone(),
+        true,
+        Default::default(),
+        Default::default(),
+    );
     let runner = Runner::scripted_with_tools(source.clone(), provider, tasks, parent.tools());
     runner
         .run("Review scope", &mut |_| {}, &CancellationToken::new())
@@ -240,7 +246,13 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
     source.close().unwrap();
     let old_len = inbox.len();
     let outstanding = owner
-        .start_parent("documentation-review", "later", &source_id, "later")
+        .start_parent(
+            "documentation-review",
+            "later",
+            &source_id,
+            "later",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     owner.wait(&outstanding.id).await.unwrap();

@@ -73,6 +73,7 @@ impl Executor for AgentExecutor {
                 transcript,
                 definition,
                 control,
+                attempt.budget,
             )
             .await;
         let close = store.close().map_err(|error| error.to_string());
@@ -196,6 +197,7 @@ async fn compose_controller(
             cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
         },
         Arc::clone(&builder.logger),
+        runtime.budget,
     );
     controller.attach_approvals(&builder.approvals)?;
     controller.set_guard(Box::new(lock));

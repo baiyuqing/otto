@@ -16,6 +16,7 @@ pub(super) fn custom_data(custom_type: &str, raw: &str) -> String {
             | "otto.task_result"
             | "otto.hook.arguments"
             | "otto.hook.result"
+            | "otto.hook.provider_request"
             | "otto.turn"
             | "otto.plan"
             | "otto.provider_recovery"

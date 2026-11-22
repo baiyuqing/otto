@@ -64,6 +64,7 @@ mod memory_references;
 mod memory_retraction;
 mod memory_summary;
 mod progress_recovery;
+mod provider_hooks;
 mod provider_tools;
 mod recording;
 mod redaction;

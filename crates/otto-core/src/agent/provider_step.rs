@@ -93,7 +93,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
 
         let (response, visible_output, error) = self
-            .complete_normal_provider_attempt(&request, state, emit, control)
+            .complete_normal_provider_attempt(request, state, emit, control)
             .await;
         let Some(original_overflow) = error else {
             return Ok(response);
@@ -126,7 +126,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ));
         }
         let (response, _, error) = self
-            .complete_normal_provider_attempt(&retry_request, state, emit, control)
+            .complete_normal_provider_attempt(retry_request, state, emit, control)
             .await;
         match error {
             Some(error) if is_typed_context_overflow(&error) => Err(automatic_dispatch_error(
@@ -424,11 +424,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     }
 
     /// Runs one provider call, reporting whether any text reached the user.
+    /// `before_provider_call` and `after_provider_call` run around it.
     /// That flag decides whether an overflow may be retried: a partly
     /// delivered answer must not be replaced by a second one.
     pub(super) async fn complete_normal_provider_attempt(
         &self,
-        request: &Request,
+        request: Request,
         state: &RunDispatchState,
         emit: EventSink<'_>,
         control: &dyn OperationControl,
@@ -439,10 +440,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // first text delta so the two keep their provider order.
         let mut reasoning = redactor.new_stream();
         let visible_output = std::sync::atomic::AtomicBool::new(false);
-        let guarded_request = match self.redactor.guard_provider_request(request) {
-            Ok(request) => request,
-            Err(error) => return (Response::default(), false, Some(error)),
-        };
+        // The hook payload and its audit record share this call's operation ID.
         let operation_id = match (self.options.new_operation_id)() {
             Ok(operation_id) => operation_id,
             Err(message) => {
@@ -452,6 +450,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     Some(AgentError::OperationIdentity { message }),
                 );
             }
+        };
+        // Hook changes are applied before the guard, so hook text is guarded too.
+        let hooked = match self
+            .before_provider_call(request, &operation_id, emit, control)
+            .await
+        {
+            Ok(provider_hooks::BeforeProviderCall::Proceed(hooked)) => hooked,
+            Ok(provider_hooks::BeforeProviderCall::Denied { reason }) => {
+                return (Response::default(), false, Some(AgentError::Other(reason)));
+            }
+            Err(error) => return (Response::default(), false, Some(error)),
+        };
+        let request = hooked.request();
+        let guarded_request = match self.redactor.guard_provider_request(request) {
+            Ok(request) => request,
+            Err(error) => return (Response::default(), false, Some(error)),
         };
         let mut diagnostic = crate::diagnostics::Observation::start(
             self.options.diagnostics.as_ref(),
@@ -572,28 +586,27 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 );
             }
         }
+        if outcome.result.is_ok() {
+            let held = reasoning.flush();
+            if !held.is_empty() {
+                emit(Event::ReasoningDelta { text: held });
+            }
+            let text = stream.flush();
+            if !text.is_empty() {
+                visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
+                emit(Event::TextDelta { text });
+            }
+        }
+        self.after_provider_call(emit, &operation_id, &outcome, duration)
+            .await;
+        let visible_output = visible_output.load(std::sync::atomic::Ordering::SeqCst);
         match outcome.result {
             Err(error) => (
                 Response::default(),
-                visible_output.load(std::sync::atomic::Ordering::SeqCst),
+                visible_output,
                 Some(AgentError::Provider(error)),
             ),
-            Ok(response) => {
-                let held = reasoning.flush();
-                if !held.is_empty() {
-                    emit(Event::ReasoningDelta { text: held });
-                }
-                let text = stream.flush();
-                if !text.is_empty() {
-                    visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
-                    emit(Event::TextDelta { text });
-                }
-                (
-                    response,
-                    visible_output.load(std::sync::atomic::Ordering::SeqCst),
-                    None,
-                )
-            }
+            Ok(response) => (response, visible_output, None),
         }
     }
 

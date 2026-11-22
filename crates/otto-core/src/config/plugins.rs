@@ -127,6 +127,12 @@ pub struct Hooks {
     pub session_start: Vec<Hook>,
     #[serde(default)]
     pub before_prompt: Vec<Hook>,
+    /// Runs before each model request of the agent loop; may deny or change that request.
+    #[serde(default)]
+    pub before_provider_call: Vec<Hook>,
+    /// Runs after each model request of the agent loop settles; audit only.
+    #[serde(default)]
+    pub after_provider_call: Vec<Hook>,
     #[serde(default)]
     pub before_tool: Vec<Hook>,
     #[serde(default)]
@@ -146,10 +152,12 @@ impl Hooks {
         *self == Self::default()
     }
 
-    pub fn entries(&self) -> [(&'static str, &[Hook]); 8] {
+    pub fn entries(&self) -> [(&'static str, &[Hook]); 10] {
         [
             ("session_start", &self.session_start),
             ("before_prompt", &self.before_prompt),
+            ("before_provider_call", &self.before_provider_call),
+            ("after_provider_call", &self.after_provider_call),
             ("before_tool", &self.before_tool),
             ("after_tool", &self.after_tool),
             ("before_compaction", &self.before_compaction),

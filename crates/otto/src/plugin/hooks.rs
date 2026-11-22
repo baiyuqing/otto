@@ -765,4 +765,6 @@ pub(crate) use binding::SessionBinding;
 #[cfg(test)]
 mod lua_handler_tests;
 #[cfg(test)]
+mod provider_call_tests;
+#[cfg(test)]
 pub(super) mod tests;

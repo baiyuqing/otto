@@ -1261,8 +1261,8 @@ authorization review or provider-managed context. This differs from
 `parent_message` and `capability_update` use their own presentation without that
 generic decoration.
 
-The storage sanitizer also recognizes `otto.hook.arguments` and
-`otto.hook.result` audit payload names. This is a recording policy, not a
+The storage sanitizer also recognizes `otto.hook.arguments`,
+`otto.hook.result` and `otto.hook.provider_request` audit payload names. This is a recording policy, not a
 promise that every installed runtime emits these records, and not a model
 visibility rule.
 

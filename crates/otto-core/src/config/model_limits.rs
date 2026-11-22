@@ -143,6 +143,7 @@ fn strip_anthropic_date_suffix(model: &str) -> Option<&str> {
 fn openai_alias_family(model: &str) -> Option<ModelFamily> {
     use ModelFamily::*;
     Some(match model {
+        "gpt-6.2-sol" | "gpt-6.2-astra" => GptLong,
         "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => GptLong,
         "gpt-5.5" | "gpt-5.5-pro" => GptLong,
         "gpt-5.4" | "gpt-5.4-pro" => GptLong,
@@ -294,6 +295,8 @@ mod tests {
     #[test]
     fn every_baseline_alias_is_known() {
         let cases: &[Case] = &[
+            known_case("gpt-6.2-sol", 1_050_000, 922_000, 272_000, 128_000),
+            known_case("gpt-6.2-astra", 1_050_000, 922_000, 272_000, 128_000),
             known_case("gpt-5.6", 1_050_000, 922_000, 272_000, 128_000),
             known_case("gpt-5.6-sol", 1_050_000, 922_000, 272_000, 128_000),
             known_case("gpt-5.6-terra", 1_050_000, 922_000, 272_000, 128_000),
@@ -388,6 +391,14 @@ mod tests {
     #[test]
     fn uses_exact_aliases_and_wrappers() {
         let known_cases: &[Case] = &[
+            known_case(
+                "openai/gpt-6.2-sol:batch",
+                1_050_000,
+                922_000,
+                272_000,
+                128_000,
+            ),
+            known_case("openai/gpt-6.2-astra", 1_050_000, 922_000, 272_000, 128_000),
             known_case("gpt-5.6-sol", 1_050_000, 922_000, 272_000, 128_000),
             known_case(
                 "openai/gpt-5.6-sol:batch",
@@ -447,6 +458,10 @@ mod tests {
         }
 
         for model in [
+            "gpt-6.2",
+            "gpt-6.2-mini",
+            "gpt-6.2-sol-preview",
+            "anthropic/gpt-6.2-astra",
             "OPENAI/gpt-5.6-sol",
             "azure-gpt-5.6-sol",
             "my-gpt-model",

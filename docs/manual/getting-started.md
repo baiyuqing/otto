@@ -358,6 +358,8 @@ type = "chatgpt"
 models."gpt-5.6-luna" = {}
 models."gpt-5.6-terra" = {}
 models."gpt-5.6-sol" = {}
+models."gpt-6.2-sol" = {}
+models."gpt-6.2-astra" = {}
 
 [providers.gateway]
 type = "openai-compatible"
@@ -407,6 +409,29 @@ unknown provider name is an error.
 | `approval.reviewer_model = "P/ID"` | Model of the approval reviewer. |
 | `--provider P --model ID`, `OTTO_PROVIDER=P` with `OTTO_MODEL=ID` | Deprecated; same as `P/ID`. |
 | `--model ID` without `--provider` | Error; Otto does not take the provider from `default_model`. |
+
+### GPT-6.2
+
+OpenAI's official model IDs are `gpt-6.2-sol` and `gpt-6.2-astra`, not
+`gpt-6.2`. Otto recognizes both with a 1,050,000-token context window,
+922,000-token hard input limit and 128,000-token output limit. The built-in
+working window stays at the conservative 272,000-token policy; provider
+metadata and explicit configuration may supply different runtime limits.
+See the official [Sol](https://developers.openai.com/api/docs/models/gpt-6.2-sol)
+and [Astra](https://developers.openai.com/api/docs/models/gpt-6.2-astra) specifications.
+
+Add the model entries shown above to your own ChatGPT provider configuration
+to list them in `/model`, or select `--model chatgpt/gpt-6.2-sol` for one run.
+Keep your existing default unless you want to change it. ChatGPT sign-in and
+account access are still required; listing a model does not grant access.
+Restart long-lived runtimes after configuration changes. If a model is not
+available to your account, select an accessible model rather than repeatedly
+retrying the unavailable ID.
+
+[GPT-6.2 tool calling requires the Responses API](https://developers.openai.com/api/docs/changelog).
+Otto's `chatgpt` provider uses Responses; the `openai-compatible` provider uses
+Chat Completions, so do not select GPT-6.2 there for Otto's tool workflows
+unless your gateway explicitly translates those requests to Responses.
 
 ### Precedence
 

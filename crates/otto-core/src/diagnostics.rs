@@ -83,6 +83,9 @@ pub struct Finish {
 pub enum TurnStop {
     /// The progress guard stopped the turn; see [`crate::agent::progress`].
     NoProgress(crate::agent::progress::StallKind),
+    /// The turn reached `[agent.budget].max_tokens` or `max_steps`; see
+    /// [`crate::agent::budget`].
+    Budget(crate::agent::budget::BudgetKind),
 }
 
 impl TurnStop {
@@ -90,6 +93,8 @@ impl TurnStop {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoProgress(kind) => kind.as_str(),
+            Self::Budget(crate::agent::budget::BudgetKind::Tokens) => "budget_tokens",
+            Self::Budget(crate::agent::budget::BudgetKind::Steps) => "budget_steps",
         }
     }
 }
@@ -110,6 +115,9 @@ pub trait Diagnostics: Send + Sync {
     /// A turn was stopped because it made no progress. Only the stall's
     /// kind, tool name and count are passed; arguments and results never are.
     fn turn_stalled(&self, _stall: &crate::agent::progress::Stall) {}
+    /// A turn was stopped because it reached its budget. Only the limit kind,
+    /// its value and the amount used are passed.
+    fn turn_budget_exceeded(&self, _exceeded: &crate::agent::budget::Exceeded) {}
 }
 
 /// All arguments are typed metadata. HTTP adapters may report headers and byte

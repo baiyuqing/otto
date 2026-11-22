@@ -631,6 +631,7 @@ impl Builder {
                 repeated_calls: runtime.progress.repeated_calls,
                 consecutive_failures: runtime.progress.consecutive_failures,
             },
+            budget: runtime.budget,
             memory: match self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
                 true => self.bind_selected_memory(session.header().id, memory_client.clone())?,
                 false => None,

@@ -88,6 +88,10 @@ max_output_bytes = 51200
 [agent.compaction]
 auto = true
 
+[agent.budget]                 # per-turn limits; 0 disables one (docs/manual/limits.md#turn-budget)
+max_tokens = 4200000
+max_steps = 54
+
 [sandbox]
 driver = "auto"
 network = "allow"

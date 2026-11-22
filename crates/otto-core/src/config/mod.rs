@@ -182,6 +182,20 @@ pub struct Agent {
     pub no_progress_failures: Option<i64>,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub budget: BudgetConfig,
+}
+
+/// The `[agent.budget]` table: per-turn limits. `None` keeps the built-in
+/// default; `0` disables that limit.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetConfig {
+    /// Tokens one turn may use (input plus output, over every provider
+    /// response of the turn).
+    pub max_tokens: Option<i64>,
+    /// Ordinary provider calls one turn may make.
+    pub max_steps: Option<i64>,
 }
 
 /// The `[agent.compaction]` table. Every field is optional so absent and

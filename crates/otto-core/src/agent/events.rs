@@ -322,6 +322,10 @@ pub enum AgentError {
     /// call, or kept failing. See [`super::progress`].
     #[error("no progress: {0}")]
     NoProgress(super::progress::Stall),
+    /// The turn used the tokens or provider steps `[agent.budget]` allows. The
+    /// text names the key to change. See [`super::budget`].
+    #[error("budget exceeded: {0}")]
+    BudgetExceeded(super::budget::Exceeded),
     /// The messages that must stay verbatim already exceed the retained budget.
     #[error("current turn exceeds the retained input budget")]
     CurrentTurnTooLarge,

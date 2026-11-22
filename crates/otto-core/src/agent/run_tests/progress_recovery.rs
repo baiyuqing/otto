@@ -6,7 +6,7 @@ use super::*;
 
 /// Whether every assistant tool call in the transcript has its result, in
 /// order. A turn the guard stops must still leave a well-formed transcript.
-fn every_tool_call_has_its_result(messages: &[Message]) -> bool {
+pub(super) fn every_tool_call_has_its_result(messages: &[Message]) -> bool {
     let mut pending: Option<&str> = None;
     for message in messages {
         for block in &message.blocks {

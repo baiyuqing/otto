@@ -145,6 +145,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
     ) -> Result<(String, Usage, bool, bool), AgentError> {
         stopped(control)?;
+        // A summary request must not push usage further after the token limit.
+        self.admit_tokens()?;
         let child = control.cancellation_token().child_token();
         let summary_control = SummaryControl {
             token: child.clone(),
@@ -219,6 +221,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .await
         };
         diagnostic.provider_finished(&outcome);
+        if let Ok(response) = &outcome.result {
+            self.charge_budget(response.message.usage);
+        }
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();

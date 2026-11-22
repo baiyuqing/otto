@@ -87,6 +87,7 @@ fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
+mod budget;
 mod compaction_defaults;
 mod connection_precedence;
 mod deadlines_progress;

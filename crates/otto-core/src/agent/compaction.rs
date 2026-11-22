@@ -70,6 +70,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<CompactionResult, AgentError> {
+        // A manual compaction is its own operation, not part of a turn.
+        self.reset_budget();
         match self
             .compact_locked(CompactionReason::Manual, focus, emit, control)
             .await

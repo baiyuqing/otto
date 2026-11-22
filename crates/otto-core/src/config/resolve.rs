@@ -13,10 +13,12 @@ use super::{
     model_limits::resolve_model_limits,
 };
 
+use budget::resolve_budget;
 use compaction::{resolve_compaction, validate_thinking};
 use deadlines::{resolve_progress, resolve_resilience};
 use model_selection::{known_provider, select_model};
 
+mod budget;
 mod compaction;
 mod deadlines;
 mod model_selection;
@@ -153,6 +155,7 @@ pub struct Runtime {
     pub compaction: CompactionRuntime,
     pub resilience: ResilienceRuntime,
     pub progress: ProgressRuntime,
+    pub budget: crate::agent::budget::BudgetPolicy,
 }
 
 fn env_value(env: &HashMap<String, String>, key: &str) -> String {
@@ -309,6 +312,7 @@ fn resolve_impl(
     let compaction = resolve_compaction(&file.agent.compaction, &model_entry, &model)?;
     let resilience = resolve_resilience(&file.agent)?;
     let progress = resolve_progress(&file.agent)?;
+    let budget = resolve_budget(&file.agent.budget)?;
 
     let mut api_key = String::new();
     if matches!(
@@ -373,6 +377,7 @@ fn resolve_impl(
         compaction,
         resilience,
         progress,
+        budget,
     };
     if let Some(policy) = &file.policy {
         policy.runtime(&runtime)?;

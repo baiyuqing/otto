@@ -327,6 +327,11 @@ shell_timeout = "120s"
 max_output_bytes = 51200
 # Deadlines and limits (meaning, defaults, effects): docs/manual/limits.md
 
+# Per-turn budget; 0 disables a limit (see limits.md#turn-budget).
+# [agent.budget]
+# max_tokens = 4200000
+# max_steps = 54
+
 [agent.compaction]
 auto = true
 reserve_tokens = 16384

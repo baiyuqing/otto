@@ -651,6 +651,38 @@ fn the_base_prompt_is_an_open_xml_document() {
 }
 
 #[test]
+fn credential_handling_policy_keeps_secret_values_out_of_model_context() {
+    for tool_names in [vec![], vec!["read", "bash"]] {
+        let prompt = system_prompt_for(&definitions(&tool_names), off(), "", "", "");
+        assert_eq!(prompt.matches("<credential_handling_policy>").count(), 1);
+        assert_eq!(prompt.matches("</credential_handling_policy>").count(), 1);
+        for instruction in [
+            "Do not ask users to paste passwords, API keys, tokens or other secrets into chat",
+            "reads and uses credentials at runtime",
+            "environment variables, credential stores or authorized configuration sources",
+            "Do not bring credential values into model context",
+            "Perform sanity checks in code",
+            "whether a credential is configured",
+            "whether required checks pass and sanitized diagnostics",
+            "Never print credential values, authorization headers or credential-bearing connection strings",
+            "configure them locally or use an appropriate secure authentication flow",
+            "Do not troubleshoot by dumping environment variables",
+            "reading entire credential files into tool output",
+            "enabling debug logging that could expose secrets",
+            "Ensure error handling does not leak credentials through exceptions, request details or responses",
+            "Respect access controls; never bypass restrictions or reconstruct redacted secrets",
+            "Redaction is a fallback, not the primary safeguard",
+            "Keep plaintext credentials out of conversations, model context, logs and generated artifacts by default",
+        ] {
+            assert!(
+                prompt.contains(instruction),
+                "missing credential-handling policy: {instruction}"
+            );
+        }
+    }
+}
+
+#[test]
 fn redaction_policy_explains_hidden_content_and_prevents_placeholder_workarounds() {
     let prompt = system_prompt_for(
         &definitions(&["grep", "read", "write", "edit", "bash"]),

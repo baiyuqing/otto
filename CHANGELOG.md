@@ -9,6 +9,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- Default system-prompt guidance keeps credential values out of chat and model
+  context: prefer runtime credential reads, code-based sanity checks and
+  sanitized diagnostics; guide local authentication setup instead of requesting
+  secrets, and avoid credential-bearing output or debug logs. This is model
+  guidance, not a guarantee of compliance or complete redaction.
+
 - Built-in memory evidence binds exact same-scope revisions or reported immutable
   observation events, with provenance and applicability. Changed/retired evidence
   marks dependent conclusions `needs_review` transitively; recovery requires

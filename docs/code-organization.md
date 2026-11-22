@@ -113,7 +113,10 @@ principal modules are:
   DTOs, and secret-safe text handling.
 
 `config/layered.rs` owns presence-preserving merge, field authority,
-provenance and managed constraints. Native `config/layered.rs` discovers
+provenance and managed constraints. Built-in model presets are read-only defaults
+in core configuration; setup, model selection and HTTP discovery consume the same
+resolved catalog. Catalog visibility does not select a model, authenticate, or
+change the provider transport. Native `config/layered.rs` discovers
 workspace sources and content-bound executable trust; `otto-cli/src/config_command.rs`
 composes offline inspection/scoped editing, and `tool/project_guard.rs`
 rechecks authorization at tool effects and requests cancellation on revocation.

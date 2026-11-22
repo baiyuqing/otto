@@ -345,21 +345,37 @@ socket = "~/.otto/otto.sock"
 
 ### Providers and models
 
-A provider is one endpoint and credential binding of one API type. A model is
-one model of a provider, written as one line in the provider's table. A model
-is selected by `<provider>/<model_id>`, split at the first `/`, so the model
-ID may contain `/`. Otto has no model aliases.
+A provider binds an endpoint and credentials to an API type. Select a model
+with `<provider>/<model_id>`; the model ID may itself contain `/`.
+
+Otto ships an offline preset catalog for ChatGPT, Claude and DeepSeek. `otto
+setup` suggests presets when you create your first config, and `/model` lists
+presets alongside your own entries. For a one-off run, pass the selector to
+`--model`. Upgrading does not rewrite your config or switch your default.
+
+| Provider | Example presets | Authentication |
+| --- | --- | --- |
+| `chatgpt` | GPT-6 Luna, GPT-6.1 Terra, GPT-6.2 Sol and Astra | Run `otto login`; model access depends on your account. |
+| `claude` | Haiku 5.5, Sonnet 4.6, Opus 4.8 | Set the Anthropic API key in your local environment. |
+| `deepseek` | `deepseek-flash`, `deepseek-v4-pro` | Set the DeepSeek API key in your local environment. |
+
+The official DeepSeek integration uses Chat Completions with
+[thinking disabled](https://api-docs.deepseek.com/guides/thinking_mode/) so tool
+calls can continue without reasoning replay. Fable 5.2, Opus 5.5 and Sonnet 5.5
+are not Claude presets: Otto does not yet support the
+[signed thinking replay](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking/change-tools-or-instructions)
+those models can require during tool use.
+
+The `default_model` line below is enough to select a preset. The optional
+provider tables illustrate overriding a preset and adding a custom provider.
+Set `include_preset_models = false` under a provider to hide its preset-only
+models without hiding explicitly configured entries or changing the default.
 
 ```toml
 default_model = "chatgpt/gpt-5.6-luna"
 
 [providers.chatgpt]
-type = "chatgpt"
-models."gpt-5.6-luna" = {}
-models."gpt-5.6-terra" = {}
-models."gpt-5.6-sol" = {}
-models."gpt-6.2-sol" = {}
-models."gpt-6.2-astra" = {}
+models."gpt-6.2-sol" = { thinking = "high" }
 
 [providers.gateway]
 type = "openai-compatible"
@@ -393,13 +409,14 @@ an existing model in the form it is written in. A provider whose models are
 all written as `[providers.<name>.models."<id>"]` tables receives a new model
 in that form, so one provider never holds both forms.
 
-A provider name uses ASCII letters, digits, `_` and `-`. Three providers are
-built in and named after the API types: `claude`, `openai-compatible` and
-`chatgpt`. A table with a built-in name adds models to that provider or
-overrides its fields; `type` may be omitted and, when present, must equal the
-name. A selector may name a model ID that has no model table, under any
-configured or built-in provider; built-in limits and defaults then apply. An
-unknown provider name is an error.
+A provider name uses ASCII letters, digits, `_` and `-`. The built-in provider
+names are `claude`, `openai-compatible`, `chatgpt` and `deepseek`. A table with
+a built-in name adds models or overrides settings. `type` may be omitted;
+if supplied, it must match the built-in API type (`openai-compatible` for
+`deepseek`, otherwise the provider name). Custom endpoints still require
+independent origin grants. You can select an ID that has no model table under
+any configured or built-in provider; this does not guarantee model access or
+compatibility. An unknown provider name is an error.
 
 | Selector input | Meaning |
 | --- | --- |
@@ -420,8 +437,7 @@ metadata and explicit configuration may supply different runtime limits.
 See the official [Sol](https://developers.openai.com/api/docs/models/gpt-6.2-sol)
 and [Astra](https://developers.openai.com/api/docs/models/gpt-6.2-astra) specifications.
 
-Add the model entries shown above to your own ChatGPT provider configuration
-to list them in `/model`, or select `--model chatgpt/gpt-6.2-sol` for one run.
+Choose either preset in `/model`, or select `--model chatgpt/gpt-6.2-sol` for one run.
 Keep your existing default unless you want to change it. ChatGPT sign-in and
 account access are still required; listing a model does not grant access.
 Restart long-lived runtimes after configuration changes. If a model is not

@@ -3,8 +3,7 @@
 use super::*;
 
 impl Controller {
-    /// The configured model selectors, sorted: every model table plus
-    /// `default_model`.
+    /// Effective, sorted model selectors, including enabled static presets.
     pub fn models(&self) -> Vec<String> {
         self.model_summaries()
             .into_iter()
@@ -23,29 +22,21 @@ impl Controller {
             )
         });
         let config = &self.builder.config;
-        let mut selectors: Vec<otto_core::config::ModelSelector> = Vec::new();
-        for (provider_name, provider) in &config.providers {
-            for model_id in provider.models.keys() {
-                selectors.push(otto_core::config::ModelSelector {
-                    provider: provider_name.clone(),
-                    model_id: model_id.clone(),
-                });
-            }
-        }
-        if let Ok(default) = otto_core::config::ModelSelector::parse(&config.default_model) {
-            selectors.push(default);
-        }
-        let mut rows: Vec<ModelSummary> = selectors
+        crate::config::configured_model_selectors(config)
             .into_iter()
-            .filter_map(|selector| {
+            .filter_map(|text| {
+                let selector = otto_core::config::ModelSelector::parse(&text).ok()?;
                 let provider = config.provider_entry(&selector.provider)?;
-                let model = config.model_entry(&selector)?;
-                let text = selector.to_string();
+                let model = provider.models.get(&selector.model_id);
                 let thinking = current
                     .as_ref()
                     .filter(|(current_selector, _)| *current_selector == text)
                     .map(|(_, thinking)| thinking.clone())
-                    .unwrap_or(model.thinking);
+                    .unwrap_or_else(|| {
+                        model
+                            .map(|model| model.thinking.clone())
+                            .unwrap_or_default()
+                    });
                 Some(ModelSummary {
                     provider_type: provider.provider_type(&selector.provider).to_string(),
                     provider: selector.provider,
@@ -54,10 +45,7 @@ impl Controller {
                     thinking,
                 })
             })
-            .collect();
-        rows.sort_by(|a, b| a.selector.cmp(&b.selector));
-        rows.dedup_by(|a, b| a.selector == b.selector);
-        rows
+            .collect()
     }
 
     pub fn set_default_model(&self, model: &str) -> Result<(), String> {

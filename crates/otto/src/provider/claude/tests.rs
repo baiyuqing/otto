@@ -130,7 +130,7 @@ fn request_size_matches_claude_wire_encoding() {
     let request = request();
     assert_eq!(
         client.serialized_request_size(&request).unwrap(),
-        serde_json::to_vec(&build_request(&request).unwrap())
+        serde_json::to_vec(&otto_core::claude::protocol::build_request(&request).unwrap())
             .unwrap()
             .len()
     );

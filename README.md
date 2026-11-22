@@ -116,4 +116,5 @@ and run the checks for the code you change. The repository has no CI; PRs must
 report local verification.
 
 [Architecture and crate boundaries](docs/code-organization.md#rust-layers) ·
+[Use `otto-core` as a Rust library](crates/otto-core/README.md) ·
 [License](LICENSE)

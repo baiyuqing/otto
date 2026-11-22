@@ -191,14 +191,20 @@ fn toml_and_plugin_json_accept_the_events_without_matchers() {
 
 #[tokio::test]
 async fn later_hooks_see_earlier_changes_and_their_edits_replace_earlier_ones() {
-    // The first hook replaces the prompt and edits two blocks; the second sees both
-    // changes and edits one of the same blocks again.
+    // The first hook replaces the prompt and edits user text, assistant text and a tool
+    // result; the second sees the prompt, the user text and the tool result changed, the
+    // assistant text unchanged, and edits a block the first hook edited.
     let first = hook(
-        "read input; printf '%s' '{\"system_prompt\":\"first prompt\",\"edits\":[{\"message\":0,\"block\":0,\"text\":\"one\"},{\"message\":0,\"block\":1,\"text\":\"two\"}]}'",
+        "read input; printf '%s' '{\"system_prompt\":\"first prompt\",\"edits\":[\
+         {\"message\":0,\"block\":0,\"text\":\"one\"},{\"message\":0,\"block\":1,\"text\":\"two\"},\
+         {\"message\":1,\"block\":0,\"text\":\"forged\"},{\"message\":2,\"block\":0,\"text\":\"result two\"}]}'",
     );
     let second = hook(
         "read input; case \"$input\" in *'\"system_prompt\":\"first prompt\"'*) ;; *) exit 3;; esac; \
          case \"$input\" in *'\"text\":\"one\"'*) ;; *) exit 4;; esac; \
+         case \"$input\" in *'\"text\":\"result two\"'*) ;; *) exit 5;; esac; \
+         case \"$input\" in *'\"text\":\"forged\"'*) exit 6;; esac; \
+         case \"$input\" in *'\"text\":\"said\"'*) ;; *) exit 7;; esac; \
          printf '%s' '{\"context\":\"note\",\"edits\":[{\"message\":0,\"block\":0,\"text\":\"three\"}]}'",
     );
     let home = tempfile::tempdir().unwrap();
@@ -216,10 +222,17 @@ async fn later_hooks_see_earlier_changes_and_their_edits_replace_earlier_ones() 
             "before_provider_call",
             json!({
                 "system_prompt": "original",
-                "messages": [{"role": "user", "blocks": [
-                    {"type": "text", "text": "a"},
-                    {"type": "text", "text": "b"}
-                ]}]
+                "messages": [
+                    {"role": "user", "blocks": [
+                        {"type": "text", "text": "a"},
+                        {"type": "text", "text": "b"}
+                    ]},
+                    {"role": "assistant", "blocks": [{"type": "text", "text": "said"}]},
+                    {"role": "tool", "blocks": [{
+                        "type": "tool_result", "id": "call-1", "name": "echo",
+                        "text": "result one", "is_error": true
+                    }]}
+                ]
             }),
             &CancellationToken::new(),
         )
@@ -229,7 +242,12 @@ async fn later_hooks_see_earlier_changes_and_their_edits_replace_earlier_ones() 
     assert_eq!(response.context.as_deref(), Some("\nnote"));
     assert_eq!(
         response.edits,
-        Some(vec![edit(0, 1, "two"), edit(0, 0, "three")])
+        Some(vec![
+            edit(0, 1, "two"),
+            edit(1, 0, "forged"),
+            edit(2, 0, "result two"),
+            edit(0, 0, "three")
+        ])
     );
 }
 

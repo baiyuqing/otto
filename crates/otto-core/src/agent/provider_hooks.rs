@@ -4,7 +4,8 @@
 //! `before_provider_call` turns a built request into a [`HookedRequest`]; the
 //! provider step guards and sends only that type, so a request cannot skip
 //! the hook. A hook may deny the request, replace its system prompt, append
-//! untrusted context to it, or replace the text of text blocks. The changes
+//! untrusted context to it, or replace the text of user text blocks and tool
+//! result blocks; assistant output and labeled input stay as built. The changes
 //! apply to that request only; when any applies, one
 //! `otto.hook.provider_request` record lists the changed values before the
 //! request is sent. `after_provider_call` reports the settled call and can
@@ -318,6 +319,8 @@ fn apply_response(
             .get_mut(edit.message)
             .and_then(|message| message.blocks.get_mut(edit.block))
             .ok_or("hook edit index is out of range")?;
+        // A user text block or a tool result block: only `text` changes, so
+        // tool result IDs, names and `is_error` stay as built.
         if block.text != edit.text {
             block.text.clone_from(&edit.text);
             changes.edits.push(edit);
@@ -330,9 +333,11 @@ fn apply_response(
     })
 }
 
-/// Accepts edits only when the messages were sent to the hook, each index
-/// names an existing text block of a message without a `context_type`, and
-/// no block is named twice.
+/// Accepts edits only when the messages were sent to the hook and each edit
+/// names an existing block that a hook may change: a `tool_result` block of
+/// any message, or a `text` block of a `user` message without a
+/// `context_type`. Assistant output, context messages and every other block
+/// type are rejected, and no block may be named twice.
 fn validate_edits(
     request: &Request,
     messages: PayloadMessages,
@@ -356,15 +361,12 @@ fn validate_edits(
                 edit.block, edit.message
             )
         })?;
-        if !message.context_type.is_empty() {
-            return Err(format!("edit message {} has a context_type", edit.message));
-        }
-        if block.block_type != BlockType::Text {
-            return Err(format!(
-                "edit block {} of message {} is not a text block",
+        editable_block(message, block).map_err(|reason| {
+            format!(
+                "edit block {} of message {} {reason}",
                 edit.block, edit.message
-            ));
-        }
+            )
+        })?;
         if !named.insert((edit.message, edit.block)) {
             return Err(format!(
                 "edit block {} of message {} is named twice",
@@ -373,4 +375,29 @@ fn validate_edits(
         }
     }
     Ok(edits)
+}
+
+/// Whether a hook may replace the text of `block` of `message`; the error
+/// completes "edit block J of message N ...".
+fn editable_block(message: &Message, block: &Block) -> Result<(), String> {
+    if block.block_type == BlockType::ToolResult {
+        return Ok(());
+    }
+    match &message.role {
+        Role::User => {}
+        Role::Assistant => return Err("is in an assistant message".into()),
+        other => {
+            return Err(format!(
+                "is in a {} message, not a user message",
+                String::from(other.clone())
+            ));
+        }
+    }
+    if !message.context_type.is_empty() {
+        return Err("is in a message with a context_type".into());
+    }
+    if block.block_type != BlockType::Text {
+        return Err("is not a user text or tool result block".into());
+    }
+    Ok(())
 }

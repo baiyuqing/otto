@@ -79,7 +79,9 @@ fn merge_edits(combined: &mut Option<Vec<Edit>>, edits: Vec<Edit>) {
 }
 
 /// Shows later `before_provider_call` hooks the request as earlier hooks changed it.
-/// Edits that name no text block of `data` are left for the agent to reject.
+/// Only blocks an edit may target change: a `tool_result` block, or a `text` block of a
+/// `user` message without a `context_type`. Other edits leave `data` unchanged and are
+/// left for the agent to reject.
 fn apply_to_request_data(data: &mut Value, system_prompt: Option<&str>, edits: &[Edit]) {
     if let Some(system_prompt) = system_prompt
         && let Some(object) = data.as_object_mut()
@@ -87,10 +89,23 @@ fn apply_to_request_data(data: &mut Value, system_prompt: Option<&str>, edits: &
         object.insert("system_prompt".into(), system_prompt.into());
     }
     for edit in edits {
-        let path = format!("/messages/{}/blocks/{}", edit.message, edit.block);
-        if let Some(block) = data.pointer_mut(&path).and_then(Value::as_object_mut)
-            && block.get("type").and_then(Value::as_str) == Some("text")
-        {
+        let Some(message) = data.pointer_mut(&format!("/messages/{}", edit.message)) else {
+            continue;
+        };
+        let user_input = message.get("role").and_then(Value::as_str) == Some("user")
+            && message.get("context_type").is_none();
+        let Some(block) = message
+            .pointer_mut(&format!("/blocks/{}", edit.block))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let editable = match block.get("type").and_then(Value::as_str) {
+            Some("tool_result") => true,
+            Some("text") => user_input,
+            _ => false,
+        };
+        if editable {
             block.insert("text".into(), edit.text.clone().into());
         }
     }

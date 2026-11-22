@@ -107,14 +107,18 @@ fn notifications(events: &[Event]) -> Vec<String> {
         .collect()
 }
 
-/// A session with a tool call, its result and a context message before the next prompt.
+/// A session with a user image, a tool call, an erroneous tool result, assistant text
+/// and a context message before the next prompt.
 async fn mixed_session() -> TurnRecordingSession {
     let session = TurnRecordingSession::default();
     let messages = [
         Message {
             id: "u0".into(),
             role: Role::User,
-            blocks: vec![Block::text("first")],
+            blocks: vec![
+                Block::text("first"),
+                Block::image("iVBORw0KGgo=", "image/png"),
+            ],
             ..Message::default()
         },
         Message {
@@ -137,6 +141,7 @@ async fn mixed_session() -> TurnRecordingSession {
                 tool_call_id: "call-0".into(),
                 tool_name: "echo".into(),
                 text: "echoed".into(),
+                is_error: true,
                 ..Block::default()
             }],
             ..Message::default()
@@ -169,11 +174,18 @@ async fn the_payload_lists_every_block_and_the_changes_reach_only_that_request()
         Ok(HookResponse {
             system_prompt: Some("replaced prompt".into()),
             context: Some("plugin note".into()),
-            edits: Some(vec![Edit {
-                message: last,
-                block: 0,
-                text: "edited prompt".into(),
-            }]),
+            edits: Some(vec![
+                Edit {
+                    message: last,
+                    block: 0,
+                    text: "edited prompt".into(),
+                },
+                Edit {
+                    message: 2,
+                    block: 0,
+                    text: "rewritten result".into(),
+                },
+            ]),
             notice: Some("request inspected".into()),
             ..HookResponse::default()
         })
@@ -207,7 +219,7 @@ async fn the_payload_lists_every_block_and_the_changes_reach_only_that_request()
     }
     assert_eq!(
         messages[0],
-        json!({"role": "user", "blocks": [{"type": "text", "text": "first"}]})
+        json!({"role": "user", "blocks": [{"type": "text", "text": "first"}, {"type": "image"}]})
     );
     assert_eq!(
         messages[1]["blocks"][0],
@@ -215,17 +227,18 @@ async fn the_payload_lists_every_block_and_the_changes_reach_only_that_request()
     );
     assert_eq!(
         messages[2]["blocks"][0],
-        json!({"type": "tool_result", "id": "call-0", "name": "echo", "text": "echoed", "is_error": false})
+        json!({"type": "tool_result", "id": "call-0", "name": "echo", "text": "echoed", "is_error": true})
     );
     assert!(
         messages
             .iter()
             .any(|entry| entry["context_type"] == "task_notification" && entry["role"] == "context")
     );
+    // Only context messages carry a context_type.
     assert!(
         messages
             .iter()
-            .filter(|entry| entry["role"] == "user")
+            .filter(|entry| entry["role"] != "context")
             .all(|entry| entry.get("context_type").is_none())
     );
 
@@ -237,6 +250,15 @@ async fn the_payload_lists_every_block_and_the_changes_reach_only_that_request()
         request.messages.last().expect("prompt").text(),
         "edited prompt"
     );
+    // A tool result edit changes only the text.
+    let result = &request.messages[2].blocks[0];
+    assert_eq!(result.block_type, BlockType::ToolResult);
+    assert_eq!(result.text, "rewritten result");
+    assert_eq!(
+        (result.tool_call_id.as_str(), result.tool_name.as_str()),
+        ("call-0", "echo")
+    );
+    assert!(result.is_error);
     // The session keeps the original prompt: the changes are request-local.
     assert!(
         agent
@@ -245,13 +267,13 @@ async fn the_payload_lists_every_block_and_the_changes_reach_only_that_request()
             .iter()
             .any(|message| message.text() == "hello")
     );
-    assert!(
-        agent
-            .session()
-            .messages()
-            .iter()
-            .all(|message| message.text() != "edited prompt")
-    );
+    assert!(agent.session().messages().iter().all(|message| {
+        message.text() != "edited prompt"
+            && message
+                .blocks
+                .iter()
+                .all(|block| block.text != "rewritten result")
+    }));
     assert!(notifications(&events).contains(&"[hook] request inspected".to_owned()));
 
     let records = provider_request_records(agent.session());
@@ -260,7 +282,10 @@ async fn the_payload_lists_every_block_and_the_changes_reach_only_that_request()
         vec![json!({
             "version": 1,
             "operation_id": data["operation_id"],
-            "edits": [{"message": messages.len() - 1, "block": 0, "text": "edited prompt"}],
+            "edits": [
+                {"message": messages.len() - 1, "block": 0, "text": "edited prompt"},
+                {"message": 2, "block": 0, "text": "rewritten result"},
+            ],
             "system_prompt": "replaced prompt",
             "context": "plugin note",
         })]
@@ -360,11 +385,29 @@ async fn a_denial_or_a_failing_hook_stops_the_turn_before_the_provider() {
     }
 }
 
+/// One edit of `block` of `message`.
+fn single(message: usize, block: usize) -> Vec<Edit> {
+    vec![Edit {
+        message,
+        block,
+        text: "x".into(),
+    }]
+}
+
+/// The index of the first payload message `wanted` accepts.
+fn find(messages: &[Value], wanted: impl Fn(&Value) -> bool) -> usize {
+    messages
+        .iter()
+        .position(wanted)
+        .expect("the session has a matching message")
+}
+
 #[tokio::test]
 async fn invalid_edits_fail_the_turn_without_applying_any() {
-    // Each picks edits from the payload; the first edit of each case is valid.
+    // Each case picks its edits from the payload; the first and the last two pair a
+    // valid edit with an invalid one, so nothing may be applied before validation ends.
     type Picker = fn(&[Value]) -> Vec<Edit>;
-    let cases: [(&str, Picker); 5] = [
+    let cases: [(&str, Picker); 8] = [
         ("message", |m| {
             vec![
                 Edit {
@@ -379,36 +422,28 @@ async fn invalid_edits_fail_the_turn_without_applying_any() {
                 },
             ]
         }),
-        ("block", |m| {
-            vec![Edit {
-                message: m.len() - 1,
-                block: 1,
-                text: "x".into(),
-            }]
+        ("block 1 of message", |m| single(m.len() - 1, 1)),
+        ("is in an assistant message", |m| {
+            single(
+                find(m, |entry| entry["blocks"][0]["type"] == "tool_call"),
+                0,
+            )
         }),
-        ("not a text block", |m| {
-            let tool_call = m
-                .iter()
-                .position(|entry| entry["blocks"][0]["type"] == "tool_call")
-                .expect("tool call");
-            vec![Edit {
-                message: tool_call,
-                block: 0,
-                text: "x".into(),
-            }]
+        ("is in an assistant message", |m| {
+            single(
+                find(m, |entry| {
+                    entry["role"] == "assistant" && entry["blocks"][0]["type"] == "text"
+                }),
+                0,
+            )
         }),
-        ("context_type", |m| {
-            let context = m
-                .iter()
-                .position(|entry| entry.get("context_type").is_some())
-                .expect("context message");
-            vec![Edit {
-                message: context,
-                block: 0,
-                text: "x".into(),
-            }]
+        ("is in a context message, not a user message", |m| {
+            single(find(m, |entry| entry["role"] == "context"), 0)
         }),
-        ("twice", |m| {
+        ("is not a user text or tool result block", |m| {
+            single(find(m, |entry| entry["blocks"][1]["type"] == "image"), 1)
+        }),
+        ("is named twice", |m| {
             vec![
                 Edit {
                     message: m.len() - 1,
@@ -417,6 +452,21 @@ async fn invalid_edits_fail_the_turn_without_applying_any() {
                 },
                 Edit {
                     message: m.len() - 1,
+                    block: 0,
+                    text: "y".into(),
+                },
+            ]
+        }),
+        ("is named twice", |m| {
+            let result = find(m, |entry| entry["blocks"][0]["type"] == "tool_result");
+            vec![
+                Edit {
+                    message: result,
+                    block: 0,
+                    text: "x".into(),
+                },
+                Edit {
+                    message: result,
                     block: 0,
                     text: "y".into(),
                 },

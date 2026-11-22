@@ -1041,13 +1041,16 @@ The response can change the request:
 - `context` is appended to this request's system prompt, labeled untrusted.
 - `system_prompt` replaces this request's system prompt.
 - `edits` is an array of `{"message": i, "block": j, "text": "..."}` that
-  replaces the text of text blocks. An edit fails the hook, and with it the
-  turn, when the indices are out of range, the block is not a text block, the
-  message has a `context_type` (input origin labels cannot be changed), two
-  edits name the same block, or `messages` was omitted. Edits are checked
-  together before any is applied.
+  replaces the text of a `text` block in a `user` message or of a
+  `tool_result` block. An edit fails the hook, and with it the turn, when the
+  indices are out of range, the block is in an assistant or context message
+  (input origin labels are context messages and cannot be changed), the block
+  is of another type, two edits name the same block, or `messages` was
+  omitted. Edits are checked together before any is applied. Assistant
+  messages are excluded because they are the model's own output and providers
+  can reject changed assistant text next to reasoning blocks.
 
-Message count, roles, block types and tool call IDs never change. The changes
+Message count, roles, block types, tool call IDs and `is_error` never change. The changes
 apply to this request only and are not written to the session messages; the
 next step builds its request from the session again and runs the hook again.
 The changed request then passes the same secret check as every model request,

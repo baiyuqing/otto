@@ -12,7 +12,7 @@ commit ledger; Git and release tags retain the full history. See the
 - Plugin and standalone hooks can run on two new events around each model
   request of the agent loop. `before_provider_call` receives the request and
   can deny it, append context, replace the system prompt or replace the text
-  of text blocks; the changes apply to that request only, pass the existing
+  of user text blocks and tool results; the changes apply to that request only, pass the existing
   secret check and are recorded as `otto.hook.provider_request`.
   `after_provider_call` receives the outcome and usage and can only show a
   notice. See [provider call events](docs/manual/memory-and-extensions.md#provider-call-events).

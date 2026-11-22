@@ -8,6 +8,19 @@ use crate::provider::{ProviderError, Request};
 use serde::Serialize;
 use serde_json::{json, value::RawValue};
 
+/// Request encoding policy for an authorized Messages endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestDialect {
+    Standard,
+    OfficialClaude,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DisabledThinking {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRequest {
     pub model: String,
@@ -18,6 +31,8 @@ pub struct WireRequest {
     pub tools: Vec<WireTool>,
     pub stream: bool,
     pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<DisabledThinking>,
 }
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct CacheControl {
@@ -101,6 +116,13 @@ fn object(raw: &RawValue) -> bool {
 /// block of the request; at most `MAX_CACHE_BREAKPOINTS` in total, dropping the
 /// earliest boundaries first.
 pub fn build_request(request: &Request) -> Result<WireRequest, ProviderError> {
+    build_request_for(request, RequestDialect::Standard)
+}
+
+pub fn build_request_for(
+    request: &Request,
+    dialect: RequestDialect,
+) -> Result<WireRequest, ProviderError> {
     if request.request_remote_compaction || request.remote_compaction.is_some() {
         return Err(invalid());
     }
@@ -198,11 +220,26 @@ pub fn build_request(request: &Request) -> Result<WireRequest, ProviderError> {
         tools,
         stream: true,
         max_tokens: OutputBudget::for_model(&request.model).initial,
+        // Haiku 5.5 defaults to thinking; use its supported disabled mode so
+        // tool continuations do not require signed reasoning replay.
+        thinking: match (dialect, request.model.as_str()) {
+            (RequestDialect::OfficialClaude, "claude-haiku-5-5") => {
+                Some(DisabledThinking { kind: "disabled" })
+            }
+            _ => None,
+        },
     })
 }
 /// Exact serialized byte count, sharing validation with the request encoder.
 pub fn serialized_request_size(request: &Request) -> Result<usize, ProviderError> {
-    serde_json::to_vec(&build_request(request)?)
+    serialized_request_size_for(request, RequestDialect::Standard)
+}
+
+pub fn serialized_request_size_for(
+    request: &Request,
+    dialect: RequestDialect,
+) -> Result<usize, ProviderError> {
+    serde_json::to_vec(&build_request_for(request, dialect)?)
         .map(|bytes| bytes.len())
         .map_err(|_| invalid())
 }

@@ -1,8 +1,8 @@
 //! `[providers.<name>]` and `[providers.<name>.models."<model_id>"]` tables.
 //!
-//! A provider is one endpoint and credential binding of one API type. The
-//! built-in providers `claude`, `openai-compatible` and `chatgpt` exist
-//! without a table and carry the defaults of the API type they are named for.
+//! A provider is one endpoint and credential binding of one API type.
+//! Built-in bindings exist without a configured table; their names need not
+//! match their wire types.
 
 use std::collections::BTreeMap;
 
@@ -11,15 +11,25 @@ use serde::{Deserialize, Serialize};
 use super::model_selector::validate_provider_name;
 use super::{
     ConfigError, DEFAULT_CLAUDE_API_VERSION, File, PROVIDER_CHATGPT, PROVIDER_CLAUDE,
-    PROVIDER_OPENAI_COMPATIBLE,
+    PROVIDER_DEEPSEEK, PROVIDER_OPENAI_COMPATIBLE,
 };
 
-/// The names of the built-in providers; each equals its API type.
-pub const BUILTIN_PROVIDERS: [&str; 3] = [
+/// The supported provider wire types.
+pub const PROVIDER_TYPES: [&str; 3] = [
     PROVIDER_CLAUDE,
     PROVIDER_OPENAI_COMPATIBLE,
     PROVIDER_CHATGPT,
 ];
+
+/// The names of built-in provider bindings.
+pub const BUILTIN_PROVIDERS: [&str; 4] = [
+    PROVIDER_CLAUDE,
+    PROVIDER_OPENAI_COMPATIBLE,
+    PROVIDER_CHATGPT,
+    PROVIDER_DEEPSEEK,
+];
+pub const DEEPSEEK_DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
+pub const DEEPSEEK_DEFAULT_API_KEY_ENV: &str = concat!("DEEPSEEK", "_API_KEY");
 pub const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// The API key variable used when a provider names none or its named variable is unset.
 pub const FALLBACK_API_KEY_ENV: &str = "OTTO_API_KEY";
@@ -29,8 +39,22 @@ pub fn is_builtin_provider(name: &str) -> bool {
     BUILTIN_PROVIDERS.contains(&name)
 }
 
+pub(super) fn builtin_provider_type(name: &str) -> Option<&str> {
+    is_builtin_provider(name).then_some(match name {
+        PROVIDER_DEEPSEEK => PROVIDER_OPENAI_COMPATIBLE,
+        _ => name,
+    })
+}
+
+fn default_include_preset_models() -> bool {
+    true
+}
+fn include_preset_models_is_default(value: &bool) -> bool {
+    *value
+}
+
 /// One `[providers.<name>]` table.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEntry {
     #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
@@ -49,6 +73,28 @@ pub struct ProviderEntry {
     pub workspace_id_env: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, ModelEntry>,
+    /// Include static picker entries alongside explicit model tables.
+    #[serde(
+        default = "default_include_preset_models",
+        skip_serializing_if = "include_preset_models_is_default"
+    )]
+    pub include_preset_models: bool,
+}
+
+impl Default for ProviderEntry {
+    fn default() -> Self {
+        Self {
+            type_: String::new(),
+            base_url: String::new(),
+            trusted_origins: Vec::new(),
+            allow_http_origins: Vec::new(),
+            api_key_env: String::new(),
+            api_version: String::new(),
+            workspace_id_env: String::new(),
+            models: BTreeMap::new(),
+            include_preset_models: true,
+        }
+    }
 }
 
 /// One `[providers.<name>.models."<model_id>"]` table.
@@ -77,16 +123,15 @@ impl ProviderEntry {
     pub fn provider_type<'a>(&'a self, name: &'a str) -> &'a str {
         if !self.type_.is_empty() {
             &self.type_
-        } else if is_builtin_provider(name) {
-            name
         } else {
-            ""
+            builtin_provider_type(name).unwrap_or_default()
         }
     }
 
-    /// The connection fields with today's defaults applied: Claude gets
+    /// The effective connection fields. DeepSeek supplies its official URL and
+    /// only defaults its dedicated key variable for that origin. Claude gets
     /// `https://api.anthropic.com`, `ANTHROPIC_API_KEY` and the default API
-    /// version. Other types keep their configured values.
+    /// version. Other bindings keep their configured values.
     pub fn connection(&self, name: &str) -> ProviderConnection {
         let provider_type = self.provider_type(name).to_string();
         let mut connection = ProviderConnection {
@@ -101,6 +146,12 @@ impl ProviderEntry {
             default_if_empty(&mut connection.api_key_env, CLAUDE_DEFAULT_API_KEY_ENV);
             default_if_empty(&mut connection.api_version, DEFAULT_CLAUDE_API_VERSION);
         }
+        if name == PROVIDER_DEEPSEEK {
+            default_if_empty(&mut connection.base_url, DEEPSEEK_DEFAULT_BASE_URL);
+            if super::endpoint::is_deepseek_origin(&connection.base_url) {
+                default_if_empty(&mut connection.api_key_env, DEEPSEEK_DEFAULT_API_KEY_ENV);
+            }
+        }
         connection
     }
 
@@ -108,17 +159,17 @@ impl ProviderEntry {
         let table = format!("providers.{name}");
         validate_provider_name(name)
             .map_err(|reason| ConfigError::new(format!("{table}: {reason}")))?;
-        if is_builtin_provider(name) {
-            if !self.type_.is_empty() && self.type_ != name {
+        if let Some(expected) = builtin_provider_type(name) {
+            if !self.type_.is_empty() && self.type_ != expected {
                 return Err(ConfigError::new(format!(
-                    "{table}.type must be \"{name}\" or omitted"
+                    "{table}.type must be \"{expected}\" or omitted"
                 )));
             }
         } else if self.type_.is_empty() {
             return Err(ConfigError::new(format!(
                 "{table}.type is required: \"claude\", \"openai-compatible\" or \"chatgpt\""
             )));
-        } else if !is_builtin_provider(&self.type_) {
+        } else if !PROVIDER_TYPES.contains(&self.type_.as_str()) {
             return Err(ConfigError::new(format!(
                 "{table}.type must be \"claude\", \"openai-compatible\" or \"chatgpt\", got \"{}\"",
                 self.type_
@@ -182,13 +233,20 @@ impl File {
         Ok(())
     }
 
-    /// The configured provider `name`, or the empty built-in provider of that
-    /// name; `None` when the name is neither.
+    /// The effective provider, with static model tables filled in when enabled.
+    /// Explicit model tables always win; the raw configuration is unchanged.
     pub fn provider_entry(&self, name: &str) -> Option<ProviderEntry> {
-        self.providers
+        let mut entry = self
+            .providers
             .get(name)
             .cloned()
-            .or_else(|| is_builtin_provider(name).then(ProviderEntry::default))
+            .or_else(|| is_builtin_provider(name).then(ProviderEntry::default))?;
+        if entry.include_preset_models {
+            for &model_id in super::model_presets::for_provider(name) {
+                entry.models.entry(model_id.into()).or_default();
+            }
+        }
+        Some(entry)
     }
 
     /// The model table `selector` names, or an empty one when the provider has
@@ -240,7 +298,10 @@ compaction_window = 100000
         assert_eq!(connection.base_url, "https://api.anthropic.com");
         assert_eq!(claude.models["claude-x"].compaction_window, Some(100_000));
         assert!(file.provider_entry("openai-compatible").is_some());
-        assert!(file.provider_entry("deepseek").is_none());
+        let deepseek = file.provider_entry("deepseek").expect("built-in DeepSeek");
+        assert_eq!(deepseek.provider_type("deepseek"), "openai-compatible");
+        assert!(deepseek.models.contains_key("deepseek-flash"));
+        assert!(file.provider_entry("unknown-provider").is_none());
     }
 
     #[test]

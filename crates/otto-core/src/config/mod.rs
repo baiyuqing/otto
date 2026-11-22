@@ -65,6 +65,11 @@ pub const PROVIDER_CLAUDE: &str = "claude";
 pub const DEFAULT_CLAUDE_API_VERSION: &str = "2026-10-21";
 /// Provider identifier for a ChatGPT subscription via OAuth credentials.
 pub const PROVIDER_CHATGPT: &str = "chatgpt";
+pub const PROVIDER_DEEPSEEK: &str = "deepseek";
+
+mod model_presets;
+#[cfg(test)]
+mod model_presets_tests;
 
 /// A configuration error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

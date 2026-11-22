@@ -7,7 +7,7 @@ use toml::{Table, Value};
 
 use super::{Diagnostic, ManagedPolicy, Origin};
 use crate::config::providers::{
-    CLAUDE_DEFAULT_API_KEY_ENV, CLAUDE_DEFAULT_BASE_URL, is_builtin_provider,
+    CLAUDE_DEFAULT_API_KEY_ENV, CLAUDE_DEFAULT_BASE_URL, builtin_provider_type, is_builtin_provider,
 };
 use crate::config::resolve::Runtime;
 use crate::config::{ConfigError, DEFAULT_CLAUDE_API_VERSION, PROVIDER_CLAUDE};
@@ -106,8 +106,9 @@ fn effective_type(name: &str, provider: &Table) -> Option<String> {
     provider
         .get("type")
         .and_then(Value::as_str)
+        .filter(|type_| !type_.is_empty())
+        .or_else(|| builtin_provider_type(name))
         .map(str::to_string)
-        .or_else(|| is_builtin_provider(name).then(|| name.to_string()))
 }
 
 /// When `incoming` sets a provider `type` different from the one already

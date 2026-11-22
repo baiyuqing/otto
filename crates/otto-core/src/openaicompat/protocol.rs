@@ -23,11 +23,26 @@ use crate::provider::Request;
 
 /// One `POST /chat/completions` body. Otto always streams, and always asks for
 /// usage in the final chunk.
+/// Request encoding policy for the authorized Chat Completions endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestDialect {
+    Standard,
+    OfficialDeepSeek,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DisabledThinking {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WireRequest {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub reasoning_effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<DisabledThinking>,
     #[serde(serialize_with = "serialize_messages")]
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -222,6 +237,10 @@ pub struct PromptTokensDetails {
 /// message per tool-result block; its other blocks are dropped. A non-empty
 /// cache key becomes `prompt_cache_key`.
 pub fn build_request(request: &Request) -> WireRequest {
+    build_request_for(request, RequestDialect::Standard)
+}
+
+pub fn build_request_for(request: &Request, dialect: RequestDialect) -> WireRequest {
     let mut messages: Vec<WireMessage> = Vec::new();
     if !request.system_prompt.is_empty() {
         messages.push(wire_message("system", request.system_prompt.clone()));
@@ -268,9 +287,20 @@ pub fn build_request(request: &Request) -> WireRequest {
             Role::Other(_) => {}
         }
     }
+    // DeepSeek defaults to thinking, which requires reasoning_content replay
+    // after tool calls. Otto does not replay provider reasoning.
+    let (reasoning_effort, thinking, prompt_cache_key) = match dialect {
+        RequestDialect::Standard => (request.thinking.clone(), None, request.cache_key.clone()),
+        RequestDialect::OfficialDeepSeek => (
+            String::new(),
+            Some(DisabledThinking { kind: "disabled" }),
+            String::new(),
+        ),
+    };
     WireRequest {
         model: request.model.clone(),
-        reasoning_effort: request.thinking.clone(),
+        reasoning_effort,
+        thinking,
         messages,
         tools: request
             .tools
@@ -288,7 +318,7 @@ pub fn build_request(request: &Request) -> WireRequest {
         stream_options: StreamOptions {
             include_usage: true,
         },
-        prompt_cache_key: request.cache_key.clone(),
+        prompt_cache_key,
     }
 }
 
@@ -306,7 +336,14 @@ pub fn finish_reason(wire: &str) -> FinishReason {
 /// The byte length the request occupies on the wire. Phase 4 implements
 /// `RequestSizer` with it.
 pub fn serialized_request_size(request: &Request) -> Result<usize, serde_json::Error> {
-    Ok(serde_json::to_vec(&build_request(request))?.len())
+    serialized_request_size_for(request, RequestDialect::Standard)
+}
+
+pub fn serialized_request_size_for(
+    request: &Request,
+    dialect: RequestDialect,
+) -> Result<usize, serde_json::Error> {
+    Ok(serde_json::to_vec(&build_request_for(request, dialect))?.len())
 }
 
 /// Reports whether the accumulated argument text is a complete JSON value.

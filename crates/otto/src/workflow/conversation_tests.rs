@@ -136,7 +136,11 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
             "scope",
             "source",
             "operation-1",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();
@@ -147,7 +151,11 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
             "scope",
             "source",
             "operation-1",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();
@@ -166,7 +174,11 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
                 "changed",
                 "source",
                 "operation-1",
-                otto_core::agent::budget::RootBudget::new("test-root", Default::default())
+                otto_core::agent::budget::RootBudget::new(
+                    "test-root",
+                    Default::default(),
+                    otto_core::agent::budget::untimed()
+                )
             )
             .await
             .is_err()
@@ -178,7 +190,11 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
                 "scope",
                 "",
                 "operation-2",
-                otto_core::agent::budget::RootBudget::new("test-root", Default::default())
+                otto_core::agent::budget::RootBudget::new(
+                    "test-root",
+                    Default::default(),
+                    otto_core::agent::budget::untimed()
+                )
             )
             .await
             .is_err()
@@ -211,7 +227,11 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
             "scope",
             "source",
             "operation-2",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();
@@ -237,7 +257,11 @@ async fn lifecycle_replay_restart_gate_dedup_and_no_new_session_redirect() {
             "scope",
             "source",
             "op",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();
@@ -379,7 +403,11 @@ async fn receipt_survives_crash_before_launch_and_does_not_retry_interrupted_eff
             "scope",
             "source",
             "same-op",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();
@@ -411,7 +439,11 @@ async fn same_operation_returns_original_snapshot_after_catalog_restart() {
             "scope",
             "source",
             "op",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();
@@ -429,7 +461,11 @@ async fn same_operation_returns_original_snapshot_after_catalog_restart() {
             "scope",
             "source",
             "op",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();
@@ -551,7 +587,11 @@ async fn failed_enqueue_keeps_ordered_page_pending() {
             "scope",
             "source",
             "op",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();

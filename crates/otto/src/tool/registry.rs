@@ -109,6 +109,21 @@ impl Registry {
         control: &dyn OperationControl,
         scope_override: Option<&otto_core::approval::Scope>,
     ) -> ToolExecution {
+        // A wait for a user decision inside this call is not active time of
+        // the run's turn budget; see `approval::user_wait`.
+        crate::approval::user_wait::scoped(
+            control.holder().cloned(),
+            self.execute_within_scope(call, control, scope_override),
+        )
+        .await
+    }
+
+    async fn execute_within_scope(
+        &self,
+        call: ToolCall<'_>,
+        control: &dyn OperationControl,
+        scope_override: Option<&otto_core::approval::Scope>,
+    ) -> ToolExecution {
         if let Some(reason) = control.admission_stop_reason() {
             return stopped_not_started(reason);
         }

@@ -114,7 +114,9 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
         Ok(owner.clone()),
         source_id.clone(),
         true,
-        Default::default(),
+        std::sync::Arc::new(otto_core::agent::budget::SessionBudgetCell::new(
+            otto_core::agent::budget::untimed(),
+        )),
         Default::default(),
     );
     let runner = Runner::scripted_with_tools(source.clone(), provider, tasks, parent.tools());
@@ -251,7 +253,11 @@ async fn live_saved_workflow_human_gate_terminal_wake_reopen_and_new_isolation()
             "later",
             &source_id,
             "later",
-            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+            otto_core::agent::budget::RootBudget::new(
+                "test-root",
+                Default::default(),
+                otto_core::agent::budget::untimed(),
+            ),
         )
         .await
         .unwrap();

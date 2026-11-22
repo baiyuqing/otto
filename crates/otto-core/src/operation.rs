@@ -30,6 +30,14 @@ pub trait OperationControl: Send + Sync {
     fn admission_stop_reason(&self) -> Option<OperationStopReason> {
         self.stop_reason()
     }
+
+    /// The holder of the turn budget the operation runs for. A tool that blocks
+    /// on a user decision takes a [`UserPause`](crate::agent::budget::UserPause)
+    /// from it, so the wait does not count against `max_duration`. `None` for
+    /// an operation that is not part of a budgeted run.
+    fn holder(&self) -> Option<&crate::agent::budget::HolderHandle> {
+        None
+    }
 }
 
 /// Backward-compatible unlimited operation control. Cancellation of the token

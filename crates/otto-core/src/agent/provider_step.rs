@@ -92,7 +92,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         }
 
-        self.admit_tokens()?;
+        self.admit_shared()?;
         let (response, visible_output, error) = self
             .complete_normal_provider_attempt(request, state, emit, control)
             .await;
@@ -126,7 +126,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 vec![original_overflow.to_string()],
             ));
         }
-        self.admit_tokens()?;
+        self.admit_shared()?;
         let (response, _, error) = self
             .complete_normal_provider_attempt(retry_request, state, emit, control)
             .await;
@@ -728,6 +728,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = scope.into_turn();
     }
 
+    /// Starts the holder that counts the run in progress on the root's
+    /// active-time clock; see [`super::budget::Holder`].
+    pub(super) fn enter_holder(&self) -> super::budget::Holder {
+        self.with_budget(|budget| budget.root().enter())
+    }
+
     /// Charges the usage of one provider response, as soon as it is known.
     pub(super) fn charge_budget(&self, usage: Option<Usage>) {
         self.with_budget(|budget| budget.charge(usage));
@@ -738,11 +744,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         self.with_budget(|budget| budget.admit_step())
     }
 
-    /// Refuses a request that would consume tokens once the token limit is
-    /// reached. Used before a retry after overflow and before each
+    /// Refuses a request once a limit shared by the root (tokens or active
+    /// time) is reached. Used before a retry after overflow and before each
     /// compaction request.
-    pub(super) fn admit_tokens(&self) -> Result<(), AgentError> {
-        self.with_budget(|budget| budget.admit_tokens())
+    pub(super) fn admit_shared(&self) -> Result<(), AgentError> {
+        self.with_budget(|budget| budget.admit_shared())
             .map_err(|exceeded| self.report_budget(exceeded))
     }
 

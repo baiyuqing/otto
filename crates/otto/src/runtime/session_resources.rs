@@ -157,8 +157,18 @@ impl SessionResources {
     }
 
     /// Resources for a scripted test runner built around `tasks`.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn for_tests(session_id: &str, tasks: Option<Arc<Tasks>>) -> Arc<Self> {
+        Self::for_tests_with_clock(session_id, tasks, otto_platform::clock::process_clock())
+    }
+
+    /// [`Self::for_tests`] whose roots measure active time with `clock`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_tests_with_clock(
+        session_id: &str,
+        tasks: Option<Arc<Tasks>>,
+        clock: otto_core::agent::budget::SharedClock,
+    ) -> Arc<Self> {
         let notifications = match &tasks {
             Some(tasks) => Arc::clone(tasks.notifications_inbox()),
             None => Arc::new(Inbox::default()),
@@ -171,7 +181,7 @@ impl SessionResources {
             tasks,
             reminders,
             output_logs: Arc::new(Logs::for_session(session_id)),
-            budget: Arc::default(),
+            budget: Arc::new(SessionBudgetCell::new(clock)),
             mcp: tokio::sync::OnceCell::new(),
             workflow_binding: Mutex::new(None),
             closed: AtomicBool::new(false),

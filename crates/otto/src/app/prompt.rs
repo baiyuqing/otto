@@ -5,10 +5,14 @@ use super::*;
 /// Why a follow-up was discarded when its turn ended while an approval waits.
 const APPROVAL_SKIP_NOTICE: &str = "An agent-scheduled follow-up was not run because this terminal turn ended while approval is pending. Retry it after resolving the approval.";
 
-/// Why a follow-up was discarded once the root's tokens were used up.
+/// Why a follow-up was discarded once a limit the root shares was used up.
 pub(super) fn budget_skip_notice(exceeded: otto_core::agent::budget::Exceeded) -> String {
+    let budget = match exceeded.kind {
+        otto_core::agent::budget::BudgetKind::Duration => "active-time budget",
+        _ => "token budget",
+    };
     format!(
-        "An agent-scheduled follow-up was not run because the token budget of this turn is used up ({exceeded}). Send a new message to continue."
+        "An agent-scheduled follow-up was not run because the {budget} of this turn is used up ({exceeded}). Send a new message to continue."
     )
 }
 

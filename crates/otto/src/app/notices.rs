@@ -21,9 +21,26 @@ pub struct Notice {
     pub presentation_origin: String,
 }
 
+/// Which frontends read a queued line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Audience {
+    /// Every reader.
+    Everyone,
+    /// The terminal UI and the line REPL, which take the queue with
+    /// [`Controller::take_notices`]. Readers that follow it by id
+    /// ([`Controller::routed_notices_since`]) skip it: they receive the same
+    /// fact through [`Controller::wake_replies_since`].
+    Terminal,
+}
+
+struct Entry {
+    notice: Notice,
+    audience: Audience,
+}
+
 #[derive(Default)]
 struct Queue {
-    lines: VecDeque<Notice>,
+    lines: VecDeque<Entry>,
     last_id: u64,
 }
 
@@ -34,7 +51,7 @@ impl Notice {
 }
 
 impl Notices {
-    fn push_with_origin(&self, line: String, presentation_origin: &str) {
+    fn push_with_origin(&self, line: String, presentation_origin: &str, audience: Audience) {
         {
             let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
             if queue.lines.len() >= MAXIMUM_NOTICES {
@@ -42,10 +59,13 @@ impl Notices {
             }
             queue.last_id += 1;
             let id = queue.last_id;
-            queue.lines.push_back(Notice {
-                id,
-                text: line,
-                presentation_origin: presentation_origin.to_owned(),
+            queue.lines.push_back(Entry {
+                notice: Notice {
+                    id,
+                    text: line,
+                    presentation_origin: presentation_origin.to_owned(),
+                },
+                audience,
             });
         }
         self.signal.send_modify(|count| *count += 1);
@@ -61,7 +81,11 @@ impl Notices {
     }
 
     pub(super) fn push(&self, line: String) {
-        self.push_with_origin(line, "");
+        self.push_with_origin(line, "", Audience::Everyone);
+    }
+
+    fn push_terminal(&self, line: String) {
+        self.push_with_origin(line, "", Audience::Terminal);
     }
 
     /// Removes and returns every queued line. For a frontend that is the only
@@ -72,7 +96,7 @@ impl Notices {
             .unwrap_or_else(|p| p.into_inner())
             .lines
             .drain(..)
-            .map(Notice::local_text)
+            .map(|entry| entry.notice.local_text())
             .collect()
     }
 
@@ -84,8 +108,8 @@ impl Notices {
         let lines = queue
             .lines
             .iter()
-            .filter(|notice| notice.id > after)
-            .cloned()
+            .filter(|entry| entry.notice.id > after && entry.audience == Audience::Everyone)
+            .map(|entry| entry.notice.clone())
             .collect();
         (lines, queue.last_id)
     }
@@ -111,6 +135,28 @@ impl Controller {
 
     pub fn routed_notices_since(&self, after: u64) -> (Vec<Notice>, u64) {
         self.notices.since(after)
+    }
+
+    /// Tells the user once that notifications are held because a limit of the
+    /// last root turn is used up, in every frontend. `reported` is `Some` only
+    /// for the call that wrote the `turn_budget_wake_skipped` record of the
+    /// root, so a root is announced once. The terminal UI and the line REPL
+    /// show it as a notice; the HTTP server and the ACP frontends deliver the
+    /// same text through the wake replies, the one out-of-turn text channel
+    /// they read.
+    pub(super) fn announce_withheld_wake(
+        &self,
+        withheld: &otto_core::agent::budget::Withheld,
+        reported: Option<usize>,
+    ) {
+        let Some(pending) = reported else { return };
+        let text = super::WithheldWake {
+            pending,
+            exceeded: withheld.exceeded,
+        }
+        .to_string();
+        self.notices.push_terminal(text.clone());
+        self.wake_replies.push(text);
     }
 
     /// Queues a notice as background operations would, for frontend tests.

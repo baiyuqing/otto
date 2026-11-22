@@ -1,8 +1,11 @@
 //! Task view, steering, active-input admission, control messages and wake claims.
 
+use otto_core::agent::budget::BudgetKind;
+
 use super::*;
 
-/// Notifications that stay queued because the root budget has no tokens left.
+/// Notifications that stay queued because a limit the root turn shares is used
+/// up: its tokens or its active time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WithheldWake {
     /// How many notifications are queued.
@@ -11,12 +14,44 @@ pub struct WithheldWake {
     pub exceeded: otto_core::agent::budget::Exceeded,
 }
 
+impl WithheldWake {
+    /// The name of the used-up budget as the notice words it.
+    fn budget_name(&self) -> &'static str {
+        match self.exceeded.kind {
+            BudgetKind::Tokens => "token budget",
+            BudgetKind::Steps => "provider-step budget",
+            BudgetKind::Duration => "active-time budget",
+        }
+    }
+}
+
+impl WithheldWake {
+    /// The error of a one-shot run (`otto --prompt`), which has no next input
+    /// to deliver the notifications with.
+    pub fn one_shot_message(&self) -> String {
+        let count = match self.pending {
+            1 => "1 notification was".to_owned(),
+            count => format!("{count} notifications were"),
+        };
+        format!(
+            "{count} not delivered: the {} of this run is used up, {}. A one-shot run has no next input.",
+            self.budget_name(),
+            self.exceeded
+        )
+    }
+}
+
 impl std::fmt::Display for WithheldWake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let held = match self.pending {
+            1 => "1 notification is held".to_owned(),
+            count => format!("{count} notifications are held"),
+        };
         write!(
             f,
-            "{} queued notification(s) were not delivered because the token budget is used up ({}); they stay queued and are delivered with the next input of this session",
-            self.pending, self.exceeded
+            "{held}: the {} of the last root turn is used up, {}. They are delivered with the next input.",
+            self.budget_name(),
+            self.exceeded
         )
     }
 }
@@ -269,9 +304,9 @@ impl Controller {
     }
 
     /// Claims a turn only when the runner has pending inbox messages and the
-    /// session's root budget has tokens left. This is the one place a wake turn
+    /// session's root budget has tokens and active time left. This is the one place a wake turn
     /// is admitted: the server, the terminal frontends, `otto --prompt` and ACP
-    /// all claim through it. With the tokens used up it returns `None` and the
+    /// all claim through it. With a shared limit used up it returns `None` and the
     /// notifications stay queued until the next user input, which starts a new
     /// root turn and delivers them; see [`Controller::withheld_wake`].
     pub fn prepare_wake(&self) -> Result<Option<WakeOperation<'_>>, String> {
@@ -294,7 +329,7 @@ impl Controller {
                 WakeGate::Admit(budget) => (state.reserve_wake()?, budget),
                 WakeGate::Withheld(withheld) => {
                     drop(state);
-                    runner.report_wake_withheld(&withheld);
+                    self.announce_withheld_wake(&withheld, runner.report_wake_withheld(&withheld));
                     return Ok(None);
                 }
             }
@@ -307,7 +342,8 @@ impl Controller {
     }
 
     /// The notifications a wake turn cannot deliver because the session's root
-    /// budget has no tokens left, or `None` when nothing is withheld. A caller
+    /// budget has no tokens or no active time left, or `None` when nothing is
+    /// withheld. A caller
     /// that would otherwise wait for a wake that will not run (`otto --prompt`)
     /// or retry one (ACP) asks here first. The first call for a root writes the
     /// `turn_budget_wake_skipped` record.
@@ -326,7 +362,7 @@ impl Controller {
         match runner.wake_gate() {
             WakeGate::Admit(_) => None,
             WakeGate::Withheld(withheld) => {
-                runner.report_wake_withheld(&withheld);
+                self.announce_withheld_wake(&withheld, runner.report_wake_withheld(&withheld));
                 Some(WithheldWake {
                     pending,
                     exceeded: withheld.exceeded,

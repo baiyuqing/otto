@@ -83,7 +83,8 @@ pub struct Finish {
 pub enum TurnStop {
     /// The progress guard stopped the turn; see [`crate::agent::progress`].
     NoProgress(crate::agent::progress::StallKind),
-    /// The turn reached `[agent.budget].max_tokens` or `max_steps`; see
+    /// The turn reached `[agent.budget].max_tokens`, `max_steps` or
+    /// `max_duration`; see
     /// [`crate::agent::budget`].
     Budget(crate::agent::budget::BudgetKind),
 }
@@ -95,6 +96,7 @@ impl TurnStop {
             Self::NoProgress(kind) => kind.as_str(),
             Self::Budget(crate::agent::budget::BudgetKind::Tokens) => "budget_tokens",
             Self::Budget(crate::agent::budget::BudgetKind::Steps) => "budget_steps",
+            Self::Budget(crate::agent::budget::BudgetKind::Duration) => "budget_duration",
         }
     }
 }
@@ -121,7 +123,7 @@ pub trait Diagnostics: Send + Sync {
     /// same `budget_id`.
     fn turn_budget_exceeded(&self, _exceeded: &crate::agent::budget::Exceeded, _budget_id: &str) {}
     /// A wake turn was not started because the session's root budget has no
-    /// tokens left. Only the root's id and the number of queued notifications
+    /// tokens or no active time left. Only the root's id and the number of queued notifications
     /// are passed; notification text never is.
     fn turn_budget_wake_skipped(&self, _budget_id: &str, _pending_notifications: usize) {}
 }

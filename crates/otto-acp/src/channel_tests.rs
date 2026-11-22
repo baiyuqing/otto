@@ -209,6 +209,82 @@ async fn a_wake_withheld_by_the_token_budget_does_not_signal_slot_release() {
 }
 
 #[tokio::test]
+async fn a_withheld_wake_reaches_the_acp_client_as_one_message_per_root() {
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let controller = Arc::new(otto::fixtures::controller(workspace.path(), sessions.path()).await);
+    let id = controller.info().session_id;
+    let builder = Arc::clone(controller.builder());
+    let session = Arc::new(Session {
+        controller: Arc::clone(&controller),
+        prompt: Arc::new(PromptSlot::default()),
+    });
+    let (out, mut frames) = mpsc::unbounded_channel();
+    let connection = Arc::new(Connection {
+        workspace: workspace.path().to_path_buf(),
+        backend: Backend::Local(Box::new(Local {
+            config: Config {
+                runtime: otto::fixtures::initial_runtime(&builder),
+                builder,
+                workspace: workspace.path().to_path_buf(),
+                sandbox: None,
+            },
+            sessions: Mutex::new(HashMap::from([(id.clone(), Arc::clone(&session))])),
+        })),
+        out,
+        pending: Mutex::new(HashMap::new()),
+        next_request_id: AtomicU64::new(1),
+        client_capabilities: Mutex::new(Value::Null),
+        task_stop: CancellationToken::new(),
+        notice_stop: CancellationToken::new(),
+        watching_notices: Mutex::new(HashMap::new()),
+        notice_ready: Mutex::new(HashMap::new()),
+        wake_loops: Mutex::new(HashMap::new()),
+    });
+    connection.start_notice_watcher(&id).await;
+    connection.notices_ready(&Ok(json!({"sessionId": id})));
+    controller
+        .current_runner()
+        .expect("runner")
+        .exhaust_root_budget();
+    controller
+        .subagent_tasks()
+        .expect("task registry")
+        .notifications()
+        .push(otto_core::agent::inbox::Notification {
+            text: "[task] secret text".into(),
+            ..Default::default()
+        });
+    let stop = CancellationToken::new();
+    for _ in 0..3 {
+        assert!(!wake_turn(&session, &stop).await);
+    }
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+        .await
+        .expect("the client receives the notice")
+        .unwrap();
+    let text = frame
+        .pointer("/params/update/content/text")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(
+        text.starts_with("1 notification is held: the token budget"),
+        "{text}"
+    );
+    assert!(text.contains("[agent.budget].max_tokens"), "{text}");
+    assert!(!text.contains("secret text"), "{text}");
+    // No second message for the same root, from either watcher.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), frames.recv())
+            .await
+            .is_err()
+    );
+    connection.notice_stop.cancel();
+    controller.close().unwrap();
+}
+
+#[tokio::test]
 async fn a_prompt_is_admitted_when_the_wake_turn_ends_between_begin_and_wait() {
     let slot = PromptSlot::default();
     let parent = CancellationToken::new();

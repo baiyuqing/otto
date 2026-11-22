@@ -333,7 +333,9 @@ pub fn test_config(
         lease: None,
         workspace_path: std::path::PathBuf::new(),
         child_mailbox: None,
-        budget: Arc::default(),
+        budget: Arc::new(otto_core::agent::budget::SessionBudgetCell::new(
+            otto_platform::clock::process_clock(),
+        )),
     }
 }
 

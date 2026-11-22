@@ -4,6 +4,7 @@
 //! They sit between `otto-core` and `otto`.
 
 pub mod child_fence;
+pub mod clock;
 pub mod deadline;
 pub mod fsops;
 mod gourl;

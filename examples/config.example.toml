@@ -91,6 +91,7 @@ auto = true
 [agent.budget]                 # per-turn limits; 0 disables one (docs/manual/limits.md#turn-budget)
 max_tokens = 4200000
 max_steps = 54
+max_duration = "40m"           # active time; idle time and approval waits do not count
 
 [sandbox]
 driver = "auto"

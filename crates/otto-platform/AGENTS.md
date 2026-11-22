@@ -4,7 +4,7 @@ The [repository rules](../../AGENTS.md) apply. Use the
 [ownership map](../../docs/code-organization.md#repository-map) and
 [package contracts](../../docs/development/architecture.md#package-boundaries).
 
-- Scope: process-wide primitives with no domain knowledge: `hex`, `deadline`,
+- Scope: process-wide primitives with no domain knowledge: `hex`, `deadline`, `clock`,
   `retry`, `fsops` (pinned POSIX file driver and the `FileDriver` contract),
   `log`, `tls_provider`, `urlprivacy`, `sse` (the Server-Sent Events parser
   used by the MCP HTTP transport and by `otto-client`), `program_status`,

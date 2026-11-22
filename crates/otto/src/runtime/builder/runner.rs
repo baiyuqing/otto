@@ -553,13 +553,37 @@ impl Runner {
         budget_policy: otto_core::agent::budget::BudgetPolicy,
         diagnostics: Option<Arc<dyn otto_core::diagnostics::Diagnostics>>,
     ) -> Self {
+        Self::scripted_with_clock(
+            session,
+            provider,
+            tasks,
+            tools,
+            budget_policy,
+            diagnostics,
+            otto_platform::clock::process_clock(),
+        )
+    }
+
+    /// [`Self::scripted_with_budget`] whose roots measure active time with
+    /// `clock`, so a test moves time without sleeping.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scripted_with_clock(
+        session: SharedSession,
+        provider: Arc<dyn Provider + Send + Sync>,
+        tasks: Arc<crate::subagent::tasks::Tasks>,
+        tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>>,
+        budget_policy: otto_core::agent::budget::BudgetPolicy,
+        diagnostics: Option<Arc<dyn otto_core::diagnostics::Diagnostics>>,
+        clock: otto_core::agent::budget::SharedClock,
+    ) -> Self {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
         let task_control = Arc::new(crate::runtime::task_control::TaskControl::default());
         let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = tasks.notifications().clone();
-        let resources = super::super::session_resources::SessionResources::for_tests(
+        let resources = super::super::session_resources::SessionResources::for_tests_with_clock(
             &session.header().id,
             Some(Arc::clone(&tasks)),
+            clock,
         );
         let budget = Arc::clone(resources.budget());
         session.install_test_resources(resources);

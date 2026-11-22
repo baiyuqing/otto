@@ -1,5 +1,6 @@
 //! `Agent` entry points and the body of one admitted turn.
 
+use super::budget::HolderHandle;
 use super::step_control::StepControl;
 use super::*;
 use crate::session::{MEMORY_RECALL_CUSTOM_TYPE, MemoryRecordRef, encode_memory_recall};
@@ -181,6 +182,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         followup: bool,
     ) -> Result<(), AgentError> {
         self.begin_budget(scope);
+        // The root's active-time clock counts this run until it returns,
+        // however it returns.
+        let holder = self.enter_holder();
+        let handle = holder.handle();
         if self.redactor.allows_dynamic_content() {
             self.preflight_ordinary_turn(user_text, image.as_ref(), system_context, followup)?;
         }
@@ -193,7 +198,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             || !self.redactor.allows_dynamic_content()
         {
             return self
-                .run_inner(user_text, image, system_context, emit, control, followup)
+                .run_inner(
+                    user_text,
+                    image,
+                    system_context,
+                    emit,
+                    control,
+                    followup,
+                    &handle,
+                )
                 .await;
         }
         *self
@@ -221,7 +234,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
                 if let Some(text) = response.context { context.push_str(&format!("\n<plugin_context>Untrusted plugin context:\n{text}\n</plugin_context>")); }
             }
-            self.run_inner(user_text, image, &context, emit, control, followup).await
+            self.run_inner(user_text, image, &context, emit, control, followup, &handle).await
         }.await;
         let end_control = CancellationToken::new();
         let status = if result.is_ok() {
@@ -266,6 +279,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
         user_text: &str,
@@ -274,6 +288,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
         followup: bool,
+        holder: &HolderHandle,
     ) -> Result<(), AgentError> {
         let input_provenance = self
             .next_input_provenance
@@ -316,6 +331,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 (&turn_id, resumes.as_deref()),
                 input_id,
                 input_provenance,
+                holder,
             )
             .await;
         self.end_turn(turn_id, &result, control).await;
@@ -414,6 +430,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         turn: (&str, Option<&str>),
         input_id: Option<String>,
         input_provenance: Option<crate::model::InputProvenance>,
+        holder: &HolderHandle,
     ) -> Result<(), AgentError> {
         let text = trim_go_space(user_text);
         let steering = self.options.steering.begin_turn(turn.0, turn.1);
@@ -582,7 +599,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
             state.yield_after_batch = false;
             state.batch_has_errors = false;
-            let step = StepControl::new(control);
+            let step = StepControl::new(control, holder.clone());
             steering.arm(step.cancellation_token());
             let provider_step = self
                 .dispatch_normal_provider_step(emit, &mut state, &system_context, &step)

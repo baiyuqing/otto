@@ -10,13 +10,14 @@ fn usage(input: i64, output: i64) -> Option<Usage> {
 
 /// A turn on a new root with the given limits.
 fn turn(policy: BudgetPolicy) -> TurnBudget {
-    RootBudget::new("root-1", policy).new_turn()
+    RootBudget::new("root-1", policy, untimed()).new_turn()
 }
 
 fn policy(tokens: u64, steps: u64) -> BudgetPolicy {
     BudgetPolicy {
         max_tokens: Limit::from_count(tokens),
         max_steps: Limit::from_count(steps),
+        max_duration: Limit::Unlimited,
     }
 }
 
@@ -37,9 +38,9 @@ fn the_defaults_are_the_documented_values() {
 fn tokens_are_refused_at_exactly_the_limit_and_not_below() {
     let budget = turn(policy(100, 0));
     budget.charge(usage(60, 39));
-    assert_eq!(budget.admit_tokens(), Ok(()));
+    assert_eq!(budget.admit_shared(), Ok(()));
     budget.charge(usage(0, 1));
-    let exceeded = budget.admit_tokens().unwrap_err();
+    let exceeded = budget.admit_shared().unwrap_err();
     assert_eq!(exceeded.kind, BudgetKind::Tokens);
     assert_eq!(exceeded.used, 100);
     assert_eq!(exceeded.limit.get(), 100);
@@ -49,7 +50,7 @@ fn tokens_are_refused_at_exactly_the_limit_and_not_below() {
 fn a_response_without_usage_charges_nothing() {
     let budget = turn(policy(10, 0));
     budget.charge(None);
-    assert_eq!(budget.admit_tokens(), Ok(()));
+    assert_eq!(budget.admit_shared(), Ok(()));
 }
 
 #[test]
@@ -77,7 +78,7 @@ fn unlimited_never_refuses() {
         budget.charge(usage(i64::MAX, i64::MAX));
         assert_eq!(budget.admit_step(), Ok(()));
     }
-    assert_eq!(budget.admit_tokens(), Ok(()));
+    assert_eq!(budget.admit_shared(), Ok(()));
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn an_exhausted_budget_keeps_reporting_the_first_limit() {
     let first = budget.admit_step().unwrap_err();
     assert_eq!(first.kind, BudgetKind::Steps);
     budget.charge(usage(100, 0));
-    assert_eq!(budget.admit_tokens().unwrap_err(), first);
+    assert_eq!(budget.admit_shared().unwrap_err(), first);
     assert_eq!(budget.admit_step().unwrap_err(), first);
 }
 
@@ -132,15 +133,15 @@ fn the_error_text_names_the_key_the_limit_and_the_amount_used() {
 
 #[test]
 fn tokens_are_shared_by_every_turn_of_one_root() {
-    let root = RootBudget::new("root-1", policy(100, 0));
+    let root = RootBudget::new("root-1", policy(100, 0), untimed());
     let parent = root.new_turn();
     let child = root.new_turn();
     parent.charge(usage(60, 0));
-    assert_eq!(child.admit_tokens(), Ok(()));
+    assert_eq!(child.admit_shared(), Ok(()));
     child.charge(usage(30, 20));
     // The child's usage is visible to the parent and the parent's to the child.
-    let from_parent = parent.admit_tokens().unwrap_err();
-    let from_child = child.admit_tokens().unwrap_err();
+    let from_parent = parent.admit_shared().unwrap_err();
+    let from_child = child.admit_shared().unwrap_err();
     assert_eq!(from_parent, from_child);
     assert_eq!(from_parent.kind, BudgetKind::Tokens);
     assert_eq!(from_parent.used, 110);
@@ -149,7 +150,7 @@ fn tokens_are_shared_by_every_turn_of_one_root() {
 
 #[test]
 fn a_root_exhausted_by_one_holder_stays_exhausted_with_its_first_amount() {
-    let root = RootBudget::new("root-1", policy(10, 0));
+    let root = RootBudget::new("root-1", policy(10, 0), untimed());
     let first = root.new_turn();
     let second = root.new_turn();
     first.charge(usage(10, 0));
@@ -162,7 +163,7 @@ fn a_root_exhausted_by_one_holder_stays_exhausted_with_its_first_amount() {
 
 #[test]
 fn steps_belong_to_one_turn_and_a_clone_continues_them() {
-    let root = RootBudget::new("root-1", policy(0, 3));
+    let root = RootBudget::new("root-1", policy(0, 3), untimed());
     let turn = root.new_turn();
     let continuation = turn.clone();
     assert_eq!(turn.admit_step(), Ok(()));
@@ -183,16 +184,16 @@ fn steps_belong_to_one_turn_and_a_clone_continues_them() {
 fn a_fresh_scope_makes_a_new_root_each_time_and_a_shared_scope_keeps_its_own() {
     let first = BudgetScope::Fresh(policy(100, 0)).into_turn();
     first.charge(usage(100, 0));
-    assert!(first.admit_tokens().is_err());
+    assert!(first.admit_shared().is_err());
     let second = BudgetScope::Fresh(policy(100, 0)).into_turn();
-    assert_eq!(second.admit_tokens(), Ok(()));
+    assert_eq!(second.admit_shared(), Ok(()));
     assert_eq!(second.budget_id(), "");
 
-    let shared = RootBudget::new("root-9", policy(100, 0)).new_turn();
+    let shared = RootBudget::new("root-9", policy(100, 0), untimed()).new_turn();
     let scoped = BudgetScope::Shared(shared.clone()).into_turn();
     assert_eq!(scoped.budget_id(), "root-9");
     shared.charge(usage(100, 0));
-    assert!(scoped.admit_tokens().is_err());
+    assert!(scoped.admit_shared().is_err());
 }
 
 mod session {
@@ -204,7 +205,7 @@ mod session {
 
     #[test]
     fn a_wake_with_no_root_yet_starts_a_root_that_later_children_share() {
-        let cell = SessionBudgetCell::default();
+        let cell = SessionBudgetCell::new(untimed());
         let WakeGate::Admit(turn) = cell.wake_gate(ids(), policy(100, 0)) else {
             panic!("a session with no root admits a wake turn");
         };
@@ -215,7 +216,7 @@ mod session {
 
     #[test]
     fn each_user_turn_replaces_the_root() {
-        let cell = SessionBudgetCell::default();
+        let cell = SessionBudgetCell::new(untimed());
         let first = cell.begin_root("a".into(), policy(100, 0));
         first.charge(usage(100, 0));
         assert!(cell.exhausted().is_some());
@@ -227,7 +228,7 @@ mod session {
 
     #[test]
     fn an_exhausted_root_withholds_wake_turns_and_reports_once() {
-        let cell = SessionBudgetCell::default();
+        let cell = SessionBudgetCell::new(untimed());
         let root = cell.begin_root("a".into(), policy(100, 0));
         assert!(matches!(
             cell.wake_gate(ids(), policy(100, 0)),
@@ -264,7 +265,7 @@ mod session {
 
     #[test]
     fn a_step_limit_never_withholds_a_wake_turn() {
-        let cell = SessionBudgetCell::default();
+        let cell = SessionBudgetCell::new(untimed());
         let turn = cell.begin_root("a".into(), policy(0, 1));
         assert_eq!(turn.admit_step(), Ok(()));
         assert!(turn.admit_step().is_err());

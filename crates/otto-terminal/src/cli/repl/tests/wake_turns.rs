@@ -257,21 +257,24 @@ async fn registry_updates_do_not_start_a_wake_while_the_token_budget_withholds_i
         text: "[task-notification] task t1 succeeded".to_string(),
         ..Notification::default()
     });
-    let (mut repl, _stdout, _stderr) = repl_buffers(&controller);
+    let (mut repl, stdout, _stderr) = repl_buffers(&controller);
     let (sender, receiver) = std::sync::mpsc::channel::<()>();
     let cancel = CancellationToken::new();
 
     let driver = async {
-        // Each registry signal reaches the loop, which asks for a wake and is
+        // Each new notification reaches the loop, which asks for a wake and is
         // refused; the loop then waits for the next signal.
-        for _ in 0..3 {
-            tasks
-                .add(otto::subagent::tasks::Task::default(), None, None)
-                .expect("add");
+        for index in 0..3 {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            tasks.notifications().push(Notification {
+                task_id: format!("t{}", index + 2),
+                text: format!("[task-notification] task t{} succeeded", index + 2),
+                ..Notification::default()
+            });
         }
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         assert_eq!(provider.calls(), 0, "a wake ran with the tokens used up");
-        assert_eq!(tasks.notifications().len(), 1);
+        assert_eq!(tasks.notifications().len(), 4);
         drop(sender);
     };
     let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -284,4 +287,15 @@ async fn registry_updates_do_not_start_a_wake_while_the_token_budget_withholds_i
     .expect("the loop did not return");
 
     result.expect("run");
+    // The user is told once, however often the wake was refused, with the
+    // reason and without the text of the notification.
+    let shown = stdout.text();
+    assert_eq!(
+        shown.matches(" held: the token budget").count(),
+        1,
+        "{shown}"
+    );
+    assert!(shown.contains("[agent.budget].max_tokens"), "{shown}");
+    assert!(shown.contains("delivered with the next input"), "{shown}");
+    assert!(!shown.contains("succeeded"), "{shown}");
 }

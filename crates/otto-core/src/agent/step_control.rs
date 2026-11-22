@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use super::budget::HolderHandle;
 use crate::model::OperationStopReason;
 use crate::operation::OperationControl;
 
@@ -14,13 +15,15 @@ use crate::operation::OperationControl;
 pub(super) struct StepControl<'a> {
     token: CancellationToken,
     parent: &'a dyn OperationControl,
+    holder: HolderHandle,
 }
 
 impl<'a> StepControl<'a> {
-    pub(super) fn new(parent: &'a dyn OperationControl) -> Self {
+    pub(super) fn new(parent: &'a dyn OperationControl, holder: HolderHandle) -> Self {
         Self {
             token: parent.cancellation_token().child_token(),
             parent,
+            holder,
         }
     }
 
@@ -42,6 +45,10 @@ impl OperationControl for StepControl<'_> {
 
     fn stop_reason(&self) -> Option<OperationStopReason> {
         self.parent.stop_reason()
+    }
+
+    fn holder(&self) -> Option<&HolderHandle> {
+        Some(&self.holder)
     }
 
     fn admission_stop_reason(&self) -> Option<OperationStopReason> {

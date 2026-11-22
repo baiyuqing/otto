@@ -35,7 +35,9 @@ async fn strict_schemas_bounds_trusted_identity_and_no_session_guidance() {
         Ok(owner.clone()),
         "source".into(),
         false,
-        Default::default(),
+        std::sync::Arc::new(otto_core::agent::budget::SessionBudgetCell::new(
+            otto_core::agent::budget::untimed(),
+        )),
         Default::default(),
     );
     let tools = parent.tools();
@@ -115,7 +117,9 @@ async fn strict_schemas_bounds_trusted_identity_and_no_session_guidance() {
         )),
         "source".into(),
         false,
-        Default::default(),
+        std::sync::Arc::new(otto_core::agent::budget::SessionBudgetCell::new(
+            otto_core::agent::budget::untimed(),
+        )),
         Default::default(),
     );
     let missing_tools = missing.tools();
@@ -163,7 +167,11 @@ async fn non_parent_service_guard_cannot_be_bypassed_by_direct_controller_call()
         "scope",
         "forged",
         "op",
-        otto_core::agent::budget::RootBudget::new("root", Default::default()),
+        otto_core::agent::budget::RootBudget::new(
+            "root",
+            Default::default(),
+            otto_core::agent::budget::untimed(),
+        ),
     ))
     .await;
     assert!(result.is_err());
@@ -215,7 +223,9 @@ async fn fake_provider_conversation_discovers_inspects_starts_and_preserves_huma
         Ok(owner.clone()),
         source.header().id.clone(),
         true,
-        Default::default(),
+        std::sync::Arc::new(otto_core::agent::budget::SessionBudgetCell::new(
+            otto_core::agent::budget::untimed(),
+        )),
         Default::default(),
     );
     let runner = crate::runtime::builder::Runner::scripted_with_tools(
@@ -260,7 +270,9 @@ fn policy_is_conditional_and_contains_six_schema_correct_examples() {
         Err("not needed".into()),
         "source".into(),
         false,
-        Default::default(),
+        std::sync::Arc::new(otto_core::agent::budget::SessionBudgetCell::new(
+            otto_core::agent::budget::untimed(),
+        )),
         Default::default(),
     );
     let definitions = parent

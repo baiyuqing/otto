@@ -23,6 +23,7 @@ fn policy(max_tokens: u64) -> BudgetPolicy {
     BudgetPolicy {
         max_tokens: Limit::from_count(max_tokens),
         max_steps: Limit::Unlimited,
+        max_duration: Limit::Unlimited,
     }
 }
 
@@ -64,7 +65,11 @@ impl Executor for Recording {
 async fn every_attempt_of_a_parent_started_run_charges_the_parents_root() {
     let executor = Arc::new(Recording::default());
     let (controller, _transcripts) = controller_with(executor.clone(), policy(100));
-    let parent = RootBudget::new("parent-root", policy(100));
+    let parent = RootBudget::new(
+        "parent-root",
+        policy(100),
+        otto_core::agent::budget::untimed(),
+    );
 
     let run = controller
         .start_parent("flow", "input", "session", "operation", parent.clone())

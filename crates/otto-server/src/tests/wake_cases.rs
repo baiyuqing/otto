@@ -309,6 +309,28 @@ async fn a_wake_withheld_by_the_token_budget_waits_for_the_next_user_turn() {
     .expect("the server stays responsive");
     assert_eq!(status.status, StatusCode::OK, "{}", status.body);
 
+    // The client is told once, through the wake-replies route, and the text
+    // does not carry the notification.
+    let replies = harness
+        .send("GET", &format!("/v1/sessions/{id}/wake-replies"), None)
+        .await;
+    assert_eq!(replies.status, StatusCode::OK, "{}", replies.body);
+    let replies: serde_json::Value = serde_json::from_str(&replies.body).unwrap();
+    let notices = replies["notices"].as_array().unwrap();
+    assert_eq!(notices.len(), 1, "{replies}");
+    let text = notices[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with(
+            "1 notification is held: the token budget of the last root turn is used up"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("[agent.budget].max_tokens"), "{text}");
+    assert!(
+        text.ends_with("They are delivered with the next input."),
+        "{text}"
+    );
+
     // The next user input starts a new root and delivers the notification.
     let reply = harness
         .send("POST", &path, Some(r#"{"text":"again","stream":false}"#))

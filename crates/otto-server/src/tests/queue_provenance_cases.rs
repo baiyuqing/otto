@@ -82,6 +82,16 @@ async fn explicit_queue_preserves_http_claim_body_identity_events_and_saved_queu
             human.input_provenance.unwrap().client_source,
             Some(InputSource::Connector)
         );
-        assert!(session.ctrl.turn_queue().unwrap().pending().is_empty());
+        // The runner forgets the saved copy after `run_turn` returns, which
+        // is after `turn_end` reached the stream, so the queue can still
+        // hold it here for a few milliseconds.
+        let journal = session.ctrl.turn_queue().unwrap();
+        for _ in 0..600 {
+            if journal.pending().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(journal.pending().is_empty());
     }
 }

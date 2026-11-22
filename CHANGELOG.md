@@ -9,6 +9,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- `otto-core` can be used as a git dependency by other Rust projects: its
+  dependencies use version ranges instead of exact pins, and the crate has
+  package metadata, a README and an offline `scripted_agent` example. It is
+  still not published to crates.io and has no API stability guarantee; see
+  [its README](crates/otto-core/README.md).
+
 - Local and attached TUIs report fixed, privacy-preserving program status using
   OSC 7501, enabling Rex to display work, permission waits and turn outcomes.
   Enabled by default for interactive terminals, without a Rex dependency or

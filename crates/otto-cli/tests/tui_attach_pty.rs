@@ -174,7 +174,7 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
     binary_harness::job_control::suspend_resume(&mut master, &child, &shared, "attached-unsent");
     binary_harness::rex_title::assert_transitions(
         &shared,
-        &["Otto", "previous title", "Otto", "previous title", "Otto"],
+        &["Otto", "previous title", "Otto", "shell title", "Otto"],
     );
 
     // No local echo: the `user_message` frame from serve puts the prompt on
@@ -276,9 +276,9 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
             "Otto",
             "previous title",
             "Otto",
-            "previous title",
+            "shell title",
             "Otto",
-            "previous title",
+            "shell title",
         ],
     );
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");

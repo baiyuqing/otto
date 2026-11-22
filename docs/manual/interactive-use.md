@@ -31,8 +31,9 @@ settings are needed to recover.
 ## Rex tab title
 
 In an interactive Rex terminal, the local TUI and `otto --attach` temporarily
-set the current terminal pane's title to `Otto`. Otto restores the startup title
-on exit or when suspended, and reapplies `Otto` when resumed in the foreground.
+set the current terminal pane's title to `Otto`. Otto saves the title each time
+it takes the foreground, including after a suspend. On exit or suspend, it
+restores the title saved for that foreground period.
 It does not rename the Rex tab or session. A forced kill may skip cleanup.
 
 This is automatic when Rex provides the current session and pane IDs and `rex`

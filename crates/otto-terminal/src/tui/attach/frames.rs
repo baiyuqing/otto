@@ -3,7 +3,7 @@
 use super::*;
 
 impl<'a> Ui<'a> {
-    pub(super) fn on_input<B: TerminalBackend>(
+    pub(super) async fn on_input<B: TerminalBackend>(
         &mut self,
         terminal: &mut Terminal<B>,
         event: TuiEvent,
@@ -15,7 +15,9 @@ impl<'a> Ui<'a> {
             event,
             self.cancel,
             &Backend::Attach(self.remote),
-        )? {
+        )
+        .await?
+        {
             match action {
                 Action::CancelTurn => self.cancel_followed(),
                 _ => self.actions.push_back(action),

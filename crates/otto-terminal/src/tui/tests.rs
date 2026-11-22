@@ -277,7 +277,8 @@ async fn a_turn_scrolls_on_the_wheel_and_still_cancels_on_esc() {
         wheel_up,
         &turn,
         &app::Backend::Local(&controller),
-    );
+    )
+    .await;
 
     assert_eq!(app.scroll, Some(9));
     assert!(!turn.is_cancelled());
@@ -288,7 +289,8 @@ async fn a_turn_scrolls_on_the_wheel_and_still_cancels_on_esc() {
         TuiEvent::Key(KeyCode::Esc.into()),
         &turn,
         &app::Backend::Local(&controller),
-    );
+    )
+    .await;
     assert!(turn.is_cancelled());
 }
 

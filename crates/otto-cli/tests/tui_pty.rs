@@ -313,9 +313,9 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
             "Otto",
             "previous title",
             "Otto",
-            "previous title",
+            "shell title",
             "Otto",
-            "previous title",
+            "shell title",
         ],
     );
 

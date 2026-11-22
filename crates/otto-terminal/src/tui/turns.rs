@@ -59,7 +59,7 @@ pub(super) fn drive_turn<B: Backend, T, E>(
                     redraw
                 }
                 Some(event)=keys.recv()=>{
-                    apply_turn_key(app,terminal,event,turn,backend);
+                    apply_turn_key(app,terminal,event,turn,backend).await;
                     frame_gate::Redraw::Immediate
                 }
                 completion=app.next_completion()=>{
@@ -103,14 +103,14 @@ pub(super) fn drive_turn<B: Backend, T, E>(
     }
 }
 
-pub(super) fn apply_turn_key<B: Backend>(
+pub(super) async fn apply_turn_key<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
     event: TuiEvent,
     turn: &CancellationToken,
     backend: &app::Backend<'_>,
 ) {
-    match apply_input(app, terminal, event, turn, backend) {
+    match apply_input(app, terminal, event, turn, backend).await {
         Ok(Some(Action::CancelTurn)) => turn.cancel(),
         Ok(Some(action)) => {
             if matches!(action, Action::Exit) {

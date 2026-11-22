@@ -12,7 +12,12 @@ pub fn configure(command: &mut Command, home: &Path) {
         &rex,
         r#"#!/bin/sh
 [ "$#" -eq 10 ] && [ "$*" = '--autostart=false --timeout=500ms block call -s session:test -b block:test title {}' ] || exit 1
-printf '%s\n' '{"title":"previous title"}'
+if [ -f "$HOME/rex-title-read" ]; then
+    printf '%s\n' '{"title":"shell title"}'
+else
+    : > "$HOME/rex-title-read"
+    printf '%s\n' '{"title":"previous title"}'
+fi
 "#,
     )
     .expect("write mock Rex CLI");

@@ -281,8 +281,8 @@ fn observer_keys_paste_mouse_preserve_composer_cursor_main_scroll_and_no_command
     assert!(app.drain_actions().is_empty());
 }
 
-#[test]
-fn observer_terminal_input_dispatch_ignores_paste_and_does_not_select_main_text() {
+#[tokio::test]
+async fn observer_terminal_input_dispatch_ignores_paste_and_does_not_select_main_text() {
     use crate::tui::{TuiEvent, apply_input, selection::DragPhase};
     let remote = Remote::offline(Vec::new());
     let backend = Backend::Attach(&remote);
@@ -308,7 +308,9 @@ fn observer_terminal_input_dispatch_ignores_paste_and_does_not_select_main_text(
         },
     ] {
         assert_eq!(
-            apply_input(&mut app, &mut terminal, event, &cancel, &backend).unwrap(),
+            apply_input(&mut app, &mut terminal, event, &cancel, &backend)
+                .await
+                .unwrap(),
             None
         );
     }

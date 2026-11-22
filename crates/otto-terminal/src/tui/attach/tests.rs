@@ -96,7 +96,7 @@ async fn delayed_session_snapshot_keeps_input_and_stream_live_and_cannot_erase_d
             }).await.expect("input and frames must not await the session query");
         match event {
             Ev::Input(Some(event)) => {
-                ui.on_input(&mut terminal, event).unwrap();
+                ui.on_input(&mut terminal, event).await.unwrap();
                 input = true;
             }
             Ev::Frame(frame) => {

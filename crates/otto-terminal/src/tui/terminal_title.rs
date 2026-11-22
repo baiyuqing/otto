@@ -12,83 +12,96 @@ use tokio::process::Command;
 const QUERY_LIMIT: usize = 4096;
 const QUERY_TIMEOUT: Duration = Duration::from_millis(750);
 
-struct Title {
-    previous: String,
-    applied: bool,
+enum TitleState {
+    Inactive,
+    Abandoned,
+    Released,
+    ForegroundWithoutOverride,
+    ForegroundWithOverride { previous: String },
 }
 
-// Job control and panic cleanup do not have access to the owning TUI future.
-// Unlike UI state, this refers only to the one process-wide real terminal.
-static TITLE: Mutex<Option<Title>> = Mutex::new(None);
+// Job control and panic cleanup operate on the one process-wide real terminal.
+static TITLE: Mutex<TitleState> = Mutex::new(TitleState::Inactive);
 
-pub(super) struct TerminalTitle(bool);
+pub(super) struct TerminalTitle(());
 
 impl TerminalTitle {
-    pub(super) async fn enter() -> Self {
+    pub(super) async fn enter() -> Option<Self> {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            return Self(false);
+            return None;
         }
-        let Some(previous) = query_previous().await else {
-            return Self(false);
-        };
-        let Ok(mut state) = TITLE.lock() else {
-            return Self(false);
-        };
-        if state.is_some() {
-            return Self(false);
+        {
+            let mut state = TITLE.lock().ok()?;
+            if !matches!(*state, TitleState::Inactive) {
+                return None;
+            }
+            *state = TitleState::Released;
         }
-        let mut title = Title {
-            previous,
-            applied: false,
-        };
-        title.apply();
-        *state = Some(title);
-        Self(true)
+        // Construct the guard before awaiting so cancellation releases its slot.
+        let guard = Self(());
+        acquire_foreground().await;
+        Some(guard)
     }
 }
 
 impl Drop for TerminalTitle {
     fn drop(&mut self) {
-        if self.0
-            && let Ok(mut state) = TITLE.lock()
-            && let Some(mut title) = state.take()
-        {
-            title.restore();
+        if let Ok(mut state) = TITLE.lock() {
+            restore_override(std::mem::replace(&mut *state, TitleState::Inactive));
         }
-    }
-}
-
-pub(super) fn restore() {
-    // Also called from the panic hook, where it must not wait on itself.
-    if let Ok(mut state) = TITLE.try_lock()
-        && let Some(title) = state.as_mut()
-    {
-        title.restore();
     }
 }
 
 #[cfg(unix)]
-pub(super) fn resume() {
+pub(super) fn release_foreground() {
     if let Ok(mut state) = TITLE.lock()
-        && let Some(title) = state.as_mut()
+        && matches!(
+            *state,
+            TitleState::ForegroundWithoutOverride | TitleState::ForegroundWithOverride { .. }
+        )
     {
-        title.apply();
+        restore_override(std::mem::replace(&mut *state, TitleState::Released));
     }
 }
 
-impl Title {
-    fn apply(&mut self) {
-        if !self.applied {
-            // Restore even if the write succeeded but flushing failed.
-            self.applied = true;
-            let _ = set_title("Otto");
-        }
+pub(super) fn restore_after_panic() {
+    // Never wait on a lock interrupted by this panic. Invalidate any snapshot
+    // we consume so the guard does not replay it during unwinding.
+    if let Ok(mut state) = TITLE.try_lock()
+        && !matches!(*state, TitleState::Inactive)
+    {
+        restore_override(std::mem::replace(&mut *state, TitleState::Abandoned));
     }
+}
 
-    fn restore(&mut self) {
-        if self.applied && set_title(&self.previous).is_ok() {
-            self.applied = false;
-        }
+pub(super) async fn acquire_foreground() {
+    if !TITLE
+        .lock()
+        .is_ok_and(|state| matches!(*state, TitleState::Released))
+    {
+        return;
+    }
+    // The shell can set a different title while it owns the terminal. Never
+    // carry a restore point across that handoff, even if the new query fails.
+    let previous = query_previous().await;
+    if let Ok(mut state) = TITLE.lock()
+        && matches!(*state, TitleState::Released)
+    {
+        *state = match previous {
+            Some(previous) => {
+                // Keep the restore point even if writing or flushing fails.
+                let state = TitleState::ForegroundWithOverride { previous };
+                let _ = set_title("Otto");
+                state
+            }
+            None => TitleState::ForegroundWithoutOverride,
+        };
+    }
+}
+
+fn restore_override(state: TitleState) {
+    if let TitleState::ForegroundWithOverride { previous } = state {
+        let _ = set_title(&previous);
     }
 }
 

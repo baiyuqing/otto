@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// Why a follow-up was discarded when its turn ended while an approval waits.
+const APPROVAL_SKIP_NOTICE: &str = "An agent-scheduled follow-up was not run because this terminal turn ended while approval is pending. Retry it after resolving the approval.";
+
+/// Why a follow-up was discarded once the root's tokens were used up.
+pub(super) fn budget_skip_notice(exceeded: otto_core::agent::budget::Exceeded) -> String {
+    format!(
+        "An agent-scheduled follow-up was not run because the token budget of this turn is used up ({exceeded}). Send a new message to continue."
+    )
+}
+
 impl Controller {
     pub async fn prompt(
         &self,
@@ -29,6 +39,9 @@ impl Controller {
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
+        // A user-origin turn is a root turn: it starts the budget that its
+        // follow-ups, children and later wake turns share.
+        let budget = runner.begin_root_turn();
         let _presentation = self.begin_user_turn(&runner, origin).await;
         runner.record_user_authorization(text).await?;
         let task_run = runner
@@ -37,19 +50,21 @@ impl Controller {
             .map_err(AgentError::Other)?;
         self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
             .await?;
-        self.run_prompt_step(&runner, text, system_context, &mut *emit, cancel)
+        self.run_prompt_step(&runner, text, system_context, &budget, &mut *emit, cancel)
             .await?;
         self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
             .await
     }
 
     /// One prompt step inside an already-admitted logical turn. Approval
-    /// retries call this without opening a second follow-up scope.
+    /// retries call this without opening a second follow-up scope, and with
+    /// the same `budget`, so the turn keeps its token total and step count.
     pub(crate) async fn run_prompt_step(
         &self,
         runner: &Runner,
         text: &str,
         system_context: &str,
+        budget: &TurnBudget,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -65,6 +80,7 @@ impl Controller {
             .run_with_system_context(
                 text,
                 system_context,
+                BudgetScope::Shared(budget.clone()),
                 &mut otto_platform::herdr::observing(emit, reporter.as_deref(), &session),
                 cancel,
             )
@@ -82,7 +98,8 @@ impl Controller {
         while let Some(followup) = task_run.next_followup() {
             if self.pending_approval().is_some() {
                 task_run.clear_followups();
-                self.record_skipped_followup(runner, emit).await?;
+                self.record_skipped_followup(runner, APPROVAL_SKIP_NOTICE, emit)
+                    .await?;
                 return Ok(());
             }
             if otto_core::session::Session::has_input(runner.session(), &followup.input_id) {
@@ -90,10 +107,29 @@ impl Controller {
                 task_run.followup_done(&followup);
                 continue;
             }
+            // A follow-up counts its own steps and shares the root's tokens. With
+            // the tokens used up it is not started; a follow-up lives only as
+            // long as the turn that queued it, so it is discarded with a notice.
+            let budget = match runner.followup_budget() {
+                Ok(budget) => budget,
+                Err(exceeded) => {
+                    task_run.clear_followups();
+                    self.record_skipped_followup(runner, &budget_skip_notice(exceeded), emit)
+                        .await?;
+                    return Ok(());
+                }
+            };
             task_run.set_current_task(&followup.text);
             runner.set_next_input_id(Some(followup.input_id.clone()));
-            self.run_followup_step(runner, &followup.text, system_context, &mut *emit, cancel)
-                .await?;
+            self.run_followup_step(
+                runner,
+                &followup.text,
+                system_context,
+                &budget,
+                &mut *emit,
+                cancel,
+            )
+            .await?;
             task_run.followup_done(&followup);
         }
         Ok(())
@@ -214,9 +250,9 @@ impl Controller {
     pub(super) async fn record_skipped_followup(
         &self,
         runner: &Runner,
+        text: &str,
         emit: EventSink<'_>,
     ) -> Result<(), AgentError> {
-        let text = "An agent-scheduled follow-up was not run because this terminal turn ended while approval is pending. Retry it after resolving the approval.";
         runner
             .session()
             .append(Message {
@@ -247,6 +283,7 @@ impl Controller {
         runner: &Runner,
         text: &str,
         system_context: &str,
+        budget: &TurnBudget,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -257,7 +294,13 @@ impl Controller {
             text: "\n\n".into(),
         });
         runner
-            .run_followup_with_system_context(text, system_context, emit, cancel)
+            .run_followup_with_system_context(
+                text,
+                system_context,
+                BudgetScope::Shared(budget.clone()),
+                emit,
+                cancel,
+            )
             .await
     }
 

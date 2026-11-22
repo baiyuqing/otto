@@ -189,6 +189,7 @@ async fn queued_task_deadline_is_consumed_before_a_permit_is_acquired() {
         Arc::new(MemorySession::new()),
         definition("worker"),
         &control,
+        RootBudget::new("test-root", Default::default()),
     );
     tokio::pin!(queued);
     tokio::time::advance(Duration::from_secs(2)).await;

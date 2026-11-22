@@ -11,11 +11,21 @@ commit ledger; Git and release tags retain the full history. See the
 
 - Every turn now has a hard budget of 4,200,000 tokens and 54 model calls
   (`[agent.budget].max_tokens` and `max_steps`); the defaults are twice the 99th
-  percentile of 150 local turns. A turn that reaches a limit ends with a
+  percentile of 150 local turns. The tokens are shared by a root turn (new user,
+  schedule or chat input) and by everything it starts: sub-agents, workflow
+  steps, wake and follow-up turns. The model-call limit counts one turn of the
+  controller, across the continuation after a Bash approval, so an approval no
+  longer resets the budget; each sub-agent, workflow step, wake turn and
+  follow-up turn counts its own calls. A turn that reaches a limit ends with a
   `budget exceeded:` error that names the key, and the session continues with the
-  next prompt. A turn that used to run longer now stops; raise a limit, or set it
-  to `0` to disable it. Each sub-agent and workflow-step turn has its own budget.
-  Stops are logged as `turn_budget_exceeded` and counted by `otto serve` in
+  next prompt. A sub-agent stops at its own next check when the shared tokens run
+  out; a workflow step that stops this way fails its run and is not retried. A
+  wake turn is not started once the shared tokens are used up: its notifications
+  are delivered with your next input, and `otto --prompt` exits with an error
+  instead. A turn that used to run longer now stops; raise a limit, or set it to
+  `0` to disable it. Budgets are not persisted; recovered work starts with a new
+  budget. Stops are logged as `turn_budget_exceeded` (with `budget_id`), skipped
+  wake turns as `turn_budget_wake_skipped`, and `otto serve` counts stops in
   `otto_turn_stops_total`. See [Turn budget](docs/manual/limits.md#turn-budget).
 
 ### Breaking changes

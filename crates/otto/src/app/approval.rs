@@ -180,6 +180,17 @@ impl Controller {
             Some(self.begin_operation().map_err(AgentError::Other)?)
         };
         let runner = self.runner().map_err(AgentError::Other)?;
+        // The budget of this controller turn, kept across every approval
+        // continuation of the turn: a text, image or scheduled step is a root
+        // turn and starts a new root; a wake turn brings the budget its claim
+        // decided; a follow-up turn continues the session's current root.
+        let turn_budget = match &first {
+            Step::Text(_) | Step::Image(..) | Step::Scheduled(_) => runner.begin_root_turn(),
+            Step::Wake(wake) => wake.budget().clone(),
+            Step::Followup(_) => runner
+                .followup_budget()
+                .map_err(AgentError::BudgetExceeded)?,
+        };
         let _output_lease = runner.retain_temporary_outputs();
         if let Step::Text(text) | Step::Image(text, _) = &first {
             runner.record_user_authorization(text).await?;
@@ -212,6 +223,7 @@ impl Controller {
                 first,
                 &runner,
                 system_context,
+                &turn_budget,
                 &task_run,
                 first_admission,
                 &mut *emit,
@@ -236,12 +248,27 @@ impl Controller {
                 task_run.followup_done(&followup);
                 continue;
             }
+            // Own step count, the root's tokens; see `run_followups_held`.
+            let followup_budget = match runner.followup_budget() {
+                Ok(budget) => budget,
+                Err(exceeded) => {
+                    task_run.clear_followups();
+                    self.record_skipped_followup(
+                        &runner,
+                        &super::prompt::budget_skip_notice(exceeded),
+                        &mut *emit,
+                    )
+                    .await?;
+                    return Ok(stop);
+                }
+            };
             runner.set_next_input_id(Some(followup.input_id.clone()));
             let followup_stop = self
                 .run_approved_step(
                     Step::Followup(&followup.text),
                     &runner,
                     system_context,
+                    &followup_budget,
                     &task_run,
                     None,
                     &mut *emit,
@@ -263,6 +290,7 @@ impl Controller {
         first: Step<'_>,
         runner: &crate::runtime::builder::Runner,
         system_context: &str,
+        budget: &otto_core::agent::budget::TurnBudget,
         task_run: &crate::runtime::task_control::Run,
         first_admission: Option<super::Admission<'_>>,
         emit: EventSink<'_>,
@@ -322,8 +350,15 @@ impl Controller {
                                     .begin_runner_operation(runner)
                                     .map_err(AgentError::Other)?,
                             };
-                            self.run_prompt_step(runner, text, system_context, &mut send, cancel)
-                                .await
+                            self.run_prompt_step(
+                                runner,
+                                text,
+                                system_context,
+                                budget,
+                                &mut send,
+                                cancel,
+                            )
+                            .await
                         }
                         Some(Step::Image(text, image)) => {
                             let _admission = match first_admission.take() {
@@ -337,6 +372,7 @@ impl Controller {
                                     text,
                                     image,
                                     system_context,
+                                    otto_core::agent::budget::BudgetScope::Shared(budget.clone()),
                                     &mut send,
                                     cancel,
                                 )
@@ -350,8 +386,15 @@ impl Controller {
                                     .map_err(AgentError::Other)?,
                             };
                             task_run.set_current_task(text);
-                            self.run_followup_step(runner, text, system_context, &mut send, cancel)
-                                .await
+                            self.run_followup_step(
+                                runner,
+                                text,
+                                system_context,
+                                budget,
+                                &mut send,
+                                cancel,
+                            )
+                            .await
                         }
                         Some(Step::Wake(wake)) => wake.run(&mut send, cancel).await,
                         None => {
@@ -366,6 +409,7 @@ impl Controller {
                                     runner,
                                     &retry,
                                     system_context,
+                                    budget,
                                     &mut send,
                                     cancel,
                                 )
@@ -375,6 +419,7 @@ impl Controller {
                                     runner,
                                     &retry,
                                     system_context,
+                                    budget,
                                     &mut send,
                                     cancel,
                                 )

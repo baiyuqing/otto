@@ -7,6 +7,7 @@
 //! Lifetime: the claim is held by an [`Admission`], so dropping a
 //! [`WakeOperation`] without running it releases the claim.
 
+use otto_core::agent::budget::{BudgetScope, TurnBudget};
 use otto_core::agent::{AgentError, EventSink};
 use tokio_util::sync::CancellationToken;
 
@@ -16,14 +17,28 @@ use super::{Admission, CLOSED, Controller};
 pub struct WakeOperation<'a> {
     controller: &'a Controller,
     admission: Option<Admission<'a>>,
+    /// The session's root with a step counter for this wake turn, decided when
+    /// the claim was made.
+    budget: TurnBudget,
 }
 
 impl<'a> WakeOperation<'a> {
-    pub(super) fn new(controller: &'a Controller, admission: Admission<'a>) -> Self {
+    pub(super) fn new(
+        controller: &'a Controller,
+        admission: Admission<'a>,
+        budget: TurnBudget,
+    ) -> Self {
         Self {
             controller,
             admission: Some(admission),
+            budget,
         }
+    }
+
+    /// The budget this wake turn runs under; an approval continuation of the
+    /// turn continues it.
+    pub(super) fn budget(&self) -> &TurnBudget {
+        &self.budget
     }
 
     /// Executes the claimed turn once with empty user text, which is how the
@@ -52,7 +67,15 @@ impl<'a> WakeOperation<'a> {
         // follow-ups and runs them itself.
         let resumes =
             self.controller.resumable_interrupted_turn() && !runner.task_control().is_active();
-        let mut result = runner.run("", &mut *emit, cancel).await;
+        let mut result = runner
+            .run_with_system_context(
+                "",
+                "",
+                BudgetScope::Shared(self.budget.clone()),
+                &mut *emit,
+                cancel,
+            )
+            .await;
         // A wake turn that resumed an interrupted task runs the follow-ups
         // that task had scheduled and not yet started.
         if result.is_ok() && resumes && !cancel.is_cancelled() {

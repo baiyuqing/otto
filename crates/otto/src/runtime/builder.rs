@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use otto_core::agent::budget::BudgetScope;
 use otto_core::agent::inbox::NotificationKind;
 use otto_core::agent::progress::ProgressPolicy;
 use otto_core::agent::redactor::Redactor;
@@ -61,6 +62,7 @@ mod provider_client;
 mod runner;
 mod runner_assembly;
 mod runner_authorization;
+mod runner_budget;
 mod runner_entry;
 mod session_lifecycle;
 mod shared_session;
@@ -260,6 +262,11 @@ pub struct Runner {
     /// Exact passive-presentation origin for the current logical user turn.
     /// Unlike scheduling, a wake turn clears this instead of inheriting it.
     pub(crate) presentation_origin: Arc<otto_session::origin::TurnOrigin>,
+    /// The session's most recent root turn budget, shared with every runner of
+    /// the session (see `session_resources`).
+    pub(crate) budget: Arc<otto_core::agent::budget::SessionBudgetCell>,
+    /// The policy a root turn of this runner starts with.
+    pub(crate) budget_policy: otto_core::agent::budget::BudgetPolicy,
 }
 
 /// The tool-less agent behind the session-model advice backend.

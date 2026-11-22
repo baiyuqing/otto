@@ -131,12 +131,24 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
         dir.path(),
     );
     let first = owner
-        .start_parent("documentation-review", "scope", "source", "operation-1")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "operation-1",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     owner.wait(&first.id).await.unwrap();
     let same = owner
-        .start_parent("documentation-review", "scope", "source", "operation-1")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "operation-1",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     assert_eq!(first.id, same.id);
@@ -149,13 +161,25 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
     );
     assert!(
         owner
-            .start_parent("documentation-review", "changed", "source", "operation-1")
+            .start_parent(
+                "documentation-review",
+                "changed",
+                "source",
+                "operation-1",
+                otto_core::agent::budget::RootBudget::new("test-root", Default::default())
+            )
             .await
             .is_err()
     );
     assert!(
         owner
-            .start_parent("documentation-review", "scope", "", "operation-2")
+            .start_parent(
+                "documentation-review",
+                "scope",
+                "",
+                "operation-2",
+                otto_core::agent::budget::RootBudget::new("test-root", Default::default())
+            )
             .await
             .is_err()
     );
@@ -182,7 +206,13 @@ async fn receipt_atomicity_reconciliation_workspace_and_input_guards() {
             .is_empty()
     );
     let next = owner
-        .start_parent("documentation-review", "scope", "source", "operation-2")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "operation-2",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     assert_ne!(
@@ -202,7 +232,13 @@ async fn lifecycle_replay_restart_gate_dedup_and_no_new_session_redirect() {
         dir.path(),
     );
     let run = owner
-        .start_parent("documentation-review", "scope", "source", "op")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "op",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     owner.wait(&run.id).await.unwrap();
@@ -338,7 +374,13 @@ async fn receipt_survives_crash_before_launch_and_does_not_retry_interrupted_eff
         dir.path(),
     );
     let reconciled = owner
-        .start_parent("documentation-review", "scope", "source", "same-op")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "same-op",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     assert_eq!(reconciled.id, run.id);
@@ -364,7 +406,13 @@ async fn same_operation_returns_original_snapshot_after_catalog_restart() {
         dir.path(),
     );
     let run = owner
-        .start_parent("documentation-review", "scope", "source", "op")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "op",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     owner.wait(&run.id).await.unwrap();
@@ -376,7 +424,13 @@ async fn same_operation_returns_original_snapshot_after_catalog_restart() {
         dir.path(),
     );
     let replay = changed
-        .start_parent("documentation-review", "scope", "source", "op")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "op",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     assert_eq!(replay.id, run.id);
@@ -492,7 +546,13 @@ async fn failed_enqueue_keeps_ordered_page_pending() {
         dir.path(),
     );
     let run = owner
-        .start_parent("documentation-review", "scope", "source", "op")
+        .start_parent(
+            "documentation-review",
+            "scope",
+            "source",
+            "op",
+            otto_core::agent::budget::RootBudget::new("test-root", Default::default()),
+        )
         .await
         .unwrap();
     owner.wait(&run.id).await.unwrap();

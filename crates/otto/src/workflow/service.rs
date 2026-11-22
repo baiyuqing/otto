@@ -56,6 +56,13 @@ pub struct Controller {
     logger: Arc<Logger>,
     active: Mutex<HashMap<String, ActiveRun>>,
     guard: Mutex<Option<Box<dyn Send>>>,
+    /// The policy of a root this controller starts for a run that no parent
+    /// turn started.
+    budget_policy: otto_core::agent::budget::BudgetPolicy,
+    /// The root budget of each run that has not ended, by run id: the root
+    /// of the parent turn that started it, or a root of its own. In memory
+    /// only, so a run recovered by a new process gets a new root.
+    budgets: Mutex<HashMap<String, otto_core::agent::budget::RootBudget>>,
 }
 
 impl Controller {
@@ -80,6 +87,7 @@ impl Controller {
             max_parallel,
             DeadlinePolicy::default(),
             Arc::new(Logger::discard()),
+            otto_core::agent::budget::BudgetPolicy::default(),
         )
     }
 
@@ -94,6 +102,7 @@ impl Controller {
         max_parallel: usize,
         deadlines: DeadlinePolicy,
         logger: Arc<Logger>,
+        budget_policy: otto_core::agent::budget::BudgetPolicy,
     ) -> Arc<Self> {
         Arc::new(Self {
             deliveries: Mutex::new(Some(Vec::new())),
@@ -109,6 +118,8 @@ impl Controller {
             logger,
             active: Mutex::new(HashMap::new()),
             guard: Mutex::new(None),
+            budget_policy,
+            budgets: Mutex::new(HashMap::new()),
         })
     }
 
@@ -156,6 +167,7 @@ impl Controller {
         input: &str,
         session: &str,
         operation: &str,
+        budget: otto_core::agent::budget::RootBudget,
     ) -> Result<Run, Error> {
         super::provenance::admit_start()?;
         if let Some(run) = self.store.origin_run(&self.workspace, session, operation)? {
@@ -183,6 +195,7 @@ impl Controller {
         )?;
         // Reconciliation must never relaunch an existing run after uncertain effects.
         if created {
+            self.set_budget(&run.id, budget);
             self.launch(run.id.clone())?;
         }
         Ok(run)
@@ -261,6 +274,9 @@ impl Controller {
         }
         if let Some(step_id) = retry_step {
             self.store.retry(run_id, step_id)?;
+            // An explicit retry starts a new root: the run's earlier root may
+            // be the one that ran out.
+            self.forget_budget(run_id);
         } else if run.status == RunStatus::Paused {
             return Err(Error::conflict(
                 "a paused or failed step must be selected for retry",
@@ -369,6 +385,37 @@ impl Controller {
             self.log_run_if_final(&run);
         }
         Ok(run)
+    }
+
+    fn set_budget(&self, run_id: &str, budget: otto_core::agent::budget::RootBudget) {
+        self.budgets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(run_id.to_string(), budget);
+    }
+
+    fn forget_budget(&self, run_id: &str) {
+        self.budgets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(run_id);
+    }
+
+    /// The root every attempt of `run_id` charges: the one its parent turn
+    /// handed over, or a new root under this controller's policy for a run
+    /// that was started without one (a command, a restart, a retry).
+    fn run_budget(&self, run_id: &str) -> otto_core::agent::budget::RootBudget {
+        self.budgets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(run_id.to_string())
+            .or_insert_with(|| {
+                otto_core::agent::budget::RootBudget::new(
+                    crate::subagent::new_budget_id(),
+                    self.budget_policy,
+                )
+            })
+            .clone()
     }
 
     /// Writes `workflow_run_finished` when `run` has a final status.
@@ -502,6 +549,12 @@ impl Controller {
                     }));
             if relaunch {
                 let _ = controller.launch(run_id.clone());
+            }
+            if controller
+                .get(&run_id)
+                .is_ok_and(|run| is_final(run.status))
+            {
+                controller.forget_budget(&run_id);
             }
             done.notify_one();
         });

@@ -79,6 +79,7 @@ impl Builder {
                 tasks,
                 reminders,
                 output_logs: Arc::new(Logs::for_session(&session.header().id)),
+                budget: Arc::default(),
                 mcp: tokio::sync::OnceCell::new(),
                 workflow_binding: Mutex::new(None),
                 closed: AtomicBool::new(false),

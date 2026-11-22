@@ -27,6 +27,7 @@ prompt = "work"
             cancellation_grace: Duration::from_secs(1),
         },
         Arc::new(Logger::discard()),
+        Default::default(),
     );
     let run = controller.start("flow", "").await.expect("start");
     started.notified().await;
@@ -69,6 +70,7 @@ prompt = "sibling"
             cancellation_grace: Duration::from_millis(100),
         },
         Arc::new(Logger::discard()),
+        Default::default(),
     );
     let run = controller.start("flow", "").await.expect("start");
     sibling_started.notified().await;

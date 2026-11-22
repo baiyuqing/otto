@@ -181,3 +181,107 @@ async fn a_one_shot_run_returns_the_wake_turns_error() {
         "{error}"
     );
 }
+
+/// More than the default `max_tokens` of 4,200,000, so one response uses the
+/// root's tokens up.
+const OVER_THE_DEFAULT_TOKEN_LIMIT: i64 = 5_000_000;
+
+#[tokio::test]
+async fn a_one_shot_run_ends_with_an_error_when_the_token_budget_withholds_a_wake() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let tasks = Arc::new(Tasks::new());
+    let pushed = Arc::clone(&tasks);
+    let provider = ScriptedProvider::with_usage(
+        move |_| {
+            // Pushed inside the turn, so it is still pending when the turn
+            // ends and the one-shot run looks for a wake to run.
+            pushed.notifications().push(Notification {
+                task_id: "t1".to_string(),
+                text: "[task-notification] task t1 succeeded\nchild done".to_string(),
+                ..Notification::default()
+            });
+            Ok("ok".to_string())
+        },
+        OVER_THE_DEFAULT_TOKEN_LIMIT,
+    );
+    let controller = scripted_controller(
+        workspace.path(),
+        sessions.path(),
+        Arc::clone(&provider),
+        Arc::clone(&tasks),
+    );
+    let (mut repl, _stdout, stderr) = repl_buffers(&controller);
+
+    // A wake that never runs and is waited for would hang here.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        repl.run_once("go", &CancellationToken::new()),
+    )
+    .await
+    .expect("the one-shot run did not return");
+
+    let error = result.expect_err("undelivered notifications are an error");
+    assert!(error.to_string().contains("not delivered"), "{error}");
+    assert!(
+        error.to_string().contains("[agent.budget].max_tokens"),
+        "{error}"
+    );
+    assert!(stderr.text().contains("not delivered"), "{}", stderr.text());
+    assert_eq!(provider.calls(), 1, "no wake turn ran");
+    assert_eq!(
+        tasks.notifications().len(),
+        1,
+        "the notification stays queued"
+    );
+}
+
+#[tokio::test]
+async fn registry_updates_do_not_start_a_wake_while_the_token_budget_withholds_it() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let tasks = Arc::new(Tasks::new());
+    let provider = ScriptedProvider::new(|_| Ok("ok".to_string()));
+    let controller = scripted_controller(
+        workspace.path(),
+        sessions.path(),
+        Arc::clone(&provider),
+        Arc::clone(&tasks),
+    );
+    controller
+        .current_runner()
+        .expect("runner")
+        .exhaust_root_budget();
+    tasks.notifications().push(Notification {
+        task_id: "t1".to_string(),
+        text: "[task-notification] task t1 succeeded".to_string(),
+        ..Notification::default()
+    });
+    let (mut repl, _stdout, _stderr) = repl_buffers(&controller);
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    let cancel = CancellationToken::new();
+
+    let driver = async {
+        // Each registry signal reaches the loop, which asks for a wake and is
+        // refused; the loop then waits for the next signal.
+        for _ in 0..3 {
+            tasks
+                .add(otto::subagent::tasks::Task::default(), None, None)
+                .expect("add");
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        assert_eq!(provider.calls(), 0, "a wake ran with the tokens used up");
+        assert_eq!(tasks.notifications().len(), 1);
+        drop(sender);
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(
+            repl.run(std::io::BufReader::new(Pipe(receiver)), &cancel),
+            driver
+        )
+    })
+    .await
+    .expect("the loop did not return");
+
+    result.expect("run");
+}

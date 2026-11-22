@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// Notifications that stay queued because the root budget has no tokens left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WithheldWake {
+    /// How many notifications are queued.
+    pub pending: usize,
+    /// The limit the root reached.
+    pub exceeded: otto_core::agent::budget::Exceeded,
+}
+
+impl std::fmt::Display for WithheldWake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} queued notification(s) were not delivered because the token budget is used up ({}); they stay queued and are delivered with the next input of this session",
+            self.pending, self.exceeded
+        )
+    }
+}
+
 /// Why [`Controller::interrupt_step`] did not interrupt the running step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterruptRefusal {
@@ -249,9 +268,14 @@ impl Controller {
         state.current.as_ref()?.runner.reminders().cloned()
     }
 
-    /// Claims a turn only when the runner has pending inbox messages.
+    /// Claims a turn only when the runner has pending inbox messages and the
+    /// session's root budget has tokens left. This is the one place a wake turn
+    /// is admitted: the server, the terminal frontends, `otto --prompt` and ACP
+    /// all claim through it. With the tokens used up it returns `None` and the
+    /// notifications stay queued until the next user input, which starts a new
+    /// root turn and delivers them; see [`Controller::withheld_wake`].
     pub fn prepare_wake(&self) -> Result<Option<WakeOperation<'_>>, String> {
-        let generation = {
+        let (generation, budget) = {
             let mut state = self.lock();
             if state.is_closed() {
                 return Err(CLOSED.to_string());
@@ -265,12 +289,49 @@ impl Controller {
             if current.runner.mailbox().is_empty() {
                 return Ok(None);
             }
-            state.reserve_wake()?
+            let runner = Arc::clone(&current.runner);
+            match runner.wake_gate() {
+                WakeGate::Admit(budget) => (state.reserve_wake()?, budget),
+                WakeGate::Withheld(withheld) => {
+                    drop(state);
+                    runner.report_wake_withheld(&withheld);
+                    return Ok(None);
+                }
+            }
         };
         let admission = Admission {
             controller: self,
             generation,
         };
-        Ok(Some(WakeOperation::new(self, admission)))
+        Ok(Some(WakeOperation::new(self, admission, budget)))
+    }
+
+    /// The notifications a wake turn cannot deliver because the session's root
+    /// budget has no tokens left, or `None` when nothing is withheld. A caller
+    /// that would otherwise wait for a wake that will not run (`otto --prompt`)
+    /// or retry one (ACP) asks here first. The first call for a root writes the
+    /// `turn_budget_wake_skipped` record.
+    pub fn withheld_wake(&self) -> Option<WithheldWake> {
+        let runner = {
+            let state = self.lock();
+            if state.is_closed() {
+                return None;
+            }
+            Arc::clone(&state.current.as_ref()?.runner)
+        };
+        let pending = runner.mailbox().len();
+        if pending == 0 {
+            return None;
+        }
+        match runner.wake_gate() {
+            WakeGate::Admit(_) => None,
+            WakeGate::Withheld(withheld) => {
+                runner.report_wake_withheld(&withheld);
+                Some(WithheldWake {
+                    pending,
+                    exceeded: withheld.exceeded,
+                })
+            }
+        }
     }
 }

@@ -162,13 +162,13 @@ counter is produced.
 
 ## Turn budget
 
-`[agent.budget]` bounds how much model work one turn may use. Both limits are on
-by default and apply to every turn.
+`[agent.budget]` bounds how much model work one turn and the work it starts may
+use. Both limits are on by default.
 
-| Key | Counts | Unit | Default |
-| --- | --- | --- | --- |
-| `max_tokens` | `input_tokens + output_tokens` of every model response in the turn. Input tokens already include cached input. Responses to automatic compaction requests and to the requests of a split-turn summary count too. | tokens | `4200000` |
-| `max_steps` | Ordinary model calls in the turn: one for each pass of the agent loop, including the call after each tool batch. Compaction requests are not steps. A retry after a context overflow is the same step. | calls | `54` |
+| Key | Counts | Scope | Unit | Default |
+| --- | --- | --- | --- | --- |
+| `max_tokens` | `input_tokens + output_tokens` of every model response, summed over the root turn and everything it starts (see below). Input tokens already include cached input. Responses to automatic compaction requests and to the requests of a split-turn summary count too. | shared by the root turn and everything it starts | tokens | `4200000` |
+| `max_steps` | Ordinary model calls: one for each pass of the agent loop, including the call after each tool batch. Compaction requests are not steps. A retry after a context overflow is the same step. | one controller turn (see below); each started turn counts its own | calls | `54` |
 
 Both defaults are twice the 99th percentile of 150 local turns (2,096,868
 tokens and 27 steps). `0` disables the limit it is set on; `0` for both
@@ -176,52 +176,125 @@ disables the budget. Values must be between 0 and 1000000000000 for
 `max_tokens` and between 0 and 1000000 for `max_steps`; a negative or larger
 value fails at load with an error that names the key.
 
+### What shares a budget
+
+A **root turn** is a turn that starts from new input: a prompt typed in the
+terminal or sent to `otto serve` or `otto acp`, an image prompt, a stored
+schedule prompt, or a chat message. Each root turn creates one budget with its
+own `budget_id`, and it replaces the budget of the session's previous root turn.
+
+- **Tokens are shared.** The root turn and everything it starts charge one
+  `max_tokens` total: the sub-agents it starts (including a resumed task), each
+  step attempt of a workflow it starts, and the wake and follow-up turns that
+  run afterwards. Tokens used by a sub-agent therefore reduce what the parent
+  and the other sub-agents may still use.
+- **Steps are per controller turn.** `max_steps` counts the model calls of one
+  turn of the controller. When a Bash approval interrupts a turn, the turn
+  continues after the decision with the token total and step count it had
+  before the approval; an approval does not reset either. Each sub-agent task,
+  each workflow step attempt, each wake turn and each follow-up turn counts its
+  own steps from 0 against the same `max_steps`.
+- A sub-agent or workflow run keeps the budget of the root turn that started it
+  after that turn has ended. A sub-agent that is still running when the shared
+  tokens run out stops at its next check.
+- A workflow run that no turn started (one started through the `otto serve`
+  workflow routes, a fork, or a retry with `otto workflow resume --retry`) gets
+  one root budget of its own, shared by all steps of the run.
+- Sub-agents cannot start sub-agents, so no budget is shared with a deeper level.
+- An external ACP sub-agent runs in its own process with its own model
+  provider. Otto does not receive its token usage, so it is not charged to the
+  budget; only the turns Otto runs itself are.
+- A manual `/compact` is not part of a turn; it runs with a new budget of its
+  own. So does a run that has no controller turn (for example `otto eval`).
+
 ### When the check runs
 
-- Otto adds the tokens of a response to the turn's total as soon as the response
+- Otto adds the tokens of a response to the shared total as soon as the response
   arrives. The usage that a provider omits counts as 0.
-- Before each ordinary model call, Otto stops the turn if the calls already made
-  equal `max_steps` or the tokens used are at least `max_tokens`. With
-  `max_steps = N`, at most N calls are made.
+- Before each ordinary model call, Otto stops the holder if its own calls
+  already equal `max_steps` or the shared tokens used are at least `max_tokens`.
+  With `max_steps = N`, a turn makes at most N calls.
 - Before a compaction request and before the retry that follows an overflow
-  compaction, Otto stops the turn if the tokens used are at least `max_tokens`,
-  so a summary request cannot add usage after the limit was reached.
-- A call is never interrupted while it streams. The turn can therefore use more
-  than `max_tokens`, by at most the tokens of the one response that crossed the
-  limit. The tool calls of that response still run, and each has its result in
-  the transcript; the next model call is not made.
+  compaction, Otto stops the holder if the shared tokens used are at least
+  `max_tokens`, so a summary request cannot add usage after the limit was
+  reached.
+- Nothing is cancelled when the shared tokens run out. Each holder of the budget
+  (the parent turn, each running sub-agent, each running workflow step) stops
+  at its own next check. A call is never interrupted while it streams. A holder
+  that was running when the limit was crossed can therefore make at most one
+  more model call and run the tool batch of that call; with several holders
+  running, the total can exceed `max_tokens` by that amount for each of them.
+  The tool calls of the last response still run, and each has its result in the
+  transcript.
 
 ### What you see
 
-The turn ends as failed with one of these errors; the text names the key to
-change:
+A turn that reaches a limit ends as failed with one of these errors; the text
+names the key to change:
 
 ```text
 budget exceeded: 4200311 of 4200000 tokens used in this turn ([agent.budget].max_tokens)
 budget exceeded: 54 of 54 provider steps used in this turn ([agent.budget].max_steps)
 ```
 
-The session stays usable. The next prompt starts with a new budget, and you can
+The session stays usable. The next prompt starts a new root budget, and you can
 ask the model to continue.
 
-In this release every turn has its own budget. A sub-agent turn and a workflow
-step turn each start with the full limits from your configuration; their usage is
-not added to the turn that started them, and theirs is not subtracted from it. A
-manual `/compact` also starts with a new budget.
+- **Sub-agent.** A sub-agent that stops at the budget ends with task status
+  `failed`; its error text is the line above, and the parent receives the usual
+  completion notification with that text.
+- **Workflow step.** The step attempt ends as `failed` with the same text as its
+  error, and the run fails. A budget stop is never retried: Otto does not retry
+  failed workflow steps automatically. To run the step again, use
+  `otto workflow resume RUN_ID --retry STEP_ID`; that retry starts a new root
+  budget.
+- **Wake and follow-up turns.** A wake turn delivers sub-agent, timer and
+  workflow notifications. It is not started when the shared tokens of the
+  session's most recent root turn are used up. The notifications stay queued and
+  are delivered with your next input, which starts a new root turn with a new
+  budget. Nothing is shown at that moment in the terminal UI, the line REPL,
+  `otto serve` or `otto acp`; the log record below is the only trace.
+  `otto --prompt` has no next input, so it ends with exit status 1 and prints
+  `N queued notification(s) were not delivered because the token budget is used
+  up ...` instead of exiting as if everything had been delivered. The step limit
+  never withholds a wake turn, because each wake turn counts its own steps.
+- **Follow-ups.** A follow-up that the model queued with `task_queue` lives only
+  as long as the turn that queued it. When the shared tokens are used up, the
+  follow-ups are not started and are discarded with a visible notice that names
+  the key; queue the work again in the next turn.
+- **First wake after a restart.** The budget is in memory only. If a session has
+  had no root turn in the current process (for example a notification that is
+  pending right after a restart), the first wake turn starts a root budget
+  with the configured limits.
+
+### Not persisted
+
+A budget is never written to a session file or a database. After a restart,
+recovered work gets a new budget with the same limits: a sub-agent task you
+resume, a workflow run that continues, and the first turn of a loaded session.
+The tokens a root turn used before the restart are not counted again.
 
 ### Logs and metrics
 
-Each stopped turn writes one `turn_budget_exceeded` record to the diagnostic file
-(see [Logs, metrics, and request correlation](servers-and-connectors.md#logs-metrics-and-request-correlation))
+Each holder that stops writes one `turn_budget_exceeded` record to the
+diagnostic file (see [Logs, metrics, and request correlation](servers-and-connectors.md#logs-metrics-and-request-correlation))
 with `session_id`, `task_id` (present only for a sub-agent or workflow step
-turn), `limit` (`tokens` or `steps`), `limit_value` and `used`. It contains no
-message or tool content. Find it with
+turn), `budget_id`, `limit` (`tokens` or `steps`), `limit_value` and `used`. One
+exhausted root can write several records, one for each holder that stops; they
+share `budget_id`. A run that has no controller turn writes an empty
+`budget_id`. A record contains no message or tool content. Find them with
 `rg turn_budget_exceeded ~/.otto/logs/diagnostic-*.jsonl*`.
 
-`otto serve` counts these stops in `otto_turn_stops_total{reason}` with
+A wake turn that is not started writes one `turn_budget_wake_skipped` record for
+each root budget, with `session_id`, `budget_id` and `pending_notifications`
+(the number of queued notifications, never their text). A second refusal for the
+same root writes nothing; the next root budget can write one again.
+
+`otto serve` counts the stops in `otto_turn_stops_total{reason}` with
 `reason="budget_tokens"` or `reason="budget_steps"`, next to the no-progress
-reasons. The metric exists only in `otto serve`; the terminal UI, `otto --prompt`
-and the schedule worker write the log record only.
+reasons. Each holder's stop is counted, so one exhausted root can add more than
+1. The metric exists only in `otto serve`; the terminal UI, `otto --prompt` and
+the schedule worker write the log record only.
 
 ### Raising or disabling a limit
 
@@ -234,7 +307,8 @@ max_steps = 0          # no step limit
 ```
 
 Raise a limit for work that legitimately needs many model calls, such as a large
-refactoring. Disable both only for turns that are bounded another way, for
+refactoring, or for a turn that starts several sub-agents, which all charge the
+same `max_tokens`. Disable both only for turns that are bounded another way, for
 example by `unattended_turn_timeout` and by your own review of the output.
 
 ## Removed keys

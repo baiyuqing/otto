@@ -23,6 +23,7 @@ async fn dropping_run_with_definition_control_cancels_the_child() {
             Arc::new(MemorySession::new()),
             definition("worker"),
             &control,
+            RootBudget::new("test-root", Default::default()),
         ),
     )
     .await;

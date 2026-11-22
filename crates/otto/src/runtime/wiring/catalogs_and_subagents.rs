@@ -146,6 +146,7 @@ impl Builder {
         };
         let tasks = Arc::clone(tasks);
         let reminders = Arc::clone(reminders);
+        let budget = Arc::clone(resources.budget());
         let usage = self.usage_collector(session, runtime);
         let session_for_children = session.clone();
         let session_for_resume = session_for_children.clone();
@@ -234,6 +235,7 @@ impl Builder {
                     Some(PathBuf::from(path).with_extension(""))
                 }
             })),
+            budget,
         })
         .map_err(|error| format!("create sub-agent runner: {error}"))?;
         for warning in &warnings {

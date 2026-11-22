@@ -353,8 +353,11 @@ impl Diagnostics for Scope {
     fn turn_stalled(&self, stall: &otto_core::agent::progress::Stall) {
         self.record_stall(stall);
     }
-    fn turn_budget_exceeded(&self, exceeded: &otto_core::agent::budget::Exceeded) {
-        self.record_budget_exceeded(exceeded);
+    fn turn_budget_exceeded(&self, exceeded: &otto_core::agent::budget::Exceeded, budget_id: &str) {
+        self.record_budget_exceeded(exceeded, budget_id);
+    }
+    fn turn_budget_wake_skipped(&self, budget_id: &str, pending_notifications: usize) {
+        self.record_budget_wake_skipped(budget_id, pending_notifications);
     }
     fn for_task(&self, task: &str) -> Option<Arc<dyn Diagnostics>> {
         Some(Arc::new(Self {

@@ -4,6 +4,7 @@ use crate::fixtures::subagent_doubles::{
     match_any, match_prompt, raw, redaction, redactor, stub, test_config, test_prompt_for,
     tool_names, wait_status,
 };
+use otto_core::agent::budget::RootBudget;
 use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role, Usage};
 use otto_core::provider::Response;
@@ -460,6 +461,7 @@ mod records;
 mod resume;
 mod resume_tool;
 mod scheduling;
+mod shared_budget;
 mod start;
 mod tools;
 

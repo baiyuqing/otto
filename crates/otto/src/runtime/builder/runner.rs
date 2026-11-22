@@ -20,22 +20,33 @@ impl Runner {
         }
         self.agent.wait_end_hooks().await;
     }
-    /// Runs one turn.
+    /// Runs one turn under a fresh budget for this run alone. It is not a root
+    /// turn of the session: the controller never calls it, and a child started
+    /// by this run shares the session's current root, not this run's budget.
+    /// Tests and callers without a controller turn use it.
     pub async fn run(
         &self,
         user_text: &str,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        self.run_with_system_context(user_text, "", emit, cancel)
-            .await
+        self.run_with_system_context(
+            user_text,
+            "",
+            BudgetScope::Fresh(self.budget_policy),
+            emit,
+            cancel,
+        )
+        .await
     }
 
-    /// Runs one turn with ephemeral system context that is not persisted.
+    /// Runs one turn with ephemeral system context that is not persisted,
+    /// under the budget `scope` names.
     pub async fn run_with_system_context(
         &self,
         user_text: &str,
         system_context: &str,
+        scope: BudgetScope,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -49,8 +60,10 @@ impl Runner {
             let _ = events.send(event);
         };
         let mut collecting = self.collecting(&mut send);
-        let run = self.agent.run_with_system_context_control(
+        let run = self.agent.run_with_budget(
+            scope,
             user_text,
+            None,
             system_context,
             &mut collecting,
             &control,
@@ -71,6 +84,7 @@ impl Runner {
         &self,
         text: &str,
         system_context: &str,
+        scope: BudgetScope,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -84,7 +98,8 @@ impl Runner {
             let _ = events.send(event);
         };
         let mut collecting = self.collecting(&mut send);
-        let run = self.agent.run_followup_with_system_context_control(
+        let run = self.agent.run_followup_with_budget(
+            scope,
             text,
             system_context,
             &mut collecting,
@@ -106,6 +121,7 @@ impl Runner {
         user_text: &str,
         image: Block,
         system_context: &str,
+        scope: BudgetScope,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -119,7 +135,8 @@ impl Runner {
             let _ = events.send(event);
         };
         let mut collecting = self.collecting(&mut send);
-        let run = self.agent.run_with_image_system_context_control(
+        let run = self.agent.run_with_budget(
+            scope,
             user_text,
             Some(image),
             system_context,
@@ -515,22 +532,45 @@ impl Runner {
         tasks: Arc<crate::subagent::tasks::Tasks>,
         tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>>,
     ) -> Self {
+        Self::scripted_with_budget(
+            session,
+            provider,
+            tasks,
+            tools,
+            otto_core::agent::budget::BudgetPolicy::default(),
+            None,
+        )
+    }
+
+    /// [`Self::scripted_with_tools`] with the budget policy of its root turns
+    /// and an optional diagnostics sink, for the tests of the turn budget.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scripted_with_budget(
+        session: SharedSession,
+        provider: Arc<dyn Provider + Send + Sync>,
+        tasks: Arc<crate::subagent::tasks::Tasks>,
+        tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>>,
+        budget_policy: otto_core::agent::budget::BudgetPolicy,
+        diagnostics: Option<Arc<dyn otto_core::diagnostics::Diagnostics>>,
+    ) -> Self {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
         let task_control = Arc::new(crate::runtime::task_control::TaskControl::default());
         let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = tasks.notifications().clone();
-        session.install_test_resources(
-            super::super::session_resources::SessionResources::for_tests(
-                &session.header().id,
-                Some(Arc::clone(&tasks)),
-            ),
+        let resources = super::super::session_resources::SessionResources::for_tests(
+            &session.header().id,
+            Some(Arc::clone(&tasks)),
         );
+        let budget = Arc::clone(resources.budget());
+        session.install_test_resources(resources);
         Self {
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
                 registry,
                 session,
                 Options {
+                    diagnostics,
+                    budget: budget_policy,
                     model: "test-model".to_string(),
                     provider_name: "openai-compatible".to_string(),
                     request_sizer: Some(Arc::new(ScriptedSizer)),
@@ -562,6 +602,8 @@ impl Runner {
             memory_proposals: None,
             schedule_origin: Default::default(),
             presentation_origin: Default::default(),
+            budget,
+            budget_policy,
         }
     }
 

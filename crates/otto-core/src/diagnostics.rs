@@ -116,8 +116,14 @@ pub trait Diagnostics: Send + Sync {
     /// kind, tool name and count are passed; arguments and results never are.
     fn turn_stalled(&self, _stall: &crate::agent::progress::Stall) {}
     /// A turn was stopped because it reached its budget. Only the limit kind,
-    /// its value and the amount used are passed.
-    fn turn_budget_exceeded(&self, _exceeded: &crate::agent::budget::Exceeded) {}
+    /// its value, the amount used and the id of the root budget are passed.
+    /// Every holder of one root that stops writes its own report, with the
+    /// same `budget_id`.
+    fn turn_budget_exceeded(&self, _exceeded: &crate::agent::budget::Exceeded, _budget_id: &str) {}
+    /// A wake turn was not started because the session's root budget has no
+    /// tokens left. Only the root's id and the number of queued notifications
+    /// are passed; notification text never is.
+    fn turn_budget_wake_skipped(&self, _budget_id: &str, _pending_notifications: usize) {}
 }
 
 /// All arguments are typed metadata. HTTP adapters may report headers and byte

@@ -14,6 +14,12 @@ pub(super) async fn wake_turn(session: &Session, stop: &CancellationToken) -> bo
     {
         return false;
     }
+    // The same rule for the same reason: with the token budget used up the
+    // claim below would end without a turn and release the slot, which wakes
+    // this loop again. The notifications wait for the next prompt.
+    if session.controller.withheld_wake().is_some() {
+        return false;
+    }
     let Some(token) = session.prompt.begin_wake(stop) else {
         return false;
     };

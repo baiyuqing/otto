@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio_util::sync::CancellationToken;
 
+use super::budget::BudgetScope;
 use super::compaction_select::{
     COMPACTION_SUMMARY_DISPLAY_PREFIX, CompactionSelection, select_compaction,
 };
@@ -71,7 +72,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
     ) -> Result<CompactionResult, AgentError> {
         // A manual compaction is its own operation, not part of a turn.
-        self.reset_budget();
+        self.begin_budget(BudgetScope::Fresh(self.options.budget));
         match self
             .compact_locked(CompactionReason::Manual, focus, emit, control)
             .await

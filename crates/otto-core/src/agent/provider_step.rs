@@ -692,12 +692,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
     /// Reports a reached budget limit to the diagnostics hook and returns the
     /// error. This is the only place a budget stop becomes an error, so each
-    /// stopped turn is reported once and before redaction can replace the
+    /// stopped holder is reported once and before redaction can replace the
     /// error. The caller ends the turn with [`Self::fail`], directly or by
     /// returning the error to the turn loop.
     pub(super) fn report_budget(&self, exceeded: super::budget::Exceeded) -> AgentError {
         if let Some(diagnostics) = self.options.diagnostics.as_ref() {
-            diagnostics.turn_budget_exceeded(&exceeded);
+            let budget_id = self.with_budget(|budget| budget.budget_id().to_owned());
+            diagnostics.turn_budget_exceeded(&exceeded, &budget_id);
         }
         AgentError::BudgetExceeded(exceeded)
     }
@@ -712,16 +713,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         self.fail(emit, error)
     }
 
-    fn with_budget<R>(&self, f: impl FnOnce(&mut super::budget::TurnBudget) -> R) -> R {
-        f(&mut self
+    fn with_budget<R>(&self, f: impl FnOnce(&super::budget::TurnBudget) -> R) -> R {
+        f(&self
             .budget
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
-    /// Starts a new budget for a turn or a manual compaction.
-    pub(super) fn reset_budget(&self) {
-        self.with_budget(|budget| *budget = super::budget::TurnBudget::new(self.options.budget));
+    /// Starts the budget of a run or a manual compaction from its scope.
+    pub(super) fn begin_budget(&self, scope: super::budget::BudgetScope) {
+        *self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = scope.into_turn();
     }
 
     /// Charges the usage of one provider response, as soon as it is known.

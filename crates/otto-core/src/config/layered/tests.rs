@@ -263,3 +263,26 @@ fn explanation_redacts_sensitive_url_arguments_and_bindings() {
     }
     assert!(output.contains("redacted"));
 }
+
+#[test]
+fn removed_agent_max_turns_and_web_table_fail_in_every_layer() {
+    for layer in [Layer::User, Layer::Shared, Layer::Local] {
+        for (text, name) in [
+            ("[agent]\nmax_turns = 20", "max_turns"),
+            ("[web]\nallow_hosts = ['example.com']", "web"),
+        ] {
+            let error = Merged::default()
+                .add(text, "host.toml", layer, true)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("invalid configuration in host.toml at line"),
+                "{error}"
+            );
+            assert!(
+                error.contains(&format!("unknown field `{name}`")),
+                "{error}"
+            );
+        }
+    }
+}

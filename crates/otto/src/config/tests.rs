@@ -445,6 +445,19 @@ fn load_rejects_unknown_fields() {
 }
 
 #[test]
+fn load_rejects_removed_agent_max_turns_and_web_table_naming_the_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (text, name) in [
+        ("[agent]\nmax_turns = 20\n", "max_turns"),
+        ("[web]\nallow_hosts = [\"example.com\"]\n", "web"),
+    ] {
+        let path = write(dir.path(), "config.toml", text);
+        let err = load(&path).unwrap_err().to_string();
+        assert!(err.contains(&format!("`{name}`")), "{err}");
+    }
+}
+
+#[test]
 fn write_creates_the_directory_and_restricts_permissions() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("nested").join("config.toml");

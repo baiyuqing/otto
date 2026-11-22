@@ -325,9 +325,7 @@ allow_env = []                 # exact environment variable names restored in th
 [agent]
 shell_timeout = "120s"
 max_output_bytes = 51200
-# Optional deadlines: turn_timeout, provider_timeout, subagent_timeout,
-# workflow_step_timeout. The unattended deadline defaults to 30m.
-# unattended_turn_timeout = "0"  # explicitly disable it
+# Deadlines and limits (meaning, defaults, effects): docs/manual/limits.md
 
 [agent.compaction]
 auto = true
@@ -459,11 +457,10 @@ Subagents normally use authenticated `list_models` discovery, falling back to
 the session model if discovery is unavailable or suitability unknown. Explicit
 user model choices and named-agent defaults take precedence. See [`list_models`](safety-and-tools.md#list_models).
 
-Deadlines use Go-duration strings; `0` disables an optional condition. Most
-end-to-end deadlines are disabled when omitted, except unattended chat/headless
-turns (30 minutes). Cancellation cannot prove an external side effect did not
-occur. Synchronous filesystem/storage calls are checked before and after, not
-forcibly detached. See [recovery](troubleshooting.md) before retrying a write.
+Deadlines use Go-duration strings. The meaning, default and effect of each
+deadline and limit, and what `0` does, are in [Limits and deadlines](limits.md).
+Cancellation cannot prove an external side effect did not occur. See
+[recovery](troubleshooting.md) before retrying a write.
 
 For detailed sandbox exclusions, environment filtering, approval defaults,
 network/read grants and unsandboxed access use [Safety and tools](safety-and-tools.md).

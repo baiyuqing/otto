@@ -523,8 +523,8 @@ What the tools refuse:
 
 Public web access needs no approval when `[sandbox].network = "allow"` (the
 default). The same destination, credential and network checks apply to
-sub-agents and scheduled runs. Legacy `[web].allow_hosts` entries are still
-accepted in config but have no effect.
+sub-agents and scheduled runs. The `[web]` config table was removed; see
+[removed keys](limits.md#removed-keys).
 
 Web content is untrusted. Results begin with a notice saying so. A page can
 still try to steer the model.
@@ -806,37 +806,8 @@ error instead.
 
 #### Stopping a turn that makes no progress
 
-A turn whose model keeps issuing the same tool call, or keeps receiving tool
-errors, would otherwise run until a deadline. Interactive turns have no
-deadline unless you configure one; chat and `--prompt` turns stop after
-[`[agent].unattended_turn_timeout`](getting-started.md#configuration)
-(default `30m`). Otto watches this itself and ends such a turn with
-the error `no progress: the same <tool> call repeated <n> times in a row`,
-`no progress: <n> tool calls in a row failed (last: <tool>)`, or
-`no progress: a tool-call cycle repeated <n> times without progress (last: <tool>)`.
-This applies to every turn, including each sub-agent's, which inherits your
-limits. A turn that ends this way is not a persistence failure: the session
-continues and you can send the next prompt.
-
-Two calls count as the same call when the tool name and the arguments are the
-same; key order and spacing in the arguments are ignored. Otto also detects
-repeated cycles of 2–4 calls when at least one call fails and all calls and
-result text repeat unchanged. For example, an edit rejected before writing,
-followed by a read of the same unchanged file, cannot loop indefinitely.
-Cycle tracking resets after any operation that may have changed state; only
-declared read-only tools and operations known not to have started participate.
-When extension hooks are configured, only consecutive checks run because hook
-effects are not covered by tool safety.
-Longer cycles and successful-only alternating cycles are not detected. Use
-`agent_status` and `agent_cancel` for these; chat and `--prompt` turns also
-have the unattended deadline.
-
-`[agent].no_progress_repeats` (default 8) and
-`[agent].no_progress_failures` (default 12) set the limits. The repetition
-limit applies to both identical consecutive calls and unchanged failed cycles.
-Set one to `0` to disable that condition; set both to `0` to disable the guard.
-Raise them if a deliberate poll loop, such as watching a long build, is being
-stopped early. Values must be between 0 and 1000.
+See [Stopping a turn that makes no progress](limits.md#stopping-a-turn-that-makes-no-progress).
+All deadlines and limits are listed in [Limits and deadlines](limits.md).
 
 ### Interactive sandbox setup
 

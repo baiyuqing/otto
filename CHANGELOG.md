@@ -7,6 +7,14 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+### Breaking changes
+
+- A config file that contains `[agent].max_turns` or a `[web]` table (including
+  `[web].allow_hosts`) now fails to load with an unknown-field error that names
+  the key. Delete those lines; neither key had any effect. The new
+  [Limits and deadlines](docs/manual/limits.md) page lists every deadline and
+  limit with its default and effect.
+
 ### Added
 
 - Plugin and standalone hooks can run on two new events around each model

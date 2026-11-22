@@ -10,6 +10,7 @@ for commands available in your installed version.
 | [Interactive use](manual/interactive-use.md) | TUI/REPL, sessions, context strategies and headless mode |
 | [Session JSONL reference](manual/interactive-use.md#session-jsonl-reference) | Record types, message roles, custom records and model-context visibility |
 | [Safety and tools](manual/safety-and-tools.md) | Approvals, sandbox, tools and sub-agents |
+| [Limits and deadlines](manual/limits.md) | Timeouts, output and progress limits, parallelism, removed keys |
 | [Servers and connectors](manual/servers-and-connectors.md) | HTTP/API, ACP, browser and chat clients, diagnostics |
 | [Automation](manual/automation.md) | Durable workflows and workspace identity |
 | [Memory and extensions](manual/memory-and-extensions.md) | Memory, skills, MCP, plugins and hooks |

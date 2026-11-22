@@ -5,7 +5,8 @@
 //! present key rejects calls it can otherwise serve, and the model has no way
 //! to retry: it already sent the shape it can produce. The convention is that
 //! an optional list argument reads an empty list as an absent key, which
-//! `otto::tool::empty_as_none` implements once.
+//! `otto::tool::empty_as_none` implements once. Explicit patch operations may
+//! distinguish omission from clearing and need a documented, tested exemption.
 //!
 //! The scan is a substring match over the tool sources rather than a parse of
 //! them. A future `Option<Vec<_>>` that is not a deserialized tool argument
@@ -26,8 +27,12 @@ const FEATURE_TOOLS: &[&str] = &[
     "workflow/tool.rs",
 ];
 
-/// Field declarations that are not tool arguments, as `file:field`.
-const EXEMPT: &[&str] = &[];
+/// Non-argument fields or intentional patch semantics, as `file:field`.
+const EXEMPT: &[&str] = &[
+    // Omission preserves evidence bindings; [] explicitly removes them.
+    // Pinned by evidence_arguments_distinguish_preserving_from_removing_bindings.
+    "memory.rs:evidence",
+];
 
 /// Attribute and doc lines directly above a field, nearest first.
 fn attributes_above(lines: &[&str], field: usize) -> Vec<String> {

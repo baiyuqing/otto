@@ -225,7 +225,7 @@ fn evidence_observation_is_an_anchor_not_external_monitoring() {
     };
     evidence::bind(
         &mut record.metadata,
-        &[observation.clone()],
+        std::slice::from_ref(&observation),
         "reported environment unchanged",
         false,
     )

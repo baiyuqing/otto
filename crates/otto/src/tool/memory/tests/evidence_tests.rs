@@ -87,6 +87,23 @@ async fn evidence_model_write_is_pending_and_condition_report_preserves_bindings
     );
 }
 
+#[test]
+fn evidence_arguments_distinguish_preserving_from_removing_bindings() {
+    let omitted: RememberArgs =
+        serde_json::from_str(r#"{"kind":"fact","text":"conclusion"}"#).unwrap();
+    let cleared: RememberArgs =
+        serde_json::from_str(r#"{"kind":"fact","text":"conclusion","evidence":[]}"#).unwrap();
+    assert!(
+        omitted.evidence.is_none(),
+        "omission must preserve bindings"
+    );
+    assert_eq!(
+        cleared.evidence,
+        Some(Vec::new()),
+        "[] must request removal"
+    );
+}
+
 #[tokio::test]
 async fn evidence_tool_requires_applicability_and_rejects_unbound_condition_reports() {
     let (_dir, service) = service();

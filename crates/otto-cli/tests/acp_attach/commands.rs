@@ -142,12 +142,21 @@ fn a_relay_lists_and_switches_profiles_on_serve() {
 
     let (frames, response) = relay.call("session/prompt", prompt(&session_id, "/model"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
-    assert_eq!(
-        agent_text(&frames),
-        "Model test/gpt-test (type openai-compatible)\n\
-         Configured models: other/gpt-other, test/gpt-test\n\
-         Switch with /model <provider>/<model_id>."
-    );
+    let report = agent_text(&frames);
+    let lines: Vec<&str> = report.lines().collect();
+    assert_eq!(lines.len(), 3, "{report}");
+    assert_eq!(lines[0], "Model test/gpt-test (type openai-compatible)");
+    assert_eq!(lines[2], "Switch with /model <provider>/<model_id>.");
+    // The list is the configured models plus the built-in presets, sorted.
+    let listed = lines[1]
+        .strip_prefix("Configured models: ")
+        .unwrap_or_else(|| panic!("no model list in {report}"));
+    let mut expected =
+        otto::config::configured_model_selectors(&otto_core::config::File::default());
+    expected.extend(["other/gpt-other".to_string(), "test/gpt-test".to_string()]);
+    expected.sort();
+    expected.dedup();
+    assert_eq!(listed, expected.join(", "), "{report}");
 
     let (frames, response) = relay.call(
         "session/prompt",

@@ -268,8 +268,27 @@ async fn model_lists_configured_models_and_switches_to_one() {
         stdout.contains("Model alpha/gpt-alpha (type openai-compatible, thinking default)\n"),
         "{stdout}"
     );
+    // The list is the configured models plus the built-in presets, sorted.
+    let listed = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Configured models: "))
+        .unwrap_or_else(|| panic!("no model list in {stdout}"));
+    let selectors: Vec<&str> = listed
+        .split(", ")
+        .map(|entry| entry.split(" (thinking ").next().unwrap())
+        .collect();
+    let mut expected =
+        otto::config::configured_model_selectors(&otto_core::config::File::default());
+    expected.extend(["alpha/gpt-alpha".to_string(), "beta/gpt-beta".to_string()]);
+    expected.sort();
+    expected.dedup();
+    assert_eq!(selectors, expected, "{stdout}");
     assert!(
-        stdout.contains("Configured models: alpha/gpt-alpha (thinking default), beta/gpt-beta (thinking default)\n"),
+        listed.contains("alpha/gpt-alpha (thinking default)"),
+        "{stdout}"
+    );
+    assert!(
+        listed.contains("beta/gpt-beta (thinking default)"),
         "{stdout}"
     );
     assert!(

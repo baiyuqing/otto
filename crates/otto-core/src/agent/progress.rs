@@ -2,8 +2,9 @@
 //!
 //! A turn whose model keeps issuing the same tool call, or keeps receiving tool
 //! errors, is making no progress and would otherwise run until a deadline that
-//! may be disabled. The guard keeps at most four result fingerprints to detect
-//! short failed cycles as well as consecutive calls/errors. A separate bounded
+//! may be disabled. The guard keeps at most [`MAX_CYCLE_LENGTH`] (8) result
+//! fingerprints to detect cycles of 2 to 8 calls, failed or successful, as well
+//! as consecutive calls/errors. A separate bounded
 //! advisory tracks single edits to at most 128 files per turn.
 //!
 //! Ownership: a [`ProgressGuard`] lives in
@@ -12,10 +13,14 @@
 //! one, including each sub-agent's, so the parent loop and its children stop
 //! under the same rule.
 //!
-//! Limitations: cycles longer than four calls and successful-only cycles are
-//! not detected. Cycle tracking resets when an operation may have changed
-//! state; result changes break a match. The agent uses consecutive checks only
-//! when hooks are configured, since hook effects are not covered by tool safety.
+//! A cycle is detected when the same calls return the same results for
+//! `repeated_calls` (at least 2) repetitions of the period, whether the results
+//! are errors or successes. Limitations: cycles longer than eight calls are not
+//! detected. Cycle tracking resets when an operation may have changed state,
+//! so a cycle that contains one is never detected; a changed result breaks a
+//! match, so polling whose output changes is not stopped. The agent uses
+//! consecutive checks only when hooks are configured, since hook effects are
+//! not covered by tool safety.
 //! Dependent-only waiting uses an explicit yield.
 //! Unchanged counters alone do not establish that a task is stalled.
 
@@ -28,9 +33,9 @@ use serde_json::Value;
 use crate::model::{EffectCertainty, RetrySafety};
 use crate::tool::ToolExecution;
 
-const MAX_CYCLE_LENGTH: usize = 4;
+const MAX_CYCLE_LENGTH: usize = 8;
 
-/// Default repetitions of identical calls or unchanged failed short cycles.
+/// Default repetitions of identical calls or unchanged cycles of 2 to 8 calls.
 pub const DEFAULT_REPEATED_CALLS: u32 = 8;
 /// Default number of consecutive failed tool results that stops a turn.
 pub const DEFAULT_CONSECUTIVE_FAILURES: u32 = 12;
@@ -40,8 +45,8 @@ pub const DEFAULT_CONSECUTIVE_FAILURES: u32 = 12;
 /// Zero disables one condition; a policy with both at zero never stops a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressPolicy {
-    /// Identical consecutive tool calls, or unchanged failed 2–4-call cycles,
-    /// that stop the turn after this many repetitions.
+    /// Identical consecutive tool calls, or unchanged 2–8-call cycles, that
+    /// stop the turn after this many repetitions.
     pub repeated_calls: u32,
     /// Consecutive failed tool results that stop the turn.
     pub consecutive_failures: u32,
@@ -72,13 +77,13 @@ impl ProgressPolicy {
 }
 
 /// Which limit a stalled turn hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StallKind {
     /// The same tool call, with the same arguments, repeated in a row.
     RepeatedCall,
     /// Tool results failed in a row.
     RepeatedFailure,
-    /// A short cycle with a failure and unchanged calls and results.
+    /// A cycle of 2 to 8 calls whose calls and results repeat unchanged.
     RepeatedCycle,
 }
 
@@ -128,7 +133,7 @@ impl fmt::Display for Stall {
     }
 }
 
-/// Counts consecutive identical calls, failures, and short unchanged cycles.
+/// Counts consecutive identical calls, failures, and unchanged cycles.
 #[derive(Debug, Default)]
 pub struct ProgressGuard {
     policy: ProgressPolicy,
@@ -141,7 +146,7 @@ pub struct ProgressGuard {
     /// The first stall this turn hit. A stall is not undone by a later call,
     /// because the turn ends as soon as the caller reads it.
     pending: Option<Stall>,
-    recent_results: VecDeque<(u64, bool)>,
+    recent_results: VecDeque<u64>,
     cycle_matches: [u32; MAX_CYCLE_LENGTH - 1],
     edits: BTreeMap<String, EditCount>,
 }
@@ -206,7 +211,7 @@ impl ProgressGuard {
         crossed
     }
 
-    /// Also compares results for short cycles. Only read-only operations and
+    /// Also compares results for cycles. Only read-only operations and
     /// operations known not to have started can participate: a mutation or an
     /// uncertain effect may represent progress even when its output repeats.
     pub fn observe_execution(
@@ -231,7 +236,7 @@ impl ProgressGuard {
         fingerprint(tool, arguments).hash(&mut hasher);
         execution.result.content.hash(&mut hasher);
         execution.result.is_error.hash(&mut hasher);
-        let observation = (hasher.finish(), execution.result.is_error);
+        let observation = hasher.finish();
         for period in 2..=MAX_CYCLE_LENGTH {
             let matches = &mut self.cycle_matches[period - 2];
             let previous = self
@@ -254,14 +259,7 @@ impl ProgressGuard {
         }
         for period in 2..=MAX_CYCLE_LENGTH {
             let repetitions = self.cycle_matches[period - 2] / period as u32 + 1;
-            if repetitions >= self.policy.repeated_calls.max(2)
-                && self
-                    .recent_results
-                    .iter()
-                    .rev()
-                    .take(period)
-                    .any(|(_, is_error)| *is_error)
-            {
+            if repetitions >= self.policy.repeated_calls.max(2) {
                 let stall = Stall {
                     kind: StallKind::RepeatedCycle,
                     tool: tool.into(),
@@ -399,6 +397,9 @@ fn push_json_string(text: &str, out: &mut String) {
 }
 
 #[cfg(test)]
+mod cycle_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -442,33 +443,6 @@ mod tests {
                 } else {
                     assert!(stall.is_none(), "period {period}, call {index}: {stall:?}");
                 }
-            }
-        }
-    }
-
-    #[test]
-    fn changing_results_and_successful_cycles_do_not_count_as_failed_cycles() {
-        for changed_position in [Some(0), Some(1), None] {
-            let mut guard = ProgressGuard::default();
-            for index in 0..100 {
-                let position = index % 2;
-                let content = if changed_position == Some(position) {
-                    format!("revision {}", index / 2)
-                } else {
-                    "unchanged".into()
-                };
-                let execution = result(&content, changed_position.is_some() && position == 0);
-                assert!(
-                    guard
-                        .observe_execution(
-                            "read",
-                            &format!(r#"{{"position":{position}}}"#),
-                            &execution,
-                            RetrySafety::ReadOnly,
-                        )
-                        .is_none()
-                );
-                assert!(guard.recent_results.len() <= MAX_CYCLE_LENGTH);
             }
         }
     }

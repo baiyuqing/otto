@@ -410,7 +410,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         };
         self.replay_pending_calls(emit, &mut state, control).await?;
         if let Some(stall) = state.progress.take_stall() {
-            return Err(self.fail(emit, AgentError::NoProgress(stall)));
+            return Err(self.stop_stalled(emit, stall));
         }
 
         if let Err(error) = self.deliver_notifications(emit).await {
@@ -599,7 +599,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             // The whole batch ran before the guard is read, so a stopped turn
             // never leaves an assistant tool call without its result.
             if let Some(stall) = state.progress.take_stall() {
-                return Err(self.fail(emit, AgentError::NoProgress(stall)));
+                return Err(self.stop_stalled(emit, stall));
             }
 
             // An interrupted batch always delivers its guidance with the event

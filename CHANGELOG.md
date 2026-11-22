@@ -72,6 +72,15 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed
 
+- The no-progress guard now stops a turn when a cycle of 2 to 8 read-only calls
+  repeats with unchanged results, whether the results succeed or fail; before,
+  only cycles of 2 to 4 calls that contained a failed result were stopped. The
+  error text is unchanged (`no progress: a tool-call cycle repeated <n> times
+  without progress`), and `[agent].no_progress_repeats` governs it. Each stop
+  writes a `turn_stalled` record (`session_id`, `task_id`, `kind`, `tool`,
+  `count`) to the diagnostic log, and `otto serve` counts it in
+  `otto_turn_stops_total{reason}`. See
+  [Limits and deadlines](docs/manual/limits.md#stopping-a-turn-that-makes-no-progress).
 - `otto eval` is no longer in the default `otto` binary. The command moved to
   the `otto-eval` crate and is linked only with the `eval` feature of
   `otto-cli`: build it with `cargo build -p otto-cli --features eval`, or run

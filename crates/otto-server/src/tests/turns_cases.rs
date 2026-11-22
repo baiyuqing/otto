@@ -719,3 +719,35 @@ async fn closing_the_server_cancels_the_active_turn() {
             .contains("otto_sessions_open 0")
     );
 }
+
+#[tokio::test]
+async fn a_stall_reported_through_a_diagnostics_scope_is_counted_in_metrics() {
+    use otto_core::agent::progress::{Stall, StallKind};
+    let harness = Harness::with(HarnessOptions::default());
+    let home = tempfile::tempdir().expect("home");
+    harness
+        .server
+        .log
+        .enable_diagnostics(home.path(), "test")
+        .expect("diagnostics");
+    let scope = harness
+        .server
+        .log
+        .diagnostic_scope(
+            "session-a",
+            "task-1",
+            otto_core::agent::redactor::Redactor::new(&[]),
+        )
+        .expect("scope");
+    scope.turn_stalled(&Stall {
+        kind: StallKind::RepeatedCycle,
+        tool: "read".into(),
+        count: 8,
+    });
+    assert!(
+        harness
+            .metrics_body()
+            .await
+            .contains(r#"otto_turn_stops_total{reason="repeated_cycle"} 1"#)
+    );
+}

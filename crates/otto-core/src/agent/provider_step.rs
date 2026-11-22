@@ -663,6 +663,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         error
     }
 
+    /// Ends a turn the progress guard stopped. The diagnostics hook is called
+    /// here, the only place a stall becomes an error, so each stopped turn is
+    /// reported once and before redaction can replace the error.
+    pub(super) fn stop_stalled(
+        &self,
+        emit: EventSink<'_>,
+        stall: super::progress::Stall,
+    ) -> AgentError {
+        if let Some(diagnostics) = self.options.diagnostics.as_ref() {
+            diagnostics.turn_stalled(&stall);
+        }
+        self.fail(emit, AgentError::NoProgress(stall))
+    }
+
     /// Returns a copy of `message` with every text-bearing field redacted.
     pub(super) fn redact_message(&self, message: &Message) -> Message {
         let mut redacted = message.clone();

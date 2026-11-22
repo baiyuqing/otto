@@ -131,6 +131,24 @@ fn a_turn_raises_then_lowers_the_active_gauge() {
 }
 
 #[test]
+fn turn_stops_are_labelled_by_reason() {
+    use otto_core::agent::progress::StallKind;
+    use otto_core::diagnostics::TurnStop;
+    let metrics = Metrics::new();
+    metrics.turn_stopped(TurnStop::NoProgress(StallKind::RepeatedCycle));
+    metrics.turn_stopped(TurnStop::NoProgress(StallKind::RepeatedCycle));
+    metrics.turn_stopped(TurnStop::NoProgress(StallKind::RepeatedCall));
+    assert_lines(
+        &metrics.render(),
+        &[
+            "# TYPE otto_turn_stops_total counter",
+            r#"otto_turn_stops_total{reason="repeated_cycle"} 2"#,
+            r#"otto_turn_stops_total{reason="repeated_call"} 1"#,
+        ],
+    );
+}
+
+#[test]
 fn tool_calls_are_labelled_by_tool_and_status() {
     let metrics = Metrics::new();
     metrics.tool_call("read", false, millis(50));

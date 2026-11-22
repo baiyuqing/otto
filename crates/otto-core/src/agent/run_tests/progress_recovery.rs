@@ -192,6 +192,71 @@ async fn alternating_failed_edits_and_unchanged_reads_stop_without_breaking_resu
 }
 
 #[tokio::test]
+async fn an_unchanged_successful_read_only_cycle_stops_the_turn() {
+    struct ConstantReader;
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for ConstantReader {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+
+        fn retry_safety(&self, _: &str) -> crate::model::RetrySafety {
+            crate::model::RetrySafety::ReadOnly
+        }
+
+        async fn execute(
+            &self,
+            _: crate::tool::ToolCall<'_>,
+            _: &dyn OperationControl,
+        ) -> crate::tool::ToolExecution {
+            crate::tool::ToolExecution::completed(ToolResult {
+                content: "unchanged".into(),
+                ..ToolResult::default()
+            })
+        }
+    }
+
+    let turns: Vec<Turn> = (0..6)
+        .map(|index| {
+            Turn::named_tool_call(
+                "read",
+                &format!("call-{index}"),
+                &format!(r#"{{"path":"{}.txt"}}"#, index % 2),
+            )
+        })
+        .collect();
+    let diagnostics = Arc::new(CapturingDiagnostics::default());
+    let agent = Agent::new(
+        FakeProvider::new(turns),
+        ConstantReader,
+        MemorySession::new(),
+        Options {
+            progress: ProgressPolicy {
+                repeated_calls: 3,
+                consecutive_failures: 12,
+            },
+            diagnostics: Some(diagnostics.clone()),
+            ..options()
+        },
+    );
+    let outcome = agent
+        .run("go", &mut |_| {}, &CancellationToken::new())
+        .await;
+    assert!(
+        matches!(outcome, Err(AgentError::NoProgress(ref stall)) if stall.kind == StallKind::RepeatedCycle && stall.count == 3),
+        "{outcome:?}"
+    );
+    assert_eq!(agent.provider().normal_requests().len(), 6);
+    assert!(every_tool_call_has_its_result(&agent.session().messages()));
+    assert_eq!(
+        *diagnostics.stalls.lock().unwrap(),
+        ["repeated_cycle read 3"],
+        "one diagnostics report per stopped turn"
+    );
+}
+
+#[tokio::test]
 async fn distinct_calls_never_stop_a_long_turn() {
     // More calls than either limit, all different: a long but productive turn
     // must run to its natural end.

@@ -18,7 +18,7 @@ Restart long-lived processes (`otto serve`, chat connectors) after changing them
 | `[agent].workflow_step_timeout` | One workflow step attempt | none | rejected at load | The step becomes `interrupted` and the run `paused` |
 | `[agent].shell_timeout` | One `bash` tool call | `120s` | rejected at load | The command is killed; the result reads `status: timed out after <duration>` |
 | `[agent].max_output_bytes` | Text returned by one tool call | `51200` | uses the default | The text is cut and ends with `[truncated: <n> bytes omitted]` |
-| `[agent].no_progress_repeats` | Identical consecutive tool calls or unchanged failed cycles | `8` | disables this condition | The turn ends with a `no progress:` error |
+| `[agent].no_progress_repeats` | Identical consecutive tool calls, or unchanged cycles of 2-8 calls | `8` | disables this condition | The turn ends with a `no progress:` error |
 | `[agent].no_progress_failures` | Consecutive failed tool results | `12` | disables this condition | The turn ends with a `no progress:` error |
 | `[agents].max_parallel` | Concurrent sub-agent tasks; concurrent workflow steps | `4` | rejected at load | Further tasks or steps wait in a queue |
 | Scheduled run limit (built in) | One scheduled run | `10m` | not configurable | The run is cancelled and recorded as failed |
@@ -109,23 +109,54 @@ continues and you can send the next prompt.
 
 Two calls count as the same call when the tool name and the arguments are the
 same; key order and spacing in the arguments are ignored. Otto also detects
-repeated cycles of 2–4 calls when at least one call fails and all calls and
-result text repeat unchanged. For example, an edit rejected before writing,
-followed by a read of the same unchanged file, cannot loop indefinitely.
-Cycle tracking resets after any operation that may have changed state; only
-declared read-only tools and operations known not to have started participate.
-When extension hooks are configured, only consecutive checks run because hook
-effects are not covered by tool safety.
-Longer cycles and successful-only alternating cycles are not detected. Use
-`agent_status` and `agent_cancel` for these; chat and `--prompt` turns also
-have the unattended deadline.
+a cycle of 2 to 8 calls when the same calls return the same result text, and
+the pattern repeats `no_progress_repeats` times. The results may be successes or
+errors. For example, `read a`, `read b`, `read a`, `read b` with unchanged
+contents, or an edit rejected before writing followed by a read of the same
+unchanged file, cannot loop indefinitely. If any result in the cycle changes,
+the match restarts, so polling whose output changes is not stopped.
+
+Not detected:
+
+- Cycles longer than 8 calls.
+- A cycle that contains an operation that may have changed state (for example a
+  `bash` call, a write or an edit that ran). Cycle tracking resets after such
+  an operation; only declared read-only tools and operations known not to have
+  started take part.
+- Cycles when extension hooks are configured. Only the identical-consecutive-call
+  and consecutive-failure checks run then, because hook effects are not covered
+  by tool safety.
+
+Use `agent_status` and `agent_cancel` for these cases; chat and `--prompt` turns
+also have the unattended deadline.
 
 `[agent].no_progress_repeats` (default 8) and
 `[agent].no_progress_failures` (default 12) set the limits. The repetition
-limit applies to both identical consecutive calls and unchanged failed cycles.
+limit applies to both identical consecutive calls and unchanged cycles of
+2-8 calls: a cycle of period P stops the turn after P x `no_progress_repeats`
+calls.
 Set one to `0` to disable that condition; set both to `0` to disable the guard.
 Raise them if a deliberate poll loop, such as watching a long build, is being
 stopped early. Values must be between 0 and 1000.
+
+### Logs and metrics
+
+Every turn that stops this way writes one `turn_stalled` record to the
+diagnostic file `~/.otto/logs/diagnostic-<pid>-<random-id>.jsonl` (see
+[Logs, metrics, and request correlation](servers-and-connectors.md#logs-metrics-and-request-correlation)).
+The record has `session_id`, `task_id` (present only for a sub-agent or workflow
+step turn), `kind` (`repeated_call`, `repeated_failure` or `repeated_cycle`),
+`tool` (the tool of the last call) and `count`. It never contains tool
+arguments or results. Find it with
+`rg turn_stalled ~/.otto/logs/diagnostic-*.jsonl*`.
+
+`otto serve` also counts these stops in `otto_turn_stops_total{reason}` on
+`/metrics`, with `reason` set to the same three `kind` values. The count covers
+main-session turns, sub-agent turns and workflow step turns run by that process.
+The counter exists only in `otto serve`; the terminal UI, `otto --prompt` and the
+schedule worker write the log record but expose no metric. If the diagnostic file
+cannot be opened at startup, Otto prints a warning and neither the record nor the
+counter is produced.
 
 ## Removed keys
 

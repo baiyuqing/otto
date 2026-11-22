@@ -614,12 +614,54 @@ mod provider_shape_tests {
         assert_eq!(value["api_version"], "2026-10-21");
         assert_eq!(value["workspace_id_env"], "WORKSPACE_ID");
         assert!(value.get("base_url").is_none());
-        assert_eq!(value["models"][0]["selector"], "claude/fixture");
-        assert_eq!(value["models"][0]["default"], true);
-        assert_eq!(value["models"][0]["thinking"], "high");
-        assert_eq!(value["models"][1]["model_id"], "other");
-        assert_eq!(value["models"][1]["default"], false);
+        let models = value["models"].as_array().unwrap();
+        let fixture = models
+            .iter()
+            .find(|model| model["model_id"] == "fixture")
+            .unwrap();
+        assert_eq!(fixture["selector"], "claude/fixture");
+        assert_eq!(fixture["default"], true);
+        assert_eq!(fixture["thinking"], "high");
+        let other = models
+            .iter()
+            .find(|model| model["model_id"] == "other")
+            .unwrap();
+        assert_eq!(other["default"], false);
         assert!(provider_response("unknown", &file).is_none());
+    }
+
+    #[test]
+    fn provider_response_lists_presets_offline_and_respects_visibility() {
+        let file = otto_core::config::File::default();
+        let deepseek = provider_response("deepseek", &file).unwrap();
+        assert!(deepseek.builtin);
+        assert_eq!(deepseek.provider_type, "openai-compatible");
+        assert!(
+            deepseek
+                .models
+                .iter()
+                .any(|model| model.selector == "deepseek/deepseek-flash")
+        );
+
+        let file = otto_core::config::parse(
+            "default_model='deepseek/deepseek-v4-pro'\n\
+             [providers.deepseek]\ninclude_preset_models=false\nmodels.custom={}\n",
+        )
+        .unwrap();
+        let deepseek = provider_response("deepseek", &file).unwrap();
+        assert_eq!(deepseek.models.len(), 2);
+        assert!(
+            deepseek
+                .models
+                .iter()
+                .any(|model| model.selector == "deepseek/custom")
+        );
+        assert!(
+            deepseek
+                .models
+                .iter()
+                .any(|model| model.selector == "deepseek/deepseek-v4-pro" && model.default)
+        );
     }
 
     #[test]

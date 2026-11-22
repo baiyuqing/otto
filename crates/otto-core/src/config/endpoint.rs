@@ -9,12 +9,21 @@ const UNTRUSTED: &str = concat!(
     "see docs/manual/getting-started.md#endpoint-trust"
 );
 
+/// Request routing determined at the endpoint trust boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointRoute {
+    Standard,
+    OfficialClaude,
+    OfficialDeepSeek,
+}
+
 /// A syntax-checked endpoint authorized by independent user/managed policy.
 /// Paths are not an authority boundary; a grant covers the entire origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedEndpoint {
     base_url: String,
     provider_type: String,
+    route: EndpointRoute,
 }
 
 impl TrustedEndpoint {
@@ -25,6 +34,10 @@ impl TrustedEndpoint {
         &self.provider_type
     }
 
+    pub fn route(&self) -> EndpointRoute {
+        self.route
+    }
+
     /// `trusted_origins` and HTTP acknowledgements must come only from trusted
     /// application/user/managed authority, never from the model or URL itself.
     pub fn authorize(
@@ -33,16 +46,42 @@ impl TrustedEndpoint {
         trusted_origins: &[String],
         allow_http_origins: &[String],
     ) -> Result<Self, &'static str> {
-        if !matches!(provider_type, "claude" | "openai-compatible" | "chatgpt") {
+        Self::authorize_for_provider(
+            base_url,
+            provider_type,
+            provider_type,
+            trusted_origins,
+            allow_http_origins,
+        )
+    }
+
+    /// Authorizes an endpoint using its binding name and existing API type.
+    pub fn authorize_for_provider(
+        base_url: &str,
+        provider_name: &str,
+        provider_type: &str,
+        trusted_origins: &[String],
+        allow_http_origins: &[String],
+    ) -> Result<Self, &'static str> {
+        use super::providers::{DEEPSEEK_DEFAULT_BASE_URL, PROVIDER_TYPES};
+        use super::{PROVIDER_DEEPSEEK, PROVIDER_OPENAI_COMPATIBLE};
+
+        if !PROVIDER_TYPES.contains(&provider_type) {
             return Err("unsupported provider endpoint type");
         }
         let parsed = parse(base_url)?;
         let origin = parsed.origin().ascii_serialization();
-        let official = match provider_type {
-            "claude" => origin == "https://api.anthropic.com",
-            "openai-compatible" => origin == "https://api.openai.com",
-            "chatgpt" => origin == "https://chatgpt.com",
-            _ => false,
+        let deepseek_binding =
+            provider_name == PROVIDER_DEEPSEEK && provider_type == PROVIDER_OPENAI_COMPATIBLE;
+        let official = if deepseek_binding {
+            origin == DEEPSEEK_DEFAULT_BASE_URL
+        } else {
+            match provider_type {
+                "claude" => origin == "https://api.anthropic.com",
+                "openai-compatible" => origin == "https://api.openai.com",
+                "chatgpt" => origin == "https://chatgpt.com",
+                _ => false,
+            }
         };
         let granted = |grants: &[String]| {
             grants.iter().any(|grant| {
@@ -59,8 +98,19 @@ impl TrustedEndpoint {
         Ok(Self {
             base_url: parsed.as_str().trim_end_matches('/').to_string(),
             provider_type: provider_type.to_string(),
+            route: match (official, deepseek_binding, provider_type) {
+                (true, true, _) => EndpointRoute::OfficialDeepSeek,
+                (true, false, "claude") => EndpointRoute::OfficialClaude,
+                _ => EndpointRoute::Standard,
+            },
         })
     }
+}
+
+pub(super) fn is_deepseek_origin(base_url: &str) -> bool {
+    parse(base_url).is_ok_and(|url| {
+        url.origin().ascii_serialization() == super::providers::DEEPSEEK_DEFAULT_BASE_URL
+    })
 }
 
 /// Checks a grant entry is an origin, not a URL path or secret-bearing URL.

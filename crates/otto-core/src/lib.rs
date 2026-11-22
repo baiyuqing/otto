@@ -18,6 +18,8 @@ pub mod openaicompat;
 pub mod openairesponses;
 pub mod operation;
 pub mod provider;
+#[cfg(test)]
+mod provider_dialect_tests;
 pub mod safetext;
 pub mod session;
 pub mod tool;

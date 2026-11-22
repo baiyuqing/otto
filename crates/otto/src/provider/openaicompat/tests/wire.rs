@@ -1,6 +1,38 @@
 //! Tests for the request wire format and the model catalog endpoints.
 
 use super::*;
+use otto_core::openaicompat::protocol::build_request;
+
+#[test]
+fn official_deepseek_client_sizes_its_authorized_wire_dialect() {
+    use otto_core::config::endpoint::TrustedEndpoint;
+    use otto_core::config::providers::DEEPSEEK_DEFAULT_BASE_URL;
+
+    let endpoint = TrustedEndpoint::authorize_for_provider(
+        DEEPSEEK_DEFAULT_BASE_URL,
+        "deepseek",
+        "openai-compatible",
+        &[],
+        &[],
+    )
+    .unwrap();
+    let client = Client::new_trusted(&endpoint, "fixture-value");
+    let request = Request {
+        model: "deepseek-flash".into(),
+        thinking: "high".into(),
+        cache_key: "fixture-cache-value".into(),
+        ..Request::default()
+    };
+    let expected = serde_json::to_vec(&build_request_for(
+        &request,
+        RequestDialect::OfficialDeepSeek,
+    ))
+    .unwrap();
+    assert_eq!(
+        client.serialized_request_size(&request).unwrap(),
+        expected.len()
+    );
+}
 
 #[test]
 fn serialized_request_size_matches_the_exact_wire_payload() {

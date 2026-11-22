@@ -208,7 +208,7 @@ fn resolve_impl(
     let model = selector.model_id.clone();
     let mut thinking = model_entry.thinking.clone();
     let mut base_url = configured.base_url.clone();
-    let api_key_env = configured.api_key_env.clone();
+    let mut api_key_env = configured.api_key_env;
     let api_version = configured.api_version.clone();
     let workspace_id_env = configured.workspace_id_env.clone();
     if !overrides.thinking.is_empty() {
@@ -229,7 +229,7 @@ fn resolve_impl(
     }
     validate_thinking(&thinking)?;
 
-    if matches!(
+    let endpoint = if matches!(
         provider.as_str(),
         super::PROVIDER_OPENAI_COMPATIBLE | super::PROVIDER_CLAUDE
     ) {
@@ -254,17 +254,33 @@ fn resolve_impl(
         }
         base_url = normalize_base_url(&base_url)
             .map_err(|err| ConfigError::new(format!("invalid base_url: {err}")))?;
-        super::endpoint::TrustedEndpoint::authorize(
-            &base_url,
-            &provider,
-            &provider_entry.trusted_origins,
-            &provider_entry.allow_http_origins,
+        Some(
+            super::endpoint::TrustedEndpoint::authorize_for_provider(
+                &base_url,
+                &selector.provider,
+                &provider,
+                &provider_entry.trusted_origins,
+                &provider_entry.allow_http_origins,
+            )
+            .map_err(ConfigError::new)?,
         )
-        .map_err(ConfigError::new)?;
     } else {
         // The chatgpt provider uses a fixed backend URL and OAuth credentials
         // from the credential file, not a configured base_url or API key.
         base_url = String::new();
+        None
+    };
+    if selector.provider == super::PROVIDER_DEEPSEEK {
+        // An endpoint override must not send the dedicated default credential
+        // to another origin. An explicit binding remains user-controlled.
+        api_key_env = provider_entry.api_key_env;
+        if api_key_env.is_empty()
+            && endpoint.as_ref().is_some_and(|endpoint| {
+                endpoint.route() == super::endpoint::EndpointRoute::OfficialDeepSeek
+            })
+        {
+            api_key_env = super::providers::DEEPSEEK_DEFAULT_API_KEY_ENV.into();
+        }
     }
 
     let mut shell_timeout = DEFAULT_SHELL_TIMEOUT;
@@ -340,20 +356,8 @@ fn resolve_impl(
         };
     let runtime = Runtime {
         provider_name: selector.provider.clone(),
+        endpoint,
         model_selector: selector,
-        endpoint: if base_url.is_empty() {
-            None
-        } else {
-            Some(
-                super::endpoint::TrustedEndpoint::authorize(
-                    &base_url,
-                    &provider,
-                    &provider_entry.trusted_origins,
-                    &provider_entry.allow_http_origins,
-                )
-                .map_err(ConfigError::new)?,
-            )
-        },
         provider_type: provider,
         base_url,
         model,

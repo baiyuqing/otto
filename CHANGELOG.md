@@ -9,6 +9,10 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- ChatGPT, Claude and DeepSeek ship with model presets in `otto setup` and
+  `/model`. Existing defaults and custom settings are preserved; the official
+  DeepSeek integration uses the OpenAI-compatible API with thinking disabled.
+
 - The local and attached TUIs can show `Otto` as a temporary Rex terminal
   title, restoring the previous title on exit or suspend without renaming the tab.
 

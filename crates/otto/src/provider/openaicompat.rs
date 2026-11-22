@@ -30,9 +30,12 @@ use std::time::Duration;
 use futures_util::TryStreamExt;
 use tokio_util::sync::CancellationToken;
 
+use otto_core::config::endpoint::EndpointRoute;
 use otto_core::model::{EffectCertainty, OperationStopReason};
 use otto_core::openaicompat::overflow::{MAX_ERROR_BODY, classify_overflow};
-use otto_core::openaicompat::protocol::{build_request, serialized_request_size};
+use otto_core::openaicompat::protocol::{
+    RequestDialect, build_request_for, serialized_request_size_for,
+};
 use otto_core::openaicompat::stream::StreamAssembler;
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
@@ -137,6 +140,7 @@ pub struct Client {
     model_idle_timeout: Duration,
     /// Set when the endpoint rejected `prompt_cache_key`; later requests omit it.
     prompt_cache_key_rejected: AtomicBool,
+    dialect: RequestDialect,
 }
 
 impl Client {
@@ -162,6 +166,7 @@ impl Client {
             state,
             model_idle_timeout: MODEL_IDLE_TIMEOUT,
             prompt_cache_key_rejected: AtomicBool::new(false),
+            dialect: RequestDialect::Standard,
         }
     }
 
@@ -171,6 +176,10 @@ impl Client {
         api_key: &str,
     ) -> Self {
         let mut client = Self::new(endpoint.base_url(), api_key);
+        client.dialect = match endpoint.route() {
+            EndpointRoute::OfficialDeepSeek => RequestDialect::OfficialDeepSeek,
+            EndpointRoute::OfficialClaude | EndpointRoute::Standard => RequestDialect::Standard,
+        };
         client.state = if endpoint.provider_type() != "openai-compatible" {
             Err("endpoint capability has wrong provider type".into())
         } else {
@@ -386,7 +395,7 @@ impl Provider for Client {
                     );
                 }
             };
-            let mut wire = build_request(request);
+            let mut wire = build_request_for(request, self.dialect);
             if self.prompt_cache_key_rejected.load(Ordering::Relaxed) {
                 wire.prompt_cache_key.clear();
             }
@@ -515,7 +524,7 @@ impl Provider for Client {
 impl RequestSizer for Client {
     /// Returns the exact number of bytes the request occupies on the wire.
     fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {
-        serialized_request_size(request).map_err(|error| {
+        serialized_request_size_for(request, self.dialect).map_err(|error| {
             ProviderError::Other(format!("encode chat completion request: {error}"))
         })
     }

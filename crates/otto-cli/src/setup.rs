@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use otto_core::config::{PROVIDER_CHATGPT, PROVIDER_CLAUDE, PROVIDER_OPENAI_COMPATIBLE};
+use otto_core::config::providers::BUILTIN_PROVIDERS;
+use otto_core::config::{File, PROVIDER_CHATGPT, PROVIDER_CLAUDE, PROVIDER_OPENAI_COMPATIBLE};
 
 use super::run::{fail, resolve_home_for};
 
@@ -86,20 +87,31 @@ pub fn run(
         stdout,
         "Otto setup creates a default model without storing API keys. Shell commands remain sandboxed by default."
     );
+    let provider_prompt = format!(
+        "Provider [{}] ({PROVIDER_CHATGPT}): ",
+        BUILTIN_PROVIDERS.join(" / ")
+    );
     let Some(provider) = ask_choice(
         stdin,
         stdout,
-        "Provider [chatgpt / openai-compatible / claude] (chatgpt): ",
-        &[
-            PROVIDER_CHATGPT,
-            PROVIDER_CLAUDE,
-            PROVIDER_OPENAI_COMPATIBLE,
-        ],
+        &provider_prompt,
+        &BUILTIN_PROVIDERS,
         PROVIDER_CHATGPT,
     ) else {
         let _ = writeln!(stdout, "Cancelled; configuration unchanged.");
         return 0;
     };
+    let Some(entry) = File::default().provider_entry(&provider) else {
+        return fail(stderr, "unknown setup provider");
+    };
+    let presets: Vec<&str> = entry.models.keys().map(String::as_str).collect();
+    if !presets.is_empty() {
+        let _ = writeln!(
+            stdout,
+            "Preset models: {}. You can also enter a custom model ID.",
+            presets.join(", ")
+        );
+    }
     let Some(model) = ask_nonempty(
         stdin,
         stdout,
@@ -181,9 +193,15 @@ pub fn run(
             if provider == PROVIDER_CHATGPT {
                 let _ = writeln!(stdout, "Next: run `otto login`, then `otto`.");
             } else {
+                let connection = entry.connection(&provider);
+                let key_env = if api_key_env.is_empty() {
+                    connection.api_key_env.as_str()
+                } else {
+                    api_key_env.as_str()
+                };
                 let _ = writeln!(
                     stdout,
-                    "Next: export {api_key_env}=… in your shell, then run `otto`."
+                    "Next: export {key_env}=… in your shell, then run `otto`."
                 );
             }
             0
@@ -323,6 +341,37 @@ mod tests {
         assert!(output.contains("otto login"));
         assert!(output.contains("Proposed configuration"));
         assert!(output.contains("[save / cancel] (cancel):"));
+    }
+
+    #[test]
+    fn deepseek_setup_suggests_presets_without_requiring_connection_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let mut input = Cursor::new(b"deepseek\ndeepseek-flash\nsave\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            &[],
+            &mut input,
+            &mut stdout,
+            &mut stderr,
+            &lookup(home.path()),
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
+        let file = otto_core::config::parse(&config).unwrap();
+        assert_eq!(file.default_model, "deepseek/deepseek-flash");
+        assert!(!config.contains("base_url"));
+        assert!(!config.contains("api_key_env"));
+        let output = String::from_utf8(stdout).unwrap();
+        assert!(output.contains("Preset models: deepseek-flash, deepseek-v4-pro"));
+        assert!(output.contains("You can also enter a custom model ID"));
+        let api_key_env = file
+            .provider_entry("deepseek")
+            .unwrap()
+            .connection("deepseek")
+            .api_key_env;
+        assert!(!api_key_env.is_empty());
+        assert!(output.contains(&format!("Next: export {api_key_env}=")));
     }
 
     #[test]

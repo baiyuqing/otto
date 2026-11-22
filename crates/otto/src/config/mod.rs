@@ -378,13 +378,29 @@ pub fn initial_config_content(
     base_url: &str,
     api_key_env: &str,
 ) -> Result<String, String> {
-    if !matches!(
-        provider,
-        PROVIDER_CHATGPT | PROVIDER_OPENAI_COMPATIBLE | PROVIDER_CLAUDE
-    ) {
+    if !otto_core::config::providers::is_builtin_provider(provider) {
         return Err("unsupported provider; no changes made".to_string());
     }
     let quote = |value: &str| toml::Value::String(value.to_string()).to_string();
+    if provider == otto_core::config::PROVIDER_DEEPSEEK {
+        if !base_url.is_empty() || !api_key_env.is_empty() {
+            return Err("DeepSeek setup uses the built-in endpoint and credential variable; configure overrides in the provider table".into());
+        }
+        let content = format!(
+            "# DeepSeek uses its built-in endpoint and API-key environment variable.\ndefault_model = {}\n",
+            quote(&format!("{provider}/{model_id}"))
+        );
+        let parsed = otto_core::config::parse(&content)
+            .map_err(|error| format!("invalid setup values: {error}"))?;
+        otto_core::config::resolve::resolve_without_credentials(
+            &parsed,
+            &HashMap::new(),
+            &SessionDefaults::default(),
+            &Overrides::default(),
+        )
+        .map_err(|error| format!("invalid setup values: {error}"))?;
+        return Ok(content);
+    }
     let claude_default_url = otto_core::config::providers::CLAUDE_DEFAULT_BASE_URL;
     let claude_default_key = otto_core::config::providers::CLAUDE_DEFAULT_API_KEY_ENV;
     let mut content = format!(
@@ -541,6 +557,8 @@ mod model_listing;
 
 pub use model_change::*;
 pub use model_listing::configured_model_selectors;
+#[cfg(test)]
+mod model_listing_tests;
 
 #[cfg(test)]
 mod model_change_tests;

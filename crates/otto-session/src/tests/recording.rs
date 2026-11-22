@@ -152,3 +152,26 @@ fn recording_protects_child_transcripts_and_queued_input_without_changing_identi
     assert_eq!(reopened.messages().len(), 1);
     reopened.close().unwrap();
 }
+
+#[test]
+fn recording_protects_hook_provider_request_records() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let candidate = "opaque-value-123";
+    store
+        .append_custom_entry(
+            "otto.hook.provider_request",
+            &format!(
+                r#"{{"version":1,"operation_id":"op_1","context":"client_secret={candidate}","edits":[{{"message":0,"block":0,"text":"SK={candidate}"}}]}}"#
+            ),
+        )
+        .unwrap();
+    let path = store.path();
+    store.close().unwrap();
+    let bytes = fs::read_to_string(&path).unwrap();
+    assert!(bytes.contains("otto.hook.provider_request"));
+    assert!(
+        !bytes.contains(candidate),
+        "credential reached journal bytes"
+    );
+}

@@ -10,6 +10,8 @@ pub(super) struct TurnRecordingSession {
     pub(super) inner: MemorySession,
     pub(super) turns: Mutex<Vec<crate::session::TurnRecord>>,
     pub(super) calls: Mutex<Vec<crate::session::ProviderCallRecord>>,
+    /// Every custom record as `(customType, data)`, in append order.
+    pub(super) customs: Mutex<Vec<(String, String)>>,
 }
 
 impl TurnRecordingSession {
@@ -79,6 +81,10 @@ impl Session for TurnRecordingSession {
         custom_type: &str,
         data: &str,
     ) -> Result<(), crate::session::SessionError> {
+        self.customs
+            .lock()
+            .expect("customs")
+            .push((custom_type.to_owned(), data.to_owned()));
         if custom_type == crate::session::TURN_CUSTOM_TYPE {
             self.turns
                 .lock()

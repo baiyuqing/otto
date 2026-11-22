@@ -1,5 +1,6 @@
 //! Session binding of hooks: per-call payload with session identity and live history path.
 use super::*;
+use otto_core::agent::hooks::Edit;
 
 /// Session identity and live values sent in the `session` payload object of every hook call.
 pub struct SessionBinding {
@@ -39,12 +40,21 @@ fn join_notices(earlier: Option<String>, later: Option<String>) -> Option<String
 pub(super) fn check_response_fields(event: &str, response: &Response) -> Result<(), String> {
     if response.arguments.is_some() && event != "before_tool"
         || response.content.is_some() && event != "after_tool"
+        || (response.system_prompt.is_some() || response.edits.is_some())
+            && event != "before_provider_call"
         || response.context.is_some()
-            && !["session_start", "before_prompt", "before_compaction"].contains(&event)
+            && ![
+                "session_start",
+                "before_prompt",
+                "before_provider_call",
+                "before_compaction",
+            ]
+            .contains(&event)
         || (response.decision.is_some() || response.reason.is_some())
             && ![
                 "session_start",
                 "before_prompt",
+                "before_provider_call",
                 "before_tool",
                 "before_compaction",
             ]
@@ -53,6 +63,37 @@ pub(super) fn check_response_fields(event: &str, response: &Response) -> Result<
         return Err("hook response field is not supported for this event".into());
     }
     Ok(())
+}
+
+/// Adds the edits of one hook response to the edits of the earlier hooks: an
+/// edit replaces an earlier hook's edit of the same block. Duplicates inside
+/// one response are kept so the agent rejects them.
+fn merge_edits(combined: &mut Option<Vec<Edit>>, edits: Vec<Edit>) {
+    let merged = combined.get_or_insert_default();
+    merged.retain(|earlier| {
+        !edits
+            .iter()
+            .any(|edit| edit.message == earlier.message && edit.block == earlier.block)
+    });
+    merged.extend(edits);
+}
+
+/// Shows later `before_provider_call` hooks the request as earlier hooks changed it.
+/// Edits that name no text block of `data` are left for the agent to reject.
+fn apply_to_request_data(data: &mut Value, system_prompt: Option<&str>, edits: &[Edit]) {
+    if let Some(system_prompt) = system_prompt
+        && let Some(object) = data.as_object_mut()
+    {
+        object.insert("system_prompt".into(), system_prompt.into());
+    }
+    for edit in edits {
+        let path = format!("/messages/{}/blocks/{}", edit.message, edit.block);
+        if let Some(block) = data.pointer_mut(&path).and_then(Value::as_object_mut)
+            && block.get("type").and_then(Value::as_str) == Some("text")
+        {
+            block.insert("text".into(), edit.text.clone().into());
+        }
+    }
 }
 
 /// The tool name an Otto hook matcher is tested against: the remote tool name for
@@ -122,6 +163,15 @@ impl Bound {
 }
 #[async_trait::async_trait]
 impl Hooks for Bound {
+    fn handles(&self, event: &str) -> bool {
+        self.runtime.hooks.iter().any(|entry| match entry {
+            HookEntry::Otto {
+                event: hook_event, ..
+            } => hook_event == event,
+            HookEntry::Claude { otto_event, .. } => *otto_event == event,
+        })
+    }
+
     async fn run(
         &self,
         event: &str,
@@ -184,6 +234,14 @@ impl Hooks for Bound {
                     if let Some(content) = response.content {
                         data["content"] = content.clone().into();
                         combined.content = Some(content);
+                    }
+                    let edits = response.edits.unwrap_or_default();
+                    apply_to_request_data(&mut data, response.system_prompt.as_deref(), &edits);
+                    if !edits.is_empty() {
+                        merge_edits(&mut combined.edits, edits);
+                    }
+                    if let Some(system_prompt) = response.system_prompt {
+                        combined.system_prompt = Some(system_prompt);
                     }
                     if let Some(context) = response.context {
                         combined

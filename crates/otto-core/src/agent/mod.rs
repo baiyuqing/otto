@@ -39,6 +39,7 @@ pub mod oneshot;
 pub mod overflow;
 pub mod progress;
 mod provider_call;
+mod provider_hooks;
 mod provider_step;
 pub mod redactor;
 pub mod steering;

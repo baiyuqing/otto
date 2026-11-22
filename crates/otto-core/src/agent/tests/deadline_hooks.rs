@@ -218,10 +218,16 @@ async fn hooks_rewrite_before_execution_preserve_effects_and_share_session_lifec
         vec![
             "session_start",
             "before_prompt",
+            "before_provider_call",
+            "after_provider_call",
             "before_tool",
             "after_tool",
+            "before_provider_call",
+            "after_provider_call",
             "turn_end",
             "before_prompt",
+            "before_provider_call",
+            "after_provider_call",
             "turn_end",
             "session_end"
         ]

@@ -127,27 +127,10 @@ pub struct File {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub failover: Failover,
-    #[serde(default, skip_serializing_if = "Web::is_default")]
-    pub web: Web,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderEntry>,
     #[serde(default)]
     pub projects: HashMap<String, projects::Project>,
-}
-
-/// Legacy `[web]` configuration, accepted for compatibility.
-/// Public web access no longer requires host grants; `allow_hosts` is ignored.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Web {
-    #[serde(default)]
-    pub allow_hosts: Vec<String>,
-}
-
-impl Web {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
 }
 
 /// The `[sandbox]` table as written in the config file, before resolution.
@@ -178,8 +161,6 @@ pub struct SandboxConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Agent {
-    #[serde(default)]
-    pub max_turns: i64,
     #[serde(default)]
     pub shell_timeout: String,
     #[serde(default)]
@@ -307,6 +288,18 @@ mod tests {
             let message = parse(text).expect_err("unknown key").to_string();
             assert!(message.starts_with("unknown field:"), "{message}");
             assert!(!message.contains("was removed"), "{message}");
+        }
+    }
+
+    #[test]
+    fn removed_agent_max_turns_and_web_table_fail_with_the_key_name() {
+        for (text, name) in [
+            ("[agent]\nmax_turns = 20\n", "max_turns"),
+            ("[web]\nallow_hosts = [\"example.com\"]\n", "web"),
+        ] {
+            let message = parse(text).expect_err("removed key").to_string();
+            assert!(message.starts_with("unknown field:"), "{message}");
+            assert!(message.contains(&format!("`{name}`")), "{message}");
         }
     }
 

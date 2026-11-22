@@ -1411,7 +1411,7 @@ can be combined with `--no-session`.
 
 Every turn of a `--prompt` run, including the wake turns that deliver
 background task results, stops after
-[`[agent].unattended_turn_timeout`](getting-started.md#configuration)
+[`[agent].unattended_turn_timeout`](limits.md#turn-deadlines)
 (default `30m`) and the run exits with `1`. Set it to `"0"` to remove the
 limit.
 

@@ -58,7 +58,16 @@ impl Merged {
             }
             let at = error.span().map_or(0, |span| span.start.min(text.len()));
             let line = text[..at].bytes().filter(|b| *b == b'\n').count() + 1;
-            ConfigError::new(format!("invalid configuration in {source} at line {line}"))
+            let unknown = error
+                .message()
+                .split_once('\n')
+                .map_or(error.message(), |(first, _)| first)
+                .strip_prefix("unknown field ")
+                .map(|field| format!(": unknown field {field}"))
+                .unwrap_or_default();
+            ConfigError::new(format!(
+                "invalid configuration in {source} at line {line}{unknown}"
+            ))
         })?;
         let mut table: Table = toml::from_str(text)
             .map_err(|_| ConfigError::new(format!("invalid TOML in {source}")))?;
@@ -376,7 +385,6 @@ fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str
                 Some("executable project configuration is not trusted")
             };
         }
-        ["web", "allow_hosts"] => true,
         _ => false,
     };
     let container = table
@@ -388,7 +396,6 @@ fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str
                 | ["mcp", "servers"]
                 | ["mcp", "servers", _]
                 | ["plugins"]
-                | ["web"]
         );
     if allowed || container {
         None

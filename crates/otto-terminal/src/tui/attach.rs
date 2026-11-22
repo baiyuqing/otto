@@ -273,6 +273,7 @@ pub async fn run_with_observer_bindings(
         let _ = writeln!(stderr, "otto: {error}");
         return 1;
     }
+    let title = super::terminal_title::TerminalTitle::enter().await;
     let mut keys = spawn_key_reader();
     // `deliver_tx` stays alive in this function so a missing worker leaves the
     // receiver pending instead of closed.
@@ -311,6 +312,7 @@ pub async fn run_with_observer_bindings(
         let _ = worker.await;
     }
     drop(deliver_tx);
+    drop(title);
     let _ = input.restore_terminal();
     let _ = ratatui::try_restore();
     match result {

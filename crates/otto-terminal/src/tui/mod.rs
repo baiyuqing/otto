@@ -59,6 +59,7 @@ use selection::{DragPhase, Selection};
 mod observer;
 mod operations;
 mod terminal_input;
+mod terminal_title;
 mod turns;
 use operations::*;
 pub use terminal_input::reset_terminal_input_modes_after_panic;
@@ -90,8 +91,10 @@ pub async fn run_with_observer_bindings(
         let _ = ratatui::try_restore();
         return Err(io_error(error));
     }
+    let title = terminal_title::TerminalTitle::enter().await;
     let mut keys = spawn_key_reader();
     let result = run_app(&mut terminal, controller, cancel, &mut keys, bindings).await;
+    drop(title);
     let _ = input.restore_terminal();
     let _ = ratatui::try_restore();
     result

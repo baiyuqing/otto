@@ -129,6 +129,7 @@ impl Drop for TerminalInput {
 /// enabled them. Called from the panic hook, where `Drop` does not run.
 /// Writes nothing when no session enabled them, because stdout may be a pipe.
 pub fn reset_terminal_input_modes_after_panic() {
+    terminal_title::restore();
     reset_input_modes(&TERMINAL_INPUT_MODES_ENABLED, std::io::stdout());
 }
 

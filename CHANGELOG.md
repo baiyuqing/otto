@@ -9,6 +9,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- The local and attached TUIs can show `Otto` as a temporary Rex terminal
+  title, restoring the previous title on exit or suspend without renaming the tab.
+
 - Local and attached TUIs report fixed, privacy-preserving program status using
   OSC 7501, enabling Rex to display work, permission waits and turn outcomes.
   Enabled by default for interactive terminals, without a Rex dependency or

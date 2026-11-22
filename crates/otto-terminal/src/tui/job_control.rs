@@ -17,6 +17,7 @@ pub(super) fn suspend<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Repl
         mouse_active: true,
         paste_active: true,
     };
+    terminal_title::restore();
     let restored_input = input.restore_terminal();
     let restored_terminal = ratatui::try_restore();
     restored_input.and(restored_terminal).map_err(io_error)?;
@@ -37,6 +38,7 @@ pub(super) fn suspend<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Repl
     // The outer session's TerminalInput remains responsible for final cleanup.
     input.mouse_active = false;
     input.paste_active = false;
+    terminal_title::resume();
     Ok(())
 }
 

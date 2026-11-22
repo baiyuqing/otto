@@ -249,6 +249,7 @@ struct RememberArgs {
     target_id: String,
     #[serde(default)]
     base_revision: u64,
+    /// Omission preserves bindings; an explicit empty list requests removal.
     #[serde(default)]
     evidence: Option<Vec<crate::memory::evidence::Evidence>>,
     #[serde(default)]

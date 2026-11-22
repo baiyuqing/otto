@@ -2,12 +2,13 @@
 
 use super::progress_recovery::every_tool_call_has_its_result;
 use super::*;
-use crate::agent::budget::{BudgetKind, BudgetPolicy, BudgetScope, Limit, RootBudget};
+use crate::agent::budget::{BudgetKind, BudgetPolicy, BudgetScope, Limit, RootBudget, untimed};
 
 fn policy(max_tokens: u64, max_steps: u64) -> BudgetPolicy {
     BudgetPolicy {
         max_tokens: Limit::from_count(max_tokens),
         max_steps: Limit::from_count(max_steps),
+        max_duration: Limit::Unlimited,
     }
 }
 
@@ -237,7 +238,7 @@ async fn runs_that_share_a_turn_budget_continue_one_step_count() {
     let mut turns = two_step_run("a");
     turns.extend(two_step_run("b"));
     let agent = scripted_agent(turns, policy(0, 3), &diagnostics);
-    let turn = RootBudget::new("root-1", policy(0, 3)).new_turn();
+    let turn = RootBudget::new("root-1", policy(0, 3), untimed()).new_turn();
 
     agent
         .run_with_budget(
@@ -304,7 +305,7 @@ async fn two_agents_on_one_root_stop_each_other_at_their_next_check() {
     // more in its second, which crosses the limit. The second agent has made
     // no request yet, so its first check already finds the root exhausted.
     let diagnostics = Arc::new(CapturingDiagnostics::default());
-    let root = RootBudget::new("root-2", policy(200, 0));
+    let root = RootBudget::new("root-2", policy(200, 0), untimed());
     let parent = scripted_agent(distinct_calls(5, 100, 50), policy(200, 0), &diagnostics);
     let child = scripted_agent(distinct_calls(5, 100, 50), policy(200, 0), &diagnostics);
 
@@ -357,7 +358,7 @@ async fn a_manual_compaction_gets_a_fresh_budget_even_after_a_shared_one_ran_out
             ..options()
         },
     );
-    let spent = RootBudget::new("root-3", policy(1, 0));
+    let spent = RootBudget::new("root-3", policy(1, 0), untimed());
     spent.charge(Some(crate::model::Usage {
         input_tokens: 5,
         ..crate::model::Usage::default()

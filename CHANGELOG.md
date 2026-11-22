@@ -9,24 +9,34 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed defaults
 
-- Every turn now has a hard budget of 4,200,000 tokens and 54 model calls
-  (`[agent.budget].max_tokens` and `max_steps`); the defaults are twice the 99th
-  percentile of 150 local turns. The tokens are shared by a root turn (new user,
-  schedule or chat input) and by everything it starts: sub-agents, workflow
-  steps, wake and follow-up turns. The model-call limit counts one turn of the
-  controller, across the continuation after a Bash approval, so an approval no
-  longer resets the budget; each sub-agent, workflow step, wake turn and
-  follow-up turn counts its own calls. A turn that reaches a limit ends with a
-  `budget exceeded:` error that names the key, and the session continues with the
-  next prompt. A sub-agent stops at its own next check when the shared tokens run
-  out; a workflow step that stops this way fails its run and is not retried. A
-  wake turn is not started once the shared tokens are used up: its notifications
-  are delivered with your next input, and `otto --prompt` exits with an error
+- Every turn now has a hard budget of 4,200,000 tokens, 54 model calls and 40
+  minutes of active time (`[agent.budget].max_tokens`, `max_steps` and
+  `max_duration`); the defaults are twice the 99th percentile of 150 local turns.
+  Interactive turns had no default deadline before; `max_duration` is a new
+  default limit that counts active time, not wall-clock time. The tokens and the
+  active time are shared by a root turn (new user, schedule or chat input) and by
+  everything it starts: sub-agents, workflow steps, wake and follow-up turns.
+  Active time is the time during which a holder of the budget runs and at least
+  one running holder is not waiting for your approval; idle time, such as the
+  hours before a timer fires, and time spent waiting for an approval do not
+  count. The model-call limit counts one turn of the controller, across the
+  continuation after a Bash approval, so an approval no longer resets the budget;
+  each sub-agent, workflow step, wake turn and follow-up turn counts its own
+  calls. A turn that reaches a limit ends with a `budget exceeded:` error that
+  names the key, and the session continues with the next prompt. A sub-agent
+  stops at its own next check when a shared limit is reached; a workflow step
+  that stops this way fails its run and is not retried. A wake turn is not
+  started once the shared tokens or active time are used up: every frontend
+  shows one notice per root turn that the notifications are held, they are
+  delivered with your next input, and `otto --prompt` exits with an error
   instead. A turn that used to run longer now stops; raise a limit, or set it to
-  `0` to disable it. Budgets are not persisted; recovered work starts with a new
-  budget. Stops are logged as `turn_budget_exceeded` (with `budget_id`), skipped
-  wake turns as `turn_budget_wake_skipped`, and `otto serve` counts stops in
-  `otto_turn_stops_total`. See [Turn budget](docs/manual/limits.md#turn-budget).
+  `0` (`"0"` for `max_duration`) to disable it. Budgets are not persisted;
+  recovered work starts with a new budget. Stops are logged as
+  `turn_budget_exceeded` (with `budget_id`; `limit` is `tokens`, `steps` or
+  `duration`), skipped wake turns as `turn_budget_wake_skipped`, and `otto serve`
+  counts stops in `otto_turn_stops_total` (`reason="budget_duration"` for the
+  active time) and shows the held-notification notice as an entry of
+  `GET /v1/sessions/{id}/wake-replies`. See [Turn budget](docs/manual/limits.md#turn-budget).
 
 ### Breaking changes
 

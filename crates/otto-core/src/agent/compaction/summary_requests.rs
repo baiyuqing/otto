@@ -146,7 +146,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     ) -> Result<(String, Usage, bool, bool), AgentError> {
         stopped(control)?;
         // A summary request must not push usage further after the token limit.
-        self.admit_tokens()?;
+        self.admit_shared()?;
         let child = control.cancellation_token().child_token();
         let summary_control = SummaryControl {
             token: child.clone(),

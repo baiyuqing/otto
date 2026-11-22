@@ -25,14 +25,18 @@ impl Runner {
 
     /// Writes the `turn_budget_wake_skipped` record, once for each root: the
     /// record holds the root's id and the number of queued notifications, never
-    /// their text.
-    pub(crate) fn report_wake_withheld(&self, withheld: &Withheld) {
+    /// their text. Returns the number of queued notifications the record
+    /// reported when this call wrote it, so the caller shows the user the same
+    /// fact once; `None` when the record of this root was written before.
+    pub(crate) fn report_wake_withheld(&self, withheld: &Withheld) -> Option<usize> {
         if withheld.report == SkipReport::Written {
-            return;
+            return None;
         }
+        let pending = self.mailbox().len();
         if let Some(diagnostics) = self.agent.diagnostics() {
-            diagnostics.turn_budget_wake_skipped(&withheld.budget_id, self.mailbox().len());
+            diagnostics.turn_budget_wake_skipped(&withheld.budget_id, pending);
         }
+        Some(pending)
     }
 
     /// The budget of a follow-up turn: the session's current root and a step
@@ -57,6 +61,7 @@ impl Runner {
         let policy = BudgetPolicy {
             max_tokens: Limit::from_count(1),
             max_steps: Limit::Unlimited,
+            max_duration: Limit::Unlimited,
         };
         let turn = self.budget.begin_root("exhausted-for-tests".into(), policy);
         turn.charge(Some(otto_core::model::Usage {

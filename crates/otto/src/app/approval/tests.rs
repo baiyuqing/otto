@@ -365,4 +365,5 @@ async fn scheduled_run(script: Vec<(&'static str, bool)>) -> crate::schedule::Ru
 mod captured_requests;
 mod scheduled_delivery;
 mod turn_budget;
+mod turn_duration;
 mod wake_replies;

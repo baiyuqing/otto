@@ -7,7 +7,7 @@
 
 use std::sync::{Mutex, PoisonError};
 
-use super::{BudgetPolicy, Exceeded, RootBudget, TurnBudget};
+use super::{BudgetPolicy, Exceeded, RootBudget, SharedClock, TurnBudget};
 
 /// Whether the report of a withheld wake still has to be written. One report
 /// is written for each root, not for each skipped attempt.
@@ -32,7 +32,7 @@ pub enum SessionBudget {
     },
 }
 
-/// A wake turn the shared token budget does not admit.
+/// A wake turn the shared limits (tokens or active time) do not admit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Withheld {
     pub budget_id: String,
@@ -46,26 +46,27 @@ pub enum WakeGate {
     /// The wake turn runs with this budget: the session's root and a step
     /// counter of its own.
     Admit(TurnBudget),
-    /// The root's tokens are exhausted: the wake turn does not start and its
-    /// notifications stay queued for the next user input.
+    /// A limit the root shares is reached: the wake turn does not start and
+    /// its notifications stay queued for the next user input.
     Withheld(Withheld),
 }
 
-/// The session's [`SessionBudget`] behind a lock.
+/// The session's [`SessionBudget`] behind a lock, with the clock every root of
+/// the session measures its active time with.
 #[derive(Debug)]
 pub struct SessionBudgetCell {
     state: Mutex<SessionBudget>,
-}
-
-impl Default for SessionBudgetCell {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(SessionBudget::NoRootYet),
-        }
-    }
+    clock: SharedClock,
 }
 
 impl SessionBudgetCell {
+    pub fn new(clock: SharedClock) -> Self {
+        Self {
+            state: Mutex::new(SessionBudget::NoRootYet),
+            clock,
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, SessionBudget> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -73,7 +74,7 @@ impl SessionBudgetCell {
     /// Starts the root of a user-origin turn: the new root replaces the
     /// session's previous one. `id` names it in log records.
     pub fn begin_root(&self, id: String, policy: BudgetPolicy) -> TurnBudget {
-        let root = RootBudget::new(id, policy);
+        let root = RootBudget::new(id, policy, self.clock.clone());
         let turn = root.new_turn();
         *self.lock() = SessionBudget::Root {
             root,
@@ -89,7 +90,7 @@ impl SessionBudgetCell {
         match &*state {
             SessionBudget::Root { root, .. } => root.clone(),
             SessionBudget::NoRootYet => {
-                let root = RootBudget::new(id(), policy);
+                let root = RootBudget::new(id(), policy, self.clock.clone());
                 *state = SessionBudget::Root {
                     root: root.clone(),
                     wake_skip: SkipReport::Due,
@@ -111,7 +112,7 @@ impl SessionBudgetCell {
     pub fn exhausted(&self) -> Option<Exceeded> {
         match &*self.lock() {
             SessionBudget::NoRootYet => None,
-            SessionBudget::Root { root, .. } => root.admit_tokens().err(),
+            SessionBudget::Root { root, .. } => root.admit_shared().err(),
         }
     }
 
@@ -123,7 +124,7 @@ impl SessionBudgetCell {
         let (root, wake_skip) = match &mut *state {
             SessionBudget::Root { root, wake_skip } => (root.clone(), wake_skip),
             SessionBudget::NoRootYet => {
-                let root = RootBudget::new(id(), policy);
+                let root = RootBudget::new(id(), policy, self.clock.clone());
                 *state = SessionBudget::Root {
                     root: root.clone(),
                     wake_skip: SkipReport::Due,
@@ -131,7 +132,7 @@ impl SessionBudgetCell {
                 return WakeGate::Admit(root.new_turn());
             }
         };
-        match root.admit_tokens() {
+        match root.admit_shared() {
             Ok(()) => WakeGate::Admit(root.new_turn()),
             Err(exceeded) => {
                 let report = *wake_skip;

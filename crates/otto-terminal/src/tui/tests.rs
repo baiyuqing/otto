@@ -471,6 +471,85 @@ async fn the_idle_loop_wakes_only_when_a_notification_is_pending() {
     );
 }
 
+/// A wake the root's used-up budget withholds shows one notice in the
+/// transcript, however often the idle loop asks, and starts no turn.
+#[tokio::test]
+async fn the_idle_loop_shows_one_notice_for_a_withheld_wake() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use idle_provider::ScriptedProvider;
+    use otto_core::agent::inbox::Notification;
+    use otto_core::provider::Provider;
+    use ratatui::backend::TestBackend;
+
+    use otto::runtime::builder::Runner;
+    use otto::subagent::tasks::Tasks;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let sessions = tempfile::tempdir().expect("sessions");
+    let tasks = Arc::new(Tasks::new());
+    let provider = ScriptedProvider::new(|_| Ok("woke up".to_string()));
+    let builder = otto::fixtures::builder(workspace.path(), sessions.path());
+    let runtime = otto::fixtures::initial_runtime(&builder);
+    let session = builder.create_session(&runtime).expect("session");
+    let info = builder.runtime_info(&runtime);
+    let runner = Runner::scripted(
+        session.clone(),
+        Arc::clone(&provider) as Arc<dyn Provider + Send + Sync>,
+        Arc::clone(&tasks),
+    );
+    runner.exhaust_root_budget();
+    let controller = Arc::new(Controller::new(builder, true, session, runner, info));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+    let (_keys_tx, mut keys) = mpsc::channel(1);
+    let cancel = CancellationToken::new();
+
+    let driver = async {
+        for index in 0..3 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            tasks.notifications().push(Notification {
+                task_id: format!("t{index}"),
+                text: format!("[task-notification] secret text {index}"),
+                ..Notification::default()
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.cancel();
+    };
+    let (result, ()) = tokio::join!(
+        run_app(
+            &mut terminal,
+            &controller,
+            &cancel,
+            &mut keys,
+            Default::default()
+        ),
+        driver
+    );
+    assert!(matches!(result, Err(ReplError::Cancelled)), "{result:?}");
+    assert_eq!(provider.calls(), 0, "no wake turn ran");
+
+    // The last frame the loop drew.
+    let buffer = terminal.backend().buffer().clone();
+    let screen: String = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                + "\n"
+        })
+        .collect();
+    assert_eq!(
+        screen.matches("1 notification is held").count(),
+        1,
+        "{screen}"
+    );
+    assert!(!screen.contains("secret text"), "{screen}");
+}
+
 /// Prompts saved in the turn queue before Otto stopped run when the TUI
 /// opens the session, in order, each once, carrying its input id.
 #[tokio::test]

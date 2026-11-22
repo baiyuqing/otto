@@ -20,11 +20,12 @@ fn base_file() -> File {
 }
 
 #[test]
-fn the_defaults_are_4_200_000_tokens_and_54_steps() {
+fn the_defaults_are_4_200_000_tokens_54_steps_and_40_minutes() {
     let runtime = resolve_with(&base_file()).unwrap();
     assert_eq!(runtime.budget, BudgetPolicy::default());
     assert_eq!(runtime.budget.max_tokens, Limit::from_count(4_200_000));
     assert_eq!(runtime.budget.max_steps, Limit::from_count(54));
+    assert_eq!(runtime.budget.max_duration, Limit::from_count(2_400));
 }
 
 #[test]
@@ -77,4 +78,47 @@ fn an_unknown_key_in_the_table_is_rejected_and_named() {
     let text = error.to_string();
     assert!(text.contains("unknown field"), "{text}");
     assert!(text.contains("max_turns"), "{text}");
+}
+
+fn duration_of(text: &str) -> Result<Limit, ConfigError> {
+    let mut file = base_file();
+    file.agent.budget.max_duration = Some(text.to_string());
+    resolve_with(&file).map(|runtime| runtime.budget.max_duration)
+}
+
+#[test]
+fn max_duration_is_a_go_duration_and_zero_is_unlimited() {
+    assert_eq!(duration_of("40m"), Ok(Limit::from_count(2_400)));
+    assert_eq!(duration_of("1h30m"), Ok(Limit::from_count(5_400)));
+    assert_eq!(duration_of("90s"), Ok(Limit::from_count(90)));
+    assert_eq!(duration_of("0"), Ok(Limit::Unlimited));
+    assert_eq!(duration_of("0s"), Ok(Limit::Unlimited));
+    // A positive duration below one second rounds up to one second.
+    assert_eq!(duration_of("500ms"), Ok(Limit::from_count(1)));
+    assert_eq!(duration_of("168h"), Ok(Limit::from_count(604_800)));
+}
+
+#[test]
+fn a_toml_table_sets_max_duration() {
+    let file = crate::config::parse("[agent.budget]\nmax_duration = \"15m\"\n").unwrap();
+    assert_eq!(file.agent.budget.max_duration.as_deref(), Some("15m"));
+}
+
+#[test]
+fn an_invalid_negative_or_oversized_max_duration_is_rejected_with_the_key_name() {
+    for value in ["soon", "", "40", "-5m", "169h", "99999999h"] {
+        let error = duration_of(value).unwrap_err().to_string();
+        assert!(
+            error.starts_with("invalid [agent.budget].max_duration: "),
+            "{value:?}: {error}"
+        );
+    }
+    assert_eq!(
+        duration_of("-5m").unwrap_err().to_string(),
+        "invalid [agent.budget].max_duration: must not be negative"
+    );
+    assert_eq!(
+        duration_of("169h").unwrap_err().to_string(),
+        "invalid [agent.budget].max_duration: must be at most 604800 seconds (7 days), got \"169h\""
+    );
 }

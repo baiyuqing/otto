@@ -11,6 +11,7 @@ fn policy(max_tokens: u64, max_steps: u64) -> BudgetPolicy {
     BudgetPolicy {
         max_tokens: Limit::from_count(max_tokens),
         max_steps: Limit::from_count(max_steps),
+        max_duration: Limit::Unlimited,
     }
 }
 
@@ -283,6 +284,14 @@ async fn a_wake_is_withheld_while_the_roots_tokens_are_used_up_and_delivered_wit
     assert_eq!(skipped.len(), 1, "{skipped:?}");
     assert_eq!(skipped[0].1, 1);
     assert!(!skipped[0].0.is_empty());
+    // The user sees it once for the root as well.
+    assert_eq!(
+        controller.take_notices(),
+        [
+            "1 notification is held: the token budget of the last root turn is used up, 150 of 100 tokens used in this turn ([agent.budget].max_tokens). They are delivered with the next input."
+        ]
+    );
+    assert_eq!(controller.wake_replies_since(0).0.len(), 1);
 
     // The next user input starts a new root and delivers the notification.
     run_with_text(&controller, "continue").await;

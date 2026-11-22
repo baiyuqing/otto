@@ -413,6 +413,7 @@ impl Controller {
                 otto_core::agent::budget::RootBudget::new(
                     crate::subagent::new_budget_id(),
                     self.budget_policy,
+                    otto_platform::clock::process_clock(),
                 )
             })
             .clone()

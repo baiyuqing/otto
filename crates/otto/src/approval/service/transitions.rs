@@ -195,6 +195,12 @@ impl Service {
             if actionable && request.is_human_pending() {
                 return Ok(request);
             }
+            // While the request waits for a person, the run that waits for it
+            // is not working: its time does not count against the turn budget.
+            let _paused = request
+                .is_human_pending()
+                .then(crate::approval::user_wait::pause)
+                .flatten();
             tokio::select! {
                 () = cancel.cancelled() => {
                     match self.withdraw(id,scope,request.revision) { Ok(r) => return Ok(r), Err(Error::Conflict) => {}, Err(e) => return Err(e) }

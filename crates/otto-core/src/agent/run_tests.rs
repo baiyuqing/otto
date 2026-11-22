@@ -96,6 +96,7 @@ mod redaction;
 mod redaction_feedback;
 mod step_interrupt;
 mod turn_budget;
+mod turn_duration;
 mod turn_end_turn;
 mod turn_records;
 mod yield_provider_calls;

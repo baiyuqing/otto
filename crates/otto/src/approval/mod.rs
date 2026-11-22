@@ -9,6 +9,7 @@ pub mod reviewer;
 mod service;
 pub mod shell;
 pub mod sqlite;
+pub(crate) mod user_wait;
 pub use contracts::*;
 pub use service::{Service, digest};
 #[cfg(test)]
@@ -495,3 +496,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod user_wait_tests;

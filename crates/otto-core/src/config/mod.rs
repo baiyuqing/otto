@@ -196,6 +196,9 @@ pub struct BudgetConfig {
     pub max_tokens: Option<i64>,
     /// Ordinary provider calls one turn may make.
     pub max_steps: Option<i64>,
+    /// Active time one root turn and the work it starts may use, as a Go
+    /// duration. `None` keeps the default of 40 minutes; `0` disables it.
+    pub max_duration: Option<String>,
 }
 
 /// The `[agent.compaction]` table. Every field is optional so absent and

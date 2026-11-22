@@ -327,11 +327,13 @@ shell_timeout = "120s"
 max_output_bytes = 51200
 # Deadlines and limits (meaning, defaults, effects): docs/manual/limits.md
 
-# Turn budget: tokens are shared by a root turn and what it starts, steps are
-# per turn; 0 disables a limit (see limits.md#turn-budget).
+# Turn budget: tokens and active time are shared by a root turn and what it
+# starts, steps are per turn; "0" or 0 disables a limit (see
+# limits.md#turn-budget).
 # [agent.budget]
 # max_tokens = 4200000
 # max_steps = 54
+# max_duration = "40m"
 
 [agent.compaction]
 auto = true

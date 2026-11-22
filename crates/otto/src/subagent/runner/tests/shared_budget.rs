@@ -8,6 +8,7 @@ fn policy(max_tokens: u64, max_steps: u64) -> BudgetPolicy {
     BudgetPolicy {
         max_tokens: Limit::from_count(max_tokens),
         max_steps: Limit::from_count(max_steps),
+        max_duration: Limit::Unlimited,
     }
 }
 
@@ -55,7 +56,7 @@ async fn child_usage_exhausts_the_roots_tokens_for_the_parent_and_the_child() {
         ],
     );
     let tasks = Arc::new(Tasks::new());
-    let cell = Arc::new(SessionBudgetCell::default());
+    let cell = Arc::new(SessionBudgetCell::new(otto_core::agent::budget::untimed()));
     let parent = cell.begin_root("root-a".into(), policy(100, 0));
     parent
         .admit_step()
@@ -82,7 +83,7 @@ async fn tokens_the_parent_used_before_the_child_started_count_for_the_child() {
     let provider = FakeProvider::new();
     provider.add_route(match_any, vec![assistant_text("done", usage(1))]);
     let tasks = Arc::new(Tasks::new());
-    let cell = Arc::new(SessionBudgetCell::default());
+    let cell = Arc::new(SessionBudgetCell::new(otto_core::agent::budget::untimed()));
     let parent = cell.begin_root("root-a".into(), policy(100, 0));
     parent.charge(Some(usage(100)));
     let (runner, _) = runner(budgeted(&provider, &tasks, &cell));
@@ -111,7 +112,7 @@ async fn a_child_counts_its_own_steps_and_not_the_parents() {
         ],
     );
     let tasks = Arc::new(Tasks::new());
-    let cell = Arc::new(SessionBudgetCell::default());
+    let cell = Arc::new(SessionBudgetCell::new(otto_core::agent::budget::untimed()));
     let parent = cell.begin_root("root-a".into(), policy(0, 2));
     parent.admit_step().unwrap();
     parent.admit_step().unwrap();
@@ -136,7 +137,7 @@ async fn a_child_stops_at_its_own_step_limit() {
         ],
     );
     let tasks = Arc::new(Tasks::new());
-    let cell = Arc::new(SessionBudgetCell::default());
+    let cell = Arc::new(SessionBudgetCell::new(otto_core::agent::budget::untimed()));
     cell.begin_root("root-a".into(), policy(0, 2));
     let (runner, _) = runner(budgeted(&provider, &tasks, &cell));
 
@@ -157,7 +158,7 @@ async fn a_new_root_turn_gives_later_children_fresh_tokens() {
     let provider = FakeProvider::new();
     provider.add_route(match_any, vec![assistant_text("done", usage(1))]);
     let tasks = Arc::new(Tasks::new());
-    let cell = Arc::new(SessionBudgetCell::default());
+    let cell = Arc::new(SessionBudgetCell::new(otto_core::agent::budget::untimed()));
     let spent = cell.begin_root("root-a".into(), policy(100, 0));
     spent.charge(Some(usage(100)));
     cell.begin_root("root-b".into(), policy(100, 0));
@@ -174,7 +175,7 @@ async fn a_child_started_before_any_root_turn_starts_one_from_the_template_polic
     let provider = FakeProvider::new();
     provider.add_route(match_any, vec![assistant_text("done", usage(1))]);
     let tasks = Arc::new(Tasks::new());
-    let cell = Arc::new(SessionBudgetCell::default());
+    let cell = Arc::new(SessionBudgetCell::new(otto_core::agent::budget::untimed()));
     let mut config = budgeted(&provider, &tasks, &cell);
     config.template.budget = policy(100, 0);
     let (runner, _) = runner(config);
@@ -206,7 +207,7 @@ async fn a_resumed_child_charges_the_current_root() {
     let provider = FakeProvider::new();
     provider.add_route(match_any, vec![assistant_text("done", usage(1))]);
     let tasks = Arc::new(Tasks::new());
-    let cell = Arc::new(SessionBudgetCell::default());
+    let cell = Arc::new(SessionBudgetCell::new(otto_core::agent::budget::untimed()));
     let spent = cell.begin_root("root-a".into(), policy(100, 0));
     spent.charge(Some(usage(100)));
     let mut config = config_with_children_dir(&provider, &tasks, parent_path.with_extension(""));

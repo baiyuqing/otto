@@ -126,16 +126,16 @@ impl Client {
         }
         if !(200..300).contains(&status) {
             let retry = transient_http_retry(status, response.headers());
-            match policy_capacity_error(response, control).await {
-                Ok(true) => {
-                    return ProviderSettlement::failed(
-                        ProviderError::PolicyCapacityUnavailable,
-                        1,
-                        EffectCertainty::Completed,
-                    );
-                }
-                Ok(false) => {}
+            let details = match read_http_error(response, control).await {
+                Ok(details) => details,
                 Err(error) => return chatgpt_failure(error, 1, EffectCertainty::Unknown, control),
+            };
+            if details.policy_capacity {
+                return ProviderSettlement::failed(
+                    ProviderError::PolicyCapacityUnavailable,
+                    1,
+                    EffectCertainty::Completed,
+                );
             }
             if matches!(status, 400 | 404)
                 && let Some(path) = &self.catalog_cache_path
@@ -151,8 +151,13 @@ impl Client {
                     EffectCertainty::Unknown,
                 );
             }
+            let message = if status == 400 && request.request_remote_compaction {
+                details.compaction_bad_request()
+            } else {
+                format!("chatgpt responses HTTP {status}")
+            };
             return ProviderSettlement::failed(
-                ProviderError::Other(format!("chatgpt responses HTTP {status}")),
+                ProviderError::Other(message),
                 1,
                 EffectCertainty::Completed,
             );

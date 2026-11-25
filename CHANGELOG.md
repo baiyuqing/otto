@@ -225,6 +225,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- ChatGPT remote compaction reports recognized error codes and parameter names
+  on HTTP 400 without exposing the raw response or retrying the request.
+
 - Informational notices, including input delivery status, no longer split an
   active terminal reply into separate messages. Interrupted steps and completed
   turns still close their streamed output.

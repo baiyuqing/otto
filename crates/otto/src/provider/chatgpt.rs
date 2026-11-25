@@ -109,16 +109,77 @@ fn stream_retry(error: &StreamError) -> Option<Retry> {
     })
 }
 
-async fn policy_capacity_error(
+#[derive(Default)]
+struct HttpErrorDetails {
+    policy_capacity: bool,
+    compaction_code: Option<&'static str>,
+    compaction_param: Option<&'static str>,
+}
+
+impl HttpErrorDetails {
+    fn parse(body: &[u8]) -> Self {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return Self::default();
+        };
+        let nested_code = value.pointer("/error/code").and_then(|v| v.as_str());
+        let top_code = value.get("code").and_then(|v| v.as_str());
+        let param = value.pointer("/error/param").or_else(|| value.get("param"));
+        // Return only our own constants, never arbitrary server strings (including
+        // strings that merely look like identifiers).
+        Self {
+            policy_capacity: [nested_code, top_code].contains(&Some("policy_capacity_unavailable")),
+            compaction_code: match nested_code.or(top_code) {
+                Some("unsupported_value") => Some("unsupported_value"),
+                Some("unsupported_parameter") => Some("unsupported_parameter"),
+                Some("invalid_value") => Some("invalid_value"),
+                Some("invalid_type") => Some("invalid_type"),
+                Some("missing_required_parameter") => Some("missing_required_parameter"),
+                Some("context_length_exceeded") => Some("context_length_exceeded"),
+                Some("model_not_found") => Some("model_not_found"),
+                _ => None,
+            },
+            compaction_param: match param.and_then(|v| v.as_str()) {
+                Some("input") => Some("input"),
+                Some("model") => Some("model"),
+                Some("compaction_trigger") => Some("compaction_trigger"),
+                Some("context_management") => Some("context_management"),
+                Some(path)
+                    if path
+                        .strip_prefix("input[")
+                        .and_then(|p| p.strip_suffix("].type"))
+                        .is_some_and(|index| {
+                            !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
+                        }) =>
+                {
+                    Some("input[].type")
+                }
+                _ => None,
+            },
+        }
+    }
+
+    fn compaction_bad_request(&self) -> String {
+        let mut message = "chatgpt responses HTTP 400".to_owned();
+        if let Some(code) = self.compaction_code {
+            message.push_str(&format!("; code={code}"));
+        }
+        if let Some(param) = self.compaction_param {
+            message.push_str(&format!("; param={param}"));
+        }
+        message
+    }
+}
+
+async fn read_http_error(
     response: reqwest::Response,
     control: &dyn OperationControl,
-) -> Result<bool, ProviderError> {
+) -> Result<HttpErrorDetails, ProviderError> {
     const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
     if response
         .content_length()
-        .is_some_and(|length| length as usize > MAX_ERROR_BODY_BYTES)
+        .is_some_and(|length| length > MAX_ERROR_BODY_BYTES as u64)
     {
-        return Ok(false);
+        return Ok(HttpErrorDetails::default());
     }
     let mut body = Vec::new();
     let mut stream = Box::pin(response.bytes_stream());
@@ -126,23 +187,16 @@ async fn policy_capacity_error(
         match await_control(control, stream.try_next()).await {
             Ok(Ok(Some(chunk))) => {
                 if body.len().saturating_add(chunk.len()) > MAX_ERROR_BODY_BYTES {
-                    return Ok(false);
+                    return Ok(HttpErrorDetails::default());
                 }
                 body.extend_from_slice(&chunk);
             }
             Ok(Ok(None)) => break,
-            Ok(Err(_)) => return Ok(false),
+            Ok(Err(_)) => return Ok(HttpErrorDetails::default()),
             Err(error) => return Err(error),
         }
     }
-    Ok(serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .is_some_and(|value| {
-            value.pointer("/error/code").and_then(|code| code.as_str())
-                == Some("policy_capacity_unavailable")
-                || value.get("code").and_then(|code| code.as_str())
-                    == Some("policy_capacity_unavailable")
-        }))
+    Ok(HttpErrorDetails::parse(&body))
 }
 
 #[derive(Clone, Copy)]

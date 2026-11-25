@@ -88,6 +88,15 @@ checkpoint for a typed context overflow. If still failing:
 See [context compaction](interactive-use.md#context-compaction); compaction does
 not erase the append-only session history.
 
+### ChatGPT remote compaction returns HTTP 400
+
+If the backend returns a recognized error code or parameter name, Otto adds it
+next to HTTP 400 (for example, `code=unsupported_value; param=compaction_trigger`).
+It does not display the backend's free-form message or raw response. A bare
+400 does not identify the cause and does not prove that the context is too long
+or that the model lacks compaction support. The failed request does not save a
+new checkpoint or automatically fall back to a different compaction method.
+
 ### A session disappeared from `/resume` or `--continue`
 
 Check whether it was archived. Active pickers exclude `archive/`, but an explicit

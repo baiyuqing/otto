@@ -86,6 +86,59 @@ async fn non_transient_http_statuses_are_not_retried() {
     }
 }
 
+#[tokio::test]
+async fn compaction_http_400_reports_only_allowlisted_details_without_retry() {
+    let fixtures = [
+        (
+            true,
+            r#"{"error":{"code":"unsupported_value","param":"compaction_trigger","message":"synthetic private payload"}}"#,
+            "; code=unsupported_value; param=compaction_trigger",
+        ),
+        (
+            true,
+            r#"{"code":"invalid_value","param":"model","message":"synthetic private payload"}"#,
+            "; code=invalid_value; param=model",
+        ),
+        (
+            true,
+            r#"{"error":{"code":"synthetic_private_identifier","param":"synthetic_private_identifier"}}"#,
+            "",
+        ),
+        (
+            true,
+            r#"{"error":{"param":"input[42].type"}}"#,
+            "; param=input[].type",
+        ),
+        (
+            true,
+            r#"{"error":{"param":"input[synthetic_private_identifier].type"}}"#,
+            "",
+        ),
+        (true, "non-JSON body", ""),
+        (
+            false,
+            r#"{"error":{"code":"unsupported_value","param":"compaction_trigger"}}"#,
+            "",
+        ),
+    ];
+    for (compact, body, suffix) in fixtures {
+        let server = testserver::spawn(move |_| testserver::status_response(400, body)).await;
+        let client = trusted_test_client(&server.url, static_tokens("token"), "acct-1");
+        let request = Request {
+            request_remote_compaction: compact,
+            ..Request::default()
+        };
+        let (settlement, events) = complete(&client, &request).await;
+        assert_eq!(
+            settlement.result.unwrap_err().to_string(),
+            format!("chatgpt responses HTTP 400{suffix}")
+        );
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(server.count(), 1);
+        assert!(events.is_empty());
+    }
+}
+
 /// A connection that is refused carries no provider text into the error.
 /// Real time keeps socket failures distinct from artificial read timeouts.
 #[tokio::test]

@@ -225,6 +225,10 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- Resuming a local TUI session no longer prints a recovery notice for every
+  delivered input. Unconfirmed deliveries are summarized, and `/inputs` still
+  lists the full session history of input statuses.
+
 - ChatGPT remote compaction sends a `compaction_trigger` instead of an empty
   checkpoint, fixing a malformed request that could return HTTP 400.
 

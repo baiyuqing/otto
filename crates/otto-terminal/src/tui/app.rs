@@ -96,7 +96,7 @@ pub(crate) struct App {
     pub(super) draft_images: Vec<otto_core::model::Block>,
     pub queued_input: Option<String>,
     pub(super) queued_input_id: Option<String>,
-    pub(super) input_statuses: std::collections::HashMap<String, String>,
+    pub(super) noticed_unresolved_inputs: std::collections::HashSet<(String, String, String)>,
     pub(super) next_input_delivery: Option<otto_core::model::InputDelivery>,
     /// The latest successful model or reasoning selection, kept as one
     /// single-line item per banner row instead of appended to the transcript.
@@ -195,7 +195,7 @@ impl App {
             queued_input: None,
             next_input_delivery: None,
             queued_input_id: None,
-            input_statuses: Default::default(),
+            noticed_unresolved_inputs: Default::default(),
             composer_notices: Vec::new(),
             queued_steer: None,
             pending_steers: Vec::new(),

@@ -377,6 +377,7 @@ mod tests {
         let ok = ToolResult {
             content: "live".into(),
             persisted_content: Some("stored".into()),
+            content_scope: Default::default(),
             is_error: false,
             outcome_override: None,
         };
@@ -387,6 +388,7 @@ mod tests {
         let failed = ToolResult {
             content: "boom".into(),
             persisted_content: None,
+            content_scope: Default::default(),
             is_error: true,
             outcome_override: None,
         };

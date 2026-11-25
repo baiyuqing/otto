@@ -231,7 +231,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                                 )
                             })?;
                         execution.result.content = content;
-                        execution.result.persisted_content = None;
+                        if execution.result.content_scope == ToolContentScope::Turn {
+                            execution.result.persisted_content = None;
+                        }
                     }
                 }
             }
@@ -258,11 +260,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .map(|text| self.redactor.redact_string(text));
         let persisted_text = match &execution.result.persisted_content {
             Some(persisted) => {
-                // The stored text is a placeholder, so the live text
-                // is kept for this turn's provider requests only.
-                state
-                    .tool_result_overlay
-                    .insert(block.tool_call_id.clone(), execution.result.content.clone());
+                match execution.result.content_scope {
+                    ToolContentScope::Turn => {
+                        state
+                            .tool_result_overlay
+                            .insert(block.tool_call_id.clone(), execution.result.content.clone());
+                    }
+                    ToolContentScope::NextStep => {
+                        state
+                            .next_step_tool_results
+                            .insert(block.tool_call_id.clone(), execution.result.content.clone());
+                    }
+                    ToolContentScope::Frontend => {}
+                }
                 persisted.clone()
             }
             None => execution.result.content.clone(),

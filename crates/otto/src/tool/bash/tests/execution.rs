@@ -33,7 +33,10 @@ async fn invalid_arguments_and_pre_cancellation_never_execute() {
         .execute(&raw(r#"{"command":"must not run"}"#), &cancel)
         .await;
     assert!(!result.is_error, "{result:?}");
-    assert_eq!(result.content, "stdout:\n\nstderr:\n\nstatus: cancelled");
+    assert_eq!(
+        result.content,
+        "stdout_bytes: 0\nstderr_bytes: 0\nstatus: cancelled"
+    );
     assert_eq!(
         outcome(&result).effect_certainty,
         otto_core::model::EffectCertainty::NotStarted

@@ -143,6 +143,14 @@ async fn default_preview_caps_large_output_and_read_can_retrieve_an_omitted_rang
     let excerpt = read.execute(&args, &CancellationToken::new()).await;
     assert!(!excerpt.is_error);
     assert_eq!(excerpt.content, "failure detail in the middle\n");
+    assert_eq!(
+        excerpt.content_scope,
+        otto_core::tool::ToolContentScope::NextStep
+    );
+    assert_eq!(
+        excerpt.persisted_text(),
+        "Read Bash log excerpt (line offset 2001, limit 1, character offset 0). Excerpt omitted."
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -316,4 +324,47 @@ async fn the_signal_text_is_redacted_too() {
             .contains(&format!("signal: killed-{}", tool.redaction_marker)),
         "{result:?}"
     );
+}
+
+#[tokio::test]
+async fn short_output_is_available_on_demand_and_absent_from_the_bash_model_result() {
+    let (_dir, workspace) = temp_workspace();
+    let executor = Arc::new(FakeExecutor::chunks(
+        &["passing test\n", "failure detail\n"],
+        &[],
+    ));
+    let tool = bash(&workspace, executor, &[], 51200, &[]);
+    let lease = tool.output_logs.lease();
+    let result = run(&tool, "test").await;
+
+    assert!(result.content.contains("failure detail"));
+    assert_eq!(
+        result.content_scope,
+        otto_core::tool::ToolContentScope::Frontend
+    );
+    let summary = result.persisted_text();
+    assert!(
+        summary.starts_with("stdout_bytes: 28\nstdout_log: "),
+        "{summary}"
+    );
+    assert!(
+        summary.ends_with("stderr_bytes: 0\nexit_code: 0"),
+        "{summary}"
+    );
+    assert!(!summary.contains("passing test") && !summary.contains("failure detail"));
+    let path = summary
+        .lines()
+        .find_map(|line| line.strip_prefix("stdout_log: "))
+        .unwrap();
+    let read = crate::tool::read::ReadTool::new(Arc::clone(&workspace), 51200);
+    let args =
+        serde_json::value::to_raw_value(&json!({"path": path, "offset": 2, "limit": 1})).unwrap();
+    let excerpt = read.execute(&args, &CancellationToken::new()).await;
+    assert_eq!(excerpt.content, "failure detail\n");
+    assert_eq!(
+        excerpt.content_scope,
+        otto_core::tool::ToolContentScope::NextStep
+    );
+    drop(lease);
+    assert!(!workspace.root().join(path).exists());
 }

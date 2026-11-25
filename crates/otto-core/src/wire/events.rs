@@ -488,6 +488,7 @@ mod tests {
                 result: ToolResult {
                     content: "x".into(),
                     persisted_content: None,
+                    content_scope: Default::default(),
                     is_error: true,
                     outcome_override: None,
                 },

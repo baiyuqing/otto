@@ -342,6 +342,7 @@ impl ToolExecutor for CancellingExecutor {
         crate::tool::ToolExecution::completed(ToolResult {
             content: call.arguments.get().to_owned(),
             persisted_content: None,
+            content_scope: Default::default(),
             is_error: false,
             outcome_override: None,
         })

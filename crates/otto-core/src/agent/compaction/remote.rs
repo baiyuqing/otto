@@ -15,11 +15,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .session
             .remote_compaction()
             .filter(|checkpoint| checkpoint.provider == self.options.provider_name);
-        let messages = if remote_compaction.is_some() {
+        let mut messages = if remote_compaction.is_some() {
             self.session.post_remote_compaction_messages()
         } else {
             self.session.model_messages()
         };
+        bash_history::summarize(&mut messages);
         if messages.is_empty() && remote_compaction.is_none() {
             return Err(AgentError::NothingToCompact);
         }

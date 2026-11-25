@@ -143,6 +143,7 @@ impl Tool for MemorySearchTool {
             return ToolResult {
                 content: "no matching records".into(),
                 persisted_content: Some("0 records".into()),
+                content_scope: Default::default(),
                 is_error: false,
                 outcome_override: None,
             };

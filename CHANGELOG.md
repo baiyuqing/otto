@@ -9,6 +9,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Changed defaults
 
+- Bash sends the model execution status, stream sizes and temporary log paths.
+  Use `read` for selected lines, available on the next ordinary model step.
+  Resuming a conversation summarizes old Bash previews in model context
+  and keeps them in the transcript.
+
 - Every turn now has a hard budget of 4,200,000 tokens, 54 model calls and 40
   minutes of active time (`[agent.budget].max_tokens`, `max_steps` and
   `max_duration`); the defaults are twice the 99th percentile of 150 local turns.

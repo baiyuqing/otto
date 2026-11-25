@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio_util::sync::CancellationToken;
 
+use super::bash_history;
 use super::budget::BudgetScope;
 use super::compaction_select::{
     COMPACTION_SUMMARY_DISPLAY_PREFIX, CompactionSelection, select_compaction,
@@ -160,7 +161,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return self.compact_remote(reason, automatic, emit, control).await;
         }
 
-        let messages = self.session.model_messages();
+        let mut messages = self.session.model_messages();
+        bash_history::summarize(&mut messages);
         let latest = self.session.latest_compaction();
         let tools = self.tools.definitions();
         let tokens_before = estimate_request(

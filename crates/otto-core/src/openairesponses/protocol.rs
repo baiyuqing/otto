@@ -77,10 +77,11 @@ pub struct WireTool {
 }
 
 /// One input item. The struct covers every item shape the request side uses:
-/// `message`, `function_call`, `function_call_output`, and `compaction`.
+/// `message`, `function_call`, `function_call_output`, `compaction`, and
+/// `compaction_trigger`.
 ///
-/// A persisted compaction carries `id` and `encrypted_content`; a compaction
-/// trigger carries only its type. Both opaque fields are omitted when empty.
+/// A persisted `compaction` carries `id` and `encrypted_content`. The final
+/// `compaction_trigger` carries only its type and requests a new checkpoint.
 ///
 /// `output` is an [`Option`] rather than a plain `String` so a
 /// `function_call_output` item emits `"output"` even when the tool produced no
@@ -300,7 +301,7 @@ pub fn build_request_with(request: &Request, hosted_web_search: bool) -> WireReq
     }
     if request.request_remote_compaction {
         input.push(WireItem {
-            item_type: "compaction".into(),
+            item_type: "compaction_trigger".into(),
             ..WireItem::default()
         });
     }

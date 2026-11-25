@@ -12,7 +12,8 @@ commit ledger; Git and release tags retain the full history. See the
 - Bash sends the model execution status, stream sizes and temporary log paths.
   Use `read` for selected lines, available on the next ordinary model step.
   Resuming a conversation summarizes old Bash previews in model context
-  and keeps them in the transcript.
+  and keeps them in the transcript. The agent prompt also directs related
+  lookups toward a single local pipeline or script when they answer one question.
 
 - Every turn now has a hard budget of 4,200,000 tokens, 54 model calls and 40
   minutes of active time (`[agent.budget].max_tokens`, `max_steps` and

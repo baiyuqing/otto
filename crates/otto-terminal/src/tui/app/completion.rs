@@ -208,6 +208,7 @@ impl App {
             }
         }
         if old != (self.info.workspace.clone(), self.info.session_id.clone()) {
+            self.draft_images.clear();
             self.surfaces.clear();
             self.composer_notices.clear();
             self.writes.clear();

@@ -30,6 +30,14 @@ impl App {
                         ),
                         self.observer.bindings.label
                     ));
+                    if !self.attached && cfg!(target_os = "macos") {
+                        text.push_str(concat!(
+                            "\n\nImage attachments (local macOS TUI)\n",
+                            "F8: paste clipboard image · F9: remove last image\n",
+                            "/attach-image <path>: attach a PNG or JPEG file\n",
+                            "Enter: send the draft with or without text when idle."
+                        ));
+                    }
                     self.transition(
                         0,
                         Transition::Push(Box::new(features::Document {
@@ -113,6 +121,14 @@ impl App {
         cancel: &CancellationToken,
     ) -> Option<Action> {
         let current = self.composer.input.iter().collect::<String>();
+        if let Backend::Local(controller) = backend
+            && self.attach_image_command(controller, &current)
+        {
+            return None;
+        }
+        if !self.draft_images.is_empty() && !current.starts_with('/') {
+            return self.submit_image_draft();
+        }
         if let Backend::Local(controller) = backend {
             if current.trim() == "/inputs" {
                 match controller.input_submissions() {

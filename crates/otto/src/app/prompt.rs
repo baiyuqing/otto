@@ -33,6 +33,37 @@ impl Controller {
         .await
     }
 
+    /// Validates typed attachments before a draft is cleared. Images are foreground-only.
+    pub fn validate_images(&self, images: &[otto_core::model::Block]) -> Result<(), AgentError> {
+        let runner = self.runner().map_err(AgentError::Other)?;
+        if !images.is_empty()
+            && (runner.task_control().is_active() || self.pending_approval().is_some())
+        {
+            return Err(AgentError::Other("Images cannot be queued or used as steering; wait for the active turn and approvals to finish, then submit again.".into()));
+        }
+        runner.validate_images(images)
+    }
+
+    /// Runs an interactive foreground user turn, preserving attachment order.
+    pub async fn prompt_with_images(
+        &self,
+        text: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+        images: Vec<otto_core::model::Block>,
+    ) -> Result<(), AgentError> {
+        self.validate_images(&images)?;
+        self.prompt_with_images_system_context(
+            text,
+            "",
+            Some(otto_session::origin::Origin::terminal()),
+            emit,
+            cancel,
+            images,
+        )
+        .await
+    }
+
     pub(crate) async fn prompt_with_system_context(
         &self,
         text: &str,
@@ -41,6 +72,27 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.prompt_with_images_system_context(
+            text,
+            system_context,
+            origin,
+            emit,
+            cancel,
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn prompt_with_images_system_context(
+        &self,
+        text: &str,
+        system_context: &str,
+        origin: Option<otto_session::origin::Origin>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+        images: Vec<otto_core::model::Block>,
+    ) -> Result<(), AgentError> {
+        self.validate_images(&images)?;
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
         // A user-origin turn is a root turn: it starts the budget that its
@@ -54,8 +106,21 @@ impl Controller {
             .map_err(AgentError::Other)?;
         self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
             .await?;
-        self.run_prompt_step(&runner, text, system_context, &budget, &mut *emit, cancel)
-            .await?;
+        if images.is_empty() {
+            self.run_prompt_step(&runner, text, system_context, &budget, &mut *emit, cancel)
+                .await?;
+        } else {
+            runner
+                .run_with_images_system_context(
+                    text,
+                    images,
+                    system_context,
+                    BudgetScope::Shared(budget.clone()),
+                    &mut *emit,
+                    cancel,
+                )
+                .await?;
+        }
         self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
             .await
     }

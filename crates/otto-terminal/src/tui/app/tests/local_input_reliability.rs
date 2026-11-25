@@ -18,6 +18,41 @@ fn local_enter(app: &mut App, controller: &Controller) -> Option<Action> {
 }
 
 #[tokio::test]
+async fn image_only_and_mixed_drafts_are_never_journaled_as_text() {
+    let (_workspace, _sessions, controller, mut app) = local().await;
+    for text in ["", "describe this"] {
+        app.composer.set_input(text);
+        app.draft_images
+            .push(otto_core::model::Block::image("iVBORw0KGgo=", "image/png"));
+        assert_eq!(
+            local_enter(&mut app, &controller),
+            Some(Action::ImagePrompt)
+        );
+        assert_eq!(app.composer.input.iter().collect::<String>(), text);
+        assert_eq!(app.draft_images.len(), 1);
+        assert!(controller.input_submissions().unwrap().is_empty());
+        app.draft_images.clear();
+    }
+}
+
+#[tokio::test]
+async fn a_busy_turn_does_not_consume_or_queue_an_image_draft() {
+    let (_workspace, _sessions, controller, mut app) = local().await;
+    app.composer.set_input("keep this draft");
+    app.draft_images
+        .push(otto_core::model::Block::image("iVBORw0KGgo=", "image/png"));
+    app.start_turn();
+    assert_eq!(local_enter(&mut app, &controller), None);
+    assert!(app.queued_input.is_none());
+    assert!(app.queued_steer.is_none());
+    assert_eq!(app.draft_images.len(), 1);
+    assert_eq!(
+        app.composer.input.iter().collect::<String>(),
+        "keep this draft"
+    );
+}
+
+#[tokio::test]
 async fn enter_persists_before_clear_and_identical_inputs_have_distinct_ids() {
     let (_workspace, _sessions, controller, mut app) = local().await;
     let mut ids = Vec::new();

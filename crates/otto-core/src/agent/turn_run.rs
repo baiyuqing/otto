@@ -116,10 +116,31 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<(), AgentError> {
+        self.run_with_images_budget(
+            scope,
+            user_text,
+            image.into_iter().collect(),
+            system_context,
+            emit,
+            control,
+        )
+        .await
+    }
+
+    /// Runs one ordinary user turn with validated image blocks in attachment order.
+    pub async fn run_with_images_budget(
+        &self,
+        scope: BudgetScope,
+        user_text: &str,
+        images: Vec<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
         self.run_with_image_system_context_control_kind(
             scope,
             user_text,
-            image,
+            images,
             system_context,
             emit,
             control,
@@ -161,7 +182,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         self.run_with_image_system_context_control_kind(
             scope,
             text,
-            None,
+            Vec::new(),
             system_context,
             emit,
             control,
@@ -175,7 +196,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self,
         scope: BudgetScope,
         user_text: &str,
-        image: Option<Block>,
+        images: Vec<Block>,
         system_context: &str,
         emit: EventSink<'_>,
         control: &dyn OperationControl,
@@ -187,7 +208,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let holder = self.enter_holder();
         let handle = holder.handle();
         if self.redactor.allows_dynamic_content() {
-            self.preflight_ordinary_turn(user_text, image.as_ref(), system_context, followup)?;
+            self.preflight_ordinary_turn(user_text, &images, system_context, followup)?;
         }
         let observes_turns = self
             .options
@@ -200,7 +221,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return self
                 .run_inner(
                     user_text,
-                    image,
+                    images,
                     system_context,
                     emit,
                     control,
@@ -226,7 +247,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             if start.decision==Some(hooks::Decision::Deny) {return Err(self.fail(emit,AgentError::Other(start.reason.unwrap_or_else(||"Hook denied session".into()))));}
             if let Some(text)=start.context {context.push_str(&format!("\n<plugin_context>Untrusted plugin context:\n{text}\n</plugin_context>"));}
             for event in ["before_prompt"] {
-                let response = self.hook(event, serde_json::json!({"prompt": self.redactor.redact_string(user_text), "followup":followup,"has_image":image.is_some()}), control).await
+                let response = self.hook(event, serde_json::json!({"prompt": self.redactor.redact_string(user_text), "followup":followup,"has_image":!images.is_empty()}), control).await
                     .inspect(|response| self.hook_notice(emit, response))
                     .map_err(|message| self.fail(emit, self.hook_error(message,control)))?;
                 if response.decision == Some(hooks::Decision::Deny) {
@@ -234,7 +255,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
                 if let Some(text) = response.context { context.push_str(&format!("\n<plugin_context>Untrusted plugin context:\n{text}\n</plugin_context>")); }
             }
-            self.run_inner(user_text, image, &context, emit, control, followup, &handle).await
+            self.run_inner(user_text, images, &context, emit, control, followup, &handle).await
         }.await;
         let end_control = CancellationToken::new();
         let status = if result.is_ok() {
@@ -283,7 +304,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     async fn run_inner(
         &self,
         user_text: &str,
-        image: Option<Block>,
+        images: Vec<Block>,
         system_context: &str,
         emit: EventSink<'_>,
         control: &dyn OperationControl,
@@ -304,10 +325,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return self.run_with_incomplete_redactions(emit, control);
         }
         let text = trim_go_space(user_text);
-        if text.is_empty() && image.is_none() && self.options.mailbox.is_empty() {
+        if text.is_empty() && images.is_empty() && self.options.mailbox.is_empty() {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
-        let wake = text.is_empty() && image.is_none();
+        let wake = text.is_empty() && images.is_empty();
         let (turn_id, resumes) = self
             .start_turn(wake)
             .await
@@ -323,7 +344,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let result = self
             .run_turn(
                 user_text,
-                image,
+                images,
                 system_context,
                 emit,
                 control,
@@ -422,7 +443,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     async fn run_turn(
         &self,
         user_text: &str,
-        image: Option<Block>,
+        images: Vec<Block>,
         system_context: &str,
         emit: EventSink<'_>,
         control: &dyn OperationControl,
@@ -490,7 +511,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(self.fail(emit, error));
         }
 
-        if !text.is_empty() || image.is_some() {
+        if !text.is_empty() || !images.is_empty() {
             let redacted = self.redactor.redact_string(user_text);
             let persisted_text = if followup {
                 format!("[Agent follow-up]\n{redacted}")
@@ -501,7 +522,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             if !text.is_empty() {
                 blocks.push(Block::text(persisted_text));
             }
-            blocks.extend(image);
+            blocks.extend(images);
             let user = Message {
                 id: (self.options.new_id)(),
                 role: if followup { Role::Context } else { Role::User },

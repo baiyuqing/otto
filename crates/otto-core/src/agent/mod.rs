@@ -32,6 +32,7 @@ pub mod context_estimate;
 pub mod context_report;
 pub mod events;
 pub mod hooks;
+mod image_input;
 pub mod inbox;
 pub mod memory;
 pub mod memory_retraction;

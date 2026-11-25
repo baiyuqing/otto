@@ -284,7 +284,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     pub(super) fn preflight_ordinary_turn(
         &self,
         user_text: &str,
-        image: Option<&Block>,
+        images: &[Block],
         system_context: &str,
         followup: bool,
     ) -> Result<(), AgentError> {
@@ -314,7 +314,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 ..Message::default()
             });
         }
-        if !trim_go_space(user_text).is_empty() || image.is_some() {
+        if !trim_go_space(user_text).is_empty() || !images.is_empty() {
             let mut blocks = Vec::new();
             if !trim_go_space(user_text).is_empty() {
                 blocks.push(Block::text(if followup {
@@ -323,7 +323,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     user_text.to_owned()
                 }));
             }
-            blocks.extend(image.cloned());
+            blocks.extend(images.iter().cloned());
             request.messages.push(Message {
                 role: if followup { Role::Context } else { Role::User },
                 context_type: if followup {

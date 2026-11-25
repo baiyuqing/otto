@@ -423,6 +423,50 @@ async fn run_does_not_replay_a_call_whose_tool_is_not_replayable() {
 }
 
 #[tokio::test]
+async fn image_turn_persists_and_sends_ordered_attachments() {
+    for text in ["", "compare these"] {
+        let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
+        let mut options = test_options();
+        options.provider_name = "openai-compatible".into();
+        options.model = "gpt-4.1".into();
+        let agent = Agent::new(provider, EchoExecutor, MemorySession::new(), options);
+        let images = vec![
+            Block::image("iVBORw0KGgo=", "image/png"),
+            Block::image("/9j/", "image/jpeg"),
+        ];
+        let mut expected = Vec::new();
+        if !text.is_empty() {
+            expected.push(Block::text(text));
+        }
+        expected.extend(images.clone());
+        agent
+            .run_with_images_budget(
+                BudgetScope::Fresh(Default::default()),
+                text,
+                images,
+                "",
+                &mut |_| {},
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("image turn");
+        let persisted = agent.session().messages();
+        let user = persisted
+            .iter()
+            .find(|m| m.role == Role::User)
+            .expect("saved user message");
+        assert_eq!(user.blocks, expected);
+        let requests = agent.provider().requests.lock().unwrap();
+        let sent = requests[0]
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .expect("sent user message");
+        assert_eq!(sent.blocks, expected);
+    }
+}
+
+#[tokio::test]
 async fn run_executes_a_tool_turn_then_a_text_turn() {
     // op_1 is the turn id of the `otto.turn` records.
     let provider = ScriptedProvider::new(vec![

@@ -24,6 +24,7 @@ impl App {
             self.ctrl_c_armed_at = Some(now);
             self.status = Some(CTRL_C_EXIT_STATUS.into());
             self.composer.edit(Edit::Clear);
+            self.draft_images.clear();
             return None;
         }
         self.ctrl_c_armed_at = None;
@@ -129,6 +130,9 @@ impl App {
         }
         if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
             self.handle_scroll_key(&key);
+            return None;
+        }
+        if self.image_draft_key(key) {
             return None;
         }
         let suggestions = self.suggestions();

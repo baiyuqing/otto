@@ -19,6 +19,7 @@ mod entries;
 mod features;
 mod frame_gate;
 pub(crate) mod gutter;
+mod image_input;
 mod input;
 mod interaction;
 #[cfg(unix)]
@@ -309,6 +310,37 @@ async fn run_app<B: Backend>(
                     return Ok(());
                 }
                 Action::CancelTurn => {}
+                Action::ImagePrompt => {
+                    if app.draft_images.is_empty() {
+                        continue;
+                    }
+                    if let Err(error) = controller.validate_images(&app.draft_images) {
+                        app.push_system(format!("Image prompt not sent; draft retained. {error}"));
+                        continue;
+                    }
+                    let line = app.composer.take().unwrap_or_default();
+                    let images = std::mem::take(&mut app.draft_images);
+                    controller.set_next_input_id(None);
+                    controller.set_next_input_provenance(Some(
+                        otto_core::model::InputProvenance::local(
+                            otto_core::model::InputSource::Tui,
+                        ),
+                    ));
+                    let result = run_turn(
+                        &mut app, terminal, keys, controller, cancel, line, None, images,
+                    )
+                    .await;
+                    controller.set_next_input_provenance(None);
+                    match result {
+                        Ok(()) => {
+                            let _ = app.refresh(&backend);
+                        }
+                        Err(error) => propagate_turn_error(error)?,
+                    }
+                    if let Some(action) = app.submit_queued_input(&backend, cancel) {
+                        actions.push_back(action);
+                    }
+                }
                 action @ (Action::Prompt(_) | Action::LocalPrompt { .. }) => {
                     let (line, input_id, delivery) = match action {
                         Action::Prompt(line) => (
@@ -370,6 +402,7 @@ async fn run_app<B: Backend>(
                         cancel,
                         line,
                         input_id.as_deref(),
+                        Vec::new(),
                     )
                     .await;
                     controller.set_next_input_id(None);

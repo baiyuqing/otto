@@ -64,6 +64,7 @@ mod runner_assembly;
 mod runner_authorization;
 mod runner_budget;
 mod runner_entry;
+mod runner_images;
 mod session_lifecycle;
 mod shared_session;
 

@@ -489,14 +489,14 @@ pub(crate) fn system_prompt_for(
     }
     if tool_names.contains(&"bash") {
         prompt.push_str(
-            "\n<shell_output_policy>Decide which result the user needs before running a \
-            command. For test runs, use a quiet reporter or write a small Bash or Python script \
-            to capture output locally and emit failed tests and their relevant diagnostics. For a \
-            clean run, report the verified outcome without listing passing tests. Preserve the \
-            runner's exit status, including pipeline failures, and verify the expected tests or \
-            stages completed. Report timeouts, cancellations, missing results and parser \
-            uncertainty. No error matches alone is not proof of success. For data tasks, write \
-            a small script to filter or aggregate locally and emit only the requested result. \
+            "\n<shell_output_policy>Start with the answer you need. Use a single targeted lookup \
+            when it answers the question. When several searches across files, logs, or test results \
+            contribute to one answer, combine them in a shell pipeline or small Bash or Python script. \
+            Filter, join, or aggregate locally, even when each lookup is small. Emit only the requested result \
+            and the evidence needed to check it, such as a file and line or a failing assertion. \
+            Use quiet test output, preserve the runner's exit status through pipelines, and verify the expected tests \
+            or stages completed. Report failed tests and their relevant diagnostics. On success, give \
+            the verified outcome. An empty error search cannot establish success. Report incomplete runs and parsing failures. \
             Bash returns execution metadata and paths to temporary redacted stdout/stderr logs. \
             Analyze large logs locally instead of printing them back. Scripts must remove their own \
             temporary logs on success or failure. Runtime-generated logs are automatically removed \

@@ -242,7 +242,8 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     master
         .write_all(b"/inputs\r")
         .expect("list local input recovery");
-    wait_for_screen_text(&shared, "session-scoped");
+    wait_for_screen_text(&shared, "Inputs for session");
+    wait_for_screen_text(&shared, "Tui / Direct / delivered");
 
     master.write_all(b"/rename\r").expect("open rename form");
     wait_for_screen_text(&shared, "Rename session");

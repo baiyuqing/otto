@@ -5,13 +5,17 @@
 /otto
 /dist/
 .DS_Store
+# Keep machine-local state out of Git; only bundled skills are source files.
 .otto/
-!.otto/
-!.otto/skills/
-!.otto/skills/sandbox-setup/
-!.otto/skills/sandbox-setup/SKILL.md
-!.otto/skills/rust-best-practices/
-!.otto/skills/rust-best-practices/**
+!/.otto/
+/.otto/*
+!/.otto/skills/
+/.otto/skills/*
+!/.otto/skills/sandbox-setup/
+/.otto/skills/sandbox-setup/*
+!/.otto/skills/sandbox-setup/SKILL.md
+!/.otto/skills/rust-best-practices/
+!/.otto/skills/rust-best-practices/**
 *.test
 
 # Rust build artifacts.

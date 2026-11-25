@@ -394,7 +394,18 @@ fn grants_read_paths(config: &str) -> bool {
         .any(|line| line.trim_start().starts_with("read_paths"))
 }
 
+// Bash output logs expire at turn end. Use a workspace file to observe the
+// command's effect after the full ACP prompt has completed.
+fn fixture_output(workspace: &Path) -> Option<String> {
+    match std::fs::read_to_string(workspace.join("approval-output.txt")) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read approval fixture output: {error}"),
+    }
+}
+
 struct Run {
+    workspace: tempfile::TempDir,
     frames: Vec<Value>,
     response: Value,
     permission_requests: Vec<Value>,
@@ -435,6 +446,7 @@ fn run(option: &str, replies: Vec<String>) -> Run {
         assert_task_queue_capability(body);
     }
     Run {
+        workspace,
         frames,
         response,
         permission_requests,
@@ -445,7 +457,7 @@ fn run(option: &str, replies: Vec<String>) -> Run {
 
 fn escalated(call_id: &str) -> String {
     let arguments = json!({
-        "command": "cat \"$HOME/elevated.txt\"",
+        "command": "cat \"$HOME/elevated.txt\" > approval-output.txt",
         "sandbox_permissions": "require_escalated",
         "justification": "read the reviewed home fixture",
     })
@@ -499,7 +511,7 @@ fn persistent_read_grant_executes_prepared_call_and_denial_does_not_write_config
             id,
             "bash",
             &json!({
-                "command": "cat '__READ_PATH__'",
+                "command": "cat '__READ_PATH__' > approval-output.txt",
                 "sandbox_read_path": "__READ_PATH__",
                 "justification": "read the fixture",
             })
@@ -535,11 +547,14 @@ fn persistent_read_grant_executes_prepared_call_and_denial_does_not_write_config
             result.config
         );
         assert!(!result.config.contains("excluded_commands"));
+        assert_terminal_tool_update(
+            &result.frames,
+            "c1",
+            if granted { "completed" } else { "failed" },
+        );
         assert_eq!(
-            serde_json::to_string(&result.frames)
-                .unwrap()
-                .contains("outside-seatbelt"),
-            granted
+            fixture_output(result.workspace.path()).as_deref(),
+            granted.then_some("outside-seatbelt\n")
         );
     }
 }
@@ -555,7 +570,10 @@ fn allow_once_executes_the_prepared_call_once_in_the_same_prompt() {
     assert_eq!(result.permission_requests.len(), 1);
     let params = &result.permission_requests[0]["params"];
     assert_eq!(params["toolCall"]["toolCallId"], "call-1");
-    assert_eq!(params["toolCall"]["title"], "cat \"$HOME/elevated.txt\"");
+    assert_eq!(
+        params["toolCall"]["title"],
+        "cat \"$HOME/elevated.txt\" > approval-output.txt"
+    );
     assert_eq!(params["toolCall"]["kind"], "execute");
     let options: Vec<(&str, &str)> = params["options"]
         .as_array()
@@ -582,8 +600,11 @@ fn allow_once_executes_the_prepared_call_once_in_the_same_prompt() {
         1,
         "approval must resume the exact original call, not dispatch a second call"
     );
-    let text = serde_json::to_string(&result.frames).unwrap();
-    assert!(text.contains("outside-seatbelt"), "{text}");
+    assert_terminal_tool_update(&result.frames, "call-1", "completed");
+    assert_eq!(
+        fixture_output(result.workspace.path()).as_deref(),
+        Some("outside-seatbelt\n")
+    );
     assert_eq!(
         updates(&result.frames).last().unwrap()["content"]["text"],
         "done"
@@ -604,8 +625,7 @@ fn reject_once_ends_the_turn_without_a_retry() {
         result.served, 2,
         "the retry prompt must not reach the provider"
     );
-    let text = serde_json::to_string(&result.frames).unwrap();
-    assert!(!text.contains("outside-seatbelt"), "{text}");
+    assert_eq!(fixture_output(result.workspace.path()), None);
 }
 
 #[test]
@@ -646,11 +666,10 @@ fn yolo_mode_approves_an_escalated_command_without_a_permission_request() {
             .any(|frame| frame["method"] == "session/request_permission"),
         "{frames:?}"
     );
-    assert!(
-        serde_json::to_string(&frames)
-            .unwrap()
-            .contains("outside-seatbelt"),
-        "the unsandboxed command must have run"
+    assert_terminal_tool_update(&frames, "call-1", "completed");
+    assert_eq!(
+        fixture_output(workspace.path()).as_deref(),
+        Some("outside-seatbelt\n")
     );
     assert_eq!(client.close(), Some(0));
 }

@@ -161,42 +161,6 @@ impl Controller {
         result
     }
 
-    /// Like `run_with_channel`, with foreground-only typed image attachments.
-    /// Supply `Step::Text`, even for an image-only turn (`Step::Text("")`).
-    pub async fn submit_with_images<F, Fut>(
-        &self,
-        first: Step<'_>,
-        channel: Option<super::Channel>,
-        origin: Option<otto_session::origin::Origin>,
-        emit: EventSink<'_>,
-        cancel: &CancellationToken,
-        decide: F,
-        images: Vec<Block>,
-    ) -> Result<Stop, AgentError>
-    where
-        F: FnMut(ApprovalRequest) -> Fut,
-        Fut: Future<Output = ApprovalDecision>,
-    {
-        if images.is_empty() {
-            return self
-                .run_with_channel(first, channel, origin, emit, cancel, decide)
-                .await;
-        }
-        let Step::Text(text) = first else {
-            return Err(AgentError::Other("Images require a foreground user turn; do not queue or steer them. Submit again after the active turn finishes.".into()));
-        };
-        self.validate_images(&images)?;
-        self.run_with_channel(
-            Step::Images(text, images),
-            channel,
-            origin,
-            emit,
-            cancel,
-            decide,
-        )
-        .await
-    }
-
     async fn run_turn_steps<F, Fut>(
         &self,
         first: Step<'_>,

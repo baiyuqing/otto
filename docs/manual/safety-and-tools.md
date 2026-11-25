@@ -1154,6 +1154,10 @@ log is available. The excerpt is sent on the next ordinary model step and the
 transcript keeps a short record of the read. The usual `read` file limits apply.
 Bash can analyze larger logs locally and print just the selected result.
 
+When several small lookups contribute to one answer, combine them in a shell
+pipeline or a short script and return the result with enough evidence to check it.
+A single targeted lookup is sufficient when it answers the question.
+
 For tests, use a quiet reporter or a local script to select failures and their
 diagnostics. The script must preserve the runner's exit status, account for
 pipeline failures, and verify the run completed. No matches for `error` does

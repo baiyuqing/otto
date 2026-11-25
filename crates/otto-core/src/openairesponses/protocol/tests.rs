@@ -79,20 +79,40 @@ fn compaction_items_wrap_messages_in_the_required_order() {
             r#"{"model":"m","input":["#,
             r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque-persisted"},"#,
             r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},"#,
-            r#"{"type":"compaction"}],"stream":true,"store":false}"#,
+            r#"{"type":"compaction_trigger"}],"stream":true,"store":false}"#,
         )
     );
 }
 
 #[test]
-fn empty_compaction_fields_are_omitted_exactly() {
-    let item = WireItem {
-        item_type: "compaction".into(),
-        ..WireItem::default()
+fn fresh_compaction_has_a_trigger_but_no_encrypted_checkpoint() {
+    let request = Request {
+        request_remote_compaction: true,
+        ..Request::default()
     };
+    let wire = serde_json::to_value(build_request(&request)).unwrap();
     assert_eq!(
-        serde_json::to_string(&item).unwrap(),
-        r#"{"type":"compaction"}"#
+        wire["input"],
+        serde_json::json!([{"type": "compaction_trigger"}])
+    );
+}
+
+#[test]
+fn replaying_a_checkpoint_does_not_request_another_compaction() {
+    let request = Request {
+        remote_compaction: Some(crate::session::RemoteCompaction {
+            provider: "chatgpt".into(),
+            id: "cmp_1".into(),
+            encrypted_content: "opaque-persisted".into(),
+        }),
+        ..Request::default()
+    };
+    let wire = serde_json::to_value(build_request(&request)).unwrap();
+    assert_eq!(
+        wire["input"],
+        serde_json::json!([
+            {"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque-persisted"}
+        ])
     );
 }
 

@@ -225,6 +225,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Fixed
 
+- ChatGPT remote compaction sends a `compaction_trigger` instead of an empty
+  checkpoint, fixing a malformed request that could return HTTP 400.
+
 - ChatGPT remote compaction reports recognized error codes and parameter names
   on HTTP 400 without exposing the raw response or retrying the request.
 

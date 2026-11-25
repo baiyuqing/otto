@@ -214,6 +214,7 @@ impl App {
         self.observer
             .reset_scope(&self.info.workspace, &self.info.session_id);
         if !same_session {
+            self.draft_images.clear();
             self.scroll = None;
         }
         // Same-session history may precede a foreign turn's input. Only the

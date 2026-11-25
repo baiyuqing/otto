@@ -48,6 +48,9 @@ commit ledger; Git and release tags retain the full history. See the
 
 ### Added
 
+- The local macOS TUI accepts clipboard screenshots and explicitly selected
+  PNG/JPEG attachments in prompts to image-capable models. Unsaved drafts
+  show removable attachment labels without uploading the images.
 - ChatGPT, Claude and DeepSeek ship with model presets in `otto setup` and
   `/model`. Existing defaults and custom settings are preserved; the official
   DeepSeek integration uses the OpenAI-compatible API with thinking disabled.

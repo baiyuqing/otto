@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 mod completion;
 mod events;
+mod image_draft;
 mod keys;
 mod lifecycle;
 mod observer;
@@ -73,6 +74,7 @@ impl Backend<'_> {
 pub(crate) enum Action {
     Exit,
     Prompt(String),
+    ImagePrompt,
     LocalPrompt {
         text: String,
         input_id: String,
@@ -91,6 +93,7 @@ pub(crate) struct App {
     pub cache_breakdown_complete: Option<bool>,
     pub info: Info,
     pub composer: Composer,
+    pub(super) draft_images: Vec<otto_core::model::Block>,
     pub queued_input: Option<String>,
     pub(super) queued_input_id: Option<String>,
     pub(super) input_statuses: std::collections::HashMap<String, String>,
@@ -188,6 +191,7 @@ impl App {
             cache_breakdown_complete,
             info: backend.info(),
             composer,
+            draft_images: Vec::new(),
             queued_input: None,
             next_input_delivery: None,
             queued_input_id: None,

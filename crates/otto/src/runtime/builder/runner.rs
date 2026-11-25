@@ -5,7 +5,7 @@ use super::*;
 impl Runner {
     /// A turn is unattended when this process is `otto --prompt` or the
     /// current user turn came from a chat.
-    fn turn_deadline(&self) -> Deadline {
+    pub(super) fn turn_deadline(&self) -> Deadline {
         let unattended = self.headless || self.schedule_origin.get().is_some_and(|o| o.is_chat());
         turn_limit(self.turn_timeout, self.unattended_turn_timeout, unattended)
             .map_or_else(Deadline::unlimited, Deadline::after)
@@ -116,44 +116,6 @@ impl Runner {
         result
     }
 
-    pub async fn run_with_image_system_context(
-        &self,
-        user_text: &str,
-        image: Block,
-        system_context: &str,
-        scope: BudgetScope,
-        emit: EventSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<(), AgentError> {
-        let _output_lease = self.retain_temporary_outputs();
-        let control = Control::new(self.turn_deadline());
-        if cancel.is_cancelled() {
-            control.stop(OperationStopReason::UserCancellation);
-        }
-        let (events, received) = tokio::sync::mpsc::unbounded_channel();
-        let mut send = |event| {
-            let _ = events.send(event);
-        };
-        let mut collecting = self.collecting(&mut send);
-        let run = self.agent.run_with_budget(
-            scope,
-            user_text,
-            Some(image),
-            system_context,
-            &mut collecting,
-            &control,
-        );
-        let result = self
-            .monitor_approvals(
-                drive_with_control(run, cancel, &control),
-                received,
-                &mut *emit,
-            )
-            .await;
-        self.report_lost_steering(&mut *emit).await;
-        result
-    }
-
     /// Reports the guidance a finished run accepted but never delivered.
     ///
     /// An interrupted turn — the user pressed Esc, the provider failed, the
@@ -163,7 +125,7 @@ impl Runner {
     /// and announced on the turn's own event stream. A failed append still
     /// announces the text, with the failure appended: losing the user's input
     /// silently is exactly what this prevents.
-    async fn report_lost_steering(&self, emit: EventSink<'_>) {
+    pub(super) async fn report_lost_steering(&self, emit: EventSink<'_>) {
         let lost = self.steering().take_discarded();
         if lost.is_empty() {
             return;
@@ -195,7 +157,7 @@ impl Runner {
         });
     }
 
-    async fn monitor_approvals<T>(
+    pub(super) async fn monitor_approvals<T>(
         &self,
         future: impl Future<Output = T>,
         mut events: tokio::sync::mpsc::UnboundedReceiver<otto_core::agent::Event>,

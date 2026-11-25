@@ -454,6 +454,13 @@ fn composer_banner_lines(app: &App) -> Vec<Line<'static>> {
             .style(style)
         })
         .collect();
+    if !app.draft_images.is_empty() {
+        let labels = (1..=app.draft_images.len())
+            .map(|index| format!("[Image #{index}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(Line::styled(format!("{labels} · F9 removes last"), style));
+    }
     if app.new_messages && app.scroll.is_some() {
         lines.insert(
             0,

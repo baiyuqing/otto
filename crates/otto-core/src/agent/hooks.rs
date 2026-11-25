@@ -124,7 +124,12 @@ impl<P: crate::provider::Provider, T: crate::tool::ToolExecutor, S: crate::sessi
         Ok(())
     }
 
-    pub(super) fn record_turn_message(&self, message: Message) {
+    pub(super) fn record_turn_message(&self, mut message: Message) {
+        for block in &mut message.blocks {
+            if block.block_type == crate::model::BlockType::Image {
+                *block = Block::text("[image attachment]");
+            }
+        }
         if let Some(messages) = self
             .hook_turn_messages
             .lock()

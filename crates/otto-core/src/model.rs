@@ -160,7 +160,7 @@ impl From<FinishReason> for String {
 ///
 /// `arguments` is provider JSON passed through verbatim. Keeping it as
 /// [`RawValue`] preserves number literals exactly.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub struct Block {
     #[serde(rename = "type")]
     pub block_type: BlockType,
@@ -186,6 +186,24 @@ pub struct Block {
     pub is_error: bool,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub operation_metadata: Option<ToolResultMetadata>,
+}
+
+impl fmt::Debug for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Block")
+            .field("block_type", &self.block_type)
+            .field("text", &self.text)
+            .field("data_bytes", &self.data.len())
+            .field("mime_type", &self.mime_type)
+            .field("tool_call_id", &self.tool_call_id)
+            .field("tool_name", &self.tool_name)
+            .field("invocation_id", &self.invocation_id)
+            .field("invocation_attempt", &self.invocation_attempt)
+            .field("arguments", &self.arguments)
+            .field("is_error", &self.is_error)
+            .field("operation_metadata", &self.operation_metadata)
+            .finish()
+    }
 }
 
 impl<'de> Deserialize<'de> for Block {

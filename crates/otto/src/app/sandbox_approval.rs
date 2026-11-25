@@ -23,6 +23,25 @@ impl Controller {
         control.reload().await
     }
 
+    /// Checks an explicit local attachment against private-file policy without
+    /// granting any access. The frontend must open the direct path without following links.
+    pub fn can_read_image_attachment(&self, path: &std::path::Path) -> bool {
+        if !path.is_absolute() || self.lock().is_closed() {
+            return false;
+        }
+        let denylist = self
+            .sandbox
+            .as_ref()
+            .and_then(|control| control.read_denylist())
+            .unwrap_or_else(|| {
+                crate::sandbox::read_denylist::ReadDenylist::new(
+                    self.builder.home.clone(),
+                    self.builder.config.sandbox.deny_read_paths.clone(),
+                )
+            });
+        !denylist.covers(path)
+    }
+
     /// Resolves a user-supplied `/sandbox allow` path against this process's
     /// home directory and the filesystem, without changing anything.
     pub fn resolve_sandbox_read_path(&self, input: &str) -> Result<String, String> {

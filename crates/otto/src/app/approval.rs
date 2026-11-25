@@ -22,6 +22,7 @@ use super::{Controller, WakeOperation};
 pub enum Step<'a> {
     Text(&'a str),
     Image(&'a str, Block),
+    Images(&'a str, Vec<Block>),
     /// An agent-originated queued task, stored as display-only context.
     Followup(&'a str),
     /// A stored schedule prompt, generated from a previously authorized item.
@@ -160,6 +161,42 @@ impl Controller {
         result
     }
 
+    /// Like `run_with_channel`, with foreground-only typed image attachments.
+    /// Supply `Step::Text`, even for an image-only turn (`Step::Text("")`).
+    pub async fn submit_with_images<F, Fut>(
+        &self,
+        first: Step<'_>,
+        channel: Option<super::Channel>,
+        origin: Option<otto_session::origin::Origin>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+        decide: F,
+        images: Vec<Block>,
+    ) -> Result<Stop, AgentError>
+    where
+        F: FnMut(ApprovalRequest) -> Fut,
+        Fut: Future<Output = ApprovalDecision>,
+    {
+        if images.is_empty() {
+            return self
+                .run_with_channel(first, channel, origin, emit, cancel, decide)
+                .await;
+        }
+        let Step::Text(text) = first else {
+            return Err(AgentError::Other("Images require a foreground user turn; do not queue or steer them. Submit again after the active turn finishes.".into()));
+        };
+        self.validate_images(&images)?;
+        self.run_with_channel(
+            Step::Images(text, images),
+            channel,
+            origin,
+            emit,
+            cancel,
+            decide,
+        )
+        .await
+    }
+
     async fn run_turn_steps<F, Fut>(
         &self,
         first: Step<'_>,
@@ -173,6 +210,11 @@ impl Controller {
         F: FnMut(ApprovalRequest) -> Fut,
         Fut: Future<Output = ApprovalDecision>,
     {
+        match &first {
+            Step::Image(_, image) => self.validate_images(std::slice::from_ref(image))?,
+            Step::Images(_, images) => self.validate_images(images)?,
+            _ => {}
+        }
         let system_context = channel.map_or("", super::Channel::system_context);
         let first_admission = if matches!(&first, Step::Wake(_)) {
             None
@@ -185,17 +227,19 @@ impl Controller {
         // turn and starts a new root; a wake turn brings the budget its claim
         // decided; a follow-up turn continues the session's current root.
         let turn_budget = match &first {
-            Step::Text(_) | Step::Image(..) | Step::Scheduled(_) => runner.begin_root_turn(),
+            Step::Text(_) | Step::Image(..) | Step::Images(..) | Step::Scheduled(_) => {
+                runner.begin_root_turn()
+            }
             Step::Wake(wake) => wake.budget().clone(),
             Step::Followup(_) => runner
                 .followup_budget()
                 .map_err(AgentError::BudgetExceeded)?,
         };
         let _output_lease = runner.retain_temporary_outputs();
-        if let Step::Text(text) | Step::Image(text, _) = &first {
+        if let Step::Text(text) | Step::Image(text, _) | Step::Images(text, _) = &first {
             runner.record_user_authorization(text).await?;
         }
-        let _presentation = if matches!(first, Step::Text(_) | Step::Image(..)) {
+        let _presentation = if matches!(first, Step::Text(_) | Step::Image(..) | Step::Images(..)) {
             Some(self.begin_user_turn(&runner, origin).await)
         } else {
             if matches!(first, Step::Wake(_)) {
@@ -208,7 +252,7 @@ impl Controller {
             Step::Text(text) | Step::Followup(text) | Step::Scheduled(text) => {
                 runner.redact_text(text)
             }
-            Step::Image(text, _) => runner.redact_text(text),
+            Step::Image(text, _) | Step::Images(text, _) => runner.redact_text(text),
             Step::Wake(_) => String::new(),
         };
         let resumes = matches!(first, Step::Wake(_)) && self.resumable_interrupted_turn();
@@ -302,6 +346,10 @@ impl Controller {
         Fut: Future<Output = ApprovalDecision>,
     {
         let mut first_admission = first_admission;
+        let first = match first {
+            Step::Image(text, image) => Step::Images(text, vec![image]),
+            other => other,
+        };
         let mut step = Some(first);
         let mut retry = String::new();
         let followup = matches!(step, Some(Step::Followup(_)));
@@ -361,6 +409,18 @@ impl Controller {
                             .await
                         }
                         Some(Step::Image(text, image)) => {
+                            runner
+                                .run_with_image_system_context(
+                                    text,
+                                    image,
+                                    system_context,
+                                    otto_core::agent::budget::BudgetScope::Shared(budget.clone()),
+                                    &mut send,
+                                    cancel,
+                                )
+                                .await
+                        }
+                        Some(Step::Images(text, images)) => {
                             let _admission = match first_admission.take() {
                                 Some(admission) => admission,
                                 None => self
@@ -368,9 +428,9 @@ impl Controller {
                                     .map_err(AgentError::Other)?,
                             };
                             runner
-                                .run_with_image_system_context(
+                                .run_with_images_system_context(
                                     text,
-                                    image,
+                                    images,
                                     system_context,
                                     otto_core::agent::budget::BudgetScope::Shared(budget.clone()),
                                     &mut send,

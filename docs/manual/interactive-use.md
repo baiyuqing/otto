@@ -365,6 +365,7 @@ still running.
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle a tool call between its folded summary and full arguments/output |
 | `F6` (configurable) | Toggle the read-only sub-agent observer; `[ui.observer]` customizes toggle/open/back bindings |
+| `F8` / `F9` (local macOS TUI) | Paste an image from the clipboard / remove the last draft image |
 | Left-button drag | Select visible text and copy it to the clipboard on release |
 | Mouse wheel, `PgUp` / `PgDn` | Navigate the focused screen control, or scroll the transcript |
 | `Home` / `End` | Move the cursor to the start or end of the composer |
@@ -379,6 +380,21 @@ suspending Otto. Run `fg` in that shell to resume and redraw the TUI, preserving
 the session and unsubmitted input. This pauses the local process; it does not
 start a detached background agent. With `--attach`, only the TUI client is
 suspended; the separate `otto serve` process and its session keep running.
+
+#### Image input on macOS
+
+In the local TUI, copy a screenshot or image to the system clipboard and
+press `F8`. To attach a readable PNG or JPEG file instead, enter
+`/attach-image /path/to/image.png`; spaces in the path need no quoting. If a
+source app copies only a file reference, save the image as a regular file and
+use the file command. Otto does not open paths copied to the clipboard.
+
+The composer shows numbered attachment labels, not thumbnails. Press `F9`
+to remove the last image. Attach up to four images; press `Enter` on an idle
+TUI to send them with or without text to a model that accepts images. Pending
+images cannot be queued as guidance. Draft images are not uploaded or saved;
+sent images are stored in the session history and can be replayed as context.
+This feature is not available in the attached TUI or the line REPL.
 
 ### The TUI attached to `otto serve`
 

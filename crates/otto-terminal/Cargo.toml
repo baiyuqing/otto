@@ -15,6 +15,7 @@ otto-platform.workspace = true
 otto-session.workspace = true
 otto-client.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
 regex.workspace = true
@@ -41,6 +42,17 @@ crossterm = "=0.29.0"
 # `tui::render::composer_lines`). Already in the tree as ratatui's own
 # width source; depending on it directly keeps the two in agreement.
 unicode-width = "=0.2.3"
+# Only the explicit image attachment boundary uses these codecs. Disable the
+# default format/rayon set (including AVIF and native tooling).
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Read native image pasteboard data, never text/URLs or NSImage file loading.
+# The objc2 bindings are MIT (AppKit also offers Apache-2.0/Zlib).
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSData"] }
+# macOS screenshots commonly expose TIFF instead of PNG.
+image = { version = "=0.25.10", default-features = false, features = ["tiff"] }
 
 [dev-dependencies]
 otto = { workspace = true, features = ["fault-injection", "test-support"] }

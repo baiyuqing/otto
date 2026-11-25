@@ -24,6 +24,7 @@ use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
+mod bash_history;
 pub mod budget;
 mod capabilities;
 pub mod compaction;
@@ -83,7 +84,7 @@ use crate::session::operation::{OperationFact, replay_allowed};
 use crate::session::turn::{
     TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, encode_turn_record,
 };
-use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
+use crate::tool::{ToolCall, ToolContentScope, ToolExecution, ToolExecutor, ToolResult};
 
 use crate::mailbox::{InMemoryMailbox, Mailbox};
 use budget::{BudgetPolicy, BudgetScope, TurnBudget};

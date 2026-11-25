@@ -241,7 +241,7 @@ impl BashTool {
     /// resolves to itself as a directory, the shell is blank or contains NUL,
     /// the timeout or cancellation grace is zero, or the output cap is zero.
     ///
-    /// `output_logs` is the owning session's overflow-log set; the tool leases
+    /// `output_logs` is the owning session's temporary log set; the tool leases
     /// and writes its logs through it.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
@@ -389,14 +389,12 @@ fn infrastructure_result(error: &Error) -> ToolResult {
 }
 
 /// The output contract shared by sandboxed and elevated calls.
-const OUTPUT_NOTE: &str = "Return exit status and stdout/stderr previews of at most 4 KiB each (or \
-    the smaller configured cap); longer redacted output is saved \
-    temporarily under .otto/tool-output and automatically removed after the \
-    turn and its children finish. Delete individual logs after analysis \
-    when no task still needs them; never remove the shared directory. \
-    Analyze logs with scripts and print only verified summaries or relevant \
-    failures; use read with offset/limit for excerpts instead of printing \
-    complete logs.";
+const OUTPUT_NOTE: &str = "Return execution status, stream sizes and paths to redacted temporary \
+    stdout/stderr logs. Use read with offset and limit for the needed lines before the turn and its \
+    child tasks finish. For tests use a quiet reporter or a local Bash/Python script that preserves \
+    the runner's exit status, checks the run completed and prints only failures and their diagnostics. \
+    For data tasks filter or aggregate locally and print only the requested result. Avoid printing \
+    passing cases, intermediate rows and full logs.";
 
 /// The read capability of a sandboxed command.
 const SANDBOX_READ_NOTE: &str = "Sandboxed commands read every path except the sandbox read denylist (credential and personal-data locations).";
@@ -417,9 +415,8 @@ pub fn bash_definition() -> ToolDefinition {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a \
-                        script that captures logs, preserves the command exit status, and \
-                        prints a concise checked summary"
+                    "description": "Shell command to execute; for large outputs, do the filtering locally \
+                        and print only failures or requested results"
                 }
             },
             "required": ["command"]
@@ -454,9 +451,8 @@ pub(crate) fn bash_definition_with_approvals() -> ToolDefinition {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a \
-                        script that captures logs, preserves the command exit status, and \
-                        prints a concise checked summary"
+                    "description": "Shell command to execute; for large outputs, do the filtering locally \
+                        and print only failures or requested results"
                 },
                 "sandbox_permissions": {
                     "type": "string",

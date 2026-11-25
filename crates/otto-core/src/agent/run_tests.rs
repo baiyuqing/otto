@@ -75,6 +75,7 @@ impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
 }
 
 mod auto_compaction;
+mod bash_output;
 mod capability_plan;
 mod claude_cache_prefix;
 mod context_oneshot;
@@ -408,6 +409,7 @@ impl ToolExecutor for EchoExecutor {
                 .clone()
                 .unwrap_or_else(|| call.arguments.get().to_owned()),
             persisted_content: self.persisted.clone(),
+            content_scope: Default::default(),
             is_error: false,
             outcome_override: None,
         })

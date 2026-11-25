@@ -1,6 +1,7 @@
 //! Command execution, timeout handling and result formatting for the bash tool.
 
 use super::*;
+use otto_core::tool::ToolContentScope;
 
 impl BashTool {
     /// Runs `request`, cancelling a private child token once the timeout
@@ -89,8 +90,7 @@ impl BashTool {
 
     pub(super) fn result(
         &self,
-        stdout: &str,
-        stderr: &str,
+        output: Option<(&Output, &Output)>,
         status: &ExitStatus,
         summary: &str,
     ) -> ToolResult {
@@ -117,9 +117,26 @@ impl BashTool {
                 denied.push('\n');
             }
         }
-        let formatted = format!("{}\n{}\n{denied}{summary}", stdout, stderr);
+        let format_result = |stdout: &str, stderr: &str| {
+            redact_exact_text(
+                &format!("{stdout}\n{stderr}\n{denied}{summary}"),
+                &self.redact_values,
+                &self.redaction_marker,
+            )
+        };
+        let Some((stdout, stderr)) = output else {
+            return ToolResult {
+                content: format_result("stdout_bytes: 0", "stderr_bytes: 0"),
+                ..ToolResult::default()
+            };
+        };
         ToolResult {
-            content: redact_exact_text(&formatted, &self.redact_values, &self.redaction_marker),
+            content: format_result(&stdout.render("stdout"), &stderr.render("stderr")),
+            persisted_content: Some(format_result(
+                &stdout.summary("stdout"),
+                &stderr.summary("stderr"),
+            )),
+            content_scope: ToolContentScope::Frontend,
             ..ToolResult::default()
         }
     }
@@ -270,12 +287,7 @@ this exact elevated Bash command after approval."
         };
         if cancel.is_cancelled() {
             return self
-                .result(
-                    "stdout:\n",
-                    "stderr:\n",
-                    &ExitStatus::default(),
-                    "status: cancelled",
-                )
+                .result(None, &ExitStatus::default(), "status: cancelled")
                 .cancelled_not_started();
         }
 
@@ -327,8 +339,7 @@ this exact elevated Bash command after approval."
             format!("exit_code: {}", status.code)
         };
         let result = self.result(
-            &stdout.collector().render("stdout"),
-            &stderr.collector().render("stderr"),
+            Some((stdout.collector(), stderr.collector())),
             &status,
             &summary,
         );

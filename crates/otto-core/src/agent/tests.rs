@@ -143,6 +143,7 @@ impl ToolExecutor for EchoExecutor {
         crate::tool::ToolExecution::completed(ToolResult {
             content: call.arguments.get().to_owned(),
             persisted_content: None,
+            content_scope: Default::default(),
             is_error: false,
             outcome_override: None,
         })
@@ -547,6 +548,7 @@ async fn run_executes_a_tool_turn_then_a_text_turn() {
                 result: ToolResult {
                     content: r#"{"value":1}"#.into(),
                     persisted_content: None,
+                    content_scope: Default::default(),
                     is_error: false,
                     outcome_override: None,
                 },
@@ -604,6 +606,7 @@ async fn run_persists_the_override_text_and_reports_the_live_text() {
             crate::tool::ToolExecution::completed(ToolResult {
                 content: "live".into(),
                 persisted_content: Some("stored".into()),
+                content_scope: Default::default(),
                 is_error: false,
                 outcome_override: None,
             })

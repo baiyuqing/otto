@@ -295,6 +295,9 @@ impl Registry {
             && let Err(text) = guard.after(tool.retry_safety())
         {
             execution.result.content = format!("{text}\n\n{}", execution.result.content);
+            if let Some(content) = &mut execution.result.persisted_content {
+                *content = format!("{text}\n\n{content}");
+            }
             execution.result.is_error = true;
             execution.outcome = outcome(OperationDisposition::Error, EffectCertainty::Unknown);
         }

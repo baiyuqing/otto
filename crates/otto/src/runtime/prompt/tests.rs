@@ -94,12 +94,14 @@ fn shell_output_policy_requires_available_bash_and_only_names_registered_read() 
     let prompt = system_prompt_for(&definitions(&["bash", "read"]), off(), "", "", "");
     for required in [
         "<shell_output_policy>",
-        "small scripts",
-        "preserve its exit code",
-        "expected tests or stages actually completed",
+        "small Bash or Python script",
+        "failed tests and their relevant diagnostics",
+        "runner's exit status",
+        "expected tests or stages completed",
         "No error matches alone",
-        "delete that specific temporary log",
-        "Never delete the entire shared log directory",
+        "filter or aggregate locally",
+        "only the requested result",
+        "execution metadata and paths",
         "turn and its outstanding children finish",
         "read with offset and limit",
     ] {

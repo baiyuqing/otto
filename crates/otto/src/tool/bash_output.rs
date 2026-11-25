@@ -1,10 +1,10 @@
-//! Bounded shell previews and workspace-confined overflow logs.
+//! Bounded shell previews for the frontend and workspace-confined output logs.
 //!
-//! Only normalized, redacted bytes reach this sink. Short streams stay in
-//! memory; overflow creates an exclusive 0600 log through the pinned workspace
-//! handle. Disk errors never change command execution and are reported instead
-//! of advertising a complete log. Shared leases retain logs while the parent
-//! turn or a child task is active; the last lease removes owned files.
+//! Only normalized, redacted bytes reach this sink. Each nonempty stream opens
+//! an exclusive 0600 log through the pinned workspace handle. Disk errors do
+//! not change command execution, but an incomplete log is reported as
+//! unavailable. Shared leases retain logs while the parent turn or a child
+//! task is active; the last lease removes owned files.
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -20,6 +20,21 @@ use otto_platform::fsops::root::Root;
 
 pub(super) const PREVIEW_BYTES: usize = 4096;
 const DIRECTORY: &str = ".otto/tool-output";
+
+pub(super) fn is_output_log(path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(DIRECTORY) else {
+        return false;
+    };
+    relative.components().count() == 2
+        && relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.strip_suffix(".log").is_some_and(|id| {
+                    id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            })
+}
 
 /// One runtime's temporary logs. Parent turns and child tasks share leases so
 /// one completed task cannot delete logs still needed by another task.
@@ -156,15 +171,10 @@ impl Output {
     }
 
     fn append(&mut self, data: &[u8], atomic: bool) {
-        if self.total.saturating_add(data.len()) > self.limit && !self.log_failed {
+        if !data.is_empty() && !self.log_failed {
             if self.log.is_none() {
                 match self.create_log() {
-                    Ok((path, mut file)) => {
-                        if file.write_all(self.prefix.bytes()).is_err() {
-                            self.log_failed = true;
-                        }
-                        self.log = Some((path, file));
-                    }
+                    Ok(log) => self.log = Some(log),
                     Err(_) => self.log_failed = true,
                 }
             }
@@ -197,6 +207,17 @@ impl Output {
             && file.flush().is_err()
         {
             self.log_failed = true;
+        }
+    }
+
+    pub(super) fn summary(&self, name: &str) -> String {
+        let count = format!("{name}_bytes: {}", self.total);
+        if self.total == 0 {
+            return count;
+        }
+        match &self.log {
+            Some((path, _)) if !self.log_failed => format!("{count}\n{name}_log: {path}"),
+            _ => format!("{count}\n{name}_log: unavailable (log storage failed)"),
         }
     }
 
@@ -391,12 +412,20 @@ mod tests {
     }
 
     #[test]
-    fn short_streams_are_unchanged_and_do_not_create_files() {
+    fn short_streams_keep_the_preview_and_provide_a_log_reference() {
         let (dir, mut output) = setup(12);
         output.write(b"all passed\n");
         output.finish();
         assert_eq!(output.render("stdout"), "stdout:\nall passed\n");
-        assert!(!dir.path().join(".otto").exists());
+        let path = output.log.as_ref().unwrap().0.as_str();
+        assert_eq!(
+            output.summary("stdout"),
+            format!("stdout_bytes: 11\nstdout_log: {path}")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(path)).unwrap(),
+            "all passed\n"
+        );
     }
 
     #[test]

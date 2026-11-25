@@ -97,6 +97,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .complete_normal_provider_attempt(request, state, emit, control)
             .await;
         let Some(original_overflow) = error else {
+            state.next_step_tool_results.clear();
             return Ok(response);
         };
         if !self.options.compaction.auto
@@ -130,6 +131,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let (response, _, error) = self
             .complete_normal_provider_attempt(retry_request, state, emit, control)
             .await;
+        state.next_step_tool_results.clear();
         match error {
             Some(error) if is_typed_context_overflow(&error) => Err(automatic_dispatch_error(
                 OVERFLOW_RETRY_FAILURE_MESSAGE,
@@ -366,7 +368,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         } else {
             self.session.model_messages()
         };
+        let projected_history = bash_history::summarize(&mut messages);
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
+        state.apply_next_step_results(&mut messages);
         messages = crate::model::project_input_provenance(messages);
         // Message counts before the request-local memory message is inserted:
         // the prefixes ending before the last two user messages recur in the
@@ -429,7 +433,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .is_none()
             .then(|| self.session.latest_compaction())
             .flatten();
-        let estimate = context_estimate::estimate_request(&request, latest.as_ref());
+        let estimate = if projected_history && request.remote_compaction.is_none() {
+            context_estimate::estimate_unanchored_request(&request)
+        } else {
+            context_estimate::estimate_request(&request, latest.as_ref())
+        };
         (request, estimate)
     }
 

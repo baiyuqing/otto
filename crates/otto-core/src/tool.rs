@@ -55,6 +55,18 @@ impl ToolExecution {
     }
 }
 
+/// How the agent can use the live tool text when a transcript override exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolContentScope {
+    /// Keep the live result available throughout this turn.
+    #[default]
+    Turn,
+    /// Use the live result on the next ordinary model step only.
+    NextStep,
+    /// Send the transcript override to the model and show the live text in the frontend.
+    Frontend,
+}
+
 /// The outcome of one tool call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolResult {
@@ -64,6 +76,7 @@ pub struct ToolResult {
     /// is an intentional empty override; `content` still reaches the frontend
     /// unchanged.
     pub persisted_content: Option<String>,
+    pub content_scope: ToolContentScope,
     pub is_error: bool,
     /// Native tools use this only when their concrete boundary can establish a
     /// more conservative effect certainty than the registry's normal mapping.
@@ -76,6 +89,7 @@ impl ToolResult {
         Self {
             content: format!("unknown tool: {name}"),
             persisted_content: None,
+            content_scope: Default::default(),
             is_error: true,
             outcome_override: None,
         }
@@ -86,6 +100,7 @@ impl ToolResult {
         Self {
             content: content.into(),
             persisted_content: None,
+            content_scope: Default::default(),
             is_error: true,
             outcome_override: None,
         }
@@ -236,6 +251,7 @@ mod tests {
         let plain = ToolResult {
             content: "live".into(),
             persisted_content: None,
+            content_scope: Default::default(),
             is_error: false,
             outcome_override: None,
         };
@@ -243,6 +259,7 @@ mod tests {
         let overridden = ToolResult {
             content: "live".into(),
             persisted_content: Some(String::new()),
+            content_scope: Default::default(),
             is_error: false,
             outcome_override: None,
         };

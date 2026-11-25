@@ -10,11 +10,11 @@
 //! dropped with it, so the tool-result overlay never outlives the turn, and the
 //! per-turn [`ProgressGuard`] starts every turn with no history.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, TimeDelta, Utc};
 
-use crate::model::zero_time;
+use crate::model::{Block, BlockType, Message, Role, zero_time};
 use crate::provider::ProviderError;
 
 use super::progress::ProgressGuard;
@@ -82,11 +82,40 @@ pub struct RunDispatchState {
     /// whose stored text is a placeholder. It is substituted into provider
     /// requests only, never into the session.
     pub tool_result_overlay: HashMap<String, String>,
+    /// Excerpts available only to the next ordinary model step.
+    pub next_step_tool_results: BTreeMap<String, String>,
     /// The limits that stop a turn making no progress. The turn loop replaces
     /// the default with the one this run's [`super::Options`] configured.
     pub progress: ProgressGuard,
     pub yield_after_batch: bool,
     pub batch_has_errors: bool,
+}
+
+impl RunDispatchState {
+    pub(super) fn apply_next_step_results(&self, messages: &mut Vec<Message>) {
+        for (call_id, text) in &self.next_step_tool_results {
+            let result = messages
+                .iter_mut()
+                .filter(|message| message.role == Role::Tool)
+                .flat_map(|message| &mut message.blocks)
+                .find(|block| {
+                    block.block_type == BlockType::ToolResult && block.tool_call_id == *call_id
+                });
+            if let Some(result) = result {
+                result.text.clone_from(text);
+            } else {
+                // Compaction can absorb the call into a checkpoint before
+                // this step runs. Retain the pending excerpt once as context.
+                messages.push(Message {
+                    role: Role::Context,
+                    blocks: vec![Block::text(format!(
+                        "Untrusted Bash log excerpt from read {call_id}:\n{text}"
+                    ))],
+                    ..Message::default()
+                });
+            }
+        }
+    }
 }
 
 /// Builds the error an automatic dispatch path gives up with, dropping causes

@@ -63,9 +63,10 @@ occur; see [recovery](troubleshooting.md) before retrying a write.
 `shell_timeout` is the limit for one `bash` call. When it expires the command is
 cancelled and the tool result reads `status: timed out after 2m0s` (the duration
 is the configured value). The turn continues and the model sees the result.
-`max_output_bytes` caps the text one tool call returns to the model; the same
-value caps skill, web and other text results. Omitting the key, or setting `0`,
-gives `51200`.
+`max_output_bytes` caps tool text and the Bash preview in the live terminal.
+Bash returns only execution metadata and temporary log references to the model.
+See [Bash output](safety-and-tools.md#bash-output) for log access. Omitting the key, or
+setting `0`, gives `51200`.
 
 ## Sub-agents and workflows
 

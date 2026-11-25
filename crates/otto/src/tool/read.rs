@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
-use otto_core::tool::ToolResult;
+use otto_core::tool::{ToolContentScope, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::value::RawValue;
@@ -57,8 +57,8 @@ pub fn read_definition() -> ToolDefinition {
     definition(
         "read",
         "Read a UTF-8 workspace file, including persistent sub-agent reports and \
-            indexes, or temporary bash output (removed after its turn and child \
-            tasks finish); use offset and limit for relevant excerpts. Returns at \
+            indexes, or temporary Bash logs. For Bash logs, select only the needed lines \
+            with offset and limit; the excerpt is available to the next model step. Returns at \
             most 4 KiB of selected text (or the smaller configured cap); truncation \
             gives character_offset to resume within the same line range. Returns an \
             error for unreadable, binary or oversized files.",
@@ -124,7 +124,12 @@ impl Tool for ReadTool {
             return error_result("character_offset must be >= 0");
         }
 
-        let file = match self.workspace.open(Path::new(&args.path)) {
+        let path = Path::new(&args.path);
+        let relative = match self.workspace.existing_relative(path) {
+            Ok(relative) => relative,
+            Err(error) => return error_result(error),
+        };
+        let file = match self.workspace.open_relative(&relative) {
             Ok(file) => file,
             Err(error) => return error_result(error),
         };
@@ -138,25 +143,43 @@ impl Tool for ReadTool {
             .chars()
             .skip(args.character_offset as usize)
             .collect();
+        let content = self.truncate(content, start_line, &args);
+        if super::bash_output::is_output_log(&relative) {
+            return ToolResult {
+                content,
+                persisted_content: Some(format!(
+                    "Read Bash log excerpt (line offset {start_line}, limit {}, character offset {}). Excerpt omitted.",
+                    args.limit, args.character_offset
+                )),
+                content_scope: ToolContentScope::NextStep,
+                ..ToolResult::default()
+            };
+        }
+        text_result(content)
+    }
+}
+
+impl ReadTool {
+    fn truncate(&self, content: String, start_line: i64, args: &ReadArgs) -> String {
         let mut collector = CappedByteCollector::new(self.max_output_bytes);
         collector.write(content.as_bytes());
         if collector.discarded() == 0 {
-            return text_result(content);
+            return content;
         }
         let raw = collector.bytes();
         let safe = valid_utf8_prefix(raw);
         let omitted = collector.discarded() + raw.len() - safe.len();
         if safe.is_empty() {
-            return text_result(format!(
+            return format!(
                 "[truncated: {omitted} bytes omitted; configured output cap is too small for the next UTF-8 character]"
-            ));
+            );
         }
-        text_result(format!(
+        format!(
             "{}\n[truncated: {omitted} bytes omitted; continue with offset {start_line}, limit {}, character_offset {}]",
             String::from_utf8_lossy(safe),
             args.limit,
             args.character_offset as usize + String::from_utf8_lossy(safe).chars().count()
-        ))
+        )
     }
 }
 

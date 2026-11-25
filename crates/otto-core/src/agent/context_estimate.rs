@@ -39,6 +39,11 @@ pub fn estimate_request(request: &Request, latest: Option<&CompactionMetadata>) 
         return total;
     }
 
+    estimate_unanchored_request(request)
+}
+
+/// Estimates a request whose history has changed since the last usage report.
+pub(super) fn estimate_unanchored_request(request: &Request) -> i64 {
     let mut total = REQUEST_FRAMING_TOKENS;
     total = saturating_add(total, estimate_string(&request.system_prompt));
     for message in &request.messages {

@@ -186,7 +186,7 @@ async fn recovery_is_explicit_session_scoped_draft_and_does_not_replay() {
     assert!(
         app.entries
             .iter()
-            .any(|entry| entry.raw.contains(&record.id))
+            .any(|entry| entry.raw.contains("Unconfirmed input delivery: 1"))
     );
     app.composer.set_input(&format!("/recover {}", record.id));
     assert_eq!(local_enter(&mut app, &controller), None);
@@ -266,7 +266,7 @@ async fn process_restart_restores_uncertain_intent_only_not_an_action() {
         restored
             .entries
             .iter()
-            .any(|entry| entry.raw.contains(&record.id))
+            .any(|entry| entry.raw.contains("Unconfirmed input delivery: 1"))
     );
 }
 
@@ -352,6 +352,22 @@ async fn active_enter_reaches_admission_and_delivers_original_id_and_source() {
         .unwrap()
         .unwrap();
     assert!(controller.has_input(&record.id));
+    let mut resumed = App::new(&Backend::Local(&controller));
+    resumed.refresh_tasks(&Backend::Local(&controller));
+    assert!(
+        !resumed
+            .entries
+            .iter()
+            .any(|entry| entry.raw.contains("/recover"))
+    );
+    resumed.composer.set_input("/inputs");
+    assert_eq!(local_enter(&mut resumed, &controller), None);
+    assert!(
+        resumed
+            .entries
+            .iter()
+            .any(|entry| { entry.raw.contains(&record.id) && entry.raw.contains("delivered") })
+    );
     let delivered = controller
         .history()
         .into_iter()

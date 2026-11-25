@@ -9,7 +9,7 @@ fn local_status_completion_requests_redraw_only_for_visible_changes() {
         info: app.info.clone(),
         tasks: app.tasks.clone(),
         skill_names: app.skill_names.clone(),
-        input_statuses: Vec::new(),
+        unresolved_input_ids: Vec::new(),
     };
     assert!(!app.apply_completion(Completion {
         ticket,
@@ -23,7 +23,7 @@ fn local_status_completion_requests_redraw_only_for_visible_changes() {
         info: app.info.clone(),
         tasks: app.tasks.clone(),
         skill_names: vec!["new-skill".into()],
-        input_statuses: Vec::new(),
+        unresolved_input_ids: Vec::new(),
     };
     assert!(app.apply_completion(Completion {
         ticket,
@@ -47,6 +47,9 @@ async fn background_status_is_bounded_refreshes_recovery_and_retries_after_failu
     controller
         .update_input_submission(&record.id, "accepted", None)
         .unwrap();
+    controller
+        .prepare_input("another draft", otto_core::model::InputDelivery::Direct)
+        .unwrap();
     for _ in 0..20 {
         app.poll_local_status();
     }
@@ -60,11 +63,15 @@ async fn background_status_is_bounded_refreshes_recovery_and_retries_after_failu
     let mut driver = Driver::new(backend::Connection::Local(controller.clone()));
     driver.submit(ticket, request);
     assert!(app.apply_completion(driver.next().await));
-    assert!(
-        app.entries
-            .iter()
-            .any(|entry| entry.raw.contains(&record.id) && entry.raw.contains("accepted"))
-    );
+    let notices: Vec<_> = app
+        .entries
+        .iter()
+        .filter(|entry| entry.raw.contains("/recover"))
+        .collect();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].raw.contains("Unconfirmed input delivery: 2"));
+    assert!(notices[0].raw.contains("/inputs"));
+    assert!(!notices[0].raw.contains(&record.id));
     let entry_count = app.entries.len();
     app.poll_local_status();
     let (ticket, request) = app.requests.pop().unwrap();

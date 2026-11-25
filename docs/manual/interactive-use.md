@@ -86,7 +86,9 @@ After a crash or restart:
 
 1. Open the original workspace and resume the original session (`/resume`).
 2. Run `/inputs` in the main composer. It lists full IDs, source, delivery, and
-   current evidence in that session/workspace; restart notices also point here.
+   current evidence in that session/workspace. The TUI summarizes inputs whose
+   delivery remains unconfirmed; it does not announce historical `delivered`
+   inputs on resume.
 3. Run `/recover <full-id>` to restore its saved text **as a draft only**. Check
    history and external effects before sending it again. Enter creates a new ID.
 

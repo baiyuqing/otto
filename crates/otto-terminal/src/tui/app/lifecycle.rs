@@ -36,11 +36,23 @@ impl App {
         let mut changed = self.tasks != status.tasks || self.skill_names != status.skill_names;
         self.tasks = status.tasks;
         self.skill_names = status.skill_names;
-        for (id, marker) in status.input_statuses {
-            let scoped_id = format!("{}:{id}", self.info.session_id);
-            if self.input_statuses.get(&scoped_id) != Some(&marker) {
-                self.input_statuses.insert(scoped_id, marker.clone());
-                self.push_system(format!("{marker}; /inputs lists session-scoped status; /recover {id} restores a draft only (never automatically replayed)"));
+        if !self.busy() {
+            let mut new_count = 0;
+            for id in status.unresolved_input_ids {
+                if self.queued_input_id.as_ref() != Some(&id)
+                    && self.noticed_unresolved_inputs.insert((
+                        self.info.workspace.clone(),
+                        self.info.session_id.clone(),
+                        id,
+                    ))
+                {
+                    new_count += 1;
+                }
+            }
+            if new_count > 0 {
+                self.push_system(format!(
+                    "Unconfirmed input delivery: {new_count}. Use /inputs for details; /recover <id> restores a draft only (never automatically replayed)."
+                ));
                 changed = true;
             }
         }

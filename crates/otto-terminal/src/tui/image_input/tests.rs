@@ -1,6 +1,15 @@
 use super::*;
 use image::{DynamicImage, Rgb, RgbImage};
 
+// The host temp directory can be private or reached through a symlink.
+// Exercise actual file admission from a direct, workspace-owned path.
+fn fixture_directory() -> tempfile::TempDir {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .unwrap();
+    tempfile::tempdir_in(checkout).unwrap()
+}
+
 fn fixture(format: ImageFormat) -> Vec<u8> {
     let pixels = RgbImage::from_pixel(2, 3, Rgb([40, 80, 120]));
     let mut bytes = Cursor::new(Vec::new());
@@ -17,7 +26,7 @@ fn explicit_png_and_jpeg_are_valid_inline_blocks() {
         (ImageFormat::Jpeg, "image/jpeg"),
     ] {
         let bytes = fixture(format);
-        let dir = tempfile::tempdir().unwrap();
+        let dir = fixture_directory();
         // Detect by bytes, not a misleading extension.
         let path = dir.path().join("synthetic.data");
         std::fs::write(&path, &bytes).unwrap();
@@ -56,7 +65,7 @@ fn rejects_unsupported_magic_without_reading_paths() {
 
 #[test]
 fn denied_path_is_rejected_before_open() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_directory();
     let missing = dir.path().join("missing.png");
     let error = file(&missing, |absolute| {
         assert!(absolute.is_absolute());
@@ -69,7 +78,7 @@ fn denied_path_is_rejected_before_open() {
 
 #[test]
 fn errors_omit_explicit_path() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_directory();
     let path = dir.path().join("synthetic-private-name.png");
     let error = file(&path, |_| true).unwrap_err();
     assert!(error.contains("not found"));
@@ -80,7 +89,8 @@ fn errors_omit_explicit_path() {
 
 #[test]
 fn rejects_oversized_files_before_reading() {
-    let input = tempfile::NamedTempFile::new().unwrap();
+    let dir = fixture_directory();
+    let input = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
     input.as_file().set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
     assert!(file(input.path(), |_| true).unwrap_err().contains("5 MiB"));
 }
@@ -103,11 +113,13 @@ fn rejects_named_pipe_without_blocking() {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt as _;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_directory();
     let path = dir.path().join("synthetic-pipe");
     let name = CString::new(path.as_os_str().as_bytes()).unwrap();
     // SAFETY: name is a valid nul-terminated path in our synthetic temp dir.
-    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    #[allow(unsafe_code)]
+    let result = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+    assert_eq!(result, 0);
     assert!(file(&path, |_| true).unwrap_err().contains("regular"));
 }
 

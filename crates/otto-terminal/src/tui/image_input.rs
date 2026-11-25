@@ -27,6 +27,7 @@ pub(super) fn clipboard() -> Result<Block, String> {
     let revision = pasteboard.changeCount();
     // SAFETY: These are immutable, framework-owned NSString constants. We only
     // request image representations, never file objects or text/path fallbacks.
+    #[allow(unsafe_code)]
     let types = unsafe { [NSPasteboardTypePNG, NSPasteboardTypeTIFF] };
     for kind in types {
         if let Some(data) = pasteboard.dataForType(kind) {

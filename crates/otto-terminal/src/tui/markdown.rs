@@ -570,12 +570,22 @@ mod tests {
 
     #[test]
     fn a_table_renders_a_header_separator_and_aligned_body() {
-        let text = render("| a | bb |\n|---|---:|\n| 1 | 22 |");
-        let flat = flat_text(&text);
-        assert!(flat.contains('a'));
-        assert!(flat.contains("bb"));
-        assert!(flat.contains('1'));
-        assert!(flat.contains("22"));
+        let text = render("| a | bb |\n|---|---:|\n| 1 | 2 |");
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["a | bb", "--+---", "1 |  2"],
+            "table separator and alignment must be visible"
+        );
     }
 
     #[test]

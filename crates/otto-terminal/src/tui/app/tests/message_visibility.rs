@@ -14,14 +14,18 @@ fn screen(app: &App) -> String {
     format!("{}", rendered_terminal(app).backend())
 }
 
-fn assert_visible_body(app: &App, text: &str, expected_rows: &[&str]) {
+fn visible_rows(app: &App) -> Vec<String> {
     let terminal = rendered_terminal(app);
     let buffer = terminal.backend().buffer();
-    let rendered: Vec<String> = buffer
+    buffer
         .content
         .chunks(usize::from(buffer.area.width))
         .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-        .collect();
+        .collect()
+}
+
+fn assert_visible_body(app: &App, text: &str, expected_rows: &[&str]) {
+    let rendered = visible_rows(app);
     let rows: Vec<_> = rendered
         .iter()
         .filter(|line| line.contains(text))
@@ -154,9 +158,17 @@ fn attached_own_enter_follows_bottom_but_external_arrivals_preserve_history() {
     assert!(historical_top.is_some());
     deliver(&mut app, "external message below");
     assert_eq!(app.scroll, historical_top);
-    let rendered = screen(&app);
-    assert!(rendered.contains("NEW MESSAGES BELOW"));
-    assert!(rendered.contains("Ctrl+End"));
+    let rendered = visible_rows(&app);
+    let banners: Vec<_> = rendered
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| row.contains("NEW MESSAGES BELOW"))
+        .collect();
+    assert_eq!(
+        banners,
+        ["◆ NEW MESSAGES BELOW · Ctrl+End to jump to bottom"],
+        "exact unread banner"
+    );
     app.handle_key(
         KeyEvent::new(KeyCode::End, crossterm::event::KeyModifiers::CONTROL),
         &Backend::Attach(&remote),
@@ -201,6 +213,11 @@ fn local_busy_same_text_input_is_not_an_optimistic_idle_echo() {
         2
     );
     assert!(app.pending_steers.is_empty());
+    assert_visible_body(
+        &app,
+        "same local words",
+        &["same local words", "same local words"],
+    );
 }
 
 #[test]

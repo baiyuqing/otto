@@ -330,7 +330,15 @@ fn a_resumed_write_keeps_its_recorded_diff() {
     ];
     let (entries, _) = super::super::entries::entries_from_history(&history);
     let rendered = lines(&entries, true, 80);
-    assert!(rows(&rendered).iter().any(|line| line.contains("+x")));
+    let rows = rows(&rendered);
+    assert!(
+        rows.windows(3).any(|diff| {
+            diff[0].ends_with("wrote x (2 bytes)")
+                && diff[1].trim() == "@@ -0,0 +1,1 @@"
+                && diff[2].trim() == "+x"
+        }),
+        "recorded diff rows must remain visible in order: {rows:?}"
+    );
 }
 
 #[test]

@@ -449,6 +449,15 @@ fn unknown_outcome_is_a_warning_even_when_the_tool_errored() {
             .add_modifier
             .contains(Modifier::BOLD)
     );
+    assert!(
+        rendered[1].spans.iter().any(|span| {
+            span.content.contains("connection lost")
+                && span.style.fg == Some(Color::Yellow)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }),
+        "warning text itself must be yellow and bold: {:?}",
+        rendered[1]
+    );
 }
 
 #[test]
@@ -472,10 +481,10 @@ fn legacy_error_preserves_actionable_text_without_fabricating_metadata() {
     );
     call.tool_error = true;
     let rendered = entry_lines(&call, false, 100);
-    let text = rows(&rendered).join("\n");
-    assert!(
-        text.contains("error") && text.contains("check effects before retrying"),
-        "{text}"
+    assert_eq!(
+        row_text(&rendered[1]),
+        "  ⎿ error · Outcome unknown — check effects before retrying",
+        "legacy error must show the original message exactly once"
     );
     assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Red));
 }

@@ -556,10 +556,22 @@ mod tests {
 
     #[test]
     fn a_fenced_code_block_keeps_its_own_lines_and_shows_the_language() {
-        let text = render("```rust\nfn main() {}\n```");
-        let flat = flat_text(&text);
-        assert!(flat.contains("rust"));
-        assert!(flat.contains("fn main() {}"));
+        let text = render("```rust\nfn main() {}\nfn helper() {}\n```");
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["rust", "fn main() {}", "fn helper() {}"],
+            "code block rows must stay separate"
+        );
     }
 
     #[test]

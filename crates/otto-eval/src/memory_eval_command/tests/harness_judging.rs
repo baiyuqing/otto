@@ -195,6 +195,30 @@ async fn the_proposal_judge_requires_null_exactly_without_a_replacement() {
         "{error}"
     );
 
+    for preserves in [false, true] {
+        let invalid = environment(
+            ScriptedProvider::new(move |_| {
+                text_reply(
+                    &serde_json::json!({
+                        "action_reasonable": true,
+                        "evidence_cited_correctly": true,
+                        "replacement_preserves_valid_claims": preserves,
+                        "reason": "x",
+                    })
+                    .to_string(),
+                )
+            }),
+            Redactor::new(&[]),
+        );
+        let error = judge_proposal(&invalid, &entry, &without)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "judge field replacement_preserves_valid_claims is set but the proposal has no replacement"
+        );
+    }
+
     let invalid = environment(
         replying(
             r#"{"action_reasonable": 1, "evidence_cited_correctly": true, "replacement_preserves_valid_claims": null, "reason": "x"}"#,

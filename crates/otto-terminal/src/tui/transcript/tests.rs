@@ -547,11 +547,19 @@ fn compact_hides_raw_payload_and_unknown_tools_fall_back_to_name() {
 
 #[test]
 fn compact_known_target_and_running_status() {
-    let mut entry = tool_entry("read", r#"{"path":"src/main.rs","other":"hidden"}"#, "");
+    let mut entry = tool_entry(
+        "read",
+        r#"{"path":"src/main.rs","other":"hidden"}"#,
+        "partial output",
+    );
     entry.tool_done = false;
-    let compact = rows(&entry_lines(&entry, false, 80)).join("\n");
-    assert!(compact.contains("src/main.rs · running"), "{compact}");
-    assert!(!compact.contains("hidden"));
+    let compact = rows(&entry_lines(&entry, false, 80));
+    assert_eq!(compact.len(), 2, "{compact:?}");
+    assert!(
+        compact[1].ends_with("src/main.rs · running"),
+        "running summary must not include a completed result: {compact:?}"
+    );
+    assert!(!compact.iter().any(|row| row.contains("hidden")));
 }
 #[test]
 fn compact_identity_is_short_stable_and_details_retain_full_identity() {
@@ -564,6 +572,10 @@ fn compact_identity_is_short_stable_and_details_retain_full_identity() {
     let compact = rows(&entry_lines(&call, false, 100)).join("\n");
     assert!(compact.contains(&format!("[{label}]")));
     assert!(!compact.contains(&call.id));
-    let details = rows(&entry_lines(&call, true, 160)).join("\n");
-    assert!(details.contains(&call.id) && details.contains(&call.tool_call_id));
+    let details = rows(&entry_lines(&call, true, 160));
+    assert_eq!(
+        details[0],
+        format!("⏺ read ({}, provider: {})", call.id, call.tool_call_id),
+        "detail header must label the provider call ID"
+    );
 }

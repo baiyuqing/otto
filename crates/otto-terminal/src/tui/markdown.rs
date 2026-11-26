@@ -476,9 +476,21 @@ mod tests {
     #[test]
     fn a_heading_is_bold_and_on_its_own_line() {
         let text = render("# Title\n\nbody");
-        let flat = flat_text(&text);
-        assert!(flat.contains("# Title"));
-        assert!(flat.contains("body"));
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["# Title", "", "body"],
+            "heading and body must occupy separate rows"
+        );
         let heading_line = &text.lines[0];
         assert!(
             heading_line

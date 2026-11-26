@@ -102,6 +102,8 @@ const SANDBOX_EXECUTION_UNAVAILABLE: &str = "sandbox execution unavailable";
 #[serde(deny_unknown_fields)]
 struct BashArgs {
     #[serde(default)]
+    return_stdout: bool,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     sandbox_permissions: SandboxPermissions,
@@ -413,6 +415,10 @@ pub fn bash_definition() -> ToolDefinition {
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "return_stdout": {
+                    "type": "boolean",
+                    "description": "Set true to receive complete, locally filtered stdout on the next model step if it fits 1 KiB and the configured output cap. Larger results stay in the log."
+                },
                 "command": {
                     "type": "string",
                     "description": "Shell command to execute; for large outputs, do the filtering locally \
@@ -449,6 +455,10 @@ pub(crate) fn bash_definition_with_approvals() -> ToolDefinition {
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "return_stdout": {
+                    "type": "boolean",
+                    "description": "Set true to receive complete, locally filtered stdout on the next model step if it fits 1 KiB and the configured output cap. Larger results stay in the log."
+                },
                 "command": {
                     "type": "string",
                     "description": "Shell command to execute; for large outputs, do the filtering locally \

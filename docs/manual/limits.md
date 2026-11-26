@@ -64,7 +64,8 @@ occur; see [recovery](troubleshooting.md) before retrying a write.
 cancelled and the tool result reads `status: timed out after 2m0s` (the duration
 is the configured value). The turn continues and the model sees the result.
 `max_output_bytes` caps tool text and the Bash preview in the live terminal.
-Bash returns only execution metadata and temporary log references to the model.
+Bash returns execution metadata and temporary log references. Optional inline
+stdout is bounded by the smaller of 1 KiB and `max_output_bytes`.
 See [Bash output](safety-and-tools.md#bash-output) for log access. Omitting the key, or
 setting `0`, gives `51200`.
 

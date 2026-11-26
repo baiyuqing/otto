@@ -210,6 +210,14 @@ impl Output {
         }
     }
 
+    /// Inline only a complete, nonempty, already normalized and redacted stream.
+    pub(super) fn small_stdout(&self) -> Option<&str> {
+        if self.total == 0 || self.total > self.limit.min(1024) {
+            return None;
+        }
+        std::str::from_utf8(self.prefix.bytes()).ok()
+    }
+
     pub(super) fn summary(&self, name: &str) -> String {
         let count = format!("{name}_bytes: {}", self.total);
         if self.total == 0 {

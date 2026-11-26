@@ -91,6 +91,7 @@ impl BashTool {
     pub(super) fn result(
         &self,
         output: Option<(&Output, &Output)>,
+        return_stdout: bool,
         status: &ExitStatus,
         summary: &str,
     ) -> ToolResult {
@@ -130,12 +131,22 @@ impl BashTool {
                 ..ToolResult::default()
             };
         };
+        let metadata = format_result(&stdout.summary("stdout"), &stderr.summary("stderr"));
+        if return_stdout && let Some(text) = stdout.small_stdout() {
+            return ToolResult {
+                content: redact_exact_text(
+                    &format!("{metadata}\nstdout:\n{text}"),
+                    &self.redact_values,
+                    &self.redaction_marker,
+                ),
+                persisted_content: Some(metadata),
+                content_scope: ToolContentScope::NextStep,
+                ..ToolResult::default()
+            };
+        }
         ToolResult {
             content: format_result(&stdout.render("stdout"), &stderr.render("stderr")),
-            persisted_content: Some(format_result(
-                &stdout.summary("stdout"),
-                &stderr.summary("stderr"),
-            )),
+            persisted_content: Some(metadata),
             content_scope: ToolContentScope::Frontend,
             ..ToolResult::default()
         }
@@ -287,7 +298,7 @@ this exact elevated Bash command after approval."
         };
         if cancel.is_cancelled() {
             return self
-                .result(None, &ExitStatus::default(), "status: cancelled")
+                .result(None, false, &ExitStatus::default(), "status: cancelled")
                 .cancelled_not_started();
         }
 
@@ -340,6 +351,7 @@ this exact elevated Bash command after approval."
         };
         let result = self.result(
             Some((stdout.collector(), stderr.collector())),
+            args.return_stdout,
             &status,
             &summary,
         );

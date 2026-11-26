@@ -93,12 +93,14 @@ fn interrupted_provider_output_is_marked_before_replacement_text() {
     ] {
         assert!(!render_event(&mut stdout, &mut stderr, &event));
     }
-    assert!(
-        stdout
-            .text()
-            .starts_with("partial\n[Previous response interrupted")
+    assert_eq!(
+        stdout.text(),
+        concat!(
+            "partial\n[Previous response interrupted; retrying this model step. ",
+            "Completed tools are preserved.]\nreplacement"
+        ),
+        "one notice must separate the partial and replacement text"
     );
-    assert!(stdout.text().ends_with("]\nreplacement"));
     assert!(stderr.text().contains("attempt 2/7"));
 }
 
@@ -213,11 +215,21 @@ fn compaction_lines_match_the_expected_text() {
         }),
         "\n[context] compacted 999 tokens\n"
     );
+    assert_eq!(
+        compaction_line(&CompactionResult::default()),
+        "\n[context] compacted\n",
+        "compaction without counts must still be announced"
+    );
 }
 
 #[test]
 fn commands_split_on_the_first_space() {
     assert_eq!(split_command("/model beta"), Some(("model", "beta")));
+    assert_eq!(
+        split_command("/sample blue green"),
+        Some(("sample", "blue green")),
+        "keep the complete multiword remainder"
+    );
     assert_eq!(split_command("/model\tbeta  "), Some(("model", "beta")));
     assert_eq!(split_command("/exit"), Some(("exit", "")));
     assert_eq!(split_command("/"), None);

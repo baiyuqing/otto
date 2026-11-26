@@ -4,15 +4,15 @@ use super::*;
 
 #[test]
 fn the_memory_usage_names_history_diff_and_restore() {
+    let usage = otto::app::management::Request::parse("memory", "")
+        .err()
+        .expect("bare /memory must return usage");
     for form in [
         "/memory history <id>",
         "/memory diff <id> <from> [<to>]",
         "/memory restore <id> <revision>",
     ] {
-        assert!(
-            MEMORY_USAGE.contains(form),
-            "usage lacks {form}: {MEMORY_USAGE}"
-        );
+        assert!(usage.contains(form), "usage lacks {form}: {usage}");
     }
 }
 

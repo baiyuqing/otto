@@ -19,9 +19,15 @@ async fn the_task_commands_report_an_empty_registry_and_reject_bad_arguments() {
         "sub-agents must be wired"
     );
     assert_eq!(
-        stdout.matches("no tasks in this session").count(),
+        stdout
+            .lines()
+            .map(|line| line
+                .strip_prefix(crate::cli::repl::USER_MARK)
+                .unwrap_or(line))
+            .filter(|line| *line == "no tasks in this session")
+            .count(),
         2,
-        "the canonical command and compatibility alias must both list: {stdout}"
+        "exact empty-task lines for the command and alias: {stdout}"
     );
     assert!(
         stderr.contains("usage: /task [<id|name> | cancel <id|name>]"),
@@ -58,7 +64,17 @@ async fn agents_lists_recorded_tasks_across_sessions_and_reports_when_empty() {
         controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store)).await;
 
     let (stdout, _) = session("/agents\n/exit\n", &controller).await;
-    assert!(stdout.contains("no recorded tasks"), "{stdout}");
+    assert_eq!(
+        stdout
+            .lines()
+            .map(|line| line
+                .strip_prefix(crate::cli::repl::USER_MARK)
+                .unwrap_or(line))
+            .filter(|line| *line == "no recorded tasks")
+            .count(),
+        1,
+        "exact empty agents line: {stdout}"
+    );
 
     let context = record::TaskContext {
         parent_session: "other-session".into(),
@@ -141,12 +157,16 @@ async fn task_detail_prints_the_line_model_and_result() {
     let (stdout, _) = session(&format!("/tasks\n/task {}\n/exit\n", task.id), &controller).await;
 
     assert!(stdout.contains(&task.id), "{stdout}");
-    assert!(stdout.contains("model: gpt-alpha"), "{stdout}");
+    let lines: Vec<_> = stdout.lines().collect();
     assert!(
-        stdout.contains("transcript: /sessions/p/t1-c.jsonl"),
-        "{stdout}"
+        lines.windows(3).any(|window| window
+            == [
+                "model: gpt-alpha",
+                "transcript: /sessions/p/t1-c.jsonl",
+                "result: done",
+            ]),
+        "exact detail lines missing from {stdout}"
     );
-    assert!(stdout.contains("result: done"), "{stdout}");
 }
 
 #[tokio::test]
@@ -239,6 +259,19 @@ async fn the_task_list_prints_one_line_per_task() {
 
     let (stdout, stderr) = session("/tasks\n/exit\n", &controller).await;
 
+    for id in [&reviewed.id, &aborted.id] {
+        assert_eq!(
+            stdout
+                .lines()
+                .map(|line| line
+                    .strip_prefix(crate::cli::repl::USER_MARK)
+                    .unwrap_or(line))
+                .filter(|line| line.split_whitespace().next() == Some(id.as_str()))
+                .count(),
+            1,
+            "one visible row per task ({id}): {stdout}"
+        );
+    }
     for want in [
         "succeeded",
         "42s",
@@ -328,12 +361,18 @@ async fn task_detail_prints_the_child_steps_between_the_model_and_the_result() {
         .unwrap_or_else(|| panic!("no model line: {stdout}"));
     assert!(model_index > 0, "{stdout}");
     assert!(lines[model_index - 1].contains(&task.id), "{stdout}");
-    assert!(
-        stdout.contains("\u{2192} read {\"path\":\"main.go\"}"),
-        "{stdout}"
+    assert_eq!(
+        lines.get(model_index + 1..model_index + 4),
+        Some(
+            [
+                "  \u{2192} read {\"path\":\"main.go\"}",
+                "  assistant: looks fine",
+                "result: no issues found",
+            ]
+            .as_slice()
+        ),
+        "ordered child details missing from {stdout}"
     );
-    assert!(stdout.contains("assistant: looks fine"), "{stdout}");
-    assert!(stdout.contains("result: no issues found"), "{stdout}");
     assert!(
         !stdout.contains("review please"),
         "the delegated prompt is not a step: {stdout}"

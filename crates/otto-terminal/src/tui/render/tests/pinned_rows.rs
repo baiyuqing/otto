@@ -49,13 +49,25 @@ async fn multiline_model_feedback_uses_one_banded_row_per_message() {
         "Thinking: medium".into(),
     ];
 
-    let rows = screen_rows(&app, 100, 12);
+    let (width, height) = (100, 12);
+    let rows = screen_rows(&app, width, height);
     let profile_row = rows
         .iter()
         .position(|row| row.contains("Set as default profile."))
         .expect("profile feedback row");
     assert!(rows[profile_row + 1].contains("◆ UPDATED  Thinking: medium"));
     assert!(rows.iter().all(|row| !row.contains(r"\x0a")), "{rows:?}");
+
+    let buffer = drawn(&app, width, height);
+    for y in profile_row as u16..=profile_row as u16 + 1 {
+        for x in SIDE_MARGIN..width - SIDE_MARGIN {
+            assert_eq!(
+                buffer.cell((x, y)).map(|cell| cell.bg),
+                Some(QUEUED_BACKGROUND),
+                "each feedback row must be fully shaded at ({x}, {y})"
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -99,8 +99,13 @@ fn skill_manager_renders_selection_preview_and_scrolling_in_small_terminals() {
         .handle(&view, Intent::Move(79));
     let scrolled = screen_rows(&app, 120, 35).join("\n");
     assert!(scrolled.contains("skill-79"), "{scrolled}");
-    for (width, height) in [(40, 8), (55, 15), (10, 3)] {
+    for (width, height) in [(40, 8), (55, 15)] {
         let rows = screen_rows(&app, width, height);
-        assert_eq!(rows.len(), height as usize);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains('╭') && row.contains('╮')),
+            "a supported small terminal must display the skill panel ({width}x{height}): {rows:?}"
+        );
     }
+    assert!(rendered(&app, 10, 3).contains("Terminal t"));
 }

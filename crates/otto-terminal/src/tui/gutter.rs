@@ -291,9 +291,18 @@ mod tests {
 
     #[test]
     fn the_marker_is_on_the_first_row_and_an_indent_on_the_rest() {
-        let lines = block(&[plain("abcdefgh")], BULLET_MARK, Style::default(), 5);
+        let lines = block(
+            &[plain("abcdefgh"), plain("ij")],
+            BULLET_MARK,
+            Style::default(),
+            5,
+        );
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
-        assert_eq!(rendered, ["⏺ abc", "  def", "  gh"]);
+        assert_eq!(
+            rendered,
+            ["⏺ abc", "  def", "  gh", "  ij"],
+            "one marker per block, including explicit line breaks"
+        );
     }
 
     #[test]

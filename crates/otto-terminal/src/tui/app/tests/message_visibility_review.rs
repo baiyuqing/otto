@@ -139,7 +139,7 @@ fn returning_to_bottom_by_page_down_down_or_wheel_clears_arrival_hint() {
         assert!(app.scroll.is_none());
         assert!(!app.new_messages);
         app.scroll_wheel(true);
-        assert!(app.scroll.is_some());
+        assert_eq!(app.scroll, Some(19), "wheel-up must move exactly one row");
         assert!(!app.new_messages);
     }
 }

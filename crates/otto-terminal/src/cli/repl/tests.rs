@@ -63,15 +63,20 @@ async fn background_notices_print_before_the_prompt() {
     let workspace = tempfile::tempdir().expect("workspace");
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = fixtures::controller(workspace.path(), sessions.path()).await;
-    controller.push_notice("memory: 1 candidate(s) queued for review (/memory review), 0 dropped");
+    let message = "Background work finished.";
+    controller.push_notice(message);
 
     let (stdout, stderr, result) = session("/exit\n", &controller).await;
 
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(stderr, "");
-    let notice = stdout
-        .find("memory: 1 candidate(s) queued")
-        .expect("the notice is printed");
+    let notice_line = format!("{message}\n");
+    let mut notices = stdout.match_indices(notice_line.as_str());
+    let (notice, _) = notices.next().expect("the complete notice is printed");
+    assert!(
+        notices.next().is_none(),
+        "queued notice must be printed exactly once"
+    );
     let prompt = stdout
         .find(crate::cli::repl::USER_MARK)
         .expect("a prompt is printed");
@@ -250,9 +255,14 @@ async fn end_of_input_ends_the_loop() {
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
 
-    let (_, _, result) = session("", &controller).await;
+    let (stdout, _, result) = session("", &controller).await;
 
     assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        stdout.matches(USER_MARK).count(),
+        1,
+        "EOF must not print another input prompt"
+    );
 }
 
 #[tokio::test]

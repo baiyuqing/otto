@@ -476,9 +476,21 @@ mod tests {
     #[test]
     fn a_heading_is_bold_and_on_its_own_line() {
         let text = render("# Title\n\nbody");
-        let flat = flat_text(&text);
-        assert!(flat.contains("# Title"));
-        assert!(flat.contains("body"));
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["# Title", "", "body"],
+            "heading and body must occupy separate rows"
+        );
         let heading_line = &text.lines[0];
         assert!(
             heading_line
@@ -491,20 +503,33 @@ mod tests {
     #[test]
     fn emphasis_and_strong_and_strikethrough_set_modifiers() {
         let text = render("*em* **strong** ~~gone~~");
-        let modifiers: Vec<Modifier> = text.lines[0]
+        let styled: Vec<_> = text.lines[0]
             .spans
             .iter()
-            .map(|s| s.style.add_modifier)
+            .filter(|span| !span.content.trim().is_empty())
+            .map(|span| (span.content.as_ref(), span.style.add_modifier))
             .collect();
-        assert!(modifiers.iter().any(|m| m.contains(Modifier::ITALIC)));
-        assert!(modifiers.iter().any(|m| m.contains(Modifier::BOLD)));
-        assert!(modifiers.iter().any(|m| m.contains(Modifier::CROSSED_OUT)));
+        assert_eq!(
+            styled,
+            [
+                ("em", Modifier::ITALIC),
+                ("strong", Modifier::BOLD),
+                ("gone", Modifier::CROSSED_OUT),
+            ],
+            "styles must match their text"
+        );
     }
 
     #[test]
     fn inline_code_is_not_escaped_as_a_markdown_span_but_kept_literal() {
-        let text = render("run `rm -rf /` now");
-        assert!(flat_text(&text).contains("rm -rf /"));
+        let text = render("use `value * 2` here");
+        assert_eq!(flat_text(&text), "use value * 2 here");
+        assert!(
+            text.lines[0].spans.iter().any(|span| {
+                span.content == "value * 2" && span.style.fg == Some(Color::Yellow)
+            }),
+            "inline code must retain its distinct style"
+        );
     }
 
     #[test]
@@ -518,24 +543,51 @@ mod tests {
     #[test]
     fn an_ordered_list_numbers_items_in_order() {
         let text = render("1. first\n2. second");
-        let flat = flat_text(&text);
-        assert!(flat.contains("1. first"));
-        assert!(flat.contains("2. second"));
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["1. first", "2. second"],
+            "ordered list rows must remain in order"
+        );
     }
 
     #[test]
     fn a_fenced_code_block_keeps_its_own_lines_and_shows_the_language() {
-        let text = render("```rust\nfn main() {}\n```");
-        let flat = flat_text(&text);
-        assert!(flat.contains("rust"));
-        assert!(flat.contains("fn main() {}"));
+        let text = render("```rust\nfn main() {}\nfn helper() {}\n```");
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["rust", "fn main() {}", "fn helper() {}"],
+            "code block rows must stay separate"
+        );
     }
 
     #[test]
     fn a_link_shows_its_text_and_its_destination() {
-        let text = render("[docs](https://example.com/docs)");
+        let text = render("[Read the guide](https://example.com/docs)");
         let flat = flat_text(&text);
-        assert!(flat.contains("docs"));
+        assert!(
+            flat.contains("Read the guide"),
+            "link label must be visible"
+        );
         assert!(flat.contains("https://example.com/docs"));
     }
 
@@ -548,18 +600,42 @@ mod tests {
 
     #[test]
     fn a_table_renders_a_header_separator_and_aligned_body() {
-        let text = render("| a | bb |\n|---|---:|\n| 1 | 22 |");
-        let flat = flat_text(&text);
-        assert!(flat.contains('a'));
-        assert!(flat.contains("bb"));
-        assert!(flat.contains('1'));
-        assert!(flat.contains("22"));
+        let text = render("| a | bb |\n|---|---:|\n| 1 | 2 |");
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["a | bb", "--+---", "1 |  2"],
+            "table separator and alignment must be visible"
+        );
     }
 
     #[test]
     fn a_blockquote_prefixes_every_line_with_the_quote_marker() {
-        let text = render("> quoted");
-        assert!(flat_text(&text).contains("> quoted"));
+        let text = render("> first\n>\n> second");
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["> first", "", "> second"],
+            "each quoted paragraph needs a marker"
+        );
     }
 
     // This renderer never produces ANSI in the first place, so the property

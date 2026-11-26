@@ -228,9 +228,13 @@ async fn footer_shows_runtime_and_session_status() {
     let (_workspace, _sessions, app) = app_fixture().await;
     let session_id = app.info.session_id.clone();
 
-    let content = rendered(&app, 160, MIN_TERMINAL_HEIGHT);
+    let rows = screen_rows(&app, 160, MIN_TERMINAL_HEIGHT);
+    let content = rows.last().expect("footer row");
 
-    assert!(content.contains("gpt-alpha"), "{content}");
+    assert!(
+        content.contains("gpt-alpha"),
+        "last row must show the model: {rows:?}"
+    );
     assert!(content.contains("default"), "{content}");
     assert!(
         content.contains("bash disabled · sandbox unavailable"),
@@ -239,7 +243,8 @@ async fn footer_shows_runtime_and_session_status() {
     assert!(content.contains("tokens 0/0"), "{content}");
     assert!(content.contains(&session_id), "{content}");
 
-    let narrow = rendered(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
+    let narrow_rows = screen_rows(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
+    let narrow = narrow_rows.last().expect("narrow footer row");
     assert!(narrow.contains("gpt-alpha"), "{narrow}");
     assert!(narrow.contains("tokens 0/0"), "{narrow}");
 }

@@ -34,8 +34,18 @@ async fn a_scrolled_view_stays_put_while_output_streams_in() {
     // Lays out `max_scroll`, which the first scroll key reads.
     let _ = rendered(&app, MIN_TERMINAL_WIDTH, 12);
     app.handle_scroll_key(&KeyCode::PageUp.into());
-    let before = rendered(&app, MIN_TERMINAL_WIDTH, 12);
-    assert!(before.contains("line 05"), "{before}");
+    let before = screen_rows(&app, MIN_TERMINAL_WIDTH, 12);
+    assert!(
+        before.iter().any(|row| row.contains("line 05")),
+        "{before:?}"
+    );
+    let previous_bottom = app.max_scroll.get();
+    let transcript_rows = |rows: Vec<String>| {
+        rows.into_iter()
+            .enumerate()
+            .filter(|(_, row)| row.contains("line "))
+            .collect::<Vec<_>>()
+    };
 
     for index in 0..10 {
         app.apply_event(&wire_frame(&Event::TextDelta {
@@ -43,9 +53,16 @@ async fn a_scrolled_view_stays_put_while_output_streams_in() {
         }));
     }
 
-    let after = rendered(&app, MIN_TERMINAL_WIDTH, 12);
-    assert!(after.contains("line 05"), "{after}");
-    assert!(!after.contains("streamed 9"), "{after}");
+    let after = screen_rows(&app, MIN_TERMINAL_WIDTH, 12);
+    assert!(
+        app.max_scroll.get() > previous_bottom,
+        "transcript must grow"
+    );
+    assert_eq!(
+        transcript_rows(before),
+        transcript_rows(after),
+        "visible transcript rows must stay at the same offsets"
+    );
 }
 
 /// The view half of command completion: a `/` prefix lists the matching

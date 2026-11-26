@@ -119,6 +119,10 @@ fn observer_help_shows_actual_configured_keys() {
     let view = app.active_view().unwrap();
     assert!(view.document.contains("F8: toggle"));
     assert!(view.document.contains("Ctrl+Left: open"));
+    assert!(
+        view.document.contains("Ctrl+Right: main"),
+        "help must show the configured return key"
+    );
     assert!(!view.document.contains("F6: toggle"));
 }
 

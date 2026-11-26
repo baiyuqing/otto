@@ -47,13 +47,19 @@ fn geometry_exposes_collection_detail_field_and_action_targets() {
         .collect::<Vec<_>>()
         .join("");
     assert!(screen.contains("Record"));
-    assert_eq!(
-        geometry
-            .fields
-            .iter()
-            .map(|(id, _)| id.as_str())
-            .collect::<Vec<_>>(),
-        ["name"]
+    let [(id, field)] = geometry.fields.as_slice() else {
+        panic!("expected one field target, got {:?}", geometry.fields);
+    };
+    assert_eq!(id, "name");
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (field.top()..field.bottom()).any(|y| {
+            let row: String = (field.left()..field.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.trim() == "Draft"
+        }),
+        "field target must visibly contain Draft"
     );
     assert_eq!(
         geometry
@@ -69,25 +75,19 @@ fn geometry_exposes_collection_detail_field_and_action_targets() {
 fn collection_renders_the_selected_rows_full_detail() {
     let view = View {
         collection: true,
-        title: "Memory review".into(),
+        title: "Color samples".into(),
         rows: vec![
             Row {
                 id: "one".into(),
-                cells: vec!["create fact/color".into()],
-                detail: "favorite color is blue\nReason: stated directly".into(),
+                cells: vec!["Blue".into()],
+                detail: "Blue swatch\nFinish: matte".into(),
             },
             Row {
                 id: "two".into(),
-                cells: vec!["forget fact/city".into()],
-                detail: "forget Paris\nReason: user requested deletion".into(),
+                cells: vec!["Green".into()],
+                detail: "Green swatch\nFinish: gloss".into(),
             },
         ],
-        actions: vec![Action {
-            id: "accept".into(),
-            label: "Accept".into(),
-            enabled: true,
-            ..Action::default()
-        }],
         ..View::default()
     };
     let mut state = State::new(&view);
@@ -98,18 +98,25 @@ fn collection_renders_the_selected_rows_full_detail() {
     terminal
         .draw(|frame| geometry = draw_surface(frame, frame.area(), &view, &state))
         .expect("draw");
-    let screen = terminal
-        .backend()
-        .buffer()
-        .content
+    let buffer = terminal.backend().buffer();
+    let document = geometry.document.expect("selected row has a document pane");
+    let lines: Vec<_> = (document.top() + 1..document.bottom() - 1)
+        .map(|y| {
+            (document.left() + 1..document.right() - 1)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    let nonempty: Vec<_> = lines
         .iter()
-        .map(|cell| cell.symbol())
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(geometry.document.is_some());
-    assert!(screen.contains("forget Paris"));
-    assert!(screen.contains("user requested deletion"));
-    assert!(!screen.contains("favorite color is blue"));
+        .map(|line| line.trim_end())
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        nonempty,
+        ["Green swatch", "Finish: gloss"],
+        "selected detail must preserve its two document lines"
+    );
 }
 
 #[test]
@@ -137,6 +144,10 @@ fn unloaded_memory_review_collection_has_a_visible_loading_state() {
         .collect::<Vec<_>>()
         .join("");
     assert!(screen.matches("Loading…").count() >= 2);
+    assert!(
+        !screen.contains("No items"),
+        "loading must not also show the empty placeholder"
+    );
 }
 
 #[test]
@@ -338,5 +349,17 @@ fn compact_terminal_keeps_action_control_inside_frame() {
         .draw(|frame| geometry = draw_surface(frame, frame.area(), &view, &state))
         .expect("draw");
     assert_eq!(geometry.actions.len(), 1);
-    assert!(geometry.actions[0].1.bottom() <= 8);
+    let rect = geometry.actions[0].1;
+    assert!(rect.bottom() <= 8);
+    assert!(rect.right() <= 40);
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (rect.top()..rect.bottom()).any(|y| {
+            let row: String = (rect.left()..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.contains("Save")
+        }),
+        "Save must be visible inside its action target"
+    );
 }

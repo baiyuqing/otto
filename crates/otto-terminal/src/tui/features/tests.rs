@@ -256,8 +256,7 @@ fn memory_review_exposes_full_candidate_information_as_selected_row_detail() {
 
     let view = reviews.view();
     let detail = &view.rows[0].detail;
-    assert!(detail.contains("favorite color is blue"));
-    assert!(detail.contains("Reason: stated directly"));
+    assert_eq!(detail, "favorite color is blue\nReason: stated directly");
 }
 
 #[test]
@@ -298,15 +297,27 @@ fn agent_collection_selection_tracks_the_row_id_after_refresh_reorders_rows() {
     }));
     let first_view = agents.view();
     let mut state = State::new(&first_view);
+    assert_ne!(first_view.rows[0].id, first_view.rows[1].id);
+    assert_eq!(
+        state.selected_row.as_deref(),
+        Some(first_view.rows[0].id.as_str())
+    );
     state.handle(&first_view, Intent::Move(1));
-    let selected = state.selected_row.clone();
+    let selected = first_view.rows[1].id.as_str();
+    assert_eq!(
+        state.selected_row.as_deref(),
+        Some(selected),
+        "moving down must select the second row"
+    );
 
     agents.receive(Reply::Agents(otto::subagent::record::ListResult {
         tasks: vec![task("parent", "two"), task("parent", "one")],
         ..Default::default()
     }));
-    state.reconcile(&agents.view());
-    assert_eq!(state.selected_row, selected);
+    let refreshed = agents.view();
+    assert_eq!(refreshed.rows[0].id, selected);
+    state.reconcile(&refreshed);
+    assert_eq!(state.selected_row.as_deref(), Some(selected));
 }
 
 #[test]
@@ -366,13 +377,17 @@ fn auto_is_a_hidden_alias_of_permissions() {
             .any(|entry| entry.name == "/permissions")
     );
     for line in ["/auto yolo", "/permissions yolo"] {
-        match catalog.open(line, &Info::default(), false).unwrap() {
-            Transition::Request(BackendRequest::Command(Command::Permissions(args))) => {
-                assert_eq!(args, "yolo")
-            }
-            Transition::Push(_) => {}
-            _ => panic!("{line}"),
-        }
+        let Transition::Push(mut presenter) = catalog.open(line, &Info::default(), false).unwrap()
+        else {
+            panic!("{line} should open a permissions request panel");
+        };
+        assert!(
+            matches!(
+                presenter.start(),
+                Some(BackendRequest::Command(Command::Permissions(args))) if args == "yolo"
+            ),
+            "{line} should produce the permissions request with its original argument"
+        );
     }
     assert!(
         catalog
@@ -571,13 +586,21 @@ fn tasks_alias_dispatches_without_appearing_in_help() {
     );
     assert!(!help.contains("/tasks"), "{help}");
 
-    let Ok(Transition::Push(canonical)) = catalog.open("/task", &Info::default(), false) else {
-        panic!("/task should open the task-list presenter");
-    };
-    let Ok(Transition::Push(alias)) = catalog.open("/tasks", &Info::default(), false) else {
-        panic!("/tasks should remain a task-list alias");
-    };
-    assert_eq!(canonical.view().title, alias.view().title);
+    for line in ["/task", "/tasks"] {
+        let Ok(Transition::Push(mut presenter)) = catalog.open(line, &Info::default(), false)
+        else {
+            panic!("{line} should open the task-list presenter");
+        };
+        assert!(
+            matches!(
+                presenter.start(),
+                Some(BackendRequest::Management(
+                    otto::app::management::Request::Tasks
+                ))
+            ),
+            "{line} should request the task list"
+        );
+    }
 }
 
 #[test]

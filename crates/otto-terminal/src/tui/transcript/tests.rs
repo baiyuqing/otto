@@ -111,6 +111,12 @@ fn a_cjk_prompt_row_is_banded_to_the_last_column() {
     // Width 9 leaves a column no wide character fits into, which only
     // the padding can close.
     let rendered = entry_lines(&entry(EntryKind::User, "集群数量极多"), false, 9);
+    let visible = rows(&rendered);
+    assert_eq!(
+        visible.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
+        ["❯ 集群数", "  量极多"],
+        "the CJK prompt must render both rows"
+    );
     for line in &rendered {
         assert_eq!(row_text(line).width(), 9, "{:?}", row_text(line));
         for span in &line.spans {
@@ -138,6 +144,11 @@ fn a_reply_is_not_banded_or_padded() {
         &entry(EntryKind::Assistant, "it guards the query"),
         false,
         40,
+    );
+    assert_eq!(
+        rows(&rendered),
+        ["⏺ it guards the query"],
+        "reply text must remain visible"
     );
     for line in &rendered {
         assert!(
@@ -174,7 +185,12 @@ fn a_reply_gets_one_bullet_and_an_aligned_indent() {
 fn a_reply_keeps_its_bullet_across_its_own_paragraphs() {
     let rendered = entry_lines(&entry(EntryKind::Assistant, "one\n\ntwo"), false, 40);
     let rows = rows(&rendered);
-    assert!(rows[0].starts_with(BULLET_MARK), "{:?}", rows[0]);
+    assert_eq!(rows.first().map(String::as_str), Some("⏺ one"));
+    assert_eq!(
+        rows.last().map(String::as_str),
+        Some("  two"),
+        "both reply paragraphs must be visible: {rows:?}"
+    );
     assert_eq!(
         rows.iter()
             .filter(|row| row.starts_with(BULLET_MARK))
@@ -278,7 +294,13 @@ fn expanded_file_edits_show_colored_hunks() {
         true,
         80,
     );
-    assert!(rows(&write).iter().any(|line| line.contains("+x")));
+    assert!(
+        write
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| { span.content.as_ref() == "+x" && span.style.fg == Some(Color::Green) }),
+        "write addition must be green: {write:?}"
+    );
 }
 
 #[test]
@@ -308,7 +330,15 @@ fn a_resumed_write_keeps_its_recorded_diff() {
     ];
     let (entries, _) = super::super::entries::entries_from_history(&history);
     let rendered = lines(&entries, true, 80);
-    assert!(rows(&rendered).iter().any(|line| line.contains("+x")));
+    let rows = rows(&rendered);
+    assert!(
+        rows.windows(3).any(|diff| {
+            diff[0].ends_with("wrote x (2 bytes)")
+                && diff[1].trim() == "@@ -0,0 +1,1 @@"
+                && diff[2].trim() == "+x"
+        }),
+        "recorded diff rows must remain visible in order: {rows:?}"
+    );
 }
 
 #[test]
@@ -350,11 +380,16 @@ fn a_folded_tool_call_shows_at_most_three_result_lines() {
 
 #[test]
 fn a_folded_tool_call_cuts_a_long_result_line() {
-    let long = "x".repeat(200);
+    let long = format!("sample result: {}", "x".repeat(200));
     let mut call = tool_entry("bash", "", &long);
     call.tool_error = true;
     let rendered = entry_lines(&call, false, 200);
     let rows = rows(&rendered);
+    assert!(
+        rows[1].contains("sample result: "),
+        "preview must retain the beginning: {:?}",
+        rows[1]
+    );
     assert!(rows[1].chars().count() < 100, "{:?}", rows[1]);
     assert!(rows[1].ends_with('…'), "{:?}", rows[1]);
 }
@@ -384,7 +419,16 @@ fn a_failed_tool_call_shows_its_result_in_red() {
     let mut call = tool_entry("bash", "", "boom");
     call.tool_error = true;
     let rendered = entry_lines(&call, false, 60);
-    assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Red));
+    let result = &rendered[1];
+    assert_eq!(row_text(result), "  ⎿ error · boom");
+    assert_eq!(result.spans[0].style.fg, Some(Color::Red));
+    assert!(
+        result
+            .spans
+            .iter()
+            .any(|span| { span.content.contains("boom") && span.style.fg == Some(Color::Red) }),
+        "the failure text must be red: {result:?}"
+    );
 }
 
 #[test]
@@ -404,6 +448,15 @@ fn unknown_outcome_is_a_warning_even_when_the_tool_errored() {
             .style
             .add_modifier
             .contains(Modifier::BOLD)
+    );
+    assert!(
+        rendered[1].spans.iter().any(|span| {
+            span.content.contains("connection lost")
+                && span.style.fg == Some(Color::Yellow)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }),
+        "warning text itself must be yellow and bold: {:?}",
+        rendered[1]
     );
 }
 
@@ -428,10 +481,10 @@ fn legacy_error_preserves_actionable_text_without_fabricating_metadata() {
     );
     call.tool_error = true;
     let rendered = entry_lines(&call, false, 100);
-    let text = rows(&rendered).join("\n");
-    assert!(
-        text.contains("error") && text.contains("check effects before retrying"),
-        "{text}"
+    assert_eq!(
+        row_text(&rendered[1]),
+        "  ⎿ error · Outcome unknown — check effects before retrying",
+        "legacy error must show the original message exactly once"
     );
     assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Red));
 }
@@ -441,7 +494,13 @@ fn expanded_details_show_the_call_id_and_every_output_line() {
     let rendered = entry_lines(&tool_entry("bash", "{}", "l1\nl2\nl3\nl4"), true, 60);
     let rows = rows(&rendered);
     assert_eq!(rows[0], "⏺ bash (t1, provider: call-1)");
-    assert!(rows.iter().any(|row| row.ends_with("l4")), "{rows:?}");
+    assert_eq!(rows[1].trim(), "{}");
+    let output: Vec<_> = rows[2..].iter().map(|row| row.trim()).collect();
+    assert_eq!(
+        output,
+        ["⎿ l1", "l2", "l3", "l4"],
+        "expanded output must retain every line in order"
+    );
     assert!(
         !rows.iter().any(|row| row.contains("ctrl+o")),
         "expanded output is not counted: {rows:?}"
@@ -458,7 +517,11 @@ fn an_error_entry_is_red() {
 #[test]
 fn a_compaction_entry_uses_the_system_marker() {
     let rendered = entry_lines(&entry(EntryKind::Compaction, "checkpoint"), false, 40);
-    assert!(rows(&rendered)[0].starts_with(SYSTEM_MARK));
+    assert_eq!(
+        rows(&rendered),
+        [format!("{SYSTEM_MARK}checkpoint")],
+        "compaction text must follow its system marker"
+    );
 }
 
 #[test]
@@ -493,11 +556,19 @@ fn compact_hides_raw_payload_and_unknown_tools_fall_back_to_name() {
 
 #[test]
 fn compact_known_target_and_running_status() {
-    let mut entry = tool_entry("read", r#"{"path":"src/main.rs","other":"hidden"}"#, "");
+    let mut entry = tool_entry(
+        "read",
+        r#"{"path":"src/main.rs","other":"hidden"}"#,
+        "partial output",
+    );
     entry.tool_done = false;
-    let compact = rows(&entry_lines(&entry, false, 80)).join("\n");
-    assert!(compact.contains("src/main.rs · running"), "{compact}");
-    assert!(!compact.contains("hidden"));
+    let compact = rows(&entry_lines(&entry, false, 80));
+    assert_eq!(compact.len(), 2, "{compact:?}");
+    assert!(
+        compact[1].ends_with("src/main.rs · running"),
+        "running summary must not include a completed result: {compact:?}"
+    );
+    assert!(!compact.iter().any(|row| row.contains("hidden")));
 }
 #[test]
 fn compact_identity_is_short_stable_and_details_retain_full_identity() {
@@ -510,6 +581,10 @@ fn compact_identity_is_short_stable_and_details_retain_full_identity() {
     let compact = rows(&entry_lines(&call, false, 100)).join("\n");
     assert!(compact.contains(&format!("[{label}]")));
     assert!(!compact.contains(&call.id));
-    let details = rows(&entry_lines(&call, true, 160)).join("\n");
-    assert!(details.contains(&call.id) && details.contains(&call.tool_call_id));
+    let details = rows(&entry_lines(&call, true, 160));
+    assert_eq!(
+        details[0],
+        format!("⏺ read ({}, provider: {})", call.id, call.tool_call_id),
+        "detail header must label the provider call ID"
+    );
 }

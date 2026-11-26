@@ -108,9 +108,15 @@ async fn the_help_text_lists_the_memory_and_task_commands() {
 
     let (stdout, _) = session("/help\n/exit\n", &controller).await;
 
-    for command in ["/memory", "/remember", "/task ", "/agents", "/mcp"] {
+    for command in ["/memory", "/remember", "/agents", "/mcp"] {
         assert!(stdout.contains(command), "{command} missing from {stdout}");
     }
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim() == "/task     list sub-agent tasks"),
+        "bare /task usage missing from {stdout}"
+    );
 }
 
 #[tokio::test]

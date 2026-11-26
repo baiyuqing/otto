@@ -2,12 +2,40 @@
 use super::*;
 use ratatui::{Terminal, backend::TestBackend};
 
-fn screen(app: &App) -> String {
+fn rendered_terminal(app: &App) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(110, 26)).unwrap();
     terminal
         .draw(|frame| crate::tui::render::draw(frame, app))
         .unwrap();
-    format!("{}", terminal.backend())
+    terminal
+}
+
+fn screen(app: &App) -> String {
+    format!("{}", rendered_terminal(app).backend())
+}
+
+fn visible_rows(app: &App) -> Vec<String> {
+    let terminal = rendered_terminal(app);
+    let buffer = terminal.backend().buffer();
+    buffer
+        .content
+        .chunks(usize::from(buffer.area.width))
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect()
+}
+
+fn assert_visible_body(app: &App, text: &str, expected_rows: &[&str]) {
+    let rendered = visible_rows(app);
+    let rows: Vec<_> = rendered
+        .iter()
+        .filter(|line| line.contains(text))
+        .map(|line| {
+            let line = line.trim();
+            line.strip_prefix(crate::cli::repl::USER_MARK)
+                .unwrap_or(line)
+        })
+        .collect();
+    assert_eq!(rows, expected_rows, "exact visible body for {text:?}");
 }
 
 fn deliver(app: &mut App, text: &str) {
@@ -36,9 +64,24 @@ fn periodic_refresh_is_bounded_and_projects_external_full_text_in_both_modes() {
             result: Ok(Reply::Steering(vec![steer(1, text, Status::Queued)])),
         });
         assert_eq!(app.pending_steers[0].text, text);
-        let rendered = screen(&app);
-        assert!(rendered.contains("external first line"));
-        assert!(rendered.contains("external complete second line"));
+        let rendered = visible_rows(&app);
+        let body: Vec<_> = rendered
+            .iter()
+            .map(|row| row.trim())
+            .filter(|row| !row.starts_with("◆ QUEUED FOR CURRENT TURN"))
+            .filter(|row| {
+                row.contains("external first line") || row.contains("external complete second line")
+            })
+            .map(|row| row.strip_prefix(crate::cli::repl::USER_MARK).unwrap_or(row))
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "[Queued for current turn] external first line",
+                "external complete second line"
+            ],
+            "exact ordered multiline body"
+        );
         app.poll_steering();
         assert_eq!(app.requests.len(), 2);
     }
@@ -52,13 +95,14 @@ fn delivered_snapshot_before_notification_keeps_body_then_replaces_it_once() {
         app.apply_steering(vec![steer(1, "unique delivery body", Status::Queued)]);
         app.apply_steering(vec![steer(1, "unique delivery body", Status::Delivered)]);
         assert!(app.queued_steer.is_none());
-        assert_eq!(screen(&app).matches("unique delivery body").count(), 1);
+        let sent = ["[Sent to current turn] unique delivery body"];
+        assert_visible_body(&app, "unique delivery body", &sent);
         app.apply_steering(vec![]);
-        assert_eq!(screen(&app).matches("unique delivery body").count(), 1);
+        assert_visible_body(&app, "unique delivery body", &sent);
         deliver(&mut app, "unique delivery body");
         app.apply_steering(vec![steer(1, "unique delivery body", Status::Delivered)]);
         assert!(app.pending_steers.is_empty());
-        assert_eq!(screen(&app).matches("unique delivery body").count(), 1);
+        assert_visible_body(&app, "unique delivery body", &["unique delivery body"]);
     }
 }
 
@@ -91,6 +135,7 @@ fn repeated_text_inputs_each_deliver_once_and_notification_can_precede_snapshot(
                 .count(),
             2
         );
+        assert_visible_body(&app, "same words", &["same words", "same words"]);
         let before_notification = app.refresh_steering();
         deliver(&mut app, "arrived first");
         app.apply_completion(Completion {
@@ -128,9 +173,17 @@ fn attached_own_enter_follows_bottom_but_external_arrivals_preserve_history() {
     assert!(historical_top.is_some());
     deliver(&mut app, "external message below");
     assert_eq!(app.scroll, historical_top);
-    let rendered = screen(&app);
-    assert!(rendered.contains("NEW MESSAGES BELOW"));
-    assert!(rendered.contains("Ctrl+End"));
+    let rendered = visible_rows(&app);
+    let banners: Vec<_> = rendered
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| row.contains("NEW MESSAGES BELOW"))
+        .collect();
+    assert_eq!(
+        banners,
+        ["◆ NEW MESSAGES BELOW · Ctrl+End to jump to bottom"],
+        "exact unread banner"
+    );
     app.handle_key(
         KeyEvent::new(KeyCode::End, crossterm::event::KeyModifiers::CONTROL),
         &Backend::Attach(&remote),
@@ -175,6 +228,11 @@ fn local_busy_same_text_input_is_not_an_optimistic_idle_echo() {
         2
     );
     assert!(app.pending_steers.is_empty());
+    assert_visible_body(
+        &app,
+        "same local words",
+        &["same local words", "same local words"],
+    );
 }
 
 #[test]
@@ -215,7 +273,7 @@ fn same_session_history_reload_preserves_scroll_and_replaces_pending_body() {
     assert!(app.new_messages);
     app.apply_steering(vec![steer(1, "loaded delivery", Status::Delivered)]);
     assert!(app.pending_steers.is_empty());
-    assert_eq!(screen(&app).matches("loaded delivery").count(), 1);
+    assert_visible_body(&app, "loaded delivery", &["loaded delivery"]);
 }
 
 #[test]

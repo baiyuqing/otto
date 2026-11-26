@@ -48,6 +48,7 @@ fn provider_recovery_separates_partial_output_in_local_and_attached_tui() {
     for attached in [false, true] {
         let (mut app, _remote) = app();
         app.attached = attached;
+        let initial_entries = app.entries.len();
         for json in [
             r#"{"type":"text_delta","text":"partial"}"#,
             r#"{"type":"provider_retry","retry":{"attempt":2,"max_attempts":7,"interrupted_output":true}}"#,
@@ -55,7 +56,12 @@ fn provider_recovery_separates_partial_output_in_local_and_attached_tui() {
         ] {
             app.apply_event(&serde_json::from_str(json).unwrap());
         }
-        let entries = &app.entries[app.entries.len() - 3..];
+        let entries = &app.entries[initial_entries..];
+        assert_eq!(
+            entries.len(),
+            3,
+            "exactly three entries must be appended (attached: {attached})"
+        );
         assert_eq!(entries[0].raw, "partial");
         assert_eq!(entries[1].kind, Some(EntryKind::System));
         assert_eq!(entries[1].raw, transcript::INTERRUPTED_OUTPUT_NOTICE);
@@ -100,12 +106,30 @@ fn provider_usage_updates_the_footer_during_a_turn() {
             ..Default::default()
         }
     );
+
+    let footer = rendered_footer(&app);
+    assert!(
+        footer.contains(" | tokens 17/5 |") || footer.contains(" | tokens 17/5 ("),
+        "footer must show input/output totals in order: {footer}"
+    );
 }
 
 #[test]
 fn a_task_notification_decides_whether_the_cache_share_is_shown() {
     let (mut app, _) = app();
     app.cache_breakdown_complete = Some(true);
+    // The snapshot includes the task's tokens but only the known cache counts.
+    app.usage = Usage {
+        input_tokens: 80,
+        output_tokens: 10,
+        cached_input_tokens: 30,
+        ..Default::default()
+    };
+    let footer = rendered_footer(&app);
+    assert!(
+        footer.contains(" | tokens 80/10 (cached 30, 37.5%)"),
+        "{footer}"
+    );
 
     // A finished sub-agent that never reported the cached breakdown: the
     // footer must stop presenting the share as measured, because the
@@ -124,12 +148,24 @@ fn a_task_notification_decides_whether_the_cache_share_is_shown() {
         ..Default::default()
     });
     assert_eq!(app.cache_breakdown_complete, Some(false));
+    let footer = rendered_footer(&app);
+    assert!(
+        footer.contains(" | tokens 80/10 |") && !footer.contains("(cached "),
+        "incomplete cache stats must render only token totals: {footer}"
+    );
 }
 
 #[test]
 fn a_measured_task_notification_keeps_the_cache_share() {
     let (mut app, _) = app();
     app.cache_breakdown_complete = Some(true);
+    // The session snapshot already accounts for the task's token usage.
+    app.usage = Usage {
+        input_tokens: 40,
+        output_tokens: 5,
+        cached_input_tokens: 30,
+        ..Default::default()
+    };
 
     app.apply_event(&WireEvent {
         event_type: "notification".into(),
@@ -147,4 +183,21 @@ fn a_measured_task_notification_keeps_the_cache_share() {
     });
 
     assert_eq!(app.cache_breakdown_complete, Some(true));
+    let footer = rendered_footer(&app);
+    assert!(
+        footer.contains(" | tokens 40/5 (cached 30, 75.0%)"),
+        "footer must show measured cache share: {footer}"
+    );
+}
+
+fn rendered_footer(app: &App) -> String {
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::render::draw(frame, app))
+        .expect("draw footer");
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, buffer.area.height - 1)].symbol())
+        .collect()
 }

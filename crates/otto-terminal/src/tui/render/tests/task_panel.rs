@@ -94,6 +94,7 @@ async fn five_running_tasks_show_three_rows_and_a_more_row() {
 #[tokio::test]
 async fn the_minimum_size_keeps_the_transcript_row_and_the_status_line() {
     let (_workspace, _sessions, mut app) = app_fixture().await;
+    app.push_system("transcript sample");
     app.tasks = (1..=4)
         .map(|i| running_task(&format!("t{i}"), "review", "check the diff"))
         .collect();
@@ -103,6 +104,10 @@ async fn the_minimum_size_keeps_the_transcript_row_and_the_status_line() {
     let rows = screen_rows(&app, width, height);
     assert_eq!(rows.len(), height as usize);
 
+    assert!(
+        rows[0].contains("transcript sample"),
+        "the reserved transcript row must show content: {rows:?}"
+    );
     // Row 0 is the transcript; the composer's titled top border is row 1
     // and its bottom border row 3, so it kept 1 inner row.
     assert!(rows[1].contains("Otto"), "{rows:?}");

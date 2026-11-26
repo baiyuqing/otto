@@ -15,11 +15,17 @@ async fn narrower_or_shorter_than_the_minimum_shows_the_resize_message() {
 
 #[tokio::test]
 async fn exactly_the_minimum_size_shows_the_normal_layout() {
-    let (_workspace, _sessions, app) = app_fixture().await;
+    let (_workspace, _sessions, mut app) = app_fixture().await;
+    app.input = "visible draft".chars().collect();
+    app.cursor = app.input.len();
 
     let content = rendered(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
 
     assert!(!content.contains("Terminal too small"));
+    assert!(
+        content.contains("visible draft"),
+        "normal layout must render the draft: {content}"
+    );
 }
 
 #[tokio::test]

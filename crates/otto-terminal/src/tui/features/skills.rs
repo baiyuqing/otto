@@ -298,10 +298,18 @@ mod tests {
         state.handle(&view, Intent::Move(74));
         assert_eq!(state.selected_row.as_deref(), Some("skill-79"));
         // Terminal key translation emits Shortcut for printable keys in rows.
-        for key in "description 23".chars().filter(|c| *c != ' ') {
+        for key in "23".chars() {
             let activation = state.handle(&skills.view(), Intent::Shortcut(key)).unwrap();
             skills.activate(activation);
         }
+        let typed = skills.view();
+        state.reconcile(&typed);
+        assert_eq!(
+            typed.rows.len(),
+            1,
+            "typed search must select the matching skill"
+        );
+        assert_eq!(state.selected_row.as_deref(), Some("skill-23"));
         // Search matches name and description, including Unicode, case-insensitively.
         skills.query = "DESCRIPTION 23".into();
         state.reconcile(&skills.view());

@@ -25,6 +25,11 @@ fn session_popup_copies_exact_payloads_with_keyboard_and_keeps_open() {
     let mut presenter = SessionDetails::new(&info);
     presenter.copy = record_copy;
     let view = presenter.view();
+    assert_eq!(
+        view.document.lines().next(),
+        Some("Current"),
+        "session details must start with the session name"
+    );
     let mut state = State::new(&view);
     assert_eq!(state.selected_action.as_deref(), Some("session-copy-id"));
     assert_eq!(

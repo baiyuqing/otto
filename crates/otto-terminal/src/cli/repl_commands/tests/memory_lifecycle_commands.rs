@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn the_memory_usage_names_state_verify_and_the_list_filters() {
+    let usage = otto::app::management::Request::parse("memory", "")
+        .err()
+        .expect("bare /memory must return usage");
     for form in [
         "/memory state <id> active|needs-review|retracted [--reason TEXT]",
         "/memory state <id> superseded <replacement-id> [--reason TEXT]",
@@ -11,14 +14,14 @@ fn the_memory_usage_names_state_verify_and_the_list_filters() {
         "[--state active|needs-review|superseded|retracted|all]",
         "[--unverified] [--review-due]",
     ] {
-        assert!(
-            MEMORY_USAGE.contains(form),
-            "usage lacks {form}: {MEMORY_USAGE}"
-        );
+        assert!(usage.contains(form), "usage lacks {form}: {usage}");
     }
+    let remember_usage = otto::app::management::Request::parse("remember", "")
+        .err()
+        .expect("bare /remember must return usage");
     assert!(
-        REMEMBER_USAGE.contains("[--review-in AGE]"),
-        "{REMEMBER_USAGE}"
+        remember_usage.contains("[--review-in AGE]"),
+        "{remember_usage}"
     );
 }
 

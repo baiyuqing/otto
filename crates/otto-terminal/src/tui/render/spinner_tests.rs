@@ -99,6 +99,17 @@ async fn timer_redraws_for_main_turn_and_live_children_but_not_an_idle_screen() 
         needs_animation(&app),
         "queued task elapsed time still updates"
     );
-    app.tasks.clear();
-    assert!(!needs_animation(&app));
+    for status in [
+        TaskStatus::Succeeded,
+        TaskStatus::Failed,
+        TaskStatus::Canceled,
+        TaskStatus::Interrupted,
+        TaskStatus::Unavailable,
+    ] {
+        app.tasks[0].status = status;
+        assert!(
+            !needs_animation(&app),
+            "finished task history must not keep the animation running: {status:?}"
+        );
+    }
 }

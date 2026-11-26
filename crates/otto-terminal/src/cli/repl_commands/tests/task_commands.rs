@@ -147,12 +147,16 @@ async fn task_detail_prints_the_line_model_and_result() {
     let (stdout, _) = session(&format!("/tasks\n/task {}\n/exit\n", task.id), &controller).await;
 
     assert!(stdout.contains(&task.id), "{stdout}");
-    assert!(stdout.contains("model: gpt-alpha"), "{stdout}");
+    let lines: Vec<_> = stdout.lines().collect();
     assert!(
-        stdout.contains("transcript: /sessions/p/t1-c.jsonl"),
-        "{stdout}"
+        lines.windows(3).any(|window| window
+            == [
+                "model: gpt-alpha",
+                "transcript: /sessions/p/t1-c.jsonl",
+                "result: done",
+            ]),
+        "exact detail lines missing from {stdout}"
     );
-    assert!(stdout.contains("result: done"), "{stdout}");
 }
 
 #[tokio::test]
@@ -334,12 +338,18 @@ async fn task_detail_prints_the_child_steps_between_the_model_and_the_result() {
         .unwrap_or_else(|| panic!("no model line: {stdout}"));
     assert!(model_index > 0, "{stdout}");
     assert!(lines[model_index - 1].contains(&task.id), "{stdout}");
-    assert!(
-        stdout.contains("\u{2192} read {\"path\":\"main.go\"}"),
-        "{stdout}"
+    assert_eq!(
+        lines.get(model_index + 1..model_index + 4),
+        Some(
+            [
+                "  \u{2192} read {\"path\":\"main.go\"}",
+                "  assistant: looks fine",
+                "result: no issues found",
+            ]
+            .as_slice()
+        ),
+        "ordered child details missing from {stdout}"
     );
-    assert!(stdout.contains("assistant: looks fine"), "{stdout}");
-    assert!(stdout.contains("result: no issues found"), "{stdout}");
     assert!(
         !stdout.contains("review please"),
         "the delegated prompt is not a step: {stdout}"

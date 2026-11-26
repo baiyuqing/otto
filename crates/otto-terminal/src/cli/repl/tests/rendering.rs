@@ -213,6 +213,11 @@ fn compaction_lines_match_the_expected_text() {
         }),
         "\n[context] compacted 999 tokens\n"
     );
+    assert_eq!(
+        compaction_line(&CompactionResult::default()),
+        "\n[context] compacted\n",
+        "compaction without counts must still be announced"
+    );
 }
 
 #[test]

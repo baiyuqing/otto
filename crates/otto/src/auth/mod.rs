@@ -592,7 +592,16 @@ mod tests {
     fn load_rejects_a_file_over_the_size_limit() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("chatgpt.json");
-        std::fs::write(&path, "x".repeat(MAX_CREDENTIAL_FILE_BYTES + 1)).unwrap();
+        let credentials = Credentials {
+            access_token: "fixture-only-token".into(),
+            ..Credentials::default()
+        };
+        let mut bytes = serde_json::to_vec(&credentials).unwrap();
+        bytes.resize(MAX_CREDENTIAL_FILE_BYTES, b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(load(&path), Ok(credentials));
+        bytes.push(b' ');
+        std::fs::write(&path, &bytes).unwrap();
         assert_eq!(load(&path), Err(AuthError::CredentialsUnavailable));
     }
 

@@ -95,6 +95,7 @@ impl FakeSink {
 struct FakeRunner {
     outcomes: Mutex<VecDeque<RunOutcome>>,
     calls: Mutex<Vec<(String, String)>>,
+    cancelled_after: Mutex<Vec<Duration>>,
     /// Wait for cancellation instead of returning.
     block: bool,
 }
@@ -107,7 +108,9 @@ impl PromptRunner for FakeRunner {
             .unwrap()
             .push((workspace.into(), text.into()));
         if self.block {
+            let started = tokio::time::Instant::now();
             cancel.cancelled().await;
+            self.cancelled_after.lock().unwrap().push(started.elapsed());
             return RunOutcome::Reply("late reply after cancellation".into());
         }
         self.outcomes
@@ -463,6 +466,11 @@ async fn a_run_is_cancelled_after_ten_minutes_and_recorded_as_failed() {
         harness.item(&telegram(), id).state == State::Done
     })
     .await;
+    assert_eq!(
+        *harness.runner.cancelled_after.lock().unwrap(),
+        [Duration::from_secs(600)],
+        "the runner observes cancellation after ten minutes of virtual time"
+    );
     assert_eq!(
         harness.sink.sent(),
         [format!(

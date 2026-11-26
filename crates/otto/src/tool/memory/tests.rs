@@ -441,7 +441,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Answers every question the same way and counts its calls.
-struct Counting(Arc<AtomicUsize>);
+struct Counting {
+    calls: Arc<AtomicUsize>,
+    cancel_during_call: Option<CancellationToken>,
+}
 
 #[async_trait::async_trait]
 impl Backend for Counting {
@@ -454,7 +457,10 @@ impl Backend for Counting {
     }
 
     async fn ask(&self, _state: &str, _questions: &[Question], _limit: Duration) -> Exchange {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(cancel) = &self.cancel_during_call {
+            cancel.cancel();
+        }
         let answer = |choice: &str| Answer {
             choice: choice.to_owned(),
             probability: None,
@@ -472,7 +478,13 @@ impl Backend for Counting {
 
 fn advised_tool(service: &Arc<Service>) -> (RememberTool, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
-    let advisor = Advisor::new(Box::new(Counting(Arc::clone(&calls))), None);
+    let advisor = Advisor::new(
+        Box::new(Counting {
+            calls: Arc::clone(&calls),
+            cancel_during_call: None,
+        }),
+        None,
+    );
     (
         remember_tool(service).with_advisor(Some(Arc::new(advisor))),
         calls,
@@ -517,21 +529,41 @@ async fn remember_with_an_advisor_asks_no_model_for_a_proposal_the_service_refus
 
 #[tokio::test]
 async fn remember_with_an_advisor_returns_context_canceled_when_canceled_during_advice() {
-    let (_directory, service) = service();
-    let (tool, _) = advised_tool(&service);
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-
-    let result = tool
-        .execute(
-            &RawValue::from_string(r#"{"kind":"preference","text":"likes dark mode"}"#.into())
-                .expect("raw"),
-            &cancel,
-        )
-        .await;
-
-    assert!(result.is_error);
-    assert_eq!(result.content, CONTEXT_CANCELED);
+    for before_advice in [true, false] {
+        let (_directory, service) = service();
+        let cancel = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let advisor = Advisor::new(
+            Box::new(Counting {
+                calls: Arc::clone(&calls),
+                cancel_during_call: Some(cancel.clone()),
+            }),
+            None,
+        );
+        let tool = remember_tool(&service).with_advisor(Some(Arc::new(advisor)));
+        if before_advice {
+            cancel.cancel();
+        }
+        let result = tool
+            .execute(
+                &RawValue::from_string(r#"{"kind":"preference","text":"likes dark mode"}"#.into())
+                    .expect("raw"),
+                &cancel,
+            )
+            .await;
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(!before_advice));
+        assert!(result.is_error);
+        assert_eq!(result.content, CONTEXT_CANCELED);
+        let pending = service
+            .list_candidates(&crate::memory::CandidateListRequest {
+                scopes: vec![scope(), workspace_scope()],
+                states: vec![CandidateState::Pending],
+                limit: 10,
+                cursor: String::new(),
+            })
+            .expect("pending candidates");
+        assert!(pending.candidates.is_empty());
+    }
 }
 
 fn set_record_state(

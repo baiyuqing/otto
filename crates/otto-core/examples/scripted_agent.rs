@@ -84,9 +84,7 @@ impl ToolExecutor for Calculator {
         let sum = a.unwrap_or_default() + b.unwrap_or_default();
         ToolExecution::completed(ToolResult {
             content: sum.to_string(),
-            persisted_content: None,
-            is_error: false,
-            outcome_override: None,
+            ..ToolResult::default()
         })
     }
 }

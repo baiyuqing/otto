@@ -203,7 +203,7 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
     std::fs::write(home.path().join("elevated.txt"), "outside-seatbelt\n").expect("home fixture");
 
     let arguments = serde_json::json!({
-        "command": "cat \"$HOME/elevated.txt\"",
+        "command": "tee approval-output.txt < \"$HOME/elevated.txt\"",
         "sandbox_permissions": "require_escalated",
         "justification": "read the reviewed home fixture",
     })
@@ -284,8 +284,14 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
     );
     assert!(approval_id.is_some(), "stdout:\n{stdout}");
     assert!(stdout.contains("done"), "stdout:\n{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("approval-output.txt")).unwrap(),
+        "outside-seatbelt\n"
+    );
+    let transcript = only_session_transcript(home.path());
+    assert!(transcript.contains("stdout_log:"), "stdout:\n{stdout}");
     assert!(
-        only_session_transcript(home.path()).contains("outside-seatbelt"),
+        !transcript.contains("outside-seatbelt"),
         "stdout:\n{stdout}"
     );
     assert_eq!(served.load(Ordering::SeqCst), 2, "stdout:\n{stdout}");

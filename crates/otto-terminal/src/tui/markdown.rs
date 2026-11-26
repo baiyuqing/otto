@@ -537,9 +537,21 @@ mod tests {
     #[test]
     fn an_ordered_list_numbers_items_in_order() {
         let text = render("1. first\n2. second");
-        let flat = flat_text(&text);
-        assert!(flat.contains("1. first"));
-        assert!(flat.contains("2. second"));
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["1. first", "2. second"],
+            "ordered list rows must remain in order"
+        );
     }
 
     #[test]

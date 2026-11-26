@@ -138,6 +138,10 @@ fn unloaded_memory_review_collection_has_a_visible_loading_state() {
         .collect::<Vec<_>>()
         .join("");
     assert!(screen.matches("Loading…").count() >= 2);
+    assert!(
+        !screen.contains("No items"),
+        "loading must not also show the empty placeholder"
+    );
 }
 
 #[test]

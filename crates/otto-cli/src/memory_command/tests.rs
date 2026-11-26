@@ -237,14 +237,34 @@ fn list_pages_all_scopes_only_when_requested() {
     assert!(default_output.contains("user-record"));
     assert!(default_output.contains("current-record"));
     assert!(!default_output.contains("other-record"));
-    let (code, output, stderr) = memory(
-        &[
-            "list", "--scope", "all", "--limit", "1", "--config", &config, "--cwd", &cwd,
-        ],
-        home.path(),
-    );
-    assert_eq!(code, 0, "stderr = {stderr}");
-    assert!(output.contains("next_cursor="), "output = {output:?}");
+    let mut cursor = String::new();
+    let mut keys = Vec::new();
+    for page in 0..3 {
+        let (code, output, stderr) = memory(
+            &[
+                "list", "--scope", "all", "--limit", "1", "--cursor", &cursor, "--config", &config,
+                "--cwd", &cwd,
+            ],
+            home.path(),
+        );
+        assert_eq!(code, 0, "page {page}: stderr = {stderr}");
+        let page_keys: Vec<_> = output
+            .lines()
+            .filter_map(|line| {
+                line.split_whitespace()
+                    .find_map(|field| field.strip_prefix("key="))
+            })
+            .collect();
+        assert_eq!(page_keys.len(), 1, "page {page}: {output}");
+        keys.extend(page_keys.into_iter().map(str::to_owned));
+        let next = output
+            .lines()
+            .find_map(|line| line.strip_prefix("next_cursor="));
+        assert_eq!(next.is_some(), page < 2, "page {page}: {output}");
+        cursor = next.unwrap_or_default().to_owned();
+    }
+    keys.sort();
+    assert_eq!(keys, ["current-record", "other-record", "user-record"]);
 }
 
 #[test]

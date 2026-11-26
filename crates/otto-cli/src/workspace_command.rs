@@ -71,6 +71,29 @@ mod tests {
             0
         );
         assert!(!dir.path().join(".otto").exists());
+        let previous = otto_session::workspace::initialize(dir.path(), "").unwrap();
+        let state = dir.path().join(".otto/retained-state");
+        std::fs::write(&state, b"synthetic workspace state").unwrap();
+        let marker = dir.path().join(otto_session::workspace::MARKER);
+        let previous_bytes = std::fs::read(&marker).unwrap();
+        output.clear();
+        assert_eq!(
+            run(
+                &["status".into(), "--cwd".into(), cwd.clone()],
+                &mut output,
+                &mut errors
+            ),
+            0
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), previous_bytes);
+        assert_eq!(
+            String::from_utf8(output.clone()).unwrap(),
+            format!(
+                "Workspace ID: {}\nSession key: {}\nMemory scope: {}\n",
+                previous.id, previous.session_key, previous.memory_scope
+            )
+        );
+        output.clear();
         assert_eq!(
             run(
                 &["fork".into(), "--cwd".into(), cwd],
@@ -79,7 +102,18 @@ mod tests {
             ),
             0
         );
-        assert!(dir.path().join(otto_session::workspace::MARKER).is_file());
+        let forked = otto_session::workspace::read(dir.path()).unwrap().unwrap();
+        assert_ne!(forked.id, previous.id);
+        assert_ne!(forked.session_key, previous.session_key);
+        assert_ne!(forked.memory_scope, previous.memory_scope);
+        assert_eq!(std::fs::read(&state).unwrap(), b"synthetic workspace state");
+        assert_eq!(
+            String::from_utf8(output.clone()).unwrap(),
+            format!(
+                "Workspace ID: {}\nSession key: {}\nMemory scope: {}\n",
+                forked.id, forked.session_key, forked.memory_scope
+            )
+        );
         assert!(errors.is_empty());
         assert_eq!(run(&["bad".into()], &mut output, &mut errors), 2);
     }

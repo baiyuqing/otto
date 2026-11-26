@@ -126,6 +126,7 @@ fn skill_checker_is_enabled_by_default_with_an_api_key() {
 
 #[test]
 fn skill_checker_honors_the_skills_setting() {
+    let home = tempfile::tempdir().expect("home");
     let mut file = File::default();
     file.skills.typesafe_skill_check = Some(false);
     let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
@@ -136,11 +137,25 @@ fn skill_checker_honors_the_skills_setting() {
             &otto::runtime::storage::Storage::default(),
             &file,
             &environment,
-            "/nonexistent",
+            &home.path().to_string_lossy(),
             &mut stderr,
         )
         .is_none()
     );
+    assert!(stderr.get_ref().is_empty());
+    assert!(!home.path().join(".otto/skill-checks.db").exists());
+    file.skills.typesafe_skill_check = Some(true);
+    assert!(
+        skill_checker(
+            &otto::runtime::storage::Storage::default(),
+            &file,
+            &environment,
+            &home.path().to_string_lossy(),
+            &mut stderr,
+        )
+        .is_some()
+    );
+    assert!(stderr.get_ref().is_empty());
 }
 
 #[test]

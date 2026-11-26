@@ -12,11 +12,15 @@ async fn repeated_reads_are_coalesced_and_keep_the_original_ticket() {
     };
     driver.submit(ticket.clone(), Request::Models);
     driver.submit(ticket.clone(), Request::Models);
-    let completion = driver.next().await;
+    // Both submissions are synchronous on the test's current-thread runtime.
+    // Join every spawned task before comparing the completion count.
+    for (_, task) in std::mem::take(&mut driver.tasks) {
+        task.await.expect("read task completed");
+    }
+    let completion = driver.try_next().expect("one read completed");
     assert_eq!(completion.ticket, ticket);
     assert!(completion.result.is_err());
-    tokio::task::yield_now().await;
-    assert!(driver.try_next().is_none());
+    assert!(driver.try_next().is_none(), "duplicate read completed");
 }
 
 #[tokio::test]

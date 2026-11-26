@@ -367,8 +367,14 @@ mod tests {
     #[test]
     fn workspace_roots_tilde_with_no_home_errors() {
         let mut file = File::default();
+        file.server.socket = "/tmp/otto.sock".into();
+        assert!(resolve_server(&file, &HashMap::new(), "", "").is_ok());
         file.server.workspace_roots = vec!["~/Work".into()];
-        assert!(resolve_server(&file, &HashMap::new(), "", "").is_err());
+        let error = resolve_server(&file, &HashMap::new(), "", "").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "resolve home directory for workspace root \"~/Work\""
+        );
     }
 
     #[test]

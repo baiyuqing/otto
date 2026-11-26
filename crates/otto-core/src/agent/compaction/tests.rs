@@ -109,10 +109,21 @@ fn the_compacted_estimate_counts_the_summary_and_the_retained_tail() {
         blocks: vec![Block::text("kept")],
         ..Message::default()
     }];
-    let empty = estimate_compacted_context(&options, &[], "", &retained);
-    let with_summary = estimate_compacted_context(&options, &[], &"s".repeat(300), &retained);
-    assert!(
-        with_summary > empty + 90,
-        "a 300-byte summary must add about 100 tokens: {empty} then {with_summary}"
+    let summary = "s".repeat(300);
+    let empty = estimate_compacted_context(&options, &[], "", &[]);
+    let with_summary = estimate_compacted_context(&options, &[], &summary, &[]);
+    let with_tail = estimate_compacted_context(&options, &[], "", &retained);
+    let with_both = estimate_compacted_context(&options, &[], &summary, &retained);
+    assert_eq!(
+        with_summary - empty,
+        100,
+        "300 summary bytes add 100 tokens"
     );
+    assert_eq!(
+        with_tail - empty,
+        10,
+        "the retained message adds 6 framing + 2 text-block + 2 text tokens"
+    );
+    assert_eq!(with_both - with_summary, 10, "the summary keeps the tail");
+    assert_eq!(with_both - with_tail, 100, "the tail keeps the summary");
 }

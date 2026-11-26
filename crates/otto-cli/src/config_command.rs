@@ -351,8 +351,28 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&err)
         );
-        assert!(workspace.path().join(".otto/config.local.toml").exists());
-        assert!(!home.path().join(".config/otto/config.toml").exists());
+        let local = workspace.path().join(".otto/config.local.toml");
+        let saved = std::fs::read_to_string(&local).unwrap();
+        assert_eq!(otto_core::config::parse(&saved).unwrap().ui.mode, "repl");
+        let global = home.path().join(".config/otto/config.toml");
+        assert!(!global.exists());
+
+        let global_text = "# global preferences\n[ui]\nmode = 'auto'\n";
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, global_text).unwrap();
+        assert_eq!(
+            run(
+                &args,
+                &mut out,
+                &mut err,
+                &HashMap::from([("HOME".into(), home.path().display().to_string())])
+            ),
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        assert_eq!(std::fs::read_to_string(&global).unwrap(), global_text);
+        assert_eq!(std::fs::read_to_string(&local).unwrap(), saved);
     }
     #[test]
     fn explicit_scope_edit_preserves_comments_and_rejects_project_authority() {
@@ -380,8 +400,10 @@ mod tests {
         .map(str::to_string);
         assert_eq!(run(&args, &mut out, &mut err, &env), 0);
         let expected = std::fs::read_to_string(&path).unwrap();
-        assert!(expected.contains("# team preferences"));
-        assert!(expected.contains("# keep this"));
+        assert_eq!(
+            expected,
+            "# team preferences\n[ui]\nmode = 'repl' # keep this\n"
+        );
         assert!(path.parent().unwrap().join("backups").exists());
         let args = [
             "set",
@@ -394,6 +416,10 @@ mod tests {
         ]
         .map(str::to_string);
         assert_eq!(run(&args, &mut out, &mut err, &env), 1);
+        assert!(
+            String::from_utf8_lossy(&err)
+                .contains("requested fields are not permitted in project configuration")
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
     }
     #[test]

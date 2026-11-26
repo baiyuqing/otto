@@ -29,12 +29,21 @@ fn bootstrap_preserves_configured_resolution() {
         ..Default::default()
     };
     let configured = crate::config::parse(
-        "[providers.openai-compatible]\napi_key_env = 'TEST_BOOTSTRAP_KEY'\nbase_url = 'http://127.0.0.1:1'\n",
-    ).unwrap();
-    assert_eq!(
-        resolve_server_bootstrap(&configured, &env, &overrides),
-        resolve(&configured, &env, &SessionDefaults::default(), &overrides)
-    );
+        "[providers.openai-compatible]\n\
+         api_key_env = 'TEST_BOOTSTRAP_KEY'\n\
+         base_url = 'http://127.0.0.1:1'\n\
+         trusted_origins = ['http://127.0.0.1:1']\n\
+         allow_http_origins = ['http://127.0.0.1:1']\n",
+    )
+    .unwrap();
+    let runtime = resolve_server_bootstrap(&configured, &env, &overrides)
+        .expect("configured bootstrap resolves");
+    let expected = resolve(&configured, &env, &SessionDefaults::default(), &overrides)
+        .expect("ordinary configuration resolves");
+    assert_eq!(runtime, expected);
+    assert_eq!(runtime.model, "test-model");
+    assert_eq!(runtime.base_url, "http://127.0.0.1:1");
+    assert_eq!(runtime.api_key, "offline-placeholder");
     assert!(resolve_server_bootstrap(&file, &HashMap::new(), &overrides).is_err());
 }
 

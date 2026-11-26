@@ -47,7 +47,15 @@ fn scripted(summary_requests: Arc<Mutex<Vec<String>>>) -> ScriptedProvider {
 
 fn environment(max_calls: u32) -> (CaseEnvironment, RequestLog, Arc<Mutex<Vec<String>>>) {
     let summary_requests = Arc::new(Mutex::new(Vec::new()));
-    let (provider, log) = BudgetedProvider::new(scripted(Arc::clone(&summary_requests)), max_calls);
+    let (env, log) = environment_with_provider(scripted(Arc::clone(&summary_requests)), max_calls);
+    (env, log, summary_requests)
+}
+
+fn environment_with_provider(
+    provider: ScriptedProvider,
+    max_calls: u32,
+) -> (CaseEnvironment, RequestLog) {
+    let (provider, log) = BudgetedProvider::new(provider, max_calls);
     let env = Arc::new(EvalEnvironment {
         provider,
         redactor: Redactor::new(&[]),
@@ -65,7 +73,7 @@ fn environment(max_calls: u32) -> (CaseEnvironment, RequestLog, Arc<Mutex<Vec<St
         },
         cancel: CancellationToken::new(),
     });
-    (env, log, summary_requests)
+    (env, log)
 }
 
 fn install_item() -> Item {
@@ -245,7 +253,7 @@ async fn provider_call_limit_lands_in_the_record_error() {
 }
 
 #[tokio::test]
-async fn compaction_failure_is_recorded_and_the_turn_still_runs() {
+async fn a_turn_call_limit_after_successful_compaction_is_recorded() {
     let (env, log, _) = environment(1);
     // The one allowed call goes to the compaction summary; the turn call is refused.
     let record = run_case(
@@ -266,4 +274,44 @@ async fn compaction_failure_is_recorded_and_the_turn_still_runs() {
         record.error
     );
     assert_eq!(record.answer, "");
+}
+
+#[tokio::test]
+async fn compaction_failure_is_recorded_and_the_turn_still_runs() {
+    let base = scripted(Arc::new(Mutex::new(Vec::new())));
+    let provider = ScriptedProvider::new(move |request| {
+        if first_user_text(request).contains("<summary-mode>") {
+            text_reply("invalid summary without the required headings")
+        } else {
+            base.reply(request)
+        }
+    });
+    let (env, log) = environment_with_provider(provider.clone(), 100);
+    let record = run_case(
+        &env,
+        &log,
+        &install_item(),
+        Variant::SummaryWithReferences,
+        Condition::D,
+        0,
+        Role::Task,
+    )
+    .await
+    .expect("a failed compaction does not stop the case");
+    assert!(record.compaction.is_none());
+    assert!(
+        record
+            .error
+            .starts_with("compaction: invalid compaction summary:"),
+        "{}",
+        record.error
+    );
+    assert_eq!(record.answer, "Run pnpm install in the repository root.");
+    assert_eq!(record.rules.uses_replacement, Some(true));
+    assert_eq!(record.requests.request_count, 2);
+    assert_eq!(record.usage.provider_calls, 2);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(first_user_text(&requests[0]).contains("<summary-mode>"));
+    assert_eq!(last_user_text(&requests[1]), install_item().task);
 }

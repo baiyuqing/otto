@@ -445,10 +445,12 @@ mod tests {
         let got = workspace_context_for(&root, now(), None, None, &workspace).await;
         assert!(
             got.contains(&format!(
-                "[truncated: {size} bytes, showing first {MAX_WORKSPACE_CONTEXT_FILE_BYTES}]"
+                "{}\n[truncated: {size} bytes, showing first {MAX_WORKSPACE_CONTEXT_FILE_BYTES}]",
+                "x".repeat(MAX_WORKSPACE_CONTEXT_FILE_BYTES)
             )),
             "{got}"
         );
+        assert!(!got.contains(&"x".repeat(MAX_WORKSPACE_CONTEXT_FILE_BYTES + 1)));
     }
 
     #[tokio::test]
@@ -473,6 +475,14 @@ mod tests {
         let workspace = workspace(dir.path());
         let root = workspace.root().to_string_lossy().into_owned();
         let got = workspace_context_for(&root, now(), None, None, &workspace).await;
+        let listed: Vec<_> = got
+            .lines()
+            .filter(|line| line.starts_with("file-"))
+            .collect();
+        let expected: Vec<_> = (0..MAX_WORKSPACE_LISTING_ENTRIES)
+            .map(|index| format!("file-{index:04}"))
+            .collect();
+        assert_eq!(listed, expected);
         assert!(
             got.contains(&format!(
                 "... ({} entries, truncated)\n",

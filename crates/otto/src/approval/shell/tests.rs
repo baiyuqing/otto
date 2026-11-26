@@ -197,10 +197,9 @@ fn output_redirect_targets_are_reported() {
         }]
     );
     assert!(targets("ls 2>&1 < in.txt").is_empty());
-    assert!(
-        segments("echo a > out.txt")
-            .iter()
-            .all(|words| words == &["echo", "a"])
+    assert_eq!(
+        segments("echo a > out.txt"),
+        vec![vec!["echo".to_string(), "a".to_string()]]
     );
 }
 

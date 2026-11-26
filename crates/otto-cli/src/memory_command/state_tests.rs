@@ -183,12 +183,19 @@ fn list_accepts_every_lifecycle_flag_in_both_forms() {
 #[test]
 fn state_and_verify_reject_scope_all() {
     let fixture = fixture();
-    let (code, _, stderr) = fixture.run(&["state", "some-id", "retracted", "--scope", "all"]);
-    assert_eq!(code, 1);
-    assert!(
-        stderr.contains("require --scope current, user, or workspace"),
-        "stderr = {stderr:?}"
-    );
+    let record = fixture.remember("editor", "vim", None);
+    for arguments in [
+        vec!["state", &record.id, "retracted", "--scope", "all"],
+        vec!["verify", &record.id, "--scope", "all"],
+    ] {
+        let (code, stdout, stderr) = fixture.run(&arguments);
+        assert_eq!(code, 1, "{arguments:?}: {stderr}");
+        assert!(stdout.is_empty(), "{arguments:?}: {stdout}");
+        assert_eq!(
+            stderr, "otto: state and verify require --scope current, user, or workspace\n",
+            "{arguments:?}"
+        );
+    }
 }
 
 #[test]

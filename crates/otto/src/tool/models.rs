@@ -272,12 +272,13 @@ mod tests {
         };
         let output = render(&catalog, 150);
         assert!(output.len() <= 150);
-        assert!(output.contains("truncated"));
-        assert!(
-            output
-                .lines()
-                .filter(|s| !s.starts_with('['))
-                .all(|s| s.len() == 9)
+        assert_eq!(
+            output,
+            concat!(
+                "model-000\nmodel-001\nmodel-002\nmodel-003\nmodel-004\n",
+                "[catalog truncated/filtered: 25 entries not shown; ",
+                "0 entries or metadata omitted by validation]"
+            )
         );
     }
 

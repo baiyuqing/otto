@@ -435,11 +435,13 @@ fn package_commands_and_cwd_use_filesystem_resolved_home() {
     let actual = fs::canonicalize(f.home.path()).unwrap();
     assert!(Path::new(command).starts_with(&actual));
     assert!(Path::new(cwd).starts_with(&actual));
-    assert!(
-        env.iter()
-            .filter(|(k, _)| k == "PLUGIN_ROOT" || k == "PLUGIN_DATA")
-            .all(|(_, v)| Path::new(v).starts_with(&actual))
-    );
+    for name in ["PLUGIN_ROOT", "PLUGIN_DATA"] {
+        let (_, value) = env
+            .iter()
+            .find(|(key, _)| key == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(Path::new(value).starts_with(&actual), "{name}: {value}");
+    }
     fs::remove_file(alias).unwrap();
 }
 

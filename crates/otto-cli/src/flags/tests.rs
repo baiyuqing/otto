@@ -155,9 +155,17 @@ fn the_acp_subcommand_accepts_runtime_flags() {
         "4096",
     ]);
     assert!(got.acp && !got.serve);
+    assert_eq!(got.config_path, "/tmp/config.toml");
     assert_eq!(got.cwd, "/work");
+    assert_eq!(got.provider, "openai-compatible");
+    assert_eq!(got.base_url, "http://127.0.0.1:1");
+    assert_eq!(got.model, "m");
+    assert_eq!(got.thinking, "low");
     assert_eq!(got.sandbox, "off");
+    assert_eq!(got.shell_timeout, Duration::from_secs(30));
+    assert_eq!(got.max_output_bytes, 4096);
     assert!(got.explicit_config);
+    assert!(got.sandbox_set && got.shell_time_set && got.max_output_set);
     assert!(!options(&["--cwd", "/work"]).acp);
 }
 

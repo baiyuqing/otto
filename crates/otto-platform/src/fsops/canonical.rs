@@ -43,11 +43,24 @@ mod tests {
 
     #[test]
     fn the_shell_must_be_a_regular_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("temp dir");
         assert!(canonical_executable_file(Path::new("/bin/sh")).is_ok());
         assert!(canonical_executable_file(Path::new("")).is_err());
         assert!(canonical_executable_file(dir.path()).is_err());
         assert!(canonical_executable_file(Path::new("/bin/does-not-exist")).is_err());
+        let file = dir.path().join("shell");
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            canonical_executable_file(&file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            canonical_executable_file(&file).unwrap(),
+            std::fs::canonicalize(&file).unwrap()
+        );
     }
 
     #[test]

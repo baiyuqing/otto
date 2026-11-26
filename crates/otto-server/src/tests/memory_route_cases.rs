@@ -291,6 +291,33 @@ async fn supersede_requires_an_active_replacement() {
         )
         .await;
     assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+    let inactive = remember(&harness, &id, "workspace", "withdrawn version").await;
+    let inactive_path = format!(
+        "/v1/sessions/{id}/memory/records/{}",
+        inactive["id"].as_str().unwrap()
+    );
+    let retracted = harness
+        .send(
+            "POST",
+            &format!("{inactive_path}/state"),
+            Some(r#"{"state":"retracted"}"#),
+        )
+        .await;
+    assert_eq!(retracted.status, StatusCode::OK, "{}", retracted.body);
+    let invalid_body =
+        serde_json::json!({"state":"superseded", "superseded_by":inactive["id"]}).to_string();
+    let rejected = harness
+        .send("POST", &format!("{base}/state"), Some(&invalid_body))
+        .await;
+    assert_eq!(
+        rejected.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        rejected.body
+    );
+    let unchanged = harness.send("GET", &base, None).await.json();
+    assert_eq!(unchanged["state"], "active");
+    assert_eq!(unchanged["revision"], old["revision"]);
     let body = serde_json::json!({"state": "superseded", "superseded_by": new["id"]}).to_string();
     let superseded = harness
         .send("POST", &format!("{base}/state"), Some(&body))

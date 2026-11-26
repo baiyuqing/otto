@@ -157,6 +157,13 @@ async fn no_judge_leaves_the_verdict_empty() {
     let rows = run_layer_two(&env, &out, false, &mut Vec::new())
         .await
         .unwrap();
+    assert_eq!(
+        rows.len(),
+        26,
+        "disabling the judge still generates every row"
+    );
+    assert!(rows.iter().all(|row| row.generated.unavailable.is_none()));
+    assert!(provider.requests().len() >= rows.len());
     assert!(
         rows.iter()
             .all(|row| row.judge.is_none() && row.judge_error.is_empty())
@@ -181,13 +188,27 @@ async fn a_judge_failure_is_stored_in_judge_error() {
             base.reply(request)
         }
     });
-    let env = environment(provider, Redactor::new(&[]));
+    let env = environment(provider.clone(), Redactor::new(&[]));
     let rows = run_layer_two(&env, &out, true, &mut Vec::new())
         .await
         .unwrap();
+    assert_eq!(rows.len(), 26, "judge failures must not drop rows");
     assert!(
         rows.iter()
-            .all(|row| row.judge.is_none() && !row.judge_error.is_empty())
+            .all(|row| row.judge.is_none() && row.judge_error == "the reply holds no JSON object")
+    );
+    assert_eq!(
+        provider
+            .requests()
+            .iter()
+            .filter(|request| first_user_text(request).starts_with("Record:\n"))
+            .count(),
+        26,
+        "every generated proposal reaches the judge"
+    );
+    assert_eq!(
+        out.read_jsonl::<ProposalRecord>(PROPOSALS_FILE).unwrap(),
+        rows
     );
 }
 
@@ -285,6 +306,11 @@ async fn the_backend_sends_the_session_prompt_and_reports_the_profile_model() {
         .await;
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].system_prompt,
+        otto::decision::session::SYSTEM_PROMPT
+    );
+    assert_eq!(requests[0].model, "profile-model");
     assert_eq!(first_user_text(&requests[0]), exchange.request);
     assert_eq!(
         exchange.request,

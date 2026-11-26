@@ -237,7 +237,20 @@ async fn an_approval_not_decided_in_ten_minutes_times_out_as_a_denial() {
     let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
 
     tokio::time::pause();
-    tokio::time::advance(APPROVAL_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_secs(599)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        harness
+            .factory
+            .builder
+            .bash_approvals
+            .as_ref()
+            .unwrap()
+            .pending_count(&id),
+        1,
+        "the approval must still be pending before ten minutes"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
     let decided = frame_named_untimed(&mut reader, "approval_decided").await;
     assert_eq!(decided["decision"], "timeout");
     assert_eq!(decided["approval_id"], approval.as_str());

@@ -81,7 +81,7 @@ fn step_interrupted(queued_guidance: Option<u32>) -> WireEvent {
 fn transcript_rows(app: &App) -> Vec<(Option<EntryKind>, &str)> {
     app.entries
         .iter()
-        .map(|entry| (entry.kind.clone(), entry.raw.as_str()))
+        .map(|entry| (entry.kind, entry.raw.as_str()))
         .collect()
 }
 

@@ -81,6 +81,7 @@ impl PublishOps for FaultyPublishOps {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Seek};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -187,8 +188,21 @@ mod tests {
         plan.assert_all_fired();
         let error = result.expect_err("short write");
         assert_eq!((error.step, error.committed), (PublishStep::Write, false));
+        assert_eq!(error.source.raw_os_error(), Some(libc::ENOSPC));
         assert_eq!(fs::read(root.path().join("state.json")).unwrap(), b"old");
         assert_eq!(names(root.path()), ["state.json"]);
+
+        // Cleanup hides the temporary bytes; also observe the fault before cleanup.
+        let mut partial = tempfile::tempfile().unwrap();
+        let error = FaultyPublishOps::new(plan.clone())
+            .write_all(&target(PublishMode::Replace), &mut partial, b"new content")
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+        partial.rewind().unwrap();
+        let mut bytes = Vec::new();
+        partial.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"new");
+        plan.assert_all_fired();
     }
 
     #[test]

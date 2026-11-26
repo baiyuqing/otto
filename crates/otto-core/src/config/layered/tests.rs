@@ -219,7 +219,7 @@ fn managed_force_survives_cli_and_session_overrides() {
 fn managed_destinations_credentials_sandbox_and_ceilings_fail_closed() {
     let policy: ManagedPolicy = toml::from_str(
         "require_sandbox=true\
-         \nallowed_provider_hosts=[]\
+         \nallowed_provider_hosts=['good.test']\
          \nallowed_mcp_hosts=[]\
          \nallowed_credential_variables=['SAFE']\
          \n[ceilings]\
@@ -228,12 +228,39 @@ fn managed_destinations_credentials_sandbox_and_ceilings_fail_closed() {
     .unwrap();
     let runtime = super::super::Runtime {
         provider_type: "openai-compatible".into(),
-        base_url: "https://evil.test/v1".into(),
-        api_key_env: "OTHER".into(),
-        max_output_bytes: 200,
+        base_url: "https://good.test/v1".into(),
+        api_key_env: "SAFE".into(),
+        max_output_bytes: 100,
         ..Default::default()
     };
-    assert!(policy.runtime(&runtime).is_err());
+    policy
+        .runtime(&runtime)
+        .expect("all runtime constraints satisfied");
+    for (invalid, expected) in [
+        (
+            super::super::Runtime {
+                base_url: "https://evil.test/v1".into(),
+                ..runtime.clone()
+            },
+            "provider destination is prohibited by managed policy",
+        ),
+        (
+            super::super::Runtime {
+                api_key_env: "OTHER".into(),
+                ..runtime.clone()
+            },
+            "provider credential binding is prohibited by managed policy",
+        ),
+        (
+            super::super::Runtime {
+                max_output_bytes: 101,
+                ..runtime.clone()
+            },
+            "managed policy ceiling exceeded: agent.max_output_bytes",
+        ),
+    ] {
+        assert_eq!(policy.runtime(&invalid).unwrap_err().to_string(), expected);
+    }
     let settings = super::super::resolve_sandbox(&Default::default(), Some("off")).unwrap();
     assert!(policy.sandbox(&settings).is_err());
     let f =

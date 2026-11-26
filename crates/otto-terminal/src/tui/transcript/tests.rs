@@ -185,7 +185,12 @@ fn a_reply_gets_one_bullet_and_an_aligned_indent() {
 fn a_reply_keeps_its_bullet_across_its_own_paragraphs() {
     let rendered = entry_lines(&entry(EntryKind::Assistant, "one\n\ntwo"), false, 40);
     let rows = rows(&rendered);
-    assert!(rows[0].starts_with(BULLET_MARK), "{:?}", rows[0]);
+    assert_eq!(rows.first().map(String::as_str), Some("⏺ one"));
+    assert_eq!(
+        rows.last().map(String::as_str),
+        Some("  two"),
+        "both reply paragraphs must be visible: {rows:?}"
+    );
     assert_eq!(
         rows.iter()
             .filter(|row| row.starts_with(BULLET_MARK))

@@ -74,8 +74,15 @@ mod tests {
         assert!(!gate.request(start + Duration::from_millis(8)));
         assert_eq!(gate.deadline(), Some(start + FRAME_INTERVAL));
 
-        gate.drew(start + FRAME_INTERVAL);
+        let drawn_at = start + FRAME_INTERVAL + Duration::from_millis(5);
+        gate.drew(drawn_at);
         assert_eq!(gate.deadline(), None);
+
+        assert!(
+            !gate.request(drawn_at + Duration::from_millis(1)),
+            "an update just after a draw must wait for the next frame"
+        );
+        assert_eq!(gate.deadline(), Some(drawn_at + FRAME_INTERVAL));
     }
 
     #[test]

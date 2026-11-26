@@ -101,15 +101,7 @@ fn provider_usage_updates_the_footer_during_a_turn() {
         }
     );
 
-    let backend = ratatui::backend::TestBackend::new(120, 24);
-    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| crate::tui::render::draw(frame, &app))
-        .expect("draw footer");
-    let buffer = terminal.backend().buffer();
-    let footer: String = (0..buffer.area.width)
-        .map(|x| buffer[(x, buffer.area.height - 1)].symbol())
-        .collect();
+    let footer = rendered_footer(&app);
     assert!(
         footer.contains(" | tokens 17/5 |") || footer.contains(" | tokens 17/5 ("),
         "footer must show input/output totals in order: {footer}"
@@ -144,6 +136,13 @@ fn a_task_notification_decides_whether_the_cache_share_is_shown() {
 fn a_measured_task_notification_keeps_the_cache_share() {
     let (mut app, _) = app();
     app.cache_breakdown_complete = Some(true);
+    // The session snapshot already accounts for the task's token usage.
+    app.usage = Usage {
+        input_tokens: 40,
+        output_tokens: 5,
+        cached_input_tokens: 30,
+        ..Default::default()
+    };
 
     app.apply_event(&WireEvent {
         event_type: "notification".into(),
@@ -161,4 +160,21 @@ fn a_measured_task_notification_keeps_the_cache_share() {
     });
 
     assert_eq!(app.cache_breakdown_complete, Some(true));
+    let footer = rendered_footer(&app);
+    assert!(
+        footer.contains(" | tokens 40/5 (cached 30, 75.0%)"),
+        "footer must show measured cache share: {footer}"
+    );
+}
+
+fn rendered_footer(app: &App) -> String {
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::render::draw(frame, app))
+        .expect("draw footer");
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, buffer.area.height - 1)].symbol())
+        .collect()
 }

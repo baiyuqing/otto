@@ -223,6 +223,11 @@ fn compaction_lines_match_the_expected_text() {
 #[test]
 fn commands_split_on_the_first_space() {
     assert_eq!(split_command("/model beta"), Some(("model", "beta")));
+    assert_eq!(
+        split_command("/sample blue green"),
+        Some(("sample", "blue green")),
+        "keep the complete multiword remainder"
+    );
     assert_eq!(split_command("/model\tbeta  "), Some(("model", "beta")));
     assert_eq!(split_command("/exit"), Some(("exit", "")));
     assert_eq!(split_command("/"), None);

@@ -48,6 +48,7 @@ fn provider_recovery_separates_partial_output_in_local_and_attached_tui() {
     for attached in [false, true] {
         let (mut app, _remote) = app();
         app.attached = attached;
+        let initial_entries = app.entries.len();
         for json in [
             r#"{"type":"text_delta","text":"partial"}"#,
             r#"{"type":"provider_retry","retry":{"attempt":2,"max_attempts":7,"interrupted_output":true}}"#,
@@ -55,7 +56,12 @@ fn provider_recovery_separates_partial_output_in_local_and_attached_tui() {
         ] {
             app.apply_event(&serde_json::from_str(json).unwrap());
         }
-        let entries = &app.entries[app.entries.len() - 3..];
+        let entries = &app.entries[initial_entries..];
+        assert_eq!(
+            entries.len(),
+            3,
+            "exactly three entries must be appended (attached: {attached})"
+        );
         assert_eq!(entries[0].raw, "partial");
         assert_eq!(entries[1].kind, Some(EntryKind::System));
         assert_eq!(entries[1].raw, transcript::INTERRUPTED_OUTPUT_NOTICE);

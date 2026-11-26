@@ -573,8 +573,22 @@ mod tests {
 
     #[test]
     fn a_blockquote_prefixes_every_line_with_the_quote_marker() {
-        let text = render("> quoted");
-        assert!(flat_text(&text).contains("> quoted"));
+        let text = render("> first\n>\n> second");
+        let rows: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["> first", "", "> second"],
+            "each quoted paragraph needs a marker"
+        );
     }
 
     // This renderer never produces ANSI in the first place, so the property

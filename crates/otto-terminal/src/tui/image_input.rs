@@ -69,7 +69,12 @@ pub(super) fn file(path: &Path, authorize: impl Fn(&Path) -> bool) -> Result<Blo
             "Image input must be a regular PNG/JPEG file, not a directory, device, or pipe.".into(),
         );
     }
-    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+    let bytes = read_image_bytes(input, metadata.len())?;
+    image_block(&bytes, false)
+}
+
+fn read_image_bytes(input: impl Read, file_len: u64) -> Result<Vec<u8>, String> {
+    if file_len > MAX_IMAGE_BYTES as u64 {
         return Err(TOO_LARGE.into());
     }
     let mut bytes = Vec::new();
@@ -82,7 +87,7 @@ pub(super) fn file(path: &Path, authorize: impl Fn(&Path) -> bool) -> Result<Blo
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err(TOO_LARGE.into());
     }
-    image_block(&bytes, false)
+    Ok(bytes)
 }
 
 // This local user-selected path is not a model file-tool request, so it is not

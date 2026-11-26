@@ -88,11 +88,25 @@ fn errors_omit_explicit_path() {
 }
 
 #[test]
-fn rejects_oversized_files_before_reading() {
+fn rejects_oversized_files() {
     let dir = fixture_directory();
     let input = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
     input.as_file().set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
     assert!(file(input.path(), |_| true).unwrap_err().contains("5 MiB"));
+}
+
+#[test]
+fn rejects_oversized_files_before_reading() {
+    struct MustNotRead;
+
+    impl Read for MustNotRead {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("preflight must reject oversized files before reading");
+        }
+    }
+
+    let error = read_image_bytes(MustNotRead, MAX_IMAGE_BYTES as u64 + 1).unwrap_err();
+    assert_eq!(error, TOO_LARGE);
 }
 
 #[test]

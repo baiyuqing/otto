@@ -69,25 +69,19 @@ fn geometry_exposes_collection_detail_field_and_action_targets() {
 fn collection_renders_the_selected_rows_full_detail() {
     let view = View {
         collection: true,
-        title: "Memory review".into(),
+        title: "Color samples".into(),
         rows: vec![
             Row {
                 id: "one".into(),
-                cells: vec!["create fact/color".into()],
-                detail: "favorite color is blue\nReason: stated directly".into(),
+                cells: vec!["Blue".into()],
+                detail: "Blue swatch\nFinish: matte".into(),
             },
             Row {
                 id: "two".into(),
-                cells: vec!["forget fact/city".into()],
-                detail: "forget Paris\nReason: user requested deletion".into(),
+                cells: vec!["Green".into()],
+                detail: "Green swatch\nFinish: gloss".into(),
             },
         ],
-        actions: vec![Action {
-            id: "accept".into(),
-            label: "Accept".into(),
-            enabled: true,
-            ..Action::default()
-        }],
         ..View::default()
     };
     let mut state = State::new(&view);
@@ -98,18 +92,25 @@ fn collection_renders_the_selected_rows_full_detail() {
     terminal
         .draw(|frame| geometry = draw_surface(frame, frame.area(), &view, &state))
         .expect("draw");
-    let screen = terminal
-        .backend()
-        .buffer()
-        .content
+    let buffer = terminal.backend().buffer();
+    let document = geometry.document.expect("selected row has a document pane");
+    let lines: Vec<_> = (document.top() + 1..document.bottom() - 1)
+        .map(|y| {
+            (document.left() + 1..document.right() - 1)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    let nonempty: Vec<_> = lines
         .iter()
-        .map(|cell| cell.symbol())
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(geometry.document.is_some());
-    assert!(screen.contains("forget Paris"));
-    assert!(screen.contains("user requested deletion"));
-    assert!(!screen.contains("favorite color is blue"));
+        .map(|line| line.trim_end())
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        nonempty,
+        ["Green swatch", "Finish: gloss"],
+        "selected detail must preserve its two document lines"
+    );
 }
 
 #[test]

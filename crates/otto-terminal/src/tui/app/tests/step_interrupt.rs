@@ -78,11 +78,10 @@ fn step_interrupted(queued_guidance: Option<u32>) -> WireEvent {
     }
 }
 
-fn assistant_texts(app: &App) -> Vec<String> {
+fn transcript_rows(app: &App) -> Vec<(Option<EntryKind>, &str)> {
     app.entries
         .iter()
-        .filter(|entry| entry.kind == Some(EntryKind::Assistant))
-        .map(|entry| entry.raw.clone())
+        .map(|entry| (entry.kind.clone(), entry.raw.as_str()))
         .collect()
 }
 
@@ -104,10 +103,17 @@ fn a_step_interrupt_closes_the_streaming_row_and_reports_one_message() {
     app.apply_event(&step_interrupted(Some(1)));
     app.apply_event(&delta("text_delta", "after guidance"));
 
-    assert_eq!(assistant_texts(&app), ["partial reply", "after guidance"]);
     assert_eq!(
-        system_texts(&app),
-        ["Step interrupted; delivering 1 queued message."]
+        transcript_rows(&app),
+        [
+            (Some(EntryKind::Assistant), "partial reply"),
+            (
+                Some(EntryKind::System),
+                "Step interrupted; delivering 1 queued message."
+            ),
+            (Some(EntryKind::Assistant), "after guidance"),
+        ],
+        "interrupt notice must separate the transcript rows"
     );
 }
 
@@ -118,13 +124,18 @@ fn a_step_interrupt_closes_the_reasoning_row() {
     app.apply_event(&step_interrupted(Some(1)));
     app.apply_event(&delta("reasoning_delta", "again"));
 
-    let reasoning: Vec<_> = app
-        .entries
-        .iter()
-        .filter(|entry| entry.kind == Some(EntryKind::Reasoning))
-        .map(|entry| entry.raw.clone())
-        .collect();
-    assert_eq!(reasoning, ["thinking", "again"]);
+    assert_eq!(
+        transcript_rows(&app),
+        [
+            (Some(EntryKind::Reasoning), "thinking"),
+            (
+                Some(EntryKind::System),
+                "Step interrupted; delivering 1 queued message."
+            ),
+            (Some(EntryKind::Reasoning), "again"),
+        ],
+        "interrupt notice must separate the transcript rows"
+    );
 }
 
 #[test]

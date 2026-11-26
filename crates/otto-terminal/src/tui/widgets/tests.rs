@@ -47,13 +47,19 @@ fn geometry_exposes_collection_detail_field_and_action_targets() {
         .collect::<Vec<_>>()
         .join("");
     assert!(screen.contains("Record"));
-    assert_eq!(
-        geometry
-            .fields
-            .iter()
-            .map(|(id, _)| id.as_str())
-            .collect::<Vec<_>>(),
-        ["name"]
+    let [(id, field)] = geometry.fields.as_slice() else {
+        panic!("expected one field target, got {:?}", geometry.fields);
+    };
+    assert_eq!(id, "name");
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (field.top()..field.bottom()).any(|y| {
+            let row: String = (field.left()..field.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.trim() == "Draft"
+        }),
+        "field target must visibly contain Draft"
     );
     assert_eq!(
         geometry

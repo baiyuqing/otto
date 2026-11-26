@@ -294,7 +294,13 @@ fn expanded_file_edits_show_colored_hunks() {
         true,
         80,
     );
-    assert!(rows(&write).iter().any(|line| line.contains("+x")));
+    assert!(
+        write
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| { span.content.as_ref() == "+x" && span.style.fg == Some(Color::Green) }),
+        "write addition must be green: {write:?}"
+    );
 }
 
 #[test]

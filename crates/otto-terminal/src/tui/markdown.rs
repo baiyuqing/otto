@@ -522,8 +522,14 @@ mod tests {
 
     #[test]
     fn inline_code_is_not_escaped_as_a_markdown_span_but_kept_literal() {
-        let text = render("run `rm -rf /` now");
-        assert!(flat_text(&text).contains("rm -rf /"));
+        let text = render("use `value * 2` here");
+        assert_eq!(flat_text(&text), "use value * 2 here");
+        assert!(
+            text.lines[0].spans.iter().any(|span| {
+                span.content == "value * 2" && span.style.fg == Some(Color::Yellow)
+            }),
+            "inline code must retain its distinct style"
+        );
     }
 
     #[test]

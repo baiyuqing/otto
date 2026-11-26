@@ -111,6 +111,12 @@ fn a_cjk_prompt_row_is_banded_to_the_last_column() {
     // Width 9 leaves a column no wide character fits into, which only
     // the padding can close.
     let rendered = entry_lines(&entry(EntryKind::User, "集群数量极多"), false, 9);
+    let visible = rows(&rendered);
+    assert_eq!(
+        visible.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
+        ["❯ 集群数", "  量极多"],
+        "the CJK prompt must render both rows"
+    );
     for line in &rendered {
         assert_eq!(row_text(line).width(), 9, "{:?}", row_text(line));
         for span in &line.spans {

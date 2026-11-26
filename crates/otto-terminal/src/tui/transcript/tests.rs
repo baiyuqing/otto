@@ -457,7 +457,13 @@ fn expanded_details_show_the_call_id_and_every_output_line() {
     let rendered = entry_lines(&tool_entry("bash", "{}", "l1\nl2\nl3\nl4"), true, 60);
     let rows = rows(&rendered);
     assert_eq!(rows[0], "⏺ bash (t1, provider: call-1)");
-    assert!(rows.iter().any(|row| row.ends_with("l4")), "{rows:?}");
+    assert_eq!(rows[1].trim(), "{}");
+    let output: Vec<_> = rows[2..].iter().map(|row| row.trim()).collect();
+    assert_eq!(
+        output,
+        ["⎿ l1", "l2", "l3", "l4"],
+        "expanded output must retain every line in order"
+    );
     assert!(
         !rows.iter().any(|row| row.contains("ctrl+o")),
         "expanded output is not counted: {rows:?}"

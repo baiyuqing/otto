@@ -83,6 +83,19 @@ fn help_prints_group_headings_in_order_with_blank_line_separators() {
         help.starts_with("Help\n/help  show commands\n\nSetup\n/init  "),
         "{help}"
     );
+    for heading in [
+        "Setup",
+        "During a task",
+        "Memory",
+        "Tasks",
+        "Sessions",
+        "Exit",
+    ] {
+        assert!(
+            help.contains(&format!("\n\n{heading}\n")),
+            "missing blank line before {heading}: {help}"
+        );
+    }
     let position = |name: &str| help.find(&format!("\n{name}  ")).unwrap();
     assert!(position("/init") < position("/permissions"));
     assert!(position("/permissions") < position("/memory"));

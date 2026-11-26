@@ -50,6 +50,10 @@ fn tokens_are_refused_at_exactly_the_limit_and_not_below() {
 fn a_response_without_usage_charges_nothing() {
     let budget = turn(policy(10, 0));
     budget.charge(None);
+    assert_eq!(budget.root().tokens_used(), 0);
+    budget.charge(usage(3, 4));
+    budget.charge(None);
+    assert_eq!(budget.root().tokens_used(), 7);
     assert_eq!(budget.admit_shared(), Ok(()));
 }
 

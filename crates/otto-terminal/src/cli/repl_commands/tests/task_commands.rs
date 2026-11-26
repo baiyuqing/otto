@@ -19,9 +19,15 @@ async fn the_task_commands_report_an_empty_registry_and_reject_bad_arguments() {
         "sub-agents must be wired"
     );
     assert_eq!(
-        stdout.matches("no tasks in this session").count(),
+        stdout
+            .lines()
+            .map(|line| line
+                .strip_prefix(crate::cli::repl::USER_MARK)
+                .unwrap_or(line))
+            .filter(|line| *line == "no tasks in this session")
+            .count(),
         2,
-        "the canonical command and compatibility alias must both list: {stdout}"
+        "exact empty-task lines for the command and alias: {stdout}"
     );
     assert!(
         stderr.contains("usage: /task [<id|name> | cancel <id|name>]"),

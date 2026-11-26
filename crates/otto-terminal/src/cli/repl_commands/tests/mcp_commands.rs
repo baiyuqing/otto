@@ -78,7 +78,10 @@ async fn mcp_with_malformed_arguments_prints_usage_on_stderr() {
 
     for input in ["/mcp bogus\n/exit\n", "/mcp login\n/exit\n"] {
         let (_, stderr) = session(input, &controller).await;
-        assert!(stderr.contains(MCP_USAGE), "{input:?} -> {stderr}");
+        assert_eq!(
+            stderr, "usage: /mcp | /mcp login <server>\n",
+            "exact MCP usage for {input:?}"
+        );
     }
 }
 

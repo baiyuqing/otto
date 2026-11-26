@@ -545,9 +545,12 @@ mod tests {
 
     #[test]
     fn a_link_shows_its_text_and_its_destination() {
-        let text = render("[docs](https://example.com/docs)");
+        let text = render("[Read the guide](https://example.com/docs)");
         let flat = flat_text(&text);
-        assert!(flat.contains("docs"));
+        assert!(
+            flat.contains("Read the guide"),
+            "link label must be visible"
+        );
         assert!(flat.contains("https://example.com/docs"));
     }
 

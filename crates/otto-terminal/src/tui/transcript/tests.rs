@@ -366,11 +366,16 @@ fn a_folded_tool_call_shows_at_most_three_result_lines() {
 
 #[test]
 fn a_folded_tool_call_cuts_a_long_result_line() {
-    let long = "x".repeat(200);
+    let long = format!("sample result: {}", "x".repeat(200));
     let mut call = tool_entry("bash", "", &long);
     call.tool_error = true;
     let rendered = entry_lines(&call, false, 200);
     let rows = rows(&rendered);
+    assert!(
+        rows[1].contains("sample result: "),
+        "preview must retain the beginning: {:?}",
+        rows[1]
+    );
     assert!(rows[1].chars().count() < 100, "{:?}", rows[1]);
     assert!(rows[1].ends_with('…'), "{:?}", rows[1]);
 }

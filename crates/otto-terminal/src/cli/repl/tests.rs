@@ -446,12 +446,45 @@ fn help_groups_and_command_order_follow_the_tui_catalog() {
             repl_order.push(name);
         }
     }
-    let tui_order = crate::tui::catalog_command_names();
-    let tui_order_of_repl: Vec<&str> = tui_order
-        .iter()
-        .copied()
-        .filter(|name| repl_order.contains(name))
+    // The REPL intentionally documents a subset of the TUI catalog. Keep
+    // that subset independent of HELP so a missing line cannot erase its
+    // own expectation.
+    let expected = [
+        "/help",
+        "/init",
+        "/login",
+        "/logout",
+        "/mcp",
+        "/skill",
+        "/model",
+        "/thinking",
+        "/compact",
+        "/permissions",
+        "/approve",
+        "/sandbox",
+        "/memory",
+        "/remember",
+        "/task",
+        "/agents",
+        "/timers",
+        "/new",
+        "/clear",
+        "/rename",
+        "/archive",
+        "/delete",
+        "/session",
+        "/exit",
+    ];
+    let tui_order_of_repl: Vec<&str> = crate::tui::catalog_command_names()
+        .into_iter()
+        .filter(|name| expected.contains(name))
         .collect();
+    assert_eq!(tui_order_of_repl.len(), expected.len());
     assert_eq!(repl_order, tui_order_of_repl);
-    assert!(repl_order.len() > 15, "{repl_order:?}");
+    assert!(
+        super::HELP
+            .lines()
+            .any(|line| line.starts_with("/mcp login ")),
+        "REPL help must document MCP login separately from the server list"
+    );
 }

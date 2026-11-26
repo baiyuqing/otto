@@ -145,6 +145,11 @@ fn a_reply_is_not_banded_or_padded() {
         false,
         40,
     );
+    assert_eq!(
+        rows(&rendered),
+        ["⏺ it guards the query"],
+        "reply text must remain visible"
+    );
     for line in &rendered {
         assert!(
             row_text(line).width() < 40,

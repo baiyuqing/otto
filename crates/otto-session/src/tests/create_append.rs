@@ -51,8 +51,11 @@ pub(super) const SESSION_FD_INHERIT_TEST_CHILD: &str = "OTTO_SESSION_FD_INHERIT_
 
 #[test]
 fn session_file_descriptors_are_not_inherited_by_spawned_children() {
-    if std::env::var_os(SESSION_FD_INHERIT_TEST_CHILD).is_some() {
-        std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Some(ready) = std::env::var_os(SESSION_FD_INHERIT_TEST_CHILD) {
+        fs::write(&ready, b"ready").expect("signal child ready");
+        std::io::stdin()
+            .read_line(&mut String::new())
+            .expect("wait for parent release");
         return;
     }
 
@@ -64,23 +67,37 @@ fn session_file_descriptors_are_not_inherited_by_spawned_children() {
     store.append_message(&user("hello")).expect("append");
     let path = store.path();
 
+    let ready = temp.join("child-ready");
+    let name = otto_faults::crash::name_of(&|| {});
     let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .args([
-            "--exact",
-            "tests::session_file_descriptors_are_not_inherited_by_spawned_children",
-            "--nocapture",
-        ])
-        .env(SESSION_FD_INHERIT_TEST_CHILD, "1")
-        .stdin(std::process::Stdio::null())
+        .args(["--exact", &name, "--nocapture"])
+        .env(SESSION_FD_INHERIT_TEST_CHILD, &ready)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn child");
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "child exited before executing the test"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child never signalled readiness"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     store.close().expect("close parent store");
 
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "child must still hold inherited descriptors"
+    );
     archive(&root, &workspace.to_string_lossy(), Path::new(&path))
         .expect("child must not inherit the session lock");
+    drop(child.stdin.take());
     assert!(child.wait().expect("wait child").success());
 }
 

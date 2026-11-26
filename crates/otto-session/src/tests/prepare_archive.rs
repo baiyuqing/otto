@@ -132,25 +132,36 @@ fn archive_rejects_a_session_held_by_another_process() {
             Path::new(&path),
         )
         .expect_err("another process holds the session");
-        assert!(error.to_string().contains("already open"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("already locked by another process"),
+            "{error}"
+        );
         return;
     }
 
     let temp = TempDir::new();
     let (root, workspace, paths) = seeded_workspace(&temp, 1);
     let (store, _) = Store::open(&paths[0]).expect("open active session");
-    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .args([
-            "--exact",
-            "tests::archive_rejects_a_session_held_by_another_process",
-            "--nocapture",
-        ])
+    let name = otto_faults::crash::name_of(&|| {});
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", &name, "--nocapture"])
         .env(ARCHIVE_LOCK_TEST_ROOT, &root)
         .env(ARCHIVE_LOCK_TEST_WORKSPACE, &workspace)
         .env(ARCHIVE_LOCK_TEST_PATH, &paths[0])
-        .status()
+        .output()
         .expect("run archive process");
-    assert!(status.success(), "archive moved an active session");
+    assert!(
+        child.status.success(),
+        "archive child failed: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed;"),
+        "child did not execute the lock test: {}",
+        String::from_utf8_lossy(&child.stdout)
+    );
     assert!(
         Path::new(&paths[0]).exists(),
         "active source must stay in place"

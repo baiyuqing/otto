@@ -585,17 +585,42 @@ mod tests {
 
     #[tokio::test]
     async fn a_reset_after_the_head_fails_the_body_read() {
-        let server = spawn_scripted(vec![Script::sse_cut_after(&["{}"], 0)]).await;
-        let error = get(&server.url).await.unwrap_err();
-        assert!(error.is_body() || error.is_decode(), "{error:?}");
+        let script = Script::new(vec![
+            Script::sse_head(),
+            Step::Stall(Some(Duration::from_millis(100))),
+            Step::Reset,
+        ]);
+        let bytes = read_until_reset(script).await;
+        assert!(bytes.starts_with(b"HTTP/1.1 200 X\r\n"));
+        assert!(bytes.ends_with(b"\r\n\r\n"));
     }
 
     #[tokio::test]
     async fn a_reset_is_not_a_clean_end_of_a_chunked_body() {
         // The chunked terminator is only written by `Close`; after a reset
         // the client must not see a complete body, even with data sent.
-        let server = spawn_scripted(vec![Script::sse_cut_after(&["{}"], 1)]).await;
-        assert!(get(&server.url).await.is_err());
+        let bytes = read_until_reset(Script::sse_cut_after(&["{}"], 1)).await;
+        assert!(find(&bytes, b"data: {}\n\n").is_some());
+        assert!(!bytes.ends_with(b"0\r\n\r\n"));
+    }
+
+    async fn read_until_reset(script: Script) -> Vec<u8> {
+        let server = spawn_scripted(vec![script]).await;
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        let error = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
+            .await
+            .expect("the scripted reset arrives")
+            .expect_err("RST, not ordinary EOF");
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        assert_eq!(server.count(), 1);
+        bytes
     }
 
     #[tokio::test]

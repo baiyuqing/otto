@@ -321,7 +321,8 @@ mod tests {
         assert_eq!(plan.check(Op::Sync, ""), Some(Fault::Hang));
         assert_eq!(plan.check(Op::Sync, ""), Some(Fault::Hang));
         assert_eq!(plan.check(Op::Write, ""), Some(Fault::Exit));
-        assert_eq!(plan.fired().len(), 3);
+        assert_eq!(plan.check(Op::Write, ""), Some(Fault::Exit));
+        assert_eq!(plan.fired().len(), 4);
         plan.assert_all_fired();
     }
 

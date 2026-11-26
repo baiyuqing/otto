@@ -118,6 +118,7 @@ async fn a_drawn_cjk_prompt_is_banded_too() {
 
     let buffer = drawn(&app, width, height);
     let row = banded_row(&buffer, width, height).expect("the prompt row is on screen");
+    let mut text = String::new();
     let mut x = SIDE_MARGIN;
     while x < width - SIDE_MARGIN {
         let cell = buffer.cell((x, row)).expect("cell in bounds");
@@ -126,6 +127,12 @@ async fn a_drawn_cjk_prompt_is_banded_too() {
             transcript::PROMPT_BACKGROUND,
             "column {x} breaks the band"
         );
+        text.push_str(cell.symbol());
         x += cell.symbol().width().max(1) as u16;
     }
+    assert_eq!(
+        text.trim_end(),
+        "❯ 集群数量极多",
+        "the banded row must retain the CJK glyphs"
+    );
 }

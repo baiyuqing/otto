@@ -218,8 +218,8 @@ fn observer_terminal_panes_collapse_by_default_and_manual_override_survives_refr
     assert!(geometry.iter().all(|(_, rect)| rect.bottom() <= 11));
     drop(geometry);
     assert!(
-        rendered.contains("succeeded") || rendered.contains("failed"),
-        "{rendered}"
+        rendered.contains("done · failed"),
+        "refreshed pane must show failed: {rendered}"
     );
 }
 

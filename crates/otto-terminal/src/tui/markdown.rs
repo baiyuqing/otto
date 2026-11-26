@@ -503,14 +503,21 @@ mod tests {
     #[test]
     fn emphasis_and_strong_and_strikethrough_set_modifiers() {
         let text = render("*em* **strong** ~~gone~~");
-        let modifiers: Vec<Modifier> = text.lines[0]
+        let styled: Vec<_> = text.lines[0]
             .spans
             .iter()
-            .map(|s| s.style.add_modifier)
+            .filter(|span| !span.content.trim().is_empty())
+            .map(|span| (span.content.as_ref(), span.style.add_modifier))
             .collect();
-        assert!(modifiers.iter().any(|m| m.contains(Modifier::ITALIC)));
-        assert!(modifiers.iter().any(|m| m.contains(Modifier::BOLD)));
-        assert!(modifiers.iter().any(|m| m.contains(Modifier::CROSSED_OUT)));
+        assert_eq!(
+            styled,
+            [
+                ("em", Modifier::ITALIC),
+                ("strong", Modifier::BOLD),
+                ("gone", Modifier::CROSSED_OUT),
+            ],
+            "styles must match their text"
+        );
     }
 
     #[test]

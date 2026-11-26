@@ -571,13 +571,21 @@ fn tasks_alias_dispatches_without_appearing_in_help() {
     );
     assert!(!help.contains("/tasks"), "{help}");
 
-    let Ok(Transition::Push(canonical)) = catalog.open("/task", &Info::default(), false) else {
-        panic!("/task should open the task-list presenter");
-    };
-    let Ok(Transition::Push(alias)) = catalog.open("/tasks", &Info::default(), false) else {
-        panic!("/tasks should remain a task-list alias");
-    };
-    assert_eq!(canonical.view().title, alias.view().title);
+    for line in ["/task", "/tasks"] {
+        let Ok(Transition::Push(mut presenter)) = catalog.open(line, &Info::default(), false)
+        else {
+            panic!("{line} should open the task-list presenter");
+        };
+        assert!(
+            matches!(
+                presenter.start(),
+                Some(BackendRequest::Management(
+                    otto::app::management::Request::Tasks
+                ))
+            ),
+            "{line} should request the task list"
+        );
+    }
 }
 
 #[test]

@@ -297,15 +297,27 @@ fn agent_collection_selection_tracks_the_row_id_after_refresh_reorders_rows() {
     }));
     let first_view = agents.view();
     let mut state = State::new(&first_view);
+    assert_ne!(first_view.rows[0].id, first_view.rows[1].id);
+    assert_eq!(
+        state.selected_row.as_deref(),
+        Some(first_view.rows[0].id.as_str())
+    );
     state.handle(&first_view, Intent::Move(1));
-    let selected = state.selected_row.clone();
+    let selected = first_view.rows[1].id.as_str();
+    assert_eq!(
+        state.selected_row.as_deref(),
+        Some(selected),
+        "moving down must select the second row"
+    );
 
     agents.receive(Reply::Agents(otto::subagent::record::ListResult {
         tasks: vec![task("parent", "two"), task("parent", "one")],
         ..Default::default()
     }));
-    state.reconcile(&agents.view());
-    assert_eq!(state.selected_row, selected);
+    let refreshed = agents.view();
+    assert_eq!(refreshed.rows[0].id, selected);
+    state.reconcile(&refreshed);
+    assert_eq!(state.selected_row.as_deref(), Some(selected));
 }
 
 #[test]

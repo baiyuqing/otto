@@ -93,12 +93,14 @@ fn interrupted_provider_output_is_marked_before_replacement_text() {
     ] {
         assert!(!render_event(&mut stdout, &mut stderr, &event));
     }
-    assert!(
-        stdout
-            .text()
-            .starts_with("partial\n[Previous response interrupted")
+    assert_eq!(
+        stdout.text(),
+        concat!(
+            "partial\n[Previous response interrupted; retrying this model step. ",
+            "Completed tools are preserved.]\nreplacement"
+        ),
+        "one notice must separate the partial and replacement text"
     );
-    assert!(stdout.text().ends_with("]\nreplacement"));
     assert!(stderr.text().contains("attempt 2/7"));
 }
 

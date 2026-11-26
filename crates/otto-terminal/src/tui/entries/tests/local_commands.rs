@@ -30,17 +30,31 @@ fn local_command_receipts_are_distinct_foldable_rows_with_collapsed_details() {
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[1].kind, Some(EntryKind::LocalCommand));
     assert_eq!(entries[1].id, "local-command-stable-invocation");
-    let folded = crate::tui::transcript::entry_lines(&entries[1], false, 120);
-    let folded = format!("{folded:?}");
+    let rendered = |details| {
+        crate::tui::transcript::entry_lines(&entries[1], details, 120)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let folded = rendered(false);
     assert!(folded.contains("›_"));
     assert!(folded.contains("full-memory-id"));
+    assert!(!folded.contains("id=full-memory-id"));
     assert!(!folded.contains("expand-only-output"));
-    let expanded = format!(
-        "{:?}",
-        crate::tui::transcript::entry_lines(&entries[1], true, 120)
-    );
+    let expanded = rendered(true);
     assert!(expanded.contains("expand-only-output"));
-    assert!(expanded.contains("Parameters:"));
+    assert!(
+        expanded
+            .lines()
+            .any(|line| line.trim() == "Parameters: id=full-memory-id"),
+        "expanded receipt must show the parameter value: {expanded}"
+    );
     project_local_commands(&mut entries, &[receipt]);
     assert_eq!(
         entries.len(),

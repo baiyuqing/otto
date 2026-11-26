@@ -100,6 +100,20 @@ fn provider_usage_updates_the_footer_during_a_turn() {
             ..Default::default()
         }
     );
+
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::render::draw(frame, &app))
+        .expect("draw footer");
+    let buffer = terminal.backend().buffer();
+    let footer: String = (0..buffer.area.width)
+        .map(|x| buffer[(x, buffer.area.height - 1)].symbol())
+        .collect();
+    assert!(
+        footer.contains(" | tokens 17/5 |") || footer.contains(" | tokens 17/5 ("),
+        "footer must show input/output totals in order: {footer}"
+    );
 }
 
 #[test]

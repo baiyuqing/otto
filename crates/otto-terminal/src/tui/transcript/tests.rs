@@ -405,7 +405,16 @@ fn a_failed_tool_call_shows_its_result_in_red() {
     let mut call = tool_entry("bash", "", "boom");
     call.tool_error = true;
     let rendered = entry_lines(&call, false, 60);
-    assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Red));
+    let result = &rendered[1];
+    assert_eq!(row_text(result), "  ⎿ error · boom");
+    assert_eq!(result.spans[0].style.fg, Some(Color::Red));
+    assert!(
+        result
+            .spans
+            .iter()
+            .any(|span| { span.content.contains("boom") && span.style.fg == Some(Color::Red) }),
+        "the failure text must be red: {result:?}"
+    );
 }
 
 #[test]

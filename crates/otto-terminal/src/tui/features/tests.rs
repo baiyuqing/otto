@@ -366,13 +366,17 @@ fn auto_is_a_hidden_alias_of_permissions() {
             .any(|entry| entry.name == "/permissions")
     );
     for line in ["/auto yolo", "/permissions yolo"] {
-        match catalog.open(line, &Info::default(), false).unwrap() {
-            Transition::Request(BackendRequest::Command(Command::Permissions(args))) => {
-                assert_eq!(args, "yolo")
-            }
-            Transition::Push(_) => {}
-            _ => panic!("{line}"),
-        }
+        let Transition::Push(mut presenter) = catalog.open(line, &Info::default(), false).unwrap()
+        else {
+            panic!("{line} should open a permissions request panel");
+        };
+        assert!(
+            matches!(
+                presenter.start(),
+                Some(BackendRequest::Command(Command::Permissions(args))) if args == "yolo"
+            ),
+            "{line} should produce the permissions request with its original argument"
+        );
     }
     assert!(
         catalog

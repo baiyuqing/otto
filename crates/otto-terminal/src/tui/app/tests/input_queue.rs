@@ -66,6 +66,12 @@ fn user_message_echo_does_not_duplicate_prompt_history() {
     });
     app.composer.edit(Edit::PreviousHistory);
     assert_eq!(app.composer.input.iter().collect::<String>(), line);
+    app.composer.edit(Edit::PreviousHistory);
+    assert_eq!(
+        app.composer.input.iter().collect::<String>(),
+        "hello",
+        "queued echo must not add a second history entry"
+    );
 }
 
 #[test]

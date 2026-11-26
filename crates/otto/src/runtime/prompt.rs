@@ -494,10 +494,12 @@ pub(crate) fn system_prompt_for(
             contribute to one answer, combine them in a shell pipeline or small Bash or Python script. \
             Filter, join, or aggregate locally, even when each lookup is small. Emit only the requested result \
             and the evidence needed to check it, such as a file and line or a failing assertion. \
+            After a fix, run the smallest test that reproduces the failure, then run the full required gate. \
             Use quiet test output, preserve the runner's exit status through pipelines, and verify the expected tests \
             or stages completed. Report failed tests and their relevant diagnostics. On success, give \
             the verified outcome. An empty error search cannot establish success. Report incomplete runs and parsing failures. \
             Bash returns execution metadata and paths to temporary redacted stdout/stderr logs. \
+            Set return_stdout when a locally filtered answer fits 1 KiB and you need it for the next decision. \
             Analyze large logs locally instead of printing them back. Scripts must remove their own \
             temporary logs on success or failure. Runtime-generated logs are automatically removed \
             when the turn and its outstanding children finish, including failure or cancellation. \

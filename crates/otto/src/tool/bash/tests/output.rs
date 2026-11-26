@@ -368,3 +368,48 @@ async fn short_output_is_available_on_demand_and_absent_from_the_bash_model_resu
     drop(lease);
     assert!(!workspace.root().join(path).exists());
 }
+
+#[tokio::test]
+async fn return_stdout_sends_only_complete_small_redacted_stdout_on_the_next_step() {
+    use otto_core::tool::ToolContentScope;
+    let (_dir, workspace) = temp_workspace();
+    let args = raw(r#"{"command":"report","return_stdout":true}"#);
+    for (body, configured_limit, inline) in [
+        ("é".repeat(512), 4096, true),
+        ("x".repeat(1025), 4096, false),
+        ("x".repeat(10), 9, false),
+        (String::new(), 4096, false),
+        ("failed case: fixture-sensitive".into(), 4096, true),
+    ] {
+        let executor =
+            FakeExecutor::chunks(&[&body], &["verbose diagnostic"]).with_status(ExitStatus {
+                code: 7,
+                ..ExitStatus::default()
+            });
+        let tool = bash(
+            &workspace,
+            Arc::new(executor),
+            &[],
+            configured_limit,
+            &["fixture-sensitive"],
+        );
+        let result = tool.execute(&args, &CancellationToken::new()).await;
+        let summary = result.persisted_text();
+        assert!(summary.contains("exit_code: 7") && summary.contains("stderr_log: "));
+        assert!(!summary.contains("\nstdout:\n") && !summary.contains("verbose diagnostic"));
+        if inline {
+            assert_eq!(result.content_scope, ToolContentScope::NextStep);
+            let (metadata, stdout) = result.content.split_once("\nstdout:\n").unwrap();
+            assert_eq!(metadata, summary);
+            assert_eq!(
+                stdout,
+                body.replace("fixture-sensitive", &tool.redaction_marker)
+            );
+        } else {
+            assert_eq!(result.content_scope, ToolContentScope::Frontend);
+            if !body.is_empty() {
+                assert!(summary.contains("stdout_log: "));
+            }
+        }
+    }
+}

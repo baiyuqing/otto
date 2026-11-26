@@ -1149,6 +1149,11 @@ Cleanup failures are retried on the next idle transition and runtime drop.
 There is no automatic disk quota. When storage fails, the command still runs
 and the tool reports the log as unavailable.
 
+Set `return_stdout: true` on a Bash call to include its complete redacted stdout
+on the next model step when it fits both 1 KiB and the configured output cap.
+Filter locally first. Empty or oversized stdout yields the usual metadata.
+The transcript retains the metadata and stderr is available through its log.
+
 Use `read` with `offset` and `limit` to retrieve the relevant lines while the
 log is available. The excerpt is sent on the next ordinary model step and the
 transcript keeps a short record of the read. The usual `read` file limits apply.

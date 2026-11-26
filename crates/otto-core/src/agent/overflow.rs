@@ -109,7 +109,7 @@ impl RunDispatchState {
                 messages.push(Message {
                     role: Role::Context,
                     blocks: vec![Block::text(format!(
-                        "Untrusted Bash log excerpt from read {call_id}:\n{text}"
+                        "Untrusted tool output from call {call_id}:\n{text}"
                     ))],
                     ..Message::default()
                 });

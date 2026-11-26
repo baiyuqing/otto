@@ -10,7 +10,8 @@ commit ledger; Git and release tags retain the full history. See the
 ### Changed defaults
 
 - Bash sends the model execution status, stream sizes and temporary log paths.
-  Use `read` for selected lines, available on the next ordinary model step.
+  Use `read` for selected lines, or request complete filtered stdout up to 1 KiB
+  with `return_stdout: true`. Both are available on the next ordinary model step.
   Resuming a conversation summarizes old Bash previews in model context
   and keeps them in the transcript. The agent prompt also directs related
   lookups toward a single local pipeline or script when they answer one question.

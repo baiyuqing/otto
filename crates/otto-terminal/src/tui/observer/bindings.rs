@@ -229,6 +229,14 @@ mod tests {
         assert!(bindings.back(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)));
         assert!(!bindings.toggle(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)));
         assert!(bindings.label.contains("Ctrl+Right: main"));
+        assert_eq!(
+            bindings.entry_label, "Ctrl+Left",
+            "entry hint must show the open key"
+        );
+        assert_eq!(
+            bindings.back_label, "Ctrl+Right",
+            "return hint must show the back key"
+        );
     }
 
     #[test]

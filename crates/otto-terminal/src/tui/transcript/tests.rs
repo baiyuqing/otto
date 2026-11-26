@@ -474,7 +474,11 @@ fn an_error_entry_is_red() {
 #[test]
 fn a_compaction_entry_uses_the_system_marker() {
     let rendered = entry_lines(&entry(EntryKind::Compaction, "checkpoint"), false, 40);
-    assert!(rows(&rendered)[0].starts_with(SYSTEM_MARK));
+    assert_eq!(
+        rows(&rendered),
+        [format!("{SYSTEM_MARK}checkpoint")],
+        "compaction text must follow its system marker"
+    );
 }
 
 #[test]

@@ -64,7 +64,17 @@ async fn agents_lists_recorded_tasks_across_sessions_and_reports_when_empty() {
         controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store)).await;
 
     let (stdout, _) = session("/agents\n/exit\n", &controller).await;
-    assert!(stdout.contains("no recorded tasks"), "{stdout}");
+    assert_eq!(
+        stdout
+            .lines()
+            .map(|line| line
+                .strip_prefix(crate::cli::repl::USER_MARK)
+                .unwrap_or(line))
+            .filter(|line| *line == "no recorded tasks")
+            .count(),
+        1,
+        "exact empty agents line: {stdout}"
+    );
 
     let context = record::TaskContext {
         parent_session: "other-session".into(),
@@ -249,6 +259,19 @@ async fn the_task_list_prints_one_line_per_task() {
 
     let (stdout, stderr) = session("/tasks\n/exit\n", &controller).await;
 
+    for id in [&reviewed.id, &aborted.id] {
+        assert_eq!(
+            stdout
+                .lines()
+                .map(|line| line
+                    .strip_prefix(crate::cli::repl::USER_MARK)
+                    .unwrap_or(line))
+                .filter(|line| line.split_whitespace().next() == Some(id.as_str()))
+                .count(),
+            1,
+            "one visible row per task ({id}): {stdout}"
+        );
+    }
     for want in [
         "succeeded",
         "42s",

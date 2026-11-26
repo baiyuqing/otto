@@ -256,8 +256,7 @@ fn memory_review_exposes_full_candidate_information_as_selected_row_detail() {
 
     let view = reviews.view();
     let detail = &view.rows[0].detail;
-    assert!(detail.contains("favorite color is blue"));
-    assert!(detail.contains("Reason: stated directly"));
+    assert_eq!(detail, "favorite color is blue\nReason: stated directly");
 }
 
 #[test]

@@ -64,9 +64,24 @@ fn periodic_refresh_is_bounded_and_projects_external_full_text_in_both_modes() {
             result: Ok(Reply::Steering(vec![steer(1, text, Status::Queued)])),
         });
         assert_eq!(app.pending_steers[0].text, text);
-        let rendered = screen(&app);
-        assert!(rendered.contains("external first line"));
-        assert!(rendered.contains("external complete second line"));
+        let rendered = visible_rows(&app);
+        let body: Vec<_> = rendered
+            .iter()
+            .map(|row| row.trim())
+            .filter(|row| !row.starts_with("◆ QUEUED FOR CURRENT TURN"))
+            .filter(|row| {
+                row.contains("external first line") || row.contains("external complete second line")
+            })
+            .map(|row| row.strip_prefix(crate::cli::repl::USER_MARK).unwrap_or(row))
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "[Queued for current turn] external first line",
+                "external complete second line"
+            ],
+            "exact ordered multiline body"
+        );
         app.poll_steering();
         assert_eq!(app.requests.len(), 2);
     }
@@ -258,7 +273,7 @@ fn same_session_history_reload_preserves_scroll_and_replaces_pending_body() {
     assert!(app.new_messages);
     app.apply_steering(vec![steer(1, "loaded delivery", Status::Delivered)]);
     assert!(app.pending_steers.is_empty());
-    assert_eq!(screen(&app).matches("loaded delivery").count(), 1);
+    assert_visible_body(&app, "loaded delivery", &["loaded delivery"]);
 }
 
 #[test]

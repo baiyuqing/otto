@@ -250,9 +250,14 @@ async fn end_of_input_ends_the_loop() {
     let sessions = tempfile::tempdir().expect("sessions");
     let controller = controller(workspace.path(), sessions.path()).await;
 
-    let (_, _, result) = session("", &controller).await;
+    let (stdout, _, result) = session("", &controller).await;
 
     assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        stdout.matches(USER_MARK).count(),
+        1,
+        "EOF must not print another input prompt"
+    );
 }
 
 #[tokio::test]

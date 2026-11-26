@@ -112,6 +112,18 @@ fn provider_usage_updates_the_footer_during_a_turn() {
 fn a_task_notification_decides_whether_the_cache_share_is_shown() {
     let (mut app, _) = app();
     app.cache_breakdown_complete = Some(true);
+    // The snapshot includes the task's tokens but only the known cache counts.
+    app.usage = Usage {
+        input_tokens: 80,
+        output_tokens: 10,
+        cached_input_tokens: 30,
+        ..Default::default()
+    };
+    let footer = rendered_footer(&app);
+    assert!(
+        footer.contains(" | tokens 80/10 (cached 30, 37.5%)"),
+        "{footer}"
+    );
 
     // A finished sub-agent that never reported the cached breakdown: the
     // footer must stop presenting the share as measured, because the
@@ -130,6 +142,11 @@ fn a_task_notification_decides_whether_the_cache_share_is_shown() {
         ..Default::default()
     });
     assert_eq!(app.cache_breakdown_complete, Some(false));
+    let footer = rendered_footer(&app);
+    assert!(
+        footer.contains(" | tokens 80/10 |") && !footer.contains("(cached "),
+        "incomplete cache stats must render only token totals: {footer}"
+    );
 }
 
 #[test]

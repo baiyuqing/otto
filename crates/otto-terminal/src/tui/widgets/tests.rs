@@ -343,5 +343,17 @@ fn compact_terminal_keeps_action_control_inside_frame() {
         .draw(|frame| geometry = draw_surface(frame, frame.area(), &view, &state))
         .expect("draw");
     assert_eq!(geometry.actions.len(), 1);
-    assert!(geometry.actions[0].1.bottom() <= 8);
+    let rect = geometry.actions[0].1;
+    assert!(rect.bottom() <= 8);
+    assert!(rect.right() <= 40);
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (rect.top()..rect.bottom()).any(|y| {
+            let row: String = (rect.left()..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.contains("Save")
+        }),
+        "Save must be visible inside its action target"
+    );
 }

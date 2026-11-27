@@ -29,6 +29,7 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     crate::tool::models::LIST_MODELS_RETRY,
     crate::runtime::verification::SUBMIT_VERIFICATION_RETRY,
     crate::tool::plan::UPDATE_PLAN_RETRY,
+    crate::tool::goal::MANAGE_GOAL_RETRY,
     crate::schedule::remind::REMIND_RETRY,
     crate::schedule::remind::REMIND_STATUS_RETRY,
     crate::schedule::remind::REMIND_CANCEL_RETRY,

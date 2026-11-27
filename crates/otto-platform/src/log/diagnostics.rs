@@ -359,6 +359,17 @@ impl Diagnostics for Scope {
     fn turn_budget_wake_skipped(&self, budget_id: &str, pending_notifications: usize) {
         self.record_budget_wake_skipped(budget_id, pending_notifications);
     }
+    fn goal_stop_persist_failed(&self) {
+        let mut record = json!({
+            "schema_version": 1,
+            "event": "goal_stop_persist_failed",
+            "session_id": self.session,
+        });
+        if !self.task.is_empty() {
+            record["task_id"] = json!(self.task);
+        }
+        self.log.write(record);
+    }
     fn for_task(&self, task: &str) -> Option<Arc<dyn Diagnostics>> {
         Some(Arc::new(Self {
             stops: self.stops.clone(),

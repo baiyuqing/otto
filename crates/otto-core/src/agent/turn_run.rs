@@ -355,13 +355,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 holder,
             )
             .await;
-        let result = match result {
-            Err(error) => match self.record_goal_stop(&error).await {
-                Ok(()) => Err(error),
-                Err(source) => Err(self.fail(emit, source)),
-            },
-            Ok(()) => Ok(()),
-        };
+        if let Err(error) = &result
+            && self
+                .record_goal_stop(error, control.stop_reason())
+                .await
+                .is_err()
+            && let Some(diagnostics) = self.diagnostics()
+        {
+            diagnostics.goal_stop_persist_failed();
+        }
         self.end_turn(turn_id, &result, control).await;
         diagnostic.finish(crate::diagnostics::Finish {
             status: if result.is_ok() { "ok" } else { "error" },
@@ -644,7 +646,6 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             if let Err(exceeded) = self.admit_step() {
                 return Err(self.stop_budget(emit, exceeded));
             }
-            state.goal_waiting_children.clear();
             state.yield_after_batch = false;
             state.batch_has_errors = false;
             let step = StepControl::new(control, holder.clone());
@@ -654,7 +655,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .await;
             steering.disarm();
             let response = match provider_step {
-                Ok(response) => response,
+                Ok(response) => {
+                    state.goal_correction_pending = false;
+                    response
+                }
                 Err(AgentError::Provider(ProviderError::Cancelled)) if step.interrupted() => {
                     // Only the step token is cancelled: a step interrupt stopped
                     // the provider call or an automatic compaction around it,
@@ -710,12 +714,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             // delivery for the terminal event of the single active call.
             let mut replan = false;
             for block in tool_calls {
+                let previous_children = self.goal_children_before(&block.tool_name);
                 steering.arm(step.cancellation_token());
                 let batch = self
                     .run_tool_call(emit, &mut state, &step, &block, None, replan)
                     .await;
                 steering.disarm();
                 let batch = batch?;
+                if let Some(before) = previous_children {
+                    self.link_goal_children(before)
+                        .await
+                        .map_err(|error| self.fail(emit, error))?;
+                }
                 replan |= batch == crate::approval::BatchControl::Replan;
             }
             // The whole batch ran before the guard is read, so a stopped turn

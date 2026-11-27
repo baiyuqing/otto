@@ -588,7 +588,21 @@ impl Builder {
             #[cfg(any(test, feature = "test-support"))]
             ProviderClient::Scripted(_) => None,
         };
+        let goal_children = subagents.as_ref().map(|runner| {
+            let tasks = Arc::clone(runner.tasks());
+            Arc::new(move || {
+                tasks
+                    .list()
+                    .into_iter()
+                    .map(|task| {
+                        let finalised = task.is_final();
+                        (task.id, finalised)
+                    })
+                    .collect()
+            }) as Arc<dyn Fn() -> Vec<(String, bool)> + Send + Sync>
+        });
         let options = Options {
+            goal_children,
             diagnostics: self.logger.diagnostic_scope(
                 &session.header().id,
                 "",

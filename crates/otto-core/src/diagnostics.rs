@@ -126,6 +126,8 @@ pub trait Diagnostics: Send + Sync {
     /// tokens or no active time left. Only the root's id and the number of queued notifications
     /// are passed; notification text never is.
     fn turn_budget_wake_skipped(&self, _budget_id: &str, _pending_notifications: usize) {}
+    /// A secondary goal-state write failed while settling a failed turn.
+    fn goal_stop_persist_failed(&self) {}
 }
 
 /// All arguments are typed metadata. HTTP adapters may report headers and byte

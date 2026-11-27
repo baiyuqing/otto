@@ -10,7 +10,10 @@ use serde::Deserialize;
 use serde_json::{json, value::RawValue};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, definition, error_result, preflight_error, text_result};
+use super::{Tool, definition, empty_as_none, error_result, preflight_error, text_result};
+
+pub(crate) const MANAGE_GOAL_RETRY: (&str, otto_core::model::RetrySafety) =
+    ("manage_goal", otto_core::model::RetrySafety::NonIdempotent);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,8 +21,10 @@ struct Args {
     action: String,
     revision: Option<u64>,
     objective: Option<String>,
+    #[serde(default, deserialize_with = "empty_as_none")]
     criteria: Option<Vec<String>>,
     note: Option<String>,
+    #[serde(default, deserialize_with = "empty_as_none")]
     evidence: Option<Vec<String>>,
     user_message_id: Option<String>,
     user_quote: Option<String>,
@@ -65,11 +70,11 @@ impl ManageGoal {
                 });
         }
         if let Some(id) = reference.strip_prefix("user:") {
-            return self
-                .session
-                .messages()
-                .iter()
-                .any(|m| m.role == Role::User && m.id == id && !m.text().trim().is_empty());
+            return self.session.messages().iter().any(|m| {
+                m.role == Role::User
+                    && (m.id == id || m.input_id == id)
+                    && !m.text().trim().is_empty()
+            });
         }
         false
     }
@@ -77,6 +82,9 @@ impl ManageGoal {
 
 #[async_trait::async_trait]
 impl Tool for ManageGoal {
+    fn retry_safety(&self) -> otto_core::model::RetrySafety {
+        MANAGE_GOAL_RETRY.1
+    }
     fn definition(&self) -> ToolDefinition {
         definition(
             "manage_goal",
@@ -248,6 +256,9 @@ impl Tool for ManageGoal {
                                 | Execution::AwaitingUser
                                 | Execution::Blocked
                                 | Execution::Interrupted
+                                | Execution::BudgetExhausted
+                                | Execution::RetryExhausted
+                                | Execution::WaitingChildren
                         )
                         && authorized =>
                 {
@@ -291,6 +302,73 @@ impl Tool for ManageGoal {
 mod tests {
     use super::*;
     use otto_core::session::MemorySession;
+
+    #[tokio::test]
+    async fn resume_waiting_children_requires_authorized_user_reference_and_clears_wait() {
+        let session = Arc::new(MemorySession::new());
+        let mut goal = Goal::draft("Verify export".into());
+        goal.criteria = vec!["Export tests pass".into()];
+        goal.status = Status::Open;
+        goal.execution = Execution::WaitingChildren;
+        goal.waiting_children = vec!["task-1".into()];
+        assert!(session.compare_and_set_goal(None, &goal).await.unwrap());
+        let user = otto_core::model::Message {
+            id: "user-1".into(),
+            role: Role::User,
+            blocks: vec![otto_core::model::Block::text(
+                "Please resume the export goal",
+            )],
+            ..Default::default()
+        };
+        session.append(user).await.unwrap();
+        let tool = ManageGoal::new(session.clone(), &[]);
+        let cancel = CancellationToken::new();
+        let args = RawValue::from_string(
+            json!({
+                "action":"resume", "revision":1,
+                "user_message_id":"user-1", "user_quote":"resume the export goal"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(!tool.execute(&args, &cancel).await.is_error);
+        let resumed = session.goal().unwrap();
+        assert_eq!(resumed.execution, Execution::Ready);
+        assert!(resumed.waiting_children.is_empty());
+        assert_eq!(resumed.revision, 2);
+    }
+
+    #[tokio::test]
+    async fn activation_keeps_draft_criteria_and_achievement_accepts_input_id() {
+        let session = Arc::new(MemorySession::new());
+        let mut draft = Goal::draft("Verify export".into());
+        draft.criteria.push("Owner verifies export".into());
+        assert!(session.compare_and_set_goal(None, &draft).await.unwrap());
+        session
+            .append(otto_core::model::Message {
+                id: "internal-message".into(),
+                input_id: "visible-input".into(),
+                role: Role::User,
+                blocks: vec![otto_core::model::Block::text(
+                    "Activate the goal; I verified the export",
+                )],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let tool = ManageGoal::new(session.clone(), &[]);
+        for request in [
+            json!({"action":"activate","revision":1,"criteria":[],"user_message_id":"visible-input","user_quote":"Activate the goal"}),
+            json!({"action":"achieved","revision":2,"evidence":["user:visible-input"]}),
+        ] {
+            let args = RawValue::from_string(request.to_string()).unwrap();
+            let result = tool.execute(&args, &Default::default()).await;
+            assert!(!result.is_error, "{}", result.content);
+        }
+        let goal = session.goal().unwrap();
+        assert_eq!(goal.criteria, draft.criteria);
+        assert_eq!(goal.status, Status::Achieved);
+    }
 
     #[tokio::test]
     async fn goal_retry_limit_stops_new_attempts_without_failing_the_goal() {

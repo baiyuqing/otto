@@ -43,6 +43,8 @@ pub struct Goal {
     pub evidence: Vec<String>,
     #[serde(default)]
     pub waiting_children: Vec<String>,
+    #[serde(default)]
+    pub child_ids: Vec<String>,
 }
 
 impl Goal {
@@ -58,6 +60,7 @@ impl Goal {
             note: String::new(),
             evidence: Vec::new(),
             waiting_children: Vec::new(),
+            child_ids: Vec::new(),
         }
     }
 
@@ -74,6 +77,7 @@ impl Goal {
             && self
                 .waiting_children
                 .iter()
+                .chain(&self.child_ids)
                 .all(|id| !id.is_empty() && id.len() <= 128)
             && self.retries <= self.max_retries
             && match self.status {

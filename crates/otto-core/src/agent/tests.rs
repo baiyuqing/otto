@@ -429,6 +429,7 @@ async fn goal_final_without_disposition_gets_one_correction_and_stays_open() {
 
     let provider = ScriptedProvider::new(vec![
         (Vec::new(), assistant_text()),
+        (Vec::new(), assistant_tool_call()),
         (Vec::new(), assistant_text()),
     ]);
     let session = MemorySession::new();
@@ -447,7 +448,19 @@ async fn goal_final_without_disposition_gets_one_correction_and_stays_open() {
             .to_string()
             .contains("Goal remains open")
     );
-    assert_eq!(agent.provider().requests.lock().unwrap().len(), 2);
+    let requests = agent.provider().requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].system_prompt, requests[1].system_prompt);
+    assert_eq!(requests[1].system_prompt, requests[2].system_prompt);
+    let correction = requests[1].messages.last().unwrap();
+    assert_eq!(correction.role, Role::Context);
+    assert!(correction.text().contains("previous final"));
+    assert!(
+        !requests[2]
+            .messages
+            .iter()
+            .any(|m| m.text().contains("previous final"))
+    );
     let goal = agent.session().goal().expect("saved goal");
     assert_eq!(goal.status, Status::Open);
     assert_eq!(goal.execution, Execution::Interrupted);
@@ -461,6 +474,7 @@ async fn paused_goal_records_late_child_result_without_calling_provider() {
     let mut goal = Goal::draft("Verify the export".into());
     goal.status = Status::Open;
     goal.execution = Execution::Paused;
+    goal.child_ids = vec!["t1".into()];
     goal.criteria = vec!["Export tests pass".into()];
     assert!(session.compare_and_set_goal(None, &goal).await.unwrap());
     let inbox = Arc::new(super::inbox::Inbox::new(None));
@@ -471,9 +485,9 @@ async fn paused_goal_records_late_child_result_without_calling_provider() {
         ..Default::default()
     });
     let mut options = test_options();
-    options.mailbox = inbox;
+    options.mailbox = inbox.clone();
     let agent = Agent::new(
-        ScriptedProvider::new(vec![]),
+        ScriptedProvider::new(vec![(Vec::new(), assistant_text())]),
         EchoExecutor,
         session,
         options,
@@ -491,7 +505,44 @@ async fn paused_goal_records_late_child_result_without_calling_provider() {
             .iter()
             .any(|message| message.text().contains("Late result"))
     );
+    inbox.push(super::inbox::Notification {
+        task_id: "unrelated".into(),
+        kind: Some(super::inbox::NotificationKind::TaskFinished),
+        ..Default::default()
+    });
+    agent
+        .run("", &mut |_| {}, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(agent.provider().requests.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn goal_wait_reconciles_missing_child_without_a_notification() {
+    use crate::goal::{Execution, Goal, Status};
+
+    let session = MemorySession::new();
+    let mut goal = Goal::draft("Verify the export".into());
+    goal.status = Status::Open;
+    goal.execution = Execution::WaitingChildren;
+    goal.criteria = vec!["Export tests pass".into()];
+    goal.waiting_children = vec!["removed-child".into()];
+    assert!(session.compare_and_set_goal(None, &goal).await.unwrap());
+    let mut options = test_options();
+    options.goal_children = Some(Arc::new(|| vec![("unrelated".into(), false)]));
+    let agent = Agent::new(
+        ScriptedProvider::new(vec![]),
+        EchoExecutor,
+        session,
+        options,
+    );
+    agent.wake_waiting_goal().await.unwrap();
+    let resumed = agent.session().goal().unwrap();
+    assert_eq!(resumed.execution, Execution::Ready);
+    assert!(resumed.waiting_children.is_empty());
+}
+
+mod goal_stops;
 
 #[tokio::test]
 async fn image_turn_persists_and_sends_ordered_attachments() {

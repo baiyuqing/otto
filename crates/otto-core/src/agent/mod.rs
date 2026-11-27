@@ -152,6 +152,8 @@ pub struct Options {
     /// The running Otto package version, recorded with the tool set. Empty
     /// when unknown.
     pub version: String,
+    /// Authoritative child registry snapshot: (task ID, is final).
+    pub goal_children: Option<Arc<dyn Fn() -> Vec<(String, bool)> + Send + Sync>>,
 }
 
 /// The default clock returns the zero time and the default identifier
@@ -186,6 +188,7 @@ impl Default for Options {
             mailbox: Arc::new(InMemoryMailbox::default()),
             steering: Arc::new(steering::Steering::default()),
             version: String::new(),
+            goal_children: None,
         }
     }
 }

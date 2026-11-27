@@ -415,14 +415,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             );
         }
         let tools = self.tools.definitions();
+        let goals_enabled = tools.iter().any(|tool| tool.name == "manage_goal");
+        if let Some(context) = self.goal_context(state.goal_correction_pending, goals_enabled) {
+            messages.push(context);
+        }
         let request = Request {
             model: self.options.model.clone(),
             system_prompt: append_system_context(
                 &append_system_context(&self.options.system_prompt, system_context),
-                &self.goal_context(
-                    state.goal_completion_requested,
-                    tools.iter().any(|tool| tool.name == "manage_goal"),
-                ),
+                Self::goal_policy(goals_enabled),
             ),
             thinking: self.options.thinking.clone(),
             messages,

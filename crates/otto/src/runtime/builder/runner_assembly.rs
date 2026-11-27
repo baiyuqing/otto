@@ -599,7 +599,7 @@ impl Builder {
                         (task.id, finalised)
                     })
                     .collect()
-            }) as Arc<dyn Fn() -> Vec<(String, bool)> + Send + Sync>
+            }) as otto_core::agent::GoalChildRegistry
         });
         let options = Options {
             goal_children,

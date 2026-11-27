@@ -100,6 +100,9 @@ use overflow::{
 use progress::{ProgressGuard, ProgressPolicy};
 use redactor::Redactor;
 
+/// Snapshot of the child registry as `(task ID, is final)` pairs.
+pub type GoalChildRegistry = Arc<dyn Fn() -> Vec<(String, bool)> + Send + Sync>;
+
 /// Turn settings and the two injected capabilities the core cannot provide
 /// itself: the clock and the identifier generator. Injecting them keeps
 /// `otto-core` free of clock and randomness access.
@@ -153,7 +156,7 @@ pub struct Options {
     /// when unknown.
     pub version: String,
     /// Authoritative child registry snapshot: (task ID, is final).
-    pub goal_children: Option<Arc<dyn Fn() -> Vec<(String, bool)> + Send + Sync>>,
+    pub goal_children: Option<GoalChildRegistry>,
 }
 
 /// The default clock returns the zero time and the default identifier

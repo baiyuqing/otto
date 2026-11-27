@@ -387,6 +387,10 @@ impl Builder {
                 Arc::new(session.clone()),
                 &redaction_values,
             )));
+            tools.push(Box::new(crate::tool::goal::ManageGoal::new(
+                Arc::new(session.clone()),
+                &redaction_values,
+            )));
             if include_parent_tools {
                 let controller = Box::pin(crate::runtime::workflow::shared_controller(
                     self, runtime, warnings,
@@ -584,7 +588,21 @@ impl Builder {
             #[cfg(any(test, feature = "test-support"))]
             ProviderClient::Scripted(_) => None,
         };
+        let goal_children = subagents.as_ref().map(|runner| {
+            let tasks = Arc::clone(runner.tasks());
+            Arc::new(move || {
+                tasks
+                    .list()
+                    .into_iter()
+                    .map(|task| {
+                        let finalised = task.is_final();
+                        (task.id, finalised)
+                    })
+                    .collect()
+            }) as otto_core::agent::GoalChildRegistry
+        });
         let options = Options {
+            goal_children,
             diagnostics: self.logger.diagnostic_scope(
                 &session.header().id,
                 "",

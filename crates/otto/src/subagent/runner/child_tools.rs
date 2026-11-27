@@ -90,6 +90,18 @@ impl Session for SharedTranscript {
         self.0.interrupted_turn()
     }
 
+    fn goal(&self) -> Option<otto_core::goal::Goal> {
+        self.0.goal()
+    }
+
+    async fn compare_and_set_goal(
+        &self,
+        expected: Option<&otto_core::goal::Goal>,
+        goal: &otto_core::goal::Goal,
+    ) -> Result<bool, otto_core::session::SessionError> {
+        self.0.compare_and_set_goal(expected, goal).await
+    }
+
     fn plan(&self) -> Vec<otto_core::session::PlanStep> {
         self.0.plan()
     }

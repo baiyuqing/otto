@@ -351,6 +351,33 @@ Telegram supports this with Otto; other ACP agents keep the ordinary
 queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
 
+### Parent goals
+
+Ask Otto to set a persistent goal in an ordinary parent conversation. For
+example: “Set a persistent goal: fix duplicate exports. Repeating the same
+request should create one file, and the export tests should pass.” If a
+material acceptance criterion is missing, Otto can save a draft and ask a
+focused question. An ordinary request does not by itself opt into a goal.
+
+The parent owns the goal and its acceptance evidence. Child agents receive
+bounded assignments and cannot mark the goal achieved. A parent waiting for
+children can yield the turn without closing the goal. The current goal state
+is stored in the session and supplied separately from compacted history.
+
+Ask Otto to pause, resume, or cancel the goal explicitly. Pausing preserves
+work; cancelling closes the goal without reversing prior effects. A blocked
+or interrupted run is not proof the goal failed. The default allows two
+retries after the initial attempt, and retries need a changed approach. If
+Otto exhausts that allowance, inspect the unmet criteria before authorizing
+further work. A final reply without a disposition does not mark the goal
+achieved.
+
+The retry count is saved with the goal. Execution token limits still use
+Otto's existing turn budgets; there is no separate cumulative token budget
+for a goal across restarts or separate user turns. Pausing or cancelling the
+goal does not stop already running child work. Use the child task controls if
+that work also needs to stop.
+
 ### Session plan
 
 For work of three or more steps, the main task model keeps a short plan with

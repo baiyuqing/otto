@@ -122,6 +122,51 @@ impl Session for Store {
             .interrupted_turn
     }
 
+    fn goal(&self) -> Option<otto_core::goal::Goal> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .goal
+    }
+
+    async fn compare_and_set_goal(
+        &self,
+        expected: Option<&otto_core::goal::Goal>,
+        goal: &otto_core::goal::Goal,
+    ) -> Result<bool, SessionError> {
+        if !goal.is_valid() {
+            return Err(SessionError::Persist("malformed otto.goal data".into()));
+        }
+        let encoded = serde_json::to_string(goal)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        let recorded = recording::custom_data(otto_core::goal::GOAL_CUSTOM_TYPE, &encoded);
+        let recorded_goal: otto_core::goal::Goal = serde_json::from_str(&recorded)
+            .map_err(|_| SessionError::Persist("malformed otto.goal data".into()))?;
+        if !recorded_goal.is_valid() {
+            return Err(SessionError::Persist("malformed otto.goal data".into()));
+        }
+        let mut state = self
+            .lock()
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        state
+            .writable()
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        let current = build_context(&state.entries, leaf)
+            .map_err(|error| SessionError::Persist(error.to_string()))?
+            .0
+            .goal;
+        if current.as_ref() != expected {
+            return Ok(false);
+        }
+        state
+            .append_custom_entry_unchecked(otto_core::goal::GOAL_CUSTOM_TYPE, &recorded)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        Ok(true)
+    }
+
     fn plan(&self) -> Vec<otto_core::session::PlanStep> {
         self.lock()
             .map(|state| state.plan.clone())

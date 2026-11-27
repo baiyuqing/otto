@@ -97,6 +97,8 @@ pub struct ResolvedContext {
     /// The steps of the latest valid `otto.plan` record on the active path;
     /// see [`crate::session::plan`].
     pub plan: Vec<crate::session::plan::PlanStep>,
+    /// Latest valid goal on the active path, including before compaction.
+    pub goal: Option<crate::goal::Goal>,
     /// Every input id delivered on the active path, including messages a
     /// compaction checkpoint has since summarized away, so an input is
     /// recognised as delivered for as long as its entry is on the path.
@@ -123,6 +125,7 @@ impl Default for ResolvedContext {
             observed_capabilities: None,
             interrupted_turn: None,
             plan: Vec::new(),
+            goal: None,
             input_ids: HashSet::new(),
             memory_references: Vec::new(),
         }
@@ -332,6 +335,20 @@ pub fn build_context(
                         Some(record) => apply_turn_record(&mut resolved.interrupted_turn, &record),
                         None => collector.add(format!(
                             "ignored malformed {TURN_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        )),
+                    }
+                } else if custom.custom_type == crate::goal::GOAL_CUSTOM_TYPE {
+                    let raw = custom
+                        .data
+                        .as_deref()
+                        .map(RawValue::get)
+                        .unwrap_or_default();
+                    match serde_json::from_str::<crate::goal::Goal>(raw) {
+                        Ok(goal) if goal.is_valid() => resolved.goal = Some(goal),
+                        _ => collector.add(format!(
+                            "ignored malformed {} entry {}",
+                            crate::goal::GOAL_CUSTOM_TYPE,
                             entry.id
                         )),
                     }

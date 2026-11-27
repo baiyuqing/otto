@@ -32,6 +32,7 @@ pub mod compaction_select;
 pub mod context_estimate;
 pub mod context_report;
 pub mod events;
+mod goals;
 pub mod hooks;
 mod image_input;
 pub mod inbox;
@@ -99,6 +100,9 @@ use overflow::{
 use progress::{ProgressGuard, ProgressPolicy};
 use redactor::Redactor;
 
+/// Snapshot of the child registry as `(task ID, is final)` pairs.
+pub type GoalChildRegistry = Arc<dyn Fn() -> Vec<(String, bool)> + Send + Sync>;
+
 /// Turn settings and the two injected capabilities the core cannot provide
 /// itself: the clock and the identifier generator. Injecting them keeps
 /// `otto-core` free of clock and randomness access.
@@ -151,6 +155,8 @@ pub struct Options {
     /// The running Otto package version, recorded with the tool set. Empty
     /// when unknown.
     pub version: String,
+    /// Authoritative child registry snapshot: (task ID, is final).
+    pub goal_children: Option<GoalChildRegistry>,
 }
 
 /// The default clock returns the zero time and the default identifier
@@ -185,6 +191,7 @@ impl Default for Options {
             mailbox: Arc::new(InMemoryMailbox::default()),
             steering: Arc::new(steering::Steering::default()),
             version: String::new(),
+            goal_children: None,
         }
     }
 }

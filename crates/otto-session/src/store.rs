@@ -602,6 +602,13 @@ impl Store {
                 }
             };
         }
+        if custom_type == otto_core::goal::GOAL_CUSTOM_TYPE {
+            let goal: otto_core::goal::Goal = serde_json::from_str(data)
+                .map_err(|_| PiError::invalid("malformed otto.goal data"))?;
+            if !goal.is_valid() {
+                return Err(PiError::invalid("malformed otto.goal data"));
+            }
+        }
         let plan = if custom_type == otto_core::session::PLAN_CUSTOM_TYPE {
             Some(
                 otto_core::session::decode_plan(data)

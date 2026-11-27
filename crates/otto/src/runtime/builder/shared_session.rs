@@ -236,6 +236,18 @@ impl Session for SharedSession {
         self.0.transcript.interrupted_turn()
     }
 
+    fn goal(&self) -> Option<otto_core::goal::Goal> {
+        self.0.transcript.goal()
+    }
+
+    async fn compare_and_set_goal(
+        &self,
+        expected: Option<&otto_core::goal::Goal>,
+        goal: &otto_core::goal::Goal,
+    ) -> Result<bool, SessionError> {
+        self.0.transcript.compare_and_set_goal(expected, goal).await
+    }
+
     fn plan(&self) -> Vec<otto_core::session::PlanStep> {
         self.0.transcript.plan()
     }

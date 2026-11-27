@@ -55,7 +55,7 @@ async fn the_system_prompt_carries_the_workspace_context_and_hides_the_api_key()
                 agent_status, agent_yield, agent_send, agent_cancel, remind, \
                 remind_status, remind_cancel, request_approval, approval_pending, \
                 approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, \
-                update_plan, workflow_list, workflow_inspect, workflow_start, \
+                update_plan, manage_goal, workflow_list, workflow_inspect, workflow_start, \
                 workflow_status, otto_help</available_tools>"
     ));
     assert!(prompt.contains("<task_control_policy>"));
@@ -73,9 +73,10 @@ async fn the_system_prompt_carries_the_workspace_context_and_hides_the_api_key()
             "Base",
             "Environment",
             "Workspace instructions",
-            "Document end"
+            "Document end",
+            "Request context"
         ],
-        "the parts must concatenate to the prompt, or the report falls back to one part"
+        "the dynamic suffix must not erase the static prompt breakdown"
     );
     assert!(parts[2].text.contains("house rules"));
 }

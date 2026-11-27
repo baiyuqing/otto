@@ -31,7 +31,7 @@ all = { level = "warn", priority = -1 }
 # feature is required by name.
 [workspace.dependencies]
 # Native plugin computation only; Lua 5.4 is statically vendored (MIT).
-mlua = { version = "=0.12.2", default-features = false, features = ["lua54", "vendored", "serialize", "send"] }
+mlua = { version = "=0.12.3", default-features = false, features = ["lua54", "vendored", "serialize", "send"] }
 async-trait = "=0.1.92"
 chrono = { version = "=0.4.45", default-features = false, features = ["alloc", "serde"] }
 serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
@@ -39,18 +39,18 @@ serde_json = { version = "=1.0.154", default-features = false, features = ["std"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", default-features = false }
 tokio-util = { version = "=0.7.20", default-features = false }
-regex = "=1.13.1"
+regex = "=1.13.2"
 # Native-only. macOS has no safe-wrapper crate for renamex_np(RENAME_EXCL),
 # openat/mkdirat/fstatat with O_NOFOLLOW, so the store calls them through libc.
 libc = "=0.2.191"
 # SHA-256 for the workspace directory key. No hash lives in std.
-sha2 = { version = "=0.11.1", default-features = false }
+sha2 = { version = "=0.11.2", default-features = false }
 # base64url for the OAuth PKCE challenge, the state parameter and the JWT
 # payload in `otto::auth`. Already in the lock file as a transitive dependency.
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 # Native-only. nix gives the openat/readlinkat walk the workspace boundary needs
 # and the setpgid/killpg process-group control the sandbox drivers need.
-nix = { version = "=0.31.3", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }
+nix = { version = "=0.32.0", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }
 tempfile = "=3.27.0"
 # Native-only HTTP transport for the provider client. rustls only, no
 # native-tls: `rustls-no-provider` keeps rustls-platform-verifier, which checks
@@ -67,11 +67,11 @@ futures-util = { version = "=0.3.34", default-features = false }
 # native crate adds "display" for Save's serialization.
 toml = { version = "=1.2.1", default-features = false, features = ["parse", "serde", "std"] }
 # Native-only HTML to Markdown conversion for the `web_fetch` tool.
-htmd = "=0.5.6"
+htmd = "=0.6.1"
 # Native-only legacy charset decoding (GBK, Shift_JIS, windows-1252) for fetched pages.
 encoding_rs = "=0.8.44"
 # WHATWG URL parsing for base_url validation, mirroring net/url's checks.
-url = "=2.5.8"
+url = "=2.5.9"
 # HTTP routing for `otto serve`. hyper and tower arrive transitively at the
 # versions axum pins; nothing depends on them by name.
 axum = "=0.8.9"
@@ -88,7 +88,7 @@ tower = { version = "=0.5.3", features = ["util"] }
 # and its `pki_types` are reached through this crate's re-export.
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 # Embedded SQLite, compiled from the bundled C source.
-rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled", "cache"] }
+rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled", "cache"] }
 otto-core = { path = "crates/otto-core" }
 otto-platform = { path = "crates/otto-platform" }
 otto-storage = { path = "crates/otto-storage" }

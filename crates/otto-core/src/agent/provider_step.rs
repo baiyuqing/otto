@@ -414,12 +414,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 },
             );
         }
+        let tools = self.tools.definitions();
         let request = Request {
             model: self.options.model.clone(),
-            system_prompt: append_system_context(&self.options.system_prompt, system_context),
+            system_prompt: append_system_context(
+                &append_system_context(&self.options.system_prompt, system_context),
+                &self.goal_context(
+                    state.goal_completion_requested,
+                    tools.iter().any(|tool| tool.name == "manage_goal"),
+                ),
+            ),
             thinking: self.options.thinking.clone(),
             messages,
-            tools: self.tools.definitions(),
+            tools,
             cache_key: self.options.cache_key.clone(),
             remote_compaction,
             request_remote_compaction: false,

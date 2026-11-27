@@ -32,6 +32,7 @@ pub mod compaction_select;
 pub mod context_estimate;
 pub mod context_report;
 pub mod events;
+mod goals;
 pub mod hooks;
 mod image_input;
 pub mod inbox;

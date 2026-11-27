@@ -66,6 +66,7 @@ async fn builtin_file_tools_are_registered_in_a_fixed_order() {
             "schedule_cancel",
             "task_queue",
             "update_plan",
+            "manage_goal",
             "workflow_list",
             "workflow_inspect",
             "workflow_start",

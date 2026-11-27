@@ -355,6 +355,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 holder,
             )
             .await;
+        let result = match result {
+            Err(error) => match self.record_goal_stop(&error).await {
+                Ok(()) => Err(error),
+                Err(source) => Err(self.fail(emit, source)),
+            },
+            Ok(()) => Ok(()),
+        };
         self.end_turn(turn_id, &result, control).await;
         diagnostic.finish(crate::diagnostics::Finish {
             status: if result.is_ok() { "ok" } else { "error" },
@@ -503,8 +510,27 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(self.stop_stalled(emit, stall));
         }
 
+        let suppress_child_wake =
+            text.is_empty() && images.is_empty() && self.suppress_goal_child_wake();
+        if let Err(error) = self.wake_waiting_goal().await {
+            return Err(self.fail(emit, error));
+        }
         if let Err(error) = self.deliver_notifications(emit).await {
             return Err(self.fail(emit, error));
+        }
+
+        if suppress_child_wake
+            && self
+                .session
+                .messages()
+                .iter()
+                .rev()
+                .take_while(|message| message.role != Role::Assistant)
+                .all(|message| message.role != Role::User)
+            && self.options.mailbox.is_empty()
+        {
+            emit(Event::AgentFinished);
+            return Ok(());
         }
 
         if let Err(error) = self.announce_tool_changes().await {
@@ -618,6 +644,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             if let Err(exceeded) = self.admit_step() {
                 return Err(self.stop_budget(emit, exceeded));
             }
+            state.goal_waiting_children.clear();
             state.yield_after_batch = false;
             state.batch_has_errors = false;
             let step = StepControl::new(control, holder.clone());
@@ -713,10 +740,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     state.yield_after_batch
                         || entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
                 }) {
+                    if let Err(error) = self.wake_waiting_goal().await {
+                        return Err(self.fail(emit, error));
+                    }
                     if let Err(error) = self.deliver_notifications(emit).await {
                         return Err(self.fail(emit, error));
                     }
                     continue;
+                }
+                match self
+                    .check_goal_disposition(&mut state, had_tool_call, &steering, emit)
+                    .await
+                {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => return Err(self.fail(emit, error)),
                 }
                 if let Some(messages) = steering.take_or_close() {
                     if let Err(error) = self.append_steering(messages, emit).await {
@@ -736,6 +774,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 self.deliver_steering(&steering, emit).await
             };
             if let Err(error) = delivered {
+                return Err(self.fail(emit, error));
+            }
+            if let Err(error) = self.wake_waiting_goal().await {
                 return Err(self.fail(emit, error));
             }
             if let Err(error) = self.deliver_notifications(emit).await {

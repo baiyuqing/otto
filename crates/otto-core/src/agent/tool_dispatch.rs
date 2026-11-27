@@ -249,7 +249,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 persisted.push_str(advice);
             }
         }
-        state.yield_after_batch |= self.tools.yields_turn(&block.tool_name, &execution);
+        let yields = self.tools.yields_turn(&block.tool_name, &execution);
+        if yields && block.tool_name == "agent_yield" {
+            state.goal_waiting_children = execution
+                .result
+                .content
+                .lines()
+                .find_map(|line| line.strip_prefix("Wait task IDs: "))
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default();
+        }
+        state.yield_after_batch |= yields;
         state.batch_has_errors |= execution.result.is_error
             || execution.outcome.disposition != OperationDisposition::Succeeded;
         execution.result.content = self.redactor.redact_string(&execution.result.content);

@@ -20,6 +20,7 @@ pub(crate) mod bash_output;
 pub mod edit;
 pub mod find;
 pub(crate) mod gitignore;
+pub mod goal;
 pub mod grep;
 pub mod ls;
 pub mod mcp;

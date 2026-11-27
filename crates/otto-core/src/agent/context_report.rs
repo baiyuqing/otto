@@ -69,24 +69,31 @@ pub struct ContextItem {
 
 /// Breaks `request` into sections, dropping empty ones.
 ///
-/// `parts` are labeled pieces of the system prompt. They are used only when
-/// they concatenate to it byte for byte; otherwise the prompt is one item.
+/// `parts` are labeled pieces of the static system prompt. If they match its
+/// prefix, any request-local suffix is reported separately.
 /// `memory` is the previous turn's rendered recall.
 pub fn sections(
     request: &Request,
     parts: &[(String, String)],
     memory: &str,
 ) -> Vec<ContextSection> {
-    let prompt_items = if parts
-        .iter()
-        .map(|(_, text)| text.as_str())
-        .collect::<String>()
-        == request.system_prompt
-    {
-        parts
+    let prefix: String = parts.iter().map(|(_, text)| text.as_str()).collect();
+    let suffix = (!parts.is_empty())
+        .then(|| request.system_prompt.strip_prefix(&prefix))
+        .flatten();
+    let prompt_items = if let Some(suffix) = suffix {
+        let mut items: Vec<_> = parts
             .iter()
             .map(|(label, text)| item(label.clone(), estimate_string(text), text.clone()))
-            .collect()
+            .collect();
+        if !suffix.is_empty() {
+            items.push(item(
+                "Request context".into(),
+                estimate_string(suffix),
+                suffix.into(),
+            ));
+        }
+        items
     } else {
         vec![item(
             "System prompt".into(),

@@ -261,19 +261,19 @@ impl Tool for AgentYieldTool {
         if cancel.is_cancelled() {
             return error_result(CONTEXT_CANCELED).cancelled_not_started();
         }
-        let count = self
+        let children: Vec<_> = self
             .runner
             .tasks()
             .list()
-            .iter()
+            .into_iter()
             .filter(|task| !task.is_final())
-            .count();
-        if count == 0 {
+            .map(|task| task.id)
+            .collect();
+        if children.is_empty() {
             return error_result("No queued or running child task; continue with available results instead of yielding.").not_started();
         }
-        text_result(format!(
-            "Waiting for {count} child task(s). This turn can yield after the tool batch settles; the runtime resumes on child notifications or user input."
-        ))
+        let ids = serde_json::to_string(&children).expect("string list serializes");
+        text_result(format!("Waiting for child tasks.\nWait task IDs: {ids}"))
     }
 }
 

@@ -89,6 +89,8 @@ pub struct RunDispatchState {
     pub progress: ProgressGuard,
     pub yield_after_batch: bool,
     pub batch_has_errors: bool,
+    pub goal_completion_requested: bool,
+    pub goal_waiting_children: Vec<String>,
 }
 
 impl RunDispatchState {

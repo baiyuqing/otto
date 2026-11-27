@@ -424,6 +424,76 @@ async fn run_does_not_replay_a_call_whose_tool_is_not_replayable() {
 }
 
 #[tokio::test]
+async fn goal_final_without_disposition_gets_one_correction_and_stays_open() {
+    use crate::goal::{Execution, Goal, Status};
+
+    let provider = ScriptedProvider::new(vec![
+        (Vec::new(), assistant_text()),
+        (Vec::new(), assistant_text()),
+    ]);
+    let session = MemorySession::new();
+    let mut goal = Goal::draft("Fix duplicate exports".into());
+    goal.status = Status::Open;
+    goal.execution = Execution::Ready;
+    goal.criteria = vec!["Repeated request creates one file".into()];
+    assert!(session.compare_and_set_goal(None, &goal).await.unwrap());
+    let agent = Agent::new(provider, EchoExecutor, session, test_options());
+    let result = agent
+        .run("Continue the goal", &mut |_| {}, &CancellationToken::new())
+        .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Goal remains open")
+    );
+    assert_eq!(agent.provider().requests.lock().unwrap().len(), 2);
+    let goal = agent.session().goal().expect("saved goal");
+    assert_eq!(goal.status, Status::Open);
+    assert_eq!(goal.execution, Execution::Interrupted);
+}
+
+#[tokio::test]
+async fn paused_goal_records_late_child_result_without_calling_provider() {
+    use crate::goal::{Execution, Goal, Status};
+
+    let session = MemorySession::new();
+    let mut goal = Goal::draft("Verify the export".into());
+    goal.status = Status::Open;
+    goal.execution = Execution::Paused;
+    goal.criteria = vec!["Export tests pass".into()];
+    assert!(session.compare_and_set_goal(None, &goal).await.unwrap());
+    let inbox = Arc::new(super::inbox::Inbox::new(None));
+    inbox.push(super::inbox::Notification {
+        task_id: "t1".into(),
+        kind: Some(super::inbox::NotificationKind::TaskFinished),
+        text: "Late result".into(),
+        ..Default::default()
+    });
+    let mut options = test_options();
+    options.mailbox = inbox;
+    let agent = Agent::new(
+        ScriptedProvider::new(vec![]),
+        EchoExecutor,
+        session,
+        options,
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(agent.provider().requests.lock().unwrap().is_empty());
+    assert_eq!(agent.session().goal(), Some(goal));
+    assert!(
+        agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| message.text().contains("Late result"))
+    );
+}
+
+#[tokio::test]
 async fn image_turn_persists_and_sends_ordered_attachments() {
     for text in ["", "compare these"] {
         let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);

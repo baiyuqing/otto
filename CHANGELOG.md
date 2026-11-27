@@ -7,6 +7,11 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+- Parent sessions can keep an explicit goal with observable acceptance criteria.
+  Otto retains the current goal through context compaction and checks its
+  disposition before ending execution. Child agents report assignments; the
+  parent owns acceptance and retry decisions.
+
 ### Changed defaults
 
 - Bash sends the model execution status, stream sizes and temporary log paths.

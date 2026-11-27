@@ -85,7 +85,8 @@ pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
 /// because a child's plan would be shown nowhere; and delivery, which only a
 /// parent may start and which would otherwise let a child reach another
 /// workspace.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 21] = [
+pub const EXCLUDED_CHILD_TOOLS: [&str; 22] = [
+    "manage_goal",
     // Bound independently by each ChildTools, never inherited from a parent catalog.
     "session_info",
     "workflow_list",

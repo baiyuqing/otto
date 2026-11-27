@@ -100,6 +100,18 @@ impl Session for MemoryHandle {
         self.inner.interrupted_turn()
     }
 
+    fn goal(&self) -> Option<otto_core::goal::Goal> {
+        self.inner.goal()
+    }
+
+    async fn compare_and_set_goal(
+        &self,
+        expected: Option<&otto_core::goal::Goal>,
+        goal: &otto_core::goal::Goal,
+    ) -> Result<bool, SessionError> {
+        self.inner.compare_and_set_goal(expected, goal).await
+    }
+
     fn plan(&self) -> Vec<otto_core::session::PlanStep> {
         self.inner.plan()
     }

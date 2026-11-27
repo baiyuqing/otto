@@ -387,6 +387,10 @@ impl Builder {
                 Arc::new(session.clone()),
                 &redaction_values,
             )));
+            tools.push(Box::new(crate::tool::goal::ManageGoal::new(
+                Arc::new(session.clone()),
+                &redaction_values,
+            )));
             if include_parent_tools {
                 let controller = Box::pin(crate::runtime::workflow::shared_controller(
                     self, runtime, warnings,

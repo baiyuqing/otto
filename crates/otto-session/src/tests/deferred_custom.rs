@@ -14,6 +14,46 @@ fn new_lazy_store(temp: &TempDir) -> Store {
     .expect("create lazy store")
 }
 
+#[tokio::test]
+async fn goal_custom_record_survives_reopen_and_rejects_invalid_data() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let goal = otto_core::goal::Goal::draft("A meaningful goal".into());
+    let data = serde_json::to_string(&goal).unwrap();
+    store
+        .append_custom_entry(otto_core::goal::GOAL_CUSTOM_TYPE, &data)
+        .unwrap();
+    assert_eq!(store.goal(), Some(goal.clone()));
+    assert!(
+        store
+            .append_custom_entry(otto_core::goal::GOAL_CUSTOM_TYPE, "{}")
+            .is_err()
+    );
+    assert_eq!(store.goal(), Some(goal.clone()));
+    let mut updated = goal.clone();
+    updated.note = "newer state".into();
+    assert!(
+        store
+            .compare_and_set_goal(Some(&goal), &updated)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .compare_and_set_goal(Some(&goal), &goal)
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.goal(), Some(updated.clone()));
+    let goal = updated;
+    let path = store.path();
+    store.close().unwrap();
+    let (reopened, _) = Store::open(&path).unwrap();
+    assert_eq!(reopened.goal(), Some(goal));
+    reopened.close().unwrap();
+}
+
 fn session_files(directory: &Path) -> Vec<PathBuf> {
     match fs::read_dir(directory) {
         Ok(entries) => entries

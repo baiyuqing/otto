@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# Keep the published Bookworm base; rustup selects the pinned compiler below.
 FROM rust:1.100.0-bookworm AS build
 WORKDIR /src
 COPY rust-toolchain.toml ./

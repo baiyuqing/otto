@@ -7,6 +7,8 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+- Source and Docker builds now use the pinned Rust 1.100.1 toolchain.
+
 - Parent sessions can keep an explicit goal with observable acceptance criteria.
   Otto retains the current goal through context compaction and checks its
   disposition before ending execution. Child agents report assignments; the

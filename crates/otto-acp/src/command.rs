@@ -181,7 +181,8 @@ fn section_name(kind: SectionKind, items: usize) -> String {
     }
 }
 
-/// Counts only: item labels and texts are not included.
+/// Counts only: item labels and texts are not included, for the request items
+/// and for the session messages that are not in the next request.
 pub(super) fn context_text(report: &ContextReport) -> String {
     let window = match report.context_window {
         0 => "not configured".to_string(),
@@ -211,6 +212,19 @@ pub(super) fn context_text(report: &ContextReport) -> String {
             section.tokens
         ));
     }
+    if let Some(excluded) = report
+        .not_in_request
+        .as_ref()
+        .filter(|excluded| !excluded.items.is_empty())
+    {
+        let tokens = excluded.items.iter().fold(0_i64, |total, item| {
+            total.saturating_add(item.tokens.max(0))
+        });
+        lines.push(format!(
+            "Not in next request: {} session messages, {tokens} tokens",
+            excluded.items.len()
+        ));
+    }
     lines.join("\n")
 }
 
@@ -233,6 +247,7 @@ pub(super) fn compaction_text(result: &WireCompaction) -> String {
 
 #[cfg(test)]
 mod tests {
+    use otto_core::agent::context_exclusion::{ExcludedItem, ExclusionReason, NotInRequest};
     use otto_core::agent::context_report::{ContextItem, ContextSection};
 
     use super::*;
@@ -389,7 +404,7 @@ mod tests {
 
     #[test]
     fn context_text_has_counts_and_no_item_text() {
-        let report = ContextReport {
+        let mut report = ContextReport {
             model: "m".into(),
             context_window: 0,
             compaction_threshold: 0,
@@ -407,13 +422,38 @@ mod tests {
                 }],
             }],
             last_sent: None,
+            not_in_request: None,
         };
         let text = context_text(&report);
+        let base = "Model: m\nContext window: not configured\nAutomatic compaction threshold: off\n\
+                    Estimated next request: 120 tokens\nSystem prompt: 100 tokens";
+        assert_eq!(text, base);
+
+        // The exclusions add one line with counts, never a label or a text.
+        let excluded_item = |label: &str, tokens: i64, text: &str| ExcludedItem {
+            label: label.into(),
+            tokens,
+            reason: ExclusionReason::Summarized,
+            text: Some(text.into()),
+        };
+        report.not_in_request = Some(NotInRequest {
+            items: vec![
+                excluded_item("session #1 user", 40, "SECRET-OLD-BODY"),
+                excluded_item("session #2 assistant", 2, "SECRET-OLD-REPLY"),
+            ],
+            carried_user_messages: 5,
+        });
         assert_eq!(
-            text,
-            "Model: m\nContext window: not configured\nAutomatic compaction threshold: off\n\
-             Estimated next request: 120 tokens\nSystem prompt: 100 tokens"
+            context_text(&report),
+            format!("{base}\nNot in next request: 2 session messages, 42 tokens")
         );
+
+        // Nothing is appended when nothing is excluded or nothing was computed.
+        report.not_in_request = Some(NotInRequest {
+            items: Vec::new(),
+            carried_user_messages: 5,
+        });
+        assert_eq!(context_text(&report), base);
     }
 
     #[test]

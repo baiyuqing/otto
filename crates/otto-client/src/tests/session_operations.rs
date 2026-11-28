@@ -194,6 +194,7 @@ async fn interrupt_steering_posts_the_route_and_decodes_the_count() {
 
 #[tokio::test]
 async fn context_decodes_the_report() {
+    use otto_core::agent::context_exclusion::{ExcludedItem, ExclusionReason, NotInRequest};
     use otto_core::agent::context_report::{ContextItem, ContextSection, SectionKind, SentRequest};
     let section = ContextSection {
         kind: SectionKind::Messages,
@@ -216,6 +217,15 @@ async fn context_decodes_the_report() {
         last_sent: Some(SentRequest {
             sent_at: 1_700_000_000_000,
             sections: vec![section],
+        }),
+        not_in_request: Some(NotInRequest {
+            items: vec![ExcludedItem {
+                label: "session #1 assistant".into(),
+                tokens: 4,
+                reason: ExclusionReason::Summarized,
+                text: Some("old reply".into()),
+            }],
+            carried_user_messages: 1,
         }),
     };
     let body = serde_json::to_string(&report).unwrap();

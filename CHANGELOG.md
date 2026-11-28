@@ -13,6 +13,14 @@ commit ledger; Git and release tags retain the full history. See the
   /v1/sessions/{id}/context` returns `last_sent` and an item `position`; see
   [interactive use](docs/manual/interactive-use.md).
 
+- `/context` lists the session messages whose text is not in the next request,
+  with the reason: replaced by the compaction summary, user message cut or
+  dropped in the summary's `<user-messages>` block, or changed by the request
+  projection. A search also matches them. `GET /v1/sessions/{id}/context`
+  returns them as `not_in_request`, and ACP `/context` adds a count line. The
+  comparison is with the next request, not the last sent one; see
+  [interactive use](docs/manual/interactive-use.md).
+
 - Source and Docker builds now use the pinned Rust 1.100.1 toolchain.
 
 - Parent sessions can keep an explicit goal with observable acceptance criteria.

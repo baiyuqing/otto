@@ -7,6 +7,7 @@ mod collection;
 mod command_order_tests;
 mod commands;
 mod context;
+mod context_excluded;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]

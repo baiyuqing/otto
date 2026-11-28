@@ -12,6 +12,7 @@ use crate::provider::Request;
 use crate::session::COMPACTION_CONTEXT_TYPE;
 
 use super::context_estimate::{estimate_message, estimate_string, estimate_tool_definition};
+use super::context_exclusion::NotInRequest;
 
 /// The prefix the native crate gives every MCP tool name.
 const MCP_TOOL_PREFIX: &str = "mcp__";
@@ -43,6 +44,13 @@ pub struct ContextReport {
     /// provider hooks and the redaction guard; `None` before the first one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sent: Option<SentRequest>,
+    /// The session messages on the active path whose text the next request
+    /// does not contain. `None` when it was not computed: the agent has no
+    /// session file to read, the file is unreadable, or the report comes from
+    /// [`super::Agent::context_report`], which holds no session entries.
+    /// `Some` without items means nothing is excluded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_in_request: Option<NotInRequest>,
 }
 
 /// An ordinary provider request as it was handed to the provider.
@@ -250,7 +258,7 @@ fn item(label: String, tokens: i64, text: String, position: usize) -> ContextIte
 }
 
 /// `#<1-based position> <role>`, plus the tool name for a tool call or result.
-fn message_label(index: usize, message: &Message) -> String {
+pub(super) fn message_label(index: usize, message: &Message) -> String {
     let role: String = message.role.clone().into();
     let mut label = format!("#{} {role}", index + 1);
     if let Some(block) = message.blocks.iter().find(|block| {
@@ -266,7 +274,7 @@ fn message_label(index: usize, message: &Message) -> String {
 }
 
 /// Every block as text: tool calls as `name(arguments)`, images as a marker.
-fn message_text(message: &Message) -> String {
+pub(super) fn message_text(message: &Message) -> String {
     message
         .blocks
         .iter()

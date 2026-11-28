@@ -3,10 +3,14 @@
 //! The panel shows one basis (the last request that was sent, or the projected
 //! next request) in one layout (grouped by section, or one row per item in
 //! request order), or the result of a text search over the items of that basis.
+//! The session messages that are not in the next request come after the
+//! sections and after the search matches; see [`super::context_excluded`].
 
 use chrono::{Local, TimeZone};
+use otto_core::agent::context_exclusion::NotInRequest;
 use otto_core::agent::context_report::{ContextItem, ContextReport, ContextSection, SectionKind};
 
+use super::context_excluded as excluded;
 use super::{Document, Presenter, Transition};
 use crate::tui::backend::{Reply, Request};
 use crate::tui::interaction::{Action, Activation, Row, View};
@@ -26,26 +30,49 @@ enum Basis {
     Next,
 }
 
+/// Which group of the by-section layout lists its items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Layout {
-    /// One row per section; `expanded` lists the items of one section.
-    BySection { expanded: Option<usize> },
+pub(super) enum Expanded {
+    Nothing,
+    /// The section of the basis at this index.
+    Section(usize),
+    /// The session messages that are not in the next request.
+    NotInRequest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Layout {
+    /// One row per section; `expanded` lists the items of one group.
+    BySection { expanded: Expanded },
     /// One row per item that has a position, sorted by position.
     RequestOrder,
+}
+
+/// The rows of a search, computed when the query or the report changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Found {
+    /// The matching items of the basis, then the matching excluded items.
+    pub(super) rows: Vec<Row>,
+    pub(super) in_request: usize,
+    pub(super) not_in_request: usize,
 }
 
 /// Browsing and searching exclude each other; a search remembers the layout
 /// it was started from.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Mode {
+pub(super) enum Mode {
     Browse(Layout),
-    Search { query: String, from: Layout },
+    Search {
+        query: String,
+        from: Layout,
+        found: Found,
+    },
 }
 
 pub(crate) struct Context {
-    report: Option<ContextReport>,
+    pub(super) report: Option<ContextReport>,
     basis: Basis,
-    mode: Mode,
+    pub(super) mode: Mode,
 }
 
 /// An item of the current basis with its place in the sections.
@@ -61,8 +88,19 @@ impl Context {
         Self {
             report: None,
             basis: Basis::Next,
-            mode: Mode::Browse(Layout::BySection { expanded: None }),
+            mode: Mode::Browse(Layout::BySection {
+                expanded: Expanded::Nothing,
+            }),
         }
+    }
+
+    /// The excluded items, when there are any.
+    fn not_in_request(&self) -> Option<&NotInRequest> {
+        self.report
+            .as_ref()?
+            .not_in_request
+            .as_ref()
+            .filter(|excluded| !excluded.items.is_empty())
     }
 
     fn sections(&self) -> &[ContextSection] {
@@ -174,7 +212,7 @@ impl Context {
         ]
     }
 
-    fn section_rows(&self, expanded: Option<usize>) -> Vec<Row> {
+    fn section_rows(&self, expanded: Expanded) -> Vec<Row> {
         let sections = self.sections();
         let total: i64 = sections.iter().map(|s| s.tokens.max(0)).sum();
         let mut rows = Vec::new();
@@ -193,7 +231,7 @@ impl Context {
                 ],
                 detail: String::new(),
             });
-            if expanded == Some(si) {
+            if expanded == Expanded::Section(si) {
                 for (ii, item) in section.items.iter().enumerate() {
                     rows.push(Row {
                         id: item_id(si, ii),
@@ -201,6 +239,12 @@ impl Context {
                         detail: String::new(),
                     });
                 }
+            }
+        }
+        if let Some(not_in_request) = self.not_in_request() {
+            rows.push(excluded::section_row(not_in_request));
+            if expanded == Expanded::NotInRequest {
+                rows.extend(excluded::item_rows(not_in_request));
             }
         }
         rows
@@ -255,11 +299,14 @@ impl Context {
             .collect()
     }
 
-    fn search_view(&self, query: &str) -> View {
+    /// The matches of `query` among the items of the basis, in request order,
+    /// and among the excluded items.
+    fn find(&self, query: &str) -> Found {
         let needle = query.to_ascii_lowercase();
-        let rows: Vec<Row> = if needle.is_empty() {
-            Vec::new()
-        } else {
+        if needle.is_empty() {
+            return Found::default();
+        }
+        let mut rows: Vec<Row> =
             self.order_table()
                 .iter()
                 .filter_map(|(entry, to_end)| {
@@ -271,24 +318,42 @@ impl Context {
                             Self::order_row(entry, *to_end, detail)
                         })
                 })
-                .collect()
-        };
-        let document = if needle.is_empty() {
+                .collect();
+        let in_request = rows.len();
+        if let Some(not_in_request) = self.not_in_request() {
+            rows.extend(excluded::search_rows(not_in_request, &needle));
+        }
+        Found {
+            not_in_request: rows.len() - in_request,
+            in_request,
+            rows,
+        }
+    }
+
+    fn search_view(&self, query: &str, found: &Found) -> View {
+        let document = if query.is_empty() {
             "Type to search the labels and text of the request items. Matches are listed in \
-             request order."
+             request order, followed by the session messages that are not in the next request."
                 .into()
-        } else if rows.is_empty() {
+        } else if found.rows.is_empty() {
             format!("No item contains \"{query}\".")
         } else {
             String::new()
         };
+        let request = match self.basis {
+            Basis::LastSent if self.report.as_ref().is_some_and(|r| r.last_sent.is_some()) => {
+                "the last sent request"
+            }
+            _ => "the request",
+        };
         View {
             description: format!(
-                "Search: {query} · {} matches · Backspace on an empty search leaves it",
-                rows.len()
+                "Search: {query} · {} in {request} · {} not in the next request · Backspace on \
+                 an empty search leaves it",
+                found.in_request, found.not_in_request
             ),
             columns: Self::order_columns(),
-            rows,
+            rows: found.rows.clone(),
             document,
             search: Some(query.to_owned()),
             ..View::default()
@@ -334,11 +399,11 @@ impl Presenter for Context {
                 actions: self.actions(report),
                 ..frame
             },
-            Mode::Search { query, .. } => View {
+            Mode::Search { query, found, .. } => View {
                 title: frame.title,
                 notice: frame.notice,
                 collection: true,
-                ..self.search_view(query)
+                ..self.search_view(query, found)
             },
         }
     }
@@ -354,7 +419,7 @@ impl Presenter for Context {
                     };
                     // Section indexes belong to one basis.
                     if let Mode::Browse(Layout::BySection { expanded }) = &mut self.mode {
-                        *expanded = None;
+                        *expanded = Expanded::Nothing;
                     }
                 }
                 Transition::Stay
@@ -363,7 +428,9 @@ impl Presenter for Context {
                 if let Mode::Browse(layout) = &self.mode {
                     self.mode = Mode::Browse(match layout {
                         Layout::BySection { .. } => Layout::RequestOrder,
-                        Layout::RequestOrder => Layout::BySection { expanded: None },
+                        Layout::RequestOrder => Layout::BySection {
+                            expanded: Expanded::Nothing,
+                        },
                     });
                 }
                 Transition::Stay
@@ -373,18 +440,25 @@ impl Presenter for Context {
                     self.mode = Mode::Search {
                         query: String::new(),
                         from: layout,
+                        found: Found::default(),
                     };
                 }
                 Transition::Stay
             }
             Activation::Action { id, fields, .. } if id == "otto:search" => {
-                if let Mode::Search { query, from } = &mut self.mode {
+                if let Mode::Search { query, from, .. } = &self.mode {
+                    let from = *from;
                     let next = fields.get("query").cloned().unwrap_or_default();
                     if next.is_empty() && query.is_empty() {
                         // Backspace on an empty query.
-                        self.mode = Mode::Browse(*from);
+                        self.mode = Mode::Browse(from);
                     } else {
-                        *query = next;
+                        let found = self.find(&next);
+                        self.mode = Mode::Search {
+                            query: next,
+                            from,
+                            found,
+                        };
                     }
                 }
                 Transition::Stay
@@ -402,6 +476,11 @@ impl Presenter for Context {
                 Basis::Next
             };
             self.report = Some(report);
+            if let Mode::Search { query, from, .. } = &self.mode {
+                let (query, from) = (query.clone(), *from);
+                let found = self.find(&query);
+                self.mode = Mode::Search { query, from, found };
+            }
         }
         Transition::Stay
     }
@@ -416,27 +495,53 @@ impl Context {
         let Ok(key) = serde_json::from_str::<(String, usize, Option<usize>)>(id) else {
             return Transition::Stay;
         };
-        if key.0 == "section" {
-            if let Mode::Browse(Layout::BySection { expanded }) = &mut self.mode {
-                *expanded = (*expanded != Some(key.1)).then_some(key.1);
+        match key.0.as_str() {
+            "section" => {
+                self.toggle(Expanded::Section(key.1));
+                Transition::Stay
             }
-            return Transition::Stay;
+            excluded::SECTION_TAG => {
+                self.toggle(Expanded::NotInRequest);
+                Transition::Stay
+            }
+            excluded::ITEM_TAG => {
+                let Some(item) = self
+                    .not_in_request()
+                    .and_then(|not_in_request| not_in_request.items.get(key.1))
+                else {
+                    return Transition::Stay;
+                };
+                Transition::Push(Box::new(excluded::document(key.1, item)))
+            }
+            _ => {
+                let Some(item) = key
+                    .2
+                    .and_then(|ii| self.sections().get(key.1)?.items.get(ii))
+                else {
+                    return Transition::Stay;
+                };
+                Transition::Push(Box::new(Document {
+                    key: format!("context:{id}"),
+                    title: format!(
+                        "{} · ~{} tokens",
+                        item.label,
+                        format_token_count(item.tokens)
+                    ),
+                    text: item.text.clone(),
+                }))
+            }
         }
-        let Some(item) = key
-            .2
-            .and_then(|ii| self.sections().get(key.1)?.items.get(ii))
-        else {
-            return Transition::Stay;
-        };
-        Transition::Push(Box::new(Document {
-            key: format!("context:{id}"),
-            title: format!(
-                "{} · ~{} tokens",
-                item.label,
-                format_token_count(item.tokens)
-            ),
-            text: item.text.clone(),
-        }))
+    }
+
+    /// Opens the group, or closes it when it is open. A search has no groups.
+    fn toggle(&mut self, group: Expanded) {
+        if let Mode::Browse(Layout::BySection { expanded }) = &mut self.mode {
+            *expanded = if *expanded == group {
+                Expanded::Nothing
+            } else {
+                group
+            };
+        }
     }
 }
 
@@ -479,7 +584,7 @@ fn clock(unix_ms: i64) -> String {
 /// One line of about [`EXCERPT_CHARS`] characters around the match that starts
 /// at byte `found` of the ASCII-lowercased text, or from the start of `text`
 /// when only the label matched. Newlines become spaces.
-fn excerpt(text: &str, found: Option<usize>) -> String {
+pub(super) fn excerpt(text: &str, found: Option<usize>) -> String {
     // ASCII lowercasing keeps every byte offset, so `found` is a char boundary.
     let lead = found.map_or(0, |at| {
         text[..at]

@@ -78,6 +78,17 @@ impl Loaded {
 }
 
 impl Controller {
+    /// The entries of the current session's file in file order, or `None`
+    /// when the session has no file (`--no-session`, or nothing appended yet),
+    /// the session is closed, or the file cannot be read.
+    pub(super) fn session_entries(&self) -> Option<Arc<Vec<PiEntry>>> {
+        let path = self.lock().current.as_ref()?.path();
+        if path.is_empty() {
+            return None;
+        }
+        Some(self.trace_cache.read(Path::new(&path))?.entries)
+    }
+
     /// The span tree of the current session and its sub-agent tasks. It holds
     /// no message or result text.
     pub fn trace(&self) -> Result<Trace, String> {

@@ -224,12 +224,23 @@ impl Controller {
 
     /// What the next provider request contains, or `None` after a close or
     /// when the redaction boundary withholds dynamic content.
+    ///
+    /// `not_in_request` is computed from the entries of the session file; it
+    /// stays `None` when the session has no readable file.
     pub fn context_report(&self) -> Option<otto_core::agent::context_report::ContextReport> {
         if !self.dynamic_content {
             return None;
         }
         let runner = self.current_runner()?;
-        Some(runner.context_report())
+        let mut report = runner.context_report();
+        report.not_in_request = self.session_entries().and_then(|entries| {
+            otto_core::agent::context_exclusion::not_in_request_for_entries(
+                &entries,
+                &report.sections,
+            )
+            .ok()
+        });
+        Some(report)
     }
 
     /// The session currently in force, or `None` after a close.

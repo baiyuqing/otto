@@ -744,6 +744,33 @@ TUI-only commands:
   around the first match and the match count. Backspace on an empty search
   leaves it; `Esc` closes the panel. The search takes typed characters; pasted
   text is not inserted.
+
+  After the sections, grouped by section shows `Not in next request (N)`: the
+  session messages on the active path whose text the next request does not
+  contain, with their estimated tokens and no share of the request. `Enter`
+  lists them with label, tokens and reason, and `Enter` on one opens its text.
+  The reasons are: `replaced by the compaction summary`; `user message cut at
+  2,000 characters in the summary` and `user message dropped from the summary
+  (16 KiB cap)`, for a summarized user message that the summary's
+  `<user-messages>` block carries cut or not at all; and `changed or left out
+  by the request projection` (a context edit, the shortened Bash output of an
+  old transcript, or a message covered by a provider-held checkpoint, which
+  Otto cannot read). A summarized user message whose full text is in the
+  `<user-messages>` block is in the request and is not listed; the section's
+  detail gives the count. The search also matches the label and text of these
+  messages. Their rows follow the request matches, with `—` as position and "To
+  end" and the name prefixed `not in next request · <reason> ·`, and the
+  description states both counts (`3 in the request · 2 not in the next
+  request`; `in the last sent request` when that is the basis). Request order has no such rows. The comparison is by text and
+  against the next request, also when the panel shows the last sent request:
+  the session as it was at that send is not recorded. The messages are read
+  from the session file, so the section is absent in a session without one
+  (`--no-session`, or before the first message). These are not listed: memory
+  records the recall budget left out, full tool output that was sent only
+  within its own turn, and a compaction summary that a later checkpoint
+  replaced. The report keeps at most 8 MiB of text for these messages, newest
+  first; an older message keeps its label, tokens and reason, and its document
+  says the text was left out for size.
 - `/agents` opens a centered panel of recorded sub-agent tasks, newest first, with
   status, agent (`default` when none), description, workspace, parent
   session, created time, duration, steps, tool calls, and tokens. It starts

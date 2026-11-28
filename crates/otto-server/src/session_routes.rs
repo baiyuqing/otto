@@ -742,12 +742,19 @@ pub(super) async fn context(State(server): State<Arc<Server>>, Path(id): Path<St
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    match session.ctrl.context_report() {
-        Some(report) => json_response(StatusCode::OK, &report),
-        None => error_response(
+    // The report reads the session file for `not_in_request`.
+    let ctrl = session.ctrl.clone();
+    match tokio::task::spawn_blocking(move || ctrl.context_report()).await {
+        Ok(Some(report)) => json_response(StatusCode::OK, &report),
+        Ok(None) => error_response(
             StatusCode::CONFLICT,
             "context_unavailable",
             "the session context is not available",
+        ),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "the context could not be read",
         ),
     }
 }

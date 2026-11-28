@@ -30,6 +30,7 @@ mod capabilities;
 pub mod compaction;
 pub mod compaction_select;
 pub mod context_estimate;
+pub mod context_exclusion;
 pub mod context_report;
 pub mod events;
 mod goals;
@@ -296,7 +297,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// builder the run loop uses. Per-turn state (a tool-result overlay, the
     /// next recall) does not exist yet, so the request carries neither; the
     /// last turn's recall is listed as its own section. `last_sent` is the last
-    /// request that was handed to the provider, if any.
+    /// request that was handed to the provider, if any. `not_in_request` is
+    /// `None`: the agent holds no session entries; the caller that reads the
+    /// session file fills it with
+    /// [`context_exclusion::not_in_request_for_entries`].
     pub fn context_report(&self) -> context_report::ContextReport {
         let (request, estimated_total) =
             self.build_normal_provider_request(&RunDispatchState::default(), "");
@@ -338,6 +342,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 &memory,
             ),
             last_sent,
+            not_in_request: None,
         }
     }
 

@@ -266,7 +266,13 @@ impl Connection {
                         }
                     }
                     command::Command::Context => {
-                        let report = session.controller.context_report();
+                        // The report reads the session file for `not_in_request`.
+                        let controller = session.controller.clone();
+                        let report =
+                            tokio::task::spawn_blocking(move || controller.context_report())
+                                .await
+                                .ok()
+                                .flatten();
                         self.say(
                             session_id,
                             &report.map_or(command::CONTEXT_UNAVAILABLE.to_string(), |report| {

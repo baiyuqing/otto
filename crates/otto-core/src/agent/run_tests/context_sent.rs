@@ -1,6 +1,7 @@
 //! Run-loop tests: the context report of the last request that was sent.
 
 use super::*;
+use crate::agent::context_exclusion::{ExcludedItem, ExclusionReason, NotInRequest};
 use crate::agent::context_report::{ContextItem, ContextReport, ContextSection};
 use crate::model::InputProvenance;
 use crate::session::COMPACTION_CONTEXT_TYPE;
@@ -123,6 +124,7 @@ fn last_sent_is_none_before_the_first_request() {
         options(),
     );
     assert_eq!(agent.context_report().last_sent, None);
+    assert_eq!(agent.context_report().not_in_request, None);
 }
 
 #[tokio::test]
@@ -304,11 +306,44 @@ fn a_report_with_last_sent_round_trips_and_an_older_report_still_decodes() {
             sent_at: 5,
             sections: vec![section],
         }),
+        not_in_request: None,
     };
     let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("not_in_request"), "{json}");
     assert_eq!(
         serde_json::from_str::<ContextReport>(&json).unwrap(),
         report
+    );
+
+    let excluded = ContextReport {
+        not_in_request: Some(NotInRequest {
+            items: vec![
+                ExcludedItem {
+                    label: "session #1 user".into(),
+                    tokens: 9,
+                    reason: ExclusionReason::UserMessageTruncated,
+                    text: Some("old".into()),
+                },
+                ExcludedItem {
+                    label: "session #2 assistant".into(),
+                    tokens: 3,
+                    reason: ExclusionReason::Summarized,
+                    text: None,
+                },
+            ],
+            carried_user_messages: 2,
+        }),
+        ..report
+    };
+    let json = serde_json::to_string(&excluded).unwrap();
+    assert!(
+        json.contains(r#""reason":"user_message_truncated""#),
+        "{json}"
+    );
+    assert!(json.contains(r#""reason":"summarized""#), "{json}");
+    assert_eq!(
+        serde_json::from_str::<ContextReport>(&json).unwrap(),
+        excluded
     );
 
     let older = r#"{"model":"m","context_window":0,"compaction_threshold":0,
@@ -316,6 +351,7 @@ fn a_report_with_last_sent_round_trips_and_an_older_report_still_decodes() {
         "sections":[{"kind":"messages","tokens":4,"items":[{"label":"l","tokens":4,"text":"t"}]}]}"#;
     let decoded: ContextReport = serde_json::from_str(older).unwrap();
     assert_eq!(decoded.last_sent, None);
+    assert_eq!(decoded.not_in_request, None);
     assert_eq!(decoded.sections[0].items[0].position, None);
     // New fields are omitted when absent.
     assert!(

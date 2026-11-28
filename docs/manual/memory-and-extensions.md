@@ -590,7 +590,7 @@ the conversation only as a paraphrase, tool output or user text. A plugin
 memory source produces notices only for records it still returns by id; it
 cannot report a forgotten record. Notices are request-local: they are not
 written to the session file, compaction summaries or logs. `/context` shows
-the notices rendered for the previous turn's last request.
+the notices as part of the memory message of the last sent request, at its position.
 
 A compaction summary is written from turns whose replies may paraphrase a
 record, so a checkpoint also carries `memoryRetracted`: the references among
@@ -631,7 +631,7 @@ approval. Unkeyed user preferences/instructions are rejected.
 Standing records are recalled every turn within a 2000-estimated-token budget.
 An over-budget write/accept fails; the candidate stays pending. Forget an old
 record with `/memory forget <id>`, then accept again. `otto memory status` shows
-usage; `/context` shows the actual previous-turn injection. Existing oversized
+usage; `/context` shows the memory message of the last sent request. Existing oversized
 sets inject oldest first until the first record that does not fit and warn
 about omitted records.
 

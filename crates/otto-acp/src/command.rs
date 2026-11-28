@@ -403,8 +403,10 @@ mod tests {
                     label: "Label".into(),
                     tokens: 100,
                     text: "SECRET-BODY".into(),
+                    position: Some(0),
                 }],
             }],
+            last_sent: None,
         };
         let text = context_text(&report);
         assert_eq!(

@@ -493,6 +493,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             Ok(request) => request,
             Err(error) => return (Response::default(), false, Some(error)),
         };
+        self.record_sent_request(&guarded_request, state);
         let mut diagnostic = crate::diagnostics::Observation::start(
             self.options.diagnostics.as_ref(),
             crate::diagnostics::Kind::Provider,

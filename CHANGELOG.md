@@ -7,6 +7,12 @@ commit ledger; Git and release tags retain the full history. See the
 
 ## Unreleased
 
+- `/context` can show the last request sent to the provider, with the memory
+  message at its position, list items in request order with the estimated
+  tokens after each, and search item labels and text. `GET
+  /v1/sessions/{id}/context` returns `last_sent` and an item `position`; see
+  [interactive use](docs/manual/interactive-use.md).
+
 - Source and Docker builds now use the pinned Rust 1.100.1 toolchain.
 
 - Parent sessions can keep an explicit goal with observable acceptance criteria.

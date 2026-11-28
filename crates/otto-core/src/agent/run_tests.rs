@@ -79,6 +79,7 @@ mod bash_output;
 mod capability_plan;
 mod claude_cache_prefix;
 mod context_oneshot;
+mod context_sent;
 mod durable_boundaries;
 mod input_delivery;
 mod input_provenance;

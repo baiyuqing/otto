@@ -46,6 +46,7 @@ mod provider_call;
 mod provider_hooks;
 mod provider_step;
 pub mod redactor;
+mod sent_request;
 pub mod steering;
 mod step_control;
 pub mod summary;
@@ -208,6 +209,9 @@ pub struct Agent<P, T, S> {
     pub(super) redactor: Redactor,
     /// The memory block the last user turn recalled, for the context report.
     last_memory_context: std::sync::Mutex<String>,
+    /// The last ordinary request handed to the provider, for the context
+    /// report. Set from the guarded request only; see `sent_request`.
+    last_sent_request: std::sync::Mutex<Option<Arc<context_report::SentRequest>>>,
     hook_turn_id: std::sync::Mutex<String>,
     /// Messages appended during the current hooked run; `None` when no hooks are active.
     hook_turn_messages: std::sync::Mutex<Option<Vec<Message>>>,
@@ -284,13 +288,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             next_input_provenance: std::sync::Mutex::new(None),
             budget: std::sync::Mutex::new(initial_budget),
             last_memory_context: std::sync::Mutex::default(),
+            last_sent_request: std::sync::Mutex::default(),
         }
     }
 
     /// What the next ordinary provider request contains, from the same
     /// builder the run loop uses. Per-turn state (a tool-result overlay, the
     /// next recall) does not exist yet, so the request carries neither; the
-    /// last turn's recall is listed as its own section.
+    /// last turn's recall is listed as its own section. `last_sent` is the last
+    /// request that was handed to the provider, if any.
     pub fn context_report(&self) -> context_report::ContextReport {
         let (request, estimated_total) =
             self.build_normal_provider_request(&RunDispatchState::default(), "");
@@ -300,6 +306,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let last_sent = self
+            .last_sent_request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            .cloned();
         let settings = &self.options.compaction;
         let compaction_threshold = match automatic_compaction_triggers(settings) {
             Some((working, _)) if settings.auto => working,
@@ -325,6 +337,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 &self.options.system_prompt_parts,
                 &memory,
             ),
+            last_sent,
         }
     }
 

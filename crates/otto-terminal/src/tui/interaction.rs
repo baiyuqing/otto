@@ -263,7 +263,10 @@ impl State {
                 }
             }
             Intent::Activate => return self.activate(view),
-            Intent::Shortcut(key) if view.search.is_some() && key != ' ' => {
+            Intent::Shortcut(key)
+                if view.search.is_some()
+                    && (key != ' ' || !view.actions.iter().any(|a| a.shortcut == Some(' '))) =>
+            {
                 let mut query = view.search.clone().unwrap_or_default();
                 query.push(key);
                 return Some(Activation::Action {

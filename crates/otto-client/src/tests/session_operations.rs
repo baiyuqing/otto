@@ -194,6 +194,17 @@ async fn interrupt_steering_posts_the_route_and_decodes_the_count() {
 
 #[tokio::test]
 async fn context_decodes_the_report() {
+    use otto_core::agent::context_report::{ContextItem, ContextSection, SectionKind, SentRequest};
+    let section = ContextSection {
+        kind: SectionKind::Messages,
+        tokens: 120,
+        items: vec![ContextItem {
+            label: "#1 user".into(),
+            tokens: 120,
+            text: "hello".into(),
+            position: Some(3),
+        }],
+    };
     let report = ContextReport {
         model: "m".into(),
         context_window: 1000,
@@ -201,11 +212,11 @@ async fn context_decodes_the_report() {
         estimated_total: 120,
         estimate_complete: true,
         reported_input_tokens: Some(110),
-        sections: vec![otto_core::agent::context_report::ContextSection {
-            kind: otto_core::agent::context_report::SectionKind::Messages,
-            tokens: 120,
-            items: vec![],
-        }],
+        sections: vec![section.clone()],
+        last_sent: Some(SentRequest {
+            sent_at: 1_700_000_000_000,
+            sections: vec![section],
+        }),
     };
     let body = serde_json::to_string(&report).unwrap();
     let (client, seen, _dir) = stub(move |_, _| json_body(StatusCode::OK, &body));

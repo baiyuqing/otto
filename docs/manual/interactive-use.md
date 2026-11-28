@@ -715,18 +715,35 @@ Shared commands:
 
 TUI-only commands:
 
-- `/context` opens a centered panel that lists what the next provider request contains:
+- `/context` opens a centered panel that lists what a provider request contains:
   the system prompt parts (base, environment, workspace instructions, skills,
   agents), built-in and MCP tool definitions, the compaction summary, the
-  previous turn's memory recall, and each message. The title shows the model,
-  the estimated total against the context window, the last provider-reported
+  memory recall, and each message. The panel has two bases. The last sent
+  request is the last ordinary request this session handed to the provider,
+  after provider hooks and the redaction guard; its notice line shows the send
+  time and estimated tokens, and its memory recall is the request-local memory
+  message at its position in the request. It is shown first when a request has
+  been sent. The next request is projected from the current session; it has no
+  recall for the next turn yet, and it lists the previous turn's recall and
+  [retraction notices](memory-and-extensions.md#retraction-notices) as a
+  separate item without a position. After `/compact` the last sent request is
+  still the one sent before the checkpoint, so compare its send time. The title shows the model, the estimated total
+  of the next request against the context window, the last provider-reported
   input tokens, and the automatic compaction threshold. Token numbers are
-  estimates (about 3 bytes per token), not tokenizer counts. `↑`/`↓` select,
-  `Enter` expands a section or opens an item's full text (`↑`/`↓`/`PgUp`/`PgDn`
-  scroll it), and `Esc` returns from details or closes the collection. The report is taken when the panel
-  opens. The memory section is the previous turn's recall together with the
-  [retraction notices](memory-and-extensions.md#retraction-notices) rendered
-  for its last request; the next turn recalls again with its own prompt.
+  estimates (about 3 bytes per token), not tokenizer counts. The report is
+  taken when the panel opens.
+  Keys: `↑`/`↓` select; `Enter` expands a section or opens an item's full text
+  (`↑`/`↓`/`PgUp`/`PgDn` scroll it); `r` switches the basis; `o` switches between
+  grouping by section and request order; `/` starts a search; `Esc` returns
+  from details or closes the panel. Request order has one row per item with its
+  position, estimated tokens, and "To end", the estimated tokens of all items
+  after it. Request order is Otto's order: system prompt, tool definitions,
+  messages. A provider adapter may serialize the tools before the system
+  prompt. The search lists the items whose label or text contains the typed
+  text (ASCII case-insensitive) in request order, with a one-line excerpt
+  around the first match and the match count. Backspace on an empty search
+  leaves it; `Esc` closes the panel. The search takes typed characters; pasted
+  text is not inserted.
 - `/agents` opens a centered panel of recorded sub-agent tasks, newest first, with
   status, agent (`default` when none), description, workspace, parent
   session, created time, duration, steps, tool calls, and tokens. It starts

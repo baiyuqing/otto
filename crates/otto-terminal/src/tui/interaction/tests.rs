@@ -280,3 +280,27 @@ fn designated_field_submits_but_feedback_returns_to_actions_without_deciding() {
     }];
     assert_eq!(state.handle(&view, Intent::Activate), None);
 }
+
+#[test]
+fn a_space_extends_the_search_unless_an_action_uses_it() {
+    let query_of = |view: &View| {
+        let mut state = State::new(view);
+        match state.handle(view, Intent::Shortcut(' ')) {
+            Some(Activation::Action { id, fields, .. }) if id == "otto:search" => {
+                Some(fields["query"].clone())
+            }
+            _ => None,
+        }
+    };
+    let mut view = View {
+        search: Some("ab".into()),
+        collection: true,
+        ..View::default()
+    };
+    assert_eq!(query_of(&view).as_deref(), Some("ab "));
+    view.actions = vec![Action {
+        shortcut: Some(' '),
+        ..action("toggle")
+    }];
+    assert_eq!(query_of(&view), None);
+}

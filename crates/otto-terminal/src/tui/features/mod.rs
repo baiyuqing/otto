@@ -6,6 +6,9 @@ mod collection;
 #[cfg(test)]
 mod command_order_tests;
 mod commands;
+mod context;
+#[cfg(test)]
+mod context_tests;
 #[cfg(test)]
 mod delete_tests;
 mod review;
